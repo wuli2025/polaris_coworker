@@ -65,6 +65,12 @@ pdf-extract = "0.10.0" # pdf 文本抽取（纯 Rust，panic 由 convert::guard 
 # Codex(ChatGPT) OAuth Device Code 流程 —— 同步阻塞 HTTP 客户端 (rustls, 无 tokio)。
 # 只用于授权三步: 取设备码 / 轮询 / code 换 token。比 cc-switch 的 reqwest+tokio 轻得多。
 ureq = { version = "2", features = ["json"] }
+# Claude 官方订阅 OAuth(在对话框内复刻 `claude setup-token` 的 PKCE 流程):
+#   sha2 = code_challenge 的 S256 摘要; base64 = challenge/verifier 的 base64url; getrandom = verifier 的 OS 随机熵。
+# 三者本就经 ring/rustls 传递进依赖树, 提为直接依赖零额外编译成本(已在 Cargo.lock 中)。
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"
 # 「聊天机器人」板块「扫码创建机器人」: 把飞书开放平台建应用 URL 编码成二维码 (SVG)。
 # default-features=false → 不拉重型 image crate, 只保留纯 Rust 的 svg 渲染。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

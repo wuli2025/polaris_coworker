@@ -8,6 +8,9 @@ import {
   type CodexStatus,
   type CodexDeviceLogin,
   type CodexProxyInfo,
+  type ClaudeAuthStatus,
+  type ClaudeLoginStart,
+  type ClaudeLoginResult,
 } from "../tauri";
 
 export const useProvidersStore = defineStore("providers", () => {
@@ -16,6 +19,7 @@ export const useProvidersStore = defineStore("providers", () => {
   const usage = ref<UsageSummary | null>(null);
   const codex = ref<CodexStatus | null>(null);
   const codexProxy = ref<CodexProxyInfo | null>(null);
+  const claudeAuth = ref<ClaudeAuthStatus | null>(null);
   const loading = ref(false);
   const switching = ref<string | null>(null);
   const error = ref<string | null>(null);
@@ -103,8 +107,36 @@ export const useProvidersStore = defineStore("providers", () => {
     return r.status;
   }
 
+  // ── Claude 官方订阅 OAuth(对话框内复刻 setup-token)──
+  async function refreshClaudeAuth() {
+    try {
+      claudeAuth.value = await providerApi.claudeAuthStatus();
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+
+  /** ① 取授权 URL(后端已暂存 PKCE,并尝试自动开浏览器) */
+  async function claudeLoginStart(): Promise<ClaudeLoginStart | null> {
+    error.value = null;
+    try {
+      return await providerApi.claudeLoginStart();
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  /** ② 提交浏览器拿到的 code(CODE#STATE);成功落盘后刷新登录态。抛错交调用方处理 */
+  async function claudeLoginSubmit(code: string): Promise<ClaudeLoginResult> {
+    const r = await providerApi.claudeLoginSubmit(code);
+    if (r.ok) await refreshClaudeAuth();
+    return r;
+  }
+
   /** 切换供应商；返回是否成功（失败时 error 已设置，常见为缺 key） */
   async function switchTo(id: string): Promise<boolean> {
+    if (switching.value) return false; // 防双发:切换涉及写 settings.json
     error.value = null;
     switching.value = id;
     try {
@@ -147,6 +179,7 @@ export const useProvidersStore = defineStore("providers", () => {
     usage,
     codex,
     codexProxy,
+    claudeAuth,
     loading,
     switching,
     error,
@@ -164,6 +197,9 @@ export const useProvidersStore = defineStore("providers", () => {
     refreshCodexProxy,
     codexStartLogin,
     codexPollLogin,
+    refreshClaudeAuth,
+    claudeLoginStart,
+    claudeLoginSubmit,
     switchTo,
     save,
     remove,

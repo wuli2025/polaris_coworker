@@ -74,14 +74,37 @@ pub async fn serve() -> anyhow::Result<()> {
     // 飞书网关「开机自动启动」（若用户开了 auto_start 且凭证齐全）。
     crate::feishu::auto_start_if_enabled(&app);
 
-    let auth_token = std::env::var("POLARIS_AUTH_TOKEN")
+    let port: u16 = std::env::var("POLARIS_PORT")
         .ok()
-        .filter(|s| !s.is_empty());
-    if auth_token.is_some() {
-        println!("[polaris-server] 已启用访问口令 (POLARIS_AUTH_TOKEN)");
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8080);
+
+    // 鉴权口令: 显式 env > 持久化文件 > 自动生成(并落盘)。
+    // Docker 默认绑 0.0.0.0(端口映射必需), 若完全无口令=局域网裸奔; 故默认强制口令,
+    // 但用「打印带 token 的访问 URL」换便利——首次复制一次, 浏览器记住后免输。
+    // 仅当显式 POLARIS_NO_AUTH=1 时放行无口令(自担风险, 适合已套反代鉴权/纯内网)。
+    let no_auth = std::env::var("POLARIS_NO_AUTH")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let auth_token = if no_auth {
+        println!("[polaris-server] ⚠ POLARIS_NO_AUTH=1: 已禁用访问口令，服务对所有可达网络开放");
+        None
     } else {
-        println!("[polaris-server] ⚠ 未设访问口令，服务对所有可达网络开放");
-    }
+        let from_env = std::env::var("POLARIS_AUTH_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some();
+        let tok = ensure_auth_token();
+        if from_env {
+            println!("[polaris-server] 已启用访问口令 (POLARIS_AUTH_TOKEN)");
+        } else {
+            println!("[polaris-server] ✓ 已自动生成访问口令并持久化。首次访问请用下面带 token 的地址(之后浏览器会记住):");
+            println!("[polaris-server]     http://<本机或NAS-IP>:{port}/?token={tok}");
+            println!("[polaris-server]   (口令文件: ~/Polaris/data/server-token.txt; 设 POLARIS_NO_AUTH=1 可关闭鉴权)");
+        }
+        Some(tok)
+    };
 
     let web_dir = std::env::var("POLARIS_WEB_DIR").unwrap_or_else(|_| "/srv/web".to_string());
     let web_dir = PathBuf::from(web_dir);
@@ -106,10 +129,6 @@ pub async fn serve() -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
         .with_state(state);
 
-    let port: u16 = std::env::var("POLARIS_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("[polaris-server] 监听 http://0.0.0.0:{port} (前端目录: {})", web_dir.display());
 
@@ -280,6 +299,66 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
     got.as_deref() == Some(expected.as_str())
 }
 
+/// 口令持久化路径: ~/Polaris/data/server-token.txt(Docker 挂载卷内, 跨重启稳定)。
+fn token_path() -> Option<PathBuf> {
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().join("Polaris").join("data").join("server-token.txt"))
+}
+
+/// 取或建鉴权口令: 显式 env > 持久化文件 > 新生成并落盘。
+fn ensure_auth_token() -> String {
+    if let Some(t) = std::env::var("POLARIS_AUTH_TOKEN").ok().filter(|s| !s.is_empty()) {
+        return t;
+    }
+    if let Some(p) = token_path() {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            let s = s.trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+        let tok = gen_token();
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&p, &tok);
+        return tok;
+    }
+    gen_token()
+}
+
+/// 生成 36 位十六进制随机口令。优先 /dev/urandom(Docker/Linux); 失败回退时间+pid 混合。
+fn gen_token() -> String {
+    let mut bytes = [0u8; 18];
+    let ok = {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut bytes))
+            .is_ok()
+    };
+    if !ok {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut x = t ^ ((std::process::id() as u128) << 64) ^ 0x9e37_79b9_7f4a_7c15;
+        for b in bytes.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = (x & 0xff) as u8;
+        }
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 内容安全策略: 挡内联脚本/事件处理器(XSS→RCE 的关键一环), 同时放行 wasm(shiki 高亮)、
+/// 内联样式(Vue)、data/blob 图片、同源 ws。仅作用于主应用外壳, 不碰 /api/file 的预览 iframe。
+const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
+style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; \
+connect-src 'self' ws: wss: https:; frame-src 'self' data: blob:; \
+object-src 'none'; base-uri 'self'";
+
 // ───────────────────────── /api/invoke 分发 ─────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -383,6 +462,8 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "kb_convert_batch" => ok(kb::kb_convert_batch(vec_str(a, "paths"))?),
         "kb_graph" => ok(kb::kb_graph()),
         "kb_lint" => ok(kb::kb_lint()),
+        "kb_scan_sources" => ok(kb::kb_scan_sources()),
+        "kb_quarantine" => ok(kb::kb_quarantine(req_str(a, "relPath")?)?),
         "kb_enrich_links" => ok(kb::kb_enrich_links(app)?),
         "kb_dedup" => ok(kb::kb_dedup(app)?),
         "kb_pack_list" => ok(kb::kb_pack_list()),
@@ -495,6 +576,11 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             req_str(a, "userCode")?,
         )?),
         "codex_proxy_info" => ok(codex_proxy::codex_proxy_info()),
+
+        // ── Claude 官方订阅 OAuth(对话框内复刻 setup-token)──
+        "claude_login_start" => ok(provider::claude_login_start()?),
+        "claude_login_submit" => ok(provider::claude_login_submit(req_str(a, "code")?)?),
+        "claude_auth_status" => ok(provider::claude_auth_status()?),
 
         // ── 推理后端(R3)：外部 GPU 节点端点状态(含连通性探测)──
         "infer_status" => ok(infer::status_json()),
@@ -815,6 +901,7 @@ async fn spa_fallback(State(state): State<AppState>, uri: axum::http::Uri) -> Re
             let ct = mime_for(&candidate);
             Response::builder()
                 .header(header::CONTENT_TYPE, ct)
+                .header("content-security-policy", CSP)
                 .body(Body::from(bytes))
                 .unwrap()
         }

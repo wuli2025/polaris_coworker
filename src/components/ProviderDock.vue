@@ -10,7 +10,7 @@ import {
   Pencil,
   Trash2,
   ExternalLink,
-  Search,
+  Copy,
   LogIn,
   ShieldCheck,
   BarChart3,
@@ -21,6 +21,7 @@ import {
   CircleAlert,
   Star,
 } from "@lucide/vue";
+import SearchGlass from "./icons/SearchGlass.vue";
 import { useProvidersStore } from "../stores/providers";
 import type { ProviderView, TokenBucket, CodexDeviceLogin } from "../tauri";
 
@@ -38,6 +39,15 @@ const codexErr = ref<string | null>(null);
 const codexCopied = ref(false);
 let codexTimer: number | null = null;
 let codexExpireAt = 0;
+
+// Claude 官方订阅 OAuth (对话框内复刻 setup-token: 出授权 URL → 粘 code)
+const claudeOpen = ref(false);
+const claudeUrl = ref<string | null>(null);
+const claudeCode = ref("");
+const claudeBusy = ref(false);
+const claudeErr = ref<string | null>(null);
+const claudeOk = ref(false);
+const claudeUrlCopied = ref(false);
 
 // 用量周期
 type Period = "today" | "week" | "month" | "year";
@@ -60,10 +70,13 @@ watch(open, (v) => {
     store.refreshUsage();
     store.refreshCodex();
     store.refreshCodexProxy();
+    store.refreshClaudeAuth();
     nextTick(() => window.addEventListener("keydown", onEsc));
   } else {
     codexOpen.value = false;
     resetCodexAuth();
+    claudeOpen.value = false;
+    resetClaudeLogin();
     window.removeEventListener("keydown", onEsc);
   }
 });
@@ -73,7 +86,8 @@ onBeforeUnmount(() => {
 });
 function onEsc(e: KeyboardEvent) {
   if (e.key !== "Escape") return;
-  if (codexOpen.value) codexOpen.value = false;
+  if (claudeOpen.value) claudeOpen.value = false;
+  else if (codexOpen.value) codexOpen.value = false;
   else open.value = false;
 }
 
@@ -283,6 +297,63 @@ async function copyUserCode() {
   }
 }
 
+// ── Claude 订阅授权 ─────────────────────────
+async function startClaudeLogin() {
+  claudeErr.value = null;
+  claudeOk.value = false;
+  claudeUrlCopied.value = false;
+  claudeBusy.value = true;
+  const r = await store.claudeLoginStart();
+  claudeBusy.value = false;
+  if (!r) {
+    claudeErr.value = store.error || "发起授权失败";
+    return;
+  }
+  claudeUrl.value = r.url;
+}
+async function submitClaudeCode() {
+  const code = claudeCode.value.trim();
+  if (!code) {
+    claudeErr.value = "请先粘贴授权码";
+    return;
+  }
+  claudeErr.value = null;
+  claudeBusy.value = true;
+  try {
+    const res = await store.claudeLoginSubmit(code);
+    claudeOk.value = res.ok;
+    if (res.ok) {
+      claudeCode.value = "";
+      claudeUrl.value = null;
+    }
+  } catch (e) {
+    claudeErr.value = String(e);
+  } finally {
+    claudeBusy.value = false;
+  }
+}
+async function copyClaudeUrl() {
+  if (!claudeUrl.value) return;
+  try {
+    await navigator.clipboard.writeText(claudeUrl.value);
+    claudeUrlCopied.value = true;
+    setTimeout(() => (claudeUrlCopied.value = false), 1500);
+  } catch {
+    /* 剪贴板不可用时忽略 */
+  }
+}
+function openClaudeUrl() {
+  if (claudeUrl.value) window.open(claudeUrl.value, "_blank");
+}
+function resetClaudeLogin() {
+  claudeUrl.value = null;
+  claudeCode.value = "";
+  claudeBusy.value = false;
+  claudeErr.value = null;
+  claudeOk.value = false;
+  claudeUrlCopied.value = false;
+}
+
 // ── 行内辅助:副标题 ─────────────────────────
 function subtitleOf(p: ProviderView): string {
   if (p.kind === "codex") {
@@ -345,7 +416,7 @@ function subtitleOf(p: ProviderView): string {
             <div class="panel-body">
               <!-- 搜索条 -->
               <div class="search-row">
-                <Search :size="13" :stroke-width="1.8" class="s-ic" />
+                <SearchGlass :size="13" :stroke-width="1.8" class="s-ic" />
                 <input v-model="filter" class="search-input" placeholder="搜索供应商 / 主机名…" />
                 <button v-if="filter" class="icon-btn sm" @click="filter = ''">
                   <X :size="13" :stroke-width="1.8" />
@@ -369,6 +440,15 @@ function subtitleOf(p: ProviderView): string {
                       <template v-else-if="current.kind === 'copilot'">
                         GitHub Copilot · 暂未支持
                       </template>
+                      <template v-else-if="current.kind === 'official'">
+                        <span v-if="store.claudeAuth?.loggedIn">
+                          订阅已登录<span v-if="store.claudeAuth?.hasRefresh"> · 自动续期</span><span
+                            v-else
+                            class="need-auth"
+                          > · 无续期凭证</span>
+                        </span>
+                        <span v-else>Claude 官方 · 订阅或 API Key</span>
+                      </template>
                       <template v-else>
                         {{ hostOf(current.baseUrl) }}<span v-if="currentModel"> · {{ currentModel }}</span>
                       </template>
@@ -388,6 +468,15 @@ function subtitleOf(p: ProviderView): string {
                 >
                   <LogIn :size="14" :stroke-width="2" />
                   ChatGPT 一键授权
+                </button>
+                <!-- 官方 Claude:订阅登录(对话框内完成 OAuth,无需进 CLI)-->
+                <button
+                  v-else-if="current.kind === 'official'"
+                  class="now-cta claude-cta"
+                  @click="claudeOpen = true"
+                >
+                  <LogIn :size="14" :stroke-width="2" />
+                  {{ store.claudeAuth?.loggedIn ? "Claude 订阅 · 重新登录" : "Claude 订阅登录(免 CLI)" }}
                 </button>
                 <button v-else class="now-cta" @click="openBoard">
                   <BarChart3 :size="13" :stroke-width="1.8" />
@@ -669,6 +758,109 @@ function subtitleOf(p: ProviderView): string {
                 </div>
               </Transition>
 
+              <!-- ★ Claude 订阅登录卡(对话框内完成 OAuth,复刻 setup-token)-->
+              <Transition name="ed-fade">
+                <div v-if="claudeOpen" class="codex-card claude-card">
+                  <div class="codex-card-head">
+                    <div class="ed-title">
+                      <ShieldCheck :size="14" :stroke-width="2" />
+                      Claude 订阅登录
+                    </div>
+                    <button class="icon-btn sm" @click="claudeOpen = false">
+                      <X :size="13" />
+                    </button>
+                  </div>
+
+                  <!-- 登录成功 -->
+                  <template v-if="claudeOk">
+                    <p class="codex-ok">
+                      <ShieldCheck :size="14" :stroke-width="2" /> 登录成功,凭证已写入(含自动续期 refreshToken)
+                    </p>
+                    <p class="codex-note">
+                      回对话框直接发消息即可。之后 token 到期会自动续期,不再 401。
+                    </p>
+                    <div class="ed-actions">
+                      <button class="ed-save" @click="claudeOpen = false">
+                        <Check :size="13" :stroke-width="2" /> 完成
+                      </button>
+                    </div>
+                  </template>
+
+                  <!-- 已拿到授权 URL:展示 + 等粘码 -->
+                  <template v-else-if="claudeUrl">
+                    <p class="codex-note">
+                      ① 打开下方授权地址,用 Claude 账号登录 → ② 页面会显示一段授权码(形如
+                      <code>xxx#yyy</code>)→ ③ 整段复制,粘到下面提交。
+                    </p>
+                    <div class="claude-url-row">
+                      <input
+                        class="claude-url"
+                        :value="claudeUrl"
+                        readonly
+                        @focus="(e) => (e.target as HTMLInputElement).select()"
+                      />
+                      <button
+                        class="icon-btn sm"
+                        :title="claudeUrlCopied ? '已复制' : '复制'"
+                        @click="copyClaudeUrl"
+                      >
+                        <Check v-if="claudeUrlCopied" :size="13" />
+                        <Copy v-else :size="13" />
+                      </button>
+                      <button class="icon-btn sm" title="在浏览器打开" @click="openClaudeUrl">
+                        <ExternalLink :size="13" />
+                      </button>
+                    </div>
+                    <input
+                      v-model="claudeCode"
+                      class="claude-code-input"
+                      placeholder="粘贴授权码(CODE#STATE)…"
+                      @keydown.enter="submitClaudeCode"
+                    />
+                    <div class="ed-actions">
+                      <button class="ed-cancel" @click="resetClaudeLogin">重来</button>
+                      <button
+                        class="ed-save login"
+                        :disabled="claudeBusy || !claudeCode.trim()"
+                        @click="submitClaudeCode"
+                      >
+                        <span v-if="claudeBusy" class="spinner" />
+                        <LogIn v-else :size="14" :stroke-width="2" />
+                        {{ claudeBusy ? "提交中…" : "提交授权码" }}
+                      </button>
+                    </div>
+                  </template>
+
+                  <!-- 初始 -->
+                  <template v-else>
+                    <p v-if="store.claudeAuth?.loggedIn" class="codex-note">
+                      当前已登录订阅<span v-if="store.claudeAuth?.hasRefresh">(带自动续期)</span>。
+                      如需更换账号或修复失效凭证,重新登录:
+                    </p>
+                    <p v-else class="codex-note">
+                      用 Claude 订阅账号登录,全程在此完成(无需进 CLI)。授权后凭证写入
+                      <code>~/.claude/.credentials.json</code>,带 refreshToken 可自动续期。
+                    </p>
+                    <div class="ed-actions">
+                      <button class="ed-cancel" @click="claudeOpen = false">关闭</button>
+                      <button
+                        class="ed-save login big"
+                        :disabled="claudeBusy"
+                        @click="startClaudeLogin"
+                      >
+                        <span v-if="claudeBusy" class="spinner" />
+                        <LogIn v-else :size="14" :stroke-width="2" />
+                        {{ claudeBusy ? "正在发起…" : "开始登录" }}
+                      </button>
+                    </div>
+                  </template>
+
+                  <p v-if="claudeErr" class="codex-fail">
+                    <CircleAlert :size="12" :stroke-width="2" /> {{ claudeErr }}
+                  </p>
+                </div>
+              </Transition>
+
               <div v-if="store.error" class="err-line">{{ store.error }}</div>
 
               <!-- ★ 下段:用量 + 功能键 -->
@@ -873,11 +1065,23 @@ function subtitleOf(p: ProviderView): string {
 .ed-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 1px; }
 .ed-cancel, .ed-save { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border); background: var(--panel); color: var(--text-2); font-size: 11.5px; padding: 5px 12px; border-radius: 6px; }
 .ed-cancel:hover { background: var(--selection-bg); }
-.ed-save { background: var(--ink); color: #fff; border-color: var(--ink); }
+.ed-save { background: var(--btn-solid-bg); color: var(--btn-solid-text); border-color: var(--btn-solid-bg); }
 .ed-save:hover { background: var(--primary); border-color: var(--primary); }
 .ed-save.login { background: #10a37f; border-color: #10a37f; }
 .ed-save.login:hover { background: #0d8a6c; }
 .ed-save.big { padding: 8px 14px; font-size: 12.5px; font-weight: 600; }
+
+/* ── Claude 订阅登录卡(复用 codex-card 布局,改鎏金调)──────────── */
+.claude-card { border-color: #c9a14a55; background: #c9a14a0c; }
+.claude-card .ed-title { color: #b8893a; }
+.claude-card .ed-save.login { background: #b8893a; border-color: #b8893a; }
+.claude-card .ed-save.login:hover { background: #a2772f; }
+.claude-url-row { display: flex; gap: 6px; align-items: center; }
+.claude-url { flex: 1; min-width: 0; font-size: 11px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--text-2); font-family: ui-monospace, SFMono-Regular, monospace; }
+.claude-code-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--text); }
+.claude-code-input:focus { outline: none; border-color: #b8893a; }
+.now-cta.claude-cta { background: #b8893a; border-color: #b8893a; color: #fff; }
+.now-cta.claude-cta:hover { background: #a2772f; }
 .ed-save:disabled, .ed-cancel:disabled { opacity: 0.55; cursor: default; }
 
 .codex-note { margin: 0; font-size: 11px; color: var(--text-2); line-height: 1.6; }
