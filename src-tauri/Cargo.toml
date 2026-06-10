@@ -4,7 +4,7 @@
 # 跨板块只依赖 polaris-core 契约，可 `cargo test -p <板块>` 独立测试。
 # ═══════════════════════════════════════════════════════════════
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "crates/forge-codec"]
 resolver = "2"
 
 [package]
@@ -51,12 +51,18 @@ once_cell = "1"
 directories = "5"
 parking_lot = "0.12"
 regex = "1"
+# libc 给 Unix 平台 forge_capture::kill_tree 用;Windows 编译期不进 cfg(unix) 路径
+# 不放 [target.cfg(unix)] 段避免与 chromiumoxide 同段冲突,加 cfg_attr 让 windows 编译期归零
+libc = { version = "0.2", features = [] }
 
 # 板块 crate (架构重构 Phase 0–1)
 polaris-core = { path = "crates/polaris-core" }
 # sandbox 含 #[tauri::command]，依赖 tauri → 仅桌面构建编译；
 # Docker 内「Docker-in-Docker」沙箱本期降级（dispatch 层给 stub）。
 polaris-sandbox = { path = "crates/polaris-sandbox", optional = true }
+# Forge codec 板块:openh264-rs + 自写 BMFF muxer + ebur128 + cosmic-text + symphonia + audiopus
+# 替 ffmpeg CLI;二进制增量 3.3-5MB;详 workspace/research-notes/task-b.md
+polaris-forge-codec = { path = "crates/forge-codec" }
 # 文件转换 (板块② 上传/入库) — 纯 Rust，无需 pdfium.dll 等原生绑定
 # clean-room 自写转换逻辑，仅这些底层解析库为第三方
 zip = "8.6.0"          # docx/pptx/xlsx 本质是 zip+xml，解压取 XML
@@ -68,9 +74,18 @@ ureq = { version = "2", features = ["json"] }
 # 「聊天机器人」板块「扫码创建机器人」: 把飞书开放平台建应用 URL 编码成二维码 (SVG)。
 # default-features=false → 不拉重型 image crate, 只保留纯 Rust 的 svg 渲染。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-# 注: 已探明 chromiumoxide 0.7 可编译(Windows 验证),是 per-frame fx 动画视频(__fx.seek)
-# 的持久浏览器捕获方案;但它在 Linux 拉 libdbus-sys(Docker 需加 libdbus-1-dev),且 fx 视频
-# 还需 polaris-fx 动画库大件——是独立多轮工程,届时再引,不为半成品破坏已验证的 Docker 构建。
+# ── Forge 工业级化阶段 1:chromiumoxide 持久 CDP 替「每帧起 chromium CLI 进程」 ──
+#   提速 6-10×(单页 350-900ms → 50-120ms);双选型 chromiumoxide 主路 + headless_chrome 兜底
+#   pin minor 版本:0.9.x API 仍在动(issue 标 "Regression from 0.8 to 0.9")
+#   chromiumoxide Linux 需 libdbus-1-dev(Dockerfile 阶段2 装);mac/Win 自带
+#   feature:默认 + 截图 + serde_json(chromiumoxide 自动拉)
+chromiumoxide = { version = "=0.9.1", default-features = false }
+# headless_chrome 二选型,作 fallback tier2
+headless_chrome = { version = "1.0", default-features = false, optional = true }
+# 图像字节级处理(forge_pptx 流式写无需 image crate,本条仅 codec 板块用,留 polaris-forge-codec)
+# image = { version = "0.25", default-features = false, optional = true }
+# audio 解码(symphonia) + 编码(audiopus)+ 响度(ebur128)+ 字幕(cosmic-text)
+# 全在 polaris-forge-codec crate 内部依赖,主 crate 不直接拉,避免 binary 膨胀
 
 # 原生标题栏染色（titlebar.rs）：Win11 DwmSetWindowAttribute 让标题栏随主题与框面同色
 [target.'cfg(windows)'.dependencies]
@@ -87,6 +102,7 @@ desktop = [
     "dep:tauri-plugin-updater",
     "dep:tauri-plugin-process",
     "dep:polaris-sandbox",
+    "dep:headless_chrome",   # forge_capture fallback tier2(可选)
     "custom-protocol",
 ]
 custom-protocol = ["tauri?/custom-protocol"]

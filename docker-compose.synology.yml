@@ -52,7 +52,7 @@ services:
       - "8080:8080"           # 避开 DSM 占用的 443/5001，对外经反向代理统一 443+TLS
     restart: unless-stopped
     mem_limit: 6g             # 必设：防泄漏拖垮整机（CPU 限速在群晖不生效，故不设 cpus=）
-    shm_size: "512m"          # full 渲染：chromium 截大页防 /dev/shm 64MB 崩（slim 无害）
+    shm_size: "1g"            # full 渲染 + CloakBrowser 有头(Xvfb):并发多标签时 512MB 也吃紧
     logging:
       driver: json-file
       options:

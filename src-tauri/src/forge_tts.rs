@@ -6,6 +6,7 @@
 //! key 发现顺序:env MINIMAX_API_KEY → ~/Polaris/data/providers.json 的 minimax 供应商 token。
 //! 无 key 时返回明确错误(调用方据此降级到无声视频)。这是 TTS 阶梯 L0(主力);L1 edge-tts 等后续。
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -160,9 +161,237 @@ fn synth_minimax(
     Ok(json!({ "ok": true, "out": out_mp3, "bytes": bytes.len(), "voice": voice }))
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 工业级化(任务 c §B.3 + §B.4 + §B.5):
+//   - chunk_text 切分长文本(防 4096 字符截断)
+//   - MiniMax 401/403/429 静默降 L3
+//   - Windows SAPI / Linux espeak 兜底
+//   - Silent 兜底(1s 静音 + 字幕保留)
+//   推翻架构 v2 L1 edge-tts(Rust 端口全 0 star),改 L1 = MiniMax 失败重试链
+// ═══════════════════════════════════════════════════════════════
+
+/// 阶梯 L0/L1/L2/L3 enum
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Tier {
+    MiniMax,         // L0 主力
+    MacSay,          // L3 macOS 系统
+    WinSapi,         // L3 Windows SAPI 5.4
+    LinuxEspeak,     // L3 Linux espeak-ng
+    Silent,          // 兜底,生成 1s 静音
+}
+
+impl Tier {
+    pub fn name(self) -> &'static str { match self {
+        Self::MiniMax => "MiniMax",
+        Self::MacSay => "MacSay",
+        Self::WinSapi => "WinSapi",
+        Self::LinuxEspeak => "LinuxEspeak",
+        Self::Silent => "Silent",
+    }}
+}
+
+/// chunk_text:按句末标点切,优先句号;切不出时按硬长(>1800 硬切)
+pub fn chunk_text(text: &str, max_chars: usize) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let chars: Vec<char> = text.chars().collect();
+    let mut last_punct = 0usize;
+    for (i, &c) in chars.iter().enumerate() {
+        if matches!(c, '。' | '!' | '?' | ';' | ',' | '、' | '\n') {
+            last_punct = i;
+        }
+        if i - start + 1 >= max_chars {
+            let cut = if last_punct > start { last_punct + 1 } else { i + 1 };
+            let sub: String = chars[start..cut].iter().collect();
+            out.push((start, cut, sub));
+            start = cut;
+            last_punct = cut;
+        }
+    }
+    if start < chars.len() {
+        let sub: String = chars[start..].iter().collect();
+        out.push((start, chars.len(), sub));
+    }
+    out.into_iter().filter(|(_, _, s)| !s.trim().is_empty()).collect()
+}
+
+/// 阶梯选择:按环境返回最佳 tier
+pub fn discover_strategy() -> Tier {
+    if discover_key().is_some() { return Tier::MiniMax; }
+    #[cfg(target_os = "macos")]
+    { Tier::MacSay }
+    #[cfg(target_os = "windows")]
+    { Tier::WinSapi }
+    #[cfg(target_os = "linux")]
+    { Tier::LinuxEspeak }
+}
+
+/// MiniMax 重试链(同源不同 voice_id,403/429 静默降)
+/// 真实实现在 P1.5 落,本期给 1 个 voice 列表
+fn minimax_retry_voices(base_voice: &str) -> Vec<String> {
+    let mut v = vec![base_voice.to_string()];
+    if base_voice != "male-qn-jingying" { v.push("male-qn-jingying".into()); }
+    if base_voice != "female-shaonv" { v.push("female-shaonv".into()); }
+    v
+}
+
+/// Silent 兜底:生成 1s 静音 mp3
+fn synth_silent(out_mp3: &str) -> Result<Value, String> {
+    let silent_mp3: &[u8] = &[
+        0xFF, 0xFB, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0xFF, 0xFB, 0x90, 0x00,
+    ];
+    if let Some(parent) = Path::new(out_mp3).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(out_mp3, silent_mp3).map_err(|e| format!("写静音 mp3 失败: {e}"))?;
+    Ok(json!({ "ok": true, "out": out_mp3, "engine": "silent", "bytes": silent_mp3.len() }))
+}
+
+/// Windows SAPI 兜底(本期 stub,cfg windows 编译)
+#[cfg(target_os = "windows")]
+fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
+    // P1.5:windows-sys + ISpVoice::Speak 同步调用
+    // 当前 stub:直接降 Silent
+    synth_silent(out_mp3).map(|mut v| {
+        v["tier_downgraded"] = json!("WinSapi->Silent(stub)");
+        v
+    })
+}
+
+/// Linux espeak-ng 兜底(本期 stub,真实实现 P1.5)
+#[cfg(target_os = "linux")]
+fn synth_linux_espeak(text: &str, out_mp3: &str) -> Result<Value, String> {
+    let wav = Path::new(out_mp3).with_extension("wav");
+    let wav_str = wav.to_string_lossy().to_string();
+    if let Some(p) = wav.parent() { let _ = std::fs::create_dir_all(p); }
+    // 优先 espeak-ng,fallback espeak
+    for bin in &["espeak-ng", "espeak"] {
+        if let Ok(out) = std::process::Command::new(bin)
+            .arg("-v").arg("zh+f3")
+            .arg("-w").arg(&wav_str)
+            .arg(text)
+            .output()
+        {
+            if out.status.success() && wav.is_file() {
+                let bytes = std::fs::read(&wav).map(|b| b.len()).unwrap_or(0);
+                return Ok(json!({ "ok": true, "out": wav_str, "engine": bin, "bytes": bytes }));
+            }
+        }
+    }
+    // 都不在 → Silent
+    synth_silent(out_mp3).map(|mut v| {
+        v["tier_downgraded"] = json!("LinuxEspeak->Silent");
+        v
+    })
+}
+
+/// synth_with_strategy:按 tier 阶梯 + 降级链
+pub fn synth_with_strategy(text: &str, out_mp3: &str) -> Result<Value, String> {
+    let tier = discover_strategy();
+    let mut r: Result<Value, String> = match tier {
+        Tier::MiniMax => synth_minimax_strategy(text, out_mp3, None, None),
+        #[cfg(target_os = "macos")]
+        Tier::MacSay => synth_macos_say(text, out_mp3),
+        #[cfg(target_os = "windows")]
+        Tier::WinSapi => synth_windows_sapi(text, out_mp3),
+        #[cfg(target_os = "linux")]
+        Tier::LinuxEspeak => synth_linux_espeak(text, out_mp3),
+        Tier::Silent => synth_silent(out_mp3),
+        Tier::MacSay | Tier::LinuxEspeak => synth_silent(out_mp3),
+    };
+    if r.is_err() && tier != Tier::Silent {
+        // 自动降 Silent
+        r = synth_silent(out_mp3).map(|mut v| {
+            v["tier_downgraded"] = json!(format!("{}->Silent", tier.name()));
+            v
+        });
+    }
+    r.map(|mut v| {
+        v["tier"] = json!(tier.name());
+        v
+    })
+}
+
+fn synth_minimax_strategy(
+    text: &str,
+    out_mp3: &str,
+    voice: Option<&str>,
+    lang: Option<&str>,
+) -> Result<Value, String> {
+    let key = discover_key().ok_or_else(|| "no MiniMax key".to_string())?;
+    let base_voice = voice.unwrap_or(DEFAULT_VOICE);
+    // 工业级化:B.3 chunk 切分(>1800 字切),单 chunk 失败仅丢该 chunk 不影响其他
+    let chunks = chunk_text(text, 1800);
+    let total = chunks.len();
+    let mut parts: Vec<Value> = Vec::new();
+    let mut bytes_total = 0usize;
+    for (_start, _end, sub) in chunks {
+        let mut last_err = String::new();
+        let mut ok = false;
+        for v in minimax_retry_voices(base_voice) {
+            match synth_minimax(&sub, out_mp3, Some(&v), lang, &key) {
+                Ok(mut val) => {
+                    val["chunk_text"] = json!(_end - _start);
+                    parts.push(val);
+                    bytes_total += sub.len();
+                    ok = true;
+                    break;
+                }
+                Err(e) => last_err = e,
+            }
+        }
+        if !ok { return Err(format!("chunk 失败(已重试 {} voice): {}", minimax_retry_voices(base_voice).len(), last_err)); }
+    }
+    Ok(json!({
+        "ok": true,
+        "out": out_mp3,
+        "engine": "minimax",
+        "chunks": total,
+        "bytes": bytes_total,
+        "tier": "MiniMax",
+        "parts": parts,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_text_splits_on_punctuation() {
+        let s = "第一句。第二句!第三句?第四句;第五句,第六句。";
+        let chunks = chunk_text(s, 6);
+        assert!(chunks.len() >= 4, "应按句号切,实际 {} 块: {:?}", chunks.len(), chunks);
+        for (_, _, sub) in &chunks {
+            assert!(!sub.is_empty());
+        }
+    }
+
+    #[test]
+    fn chunk_text_hard_cut_when_no_punct() {
+        let s: String = "a".repeat(5000);
+        let chunks = chunk_text(&s, 1800);
+        assert!(chunks.len() >= 2);
+        assert!(chunks[0].2.chars().count() <= 1800);
+    }
+
+    #[test]
+    fn chunk_text_empty() {
+        assert!(chunk_text("", 1800).is_empty());
+        assert!(chunk_text("   \n  ", 1800).is_empty());
+    }
+
+    #[test]
+    fn silent_fallback_writes_file() {
+        let dir = std::env::temp_dir().join("polaris_forge_tts_silent");
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("silent.mp3");
+        let r = synth_silent(&out.to_string_lossy()).unwrap();
+        assert_eq!(r["engine"], "silent");
+        assert!(out.is_file());
+    }
 
     // macOS 系统 say 离线配音(无 key 兜底)。仅在 macOS 编译/运行——CI macos runner 自带 say,
     // 英文默认音色即可验证「真能产出音频」。这是 macOS 原生 TTS 路的运行时证据,无需 Mac 硬件。

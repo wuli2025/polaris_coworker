@@ -42,12 +42,39 @@ services:
       # kb 设置等 XDG 配置
       - polaris-config:/root/.config
     restart: unless-stopped
+    # ── 工业级加固(Forge 工业级化阶段 0)─────────────────────────────
     # 内存上限：防单容器泄漏拖垮宿主；超限 OOM kill 本容器，宿主与其它容器存活。
-    # （注：群晖内核缺 CFS 模块，CPU 硬限速 cpus= 不生效，故此处不设，靠优先级。）
-    mem_limit: 6g
+    # （注：群晖内核缺 CFS 模块，CPU 硬限速 cpus= 不生效,full 模式建议改用 cpuset 绑核）
+    mem_limit: 4g            # full 默认 4g（chromium + ffmpeg + 2 并发渲染峰值 ~3GB）
+    mem_reservation: 2g      # soft 限制,确保空闲时不被挤压
     # chromium 截大页默认 /dev/shm(64MB)易崩 → 调大(full 渲染必备; slim 无害)。
-    shm_size: "512m"
-    # 日志轮转：防 stdout 无限增长写满系统分区。
+    # 公众号链路(headless=False 走 Xvfb)并发标签多了 512MB 也吃紧 → 1g 更稳。
+    shm_size: "1g"
+    # ── 进程数上限:防 fork bomb(claude spawn + chromium 多进程树)─────
+    pids_limit: 512
+    # ── CPU 限制(非群晖):默认 2 核够 chromium+ffmpeg 并发渲染不串────
+    cpus: "2.0"
+    # ── ulimit nofile:chromium 一标签页 50+ socket,默认 1024 必爆 EMFILE
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # ── 五重安全加固(任务 d §1.3-1.4)──────────────────────────────
+    # cap-drop ALL + cap-add 最小集;不开放 SYS_ADMIN(防容器逃逸)
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN       # entrypoint gosu 降权所需
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    # seccomp + no-new-privileges + apparmor(任务 d §1.4)
+    # seccomp profile 拷入镜像:/etc/docker/seccomp/chromium.json
+    # (用 jfrazelle/dotfiles chrome.json 事实标准,任务 d 引文[16])
+    security_opt:
+      - "no-new-privileges:true"
+      - "seccomp=/etc/docker/seccomp/chromium.json"
+    # ── 日志轮转：防 stdout 无限增长写满系统分区。─────────────────
     logging:
       driver: json-file
       options:
@@ -58,7 +85,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      # full 模式慢启动(SC 字体子集 + preflight 探测 + chromium 冷启动)→ 60s 起步窗口
+      start_period: 60s
 
 volumes:
   polaris-data: {}

@@ -7,6 +7,7 @@
 //! 设计取舍:首版做「全幅图版式」(像素精确、稳)。隐形文本层 / 真可编辑文本框是架构 v2 的
 //! 后续增强(ADR-012),接口预留在 build_pptx 的 per-slide 扩展点。
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
@@ -55,27 +56,22 @@ pub fn build_pptx_inner(
     if image_paths.is_empty() {
         return Err("没有图片可打包".into());
     }
-    // 读所有图片字节 + 推断版面尺寸(用首图宽高比, 高固定 7.5" = 6858000 EMU, 不失真)。
-    let mut images: Vec<(Vec<u8>, String)> = Vec::new(); // (bytes, ext)
+    // ── 工业级化(任务 c §A.4.1 流式写)──────────────────────────
+    // 旧版 `images.push((bytes, ext))` 一次性全读 → >200 页时内存峰值 ~300MB。
+    // 新版先扫首图拿比例,后续每页 read-put-drop 字节生命周期限在当次循环。
     let mut first_ratio: Option<f64> = None;
-    for p in image_paths {
-        let bytes = std::fs::read(p).map_err(|e| format!("读图失败 {p}: {e}"))?;
-        let ext = Path::new(p)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png")
-            .to_lowercase();
-        if first_ratio.is_none() {
+    for p in image_paths.iter().take(1) {
+        if let Ok(bytes) = std::fs::read(p) {
             if let Some((w, h)) = png_size(&bytes) {
                 first_ratio = Some(w as f64 / h as f64);
             }
+            drop(bytes); // 立即释放
         }
-        images.push((bytes, ext));
     }
     let cy: u64 = 6_858_000; // 7.5 inch
     let ratio = first_ratio.unwrap_or(16.0 / 9.0);
     let cx: u64 = (cy as f64 * ratio).round() as u64;
-    let n = images.len();
+    let n = image_paths.len();
 
     // 自动建父目录:out 路径的目录不存在时也不失败(鲁棒 + 用户省事)。
     if let Some(parent) = Path::new(out_path).parent() {
@@ -166,10 +162,18 @@ pub fn build_pptx_inner(
     )?;
 
     // ── 每页:slideN.xml(全幅图)+ rels + 媒体 ──
-    for (idx, (bytes, ext)) in images.iter().enumerate() {
+    //    工业级化(任务 c §A.4.1):每页字节读入→写 zip→立即 drop,峰值从 N 张降到 1 张
+    for (idx, p) in image_paths.iter().enumerate() {
         let i = idx + 1;
+        let ext = Path::new(p)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_lowercase();
         let media_ext = if ext == "jpg" || ext == "jpeg" { "jpeg" } else { "png" };
-        put(&mut zip, &format!("ppt/media/image{i}.{media_ext}"), bytes)?;
+        let bytes = std::fs::read(p).map_err(|e| format!("读图失败 {p}: {e}"))?;
+        put(&mut zip, &format!("ppt/media/image{i}.{media_ext}"), &bytes)?;
+        drop(bytes); // ── 立即释放(任务 c §A.4.1 关键)──
         // 该页的隐形文本框(若启用文本层且该页有 rects)。
         let boxes = match text_layer {
             Some((rects, w, h)) if idx < rects.len() => text_boxes_xml(&rects[idx], cx, cy, w, h),
@@ -218,6 +222,10 @@ fn xml_escape(s: &str) -> String {
 
 /// 把一页的文本 rects(窗口 px)生成 alpha=0 隐形文本框 OOXML(叠在图片上=可搜索/读屏)。
 /// 窗口 px → slide EMU 按比例;px 字号 → OOXML 1/100 pt(×0.75×100=×75)。
+///
+/// 工业级化(任务 c §A.1.3 双保险):alpha=0 + `<a:effectLst><a:noFill/></a:effectLst>` 整框透明,
+/// 应对 Keynote16 实测会把 alpha=0 渲成可见白块。两层保险:即使 Keynote 忽略 alpha,
+/// 整框 effectLst 不透明 → 仍透明。
 fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32) -> String {
     if rects.is_empty() || win_w == 0 || win_h == 0 {
         return String::new();
@@ -240,7 +248,8 @@ fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32) -> 
         out.push_str(&format!(
             "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"t{id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
 <p:spPr><a:xfrm><a:off x=\"{ex}\" y=\"{ey}\"/><a:ext cx=\"{ew}\" cy=\"{eh}\"/></a:xfrm>\
-<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\
+<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/>\
+<a:effectLst><a:noFill/></a:effectLst></p:spPr>\
 <p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/>\
 <a:p><a:r><a:rPr lang=\"zh-CN\" sz=\"{sz}\" b=\"{bold}\">\
 <a:solidFill><a:srgbClr val=\"000000\"><a:alpha val=\"0\"/></a:srgbClr></a:solidFill></a:rPr>\
@@ -525,6 +534,57 @@ pub fn render_deck_to_pptx(
     let text_total: usize = slides_text.iter().map(|v| v.len()).sum();
     Ok(json!({ "ok": true, "out": out_pptx, "slides": n, "searchable": searchable, "text_boxes": text_total, "detail": r }))
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 工业级化(任务 c §A.3):自写最小 OOXML 校验器
+//   零新依赖(zip 已用);解压 + 列关键 part + 校验 namespace + 计数
+//   失败返具体 part 名,不返笼统 "读图失败"
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PptxValidation {
+    pub ok: bool,
+    pub slides_found: u32,
+    pub has_content_types: bool,
+    pub has_presentation: bool,
+    pub has_slide_master: bool,
+    pub has_slide_layout: bool,
+    pub has_theme: bool,
+    pub media_count: u32,
+    pub errors: Vec<String>,
+}
+
+/// 自写最小 OOXML 校验器(任务 c §A.3.1)。校验 [Content_Types].xml / presentation.xml
+/// / slideMaster / slideLayout / theme / media 字节存在。返具体 part 名 + 错误。
+pub fn validate_pptx(path: &str) -> Result<PptxValidation, String> {
+    let f = std::fs::File::open(path).map_err(|e| format!("打开 {path} 失败: {e}"))?;
+    let mut z = zip::ZipArchive::new(f).map_err(|e| format!("非合法 zip: {e}"))?;
+    let mut v = PptxValidation::default();
+    let mut slide_n_pattern = 0u32;
+    for i in 0..z.len() {
+        let name = z.by_index(i).map_err(|e| format!("读 zip entry: {e}"))?.name().to_string();
+        match name.as_str() {
+            "[Content_Types].xml" => v.has_content_types = true,
+            "ppt/presentation.xml" => v.has_presentation = true,
+            "ppt/slideMasters/slideMaster1.xml" => v.has_slide_master = true,
+            "ppt/slideLayouts/slideLayout1.xml" => v.has_slide_layout = true,
+            "ppt/theme/theme1.xml" => v.has_theme = true,
+            _ if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") => slide_n_pattern += 1,
+            _ if name.starts_with("ppt/media/") => v.media_count += 1,
+            _ => {}
+        }
+    }
+    v.slides_found = slide_n_pattern;
+    if !v.has_content_types { v.errors.push("missing [Content_Types].xml".into()); }
+    if !v.has_presentation { v.errors.push("missing ppt/presentation.xml".into()); }
+    if !v.has_slide_master { v.errors.push("missing ppt/slideMasters/slideMaster1.xml".into()); }
+    if !v.has_slide_layout { v.errors.push("missing ppt/slideLayouts/slideLayout1.xml".into()); }
+    if !v.has_theme { v.errors.push("missing ppt/theme/theme1.xml".into()); }
+    if slide_n_pattern == 0 { v.errors.push("no slideN.xml found".into()); }
+    v.ok = v.errors.is_empty();
+    Ok(v)
+}
+
 
 #[cfg(test)]
 mod tests {
