@@ -108,16 +108,6 @@ let ws: WebSocket | null = null;
 const wsListeners = new Map<string, Set<(p: unknown) => void>>();
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** WS 连接状态变化（仅 Docker/Web 模式有意义）：true=已连上, false=断开重连中 */
-const wsStatusCbs = new Set<(connected: boolean) => void>();
-function dispatchWsStatus(connected: boolean) {
-  for (const cb of wsStatusCbs) cb(connected);
-}
-export function onWsStatus(cb: (connected: boolean) => void): () => void {
-  wsStatusCbs.add(cb);
-  return () => wsStatusCbs.delete(cb);
-}
-
 function ensureWs(): void {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
     return;
@@ -128,7 +118,6 @@ function ensureWs(): void {
       t ? `?token=${encodeURIComponent(t)}` : ""
     }`;
     ws = new WebSocket(url);
-    ws.onopen = () => dispatchWsStatus(true);
     ws.onmessage = (e) => {
       try {
         const { topic, payload } = JSON.parse(e.data);
@@ -140,7 +129,6 @@ function ensureWs(): void {
     };
     ws.onclose = () => {
       ws = null;
-      dispatchWsStatus(false);
       if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
       // 仍有监听者才自动重连（避免空连接刷日志）。
       if (wsListeners.size > 0) wsReconnectTimer = setTimeout(ensureWs, 1500);
@@ -313,20 +301,6 @@ export interface KbUploadResult {
   message: string;
 }
 
-/** 批量转换 md 文件 (kb_convert_batch) 的汇总报告 */
-export interface KbConvertReport {
-  /** 扫到的文件总数 */
-  total: number;
-  /** 成功转成 md 的数量 (含缓存命中复用) */
-  converted: number;
-  /** 视频类跳过数 */
-  skippedVideo: number;
-  /** 其它跳过数 (图片/音频/压缩包等不可抽文本) */
-  skippedOther: number;
-  /** 失败明细 "文件名: 原因" */
-  failed: string[];
-}
-
 /** wiki 质量检查 (kb_lint) 单条问题 */
 export interface KbLintIssue {
   /** dead-link | missing-type | orphan | unsafe-path */
@@ -344,28 +318,6 @@ export interface KbLintReport {
   issues: KbLintIssue[];
 }
 
-/** 信源安全扫描 (kb_scan_sources) 单条命中 */
-export interface KbThreatHit {
-  /** high | medium | low */
-  severity: string;
-  /** instruction-override | role-hijack | tool-coercion | exfiltration | hidden-content | suspicious-link */
-  category: string;
-  path: string;
-  line: number;
-  matched: string;
-  snippet: string;
-}
-/** 信源安全扫描报告 */
-export interface KbThreatReport {
-  scannedFiles: number;
-  flaggedFiles: number;
-  skippedFiles: number;
-  high: number;
-  medium: number;
-  low: number;
-  hits: KbThreatHit[];
-}
-
 /** 「维护知识网」(enrich / dedup) 进度事件 (kb:enrich / kb:dedup) */
 export interface KbMaintainEvent {
   runId: string;
@@ -377,31 +329,12 @@ export interface KbMaintainEvent {
   merged?: number;
 }
 
-/** 名人资料包：随安装包分发，点「下载」拷进自己的资料库并附带安装配套 skill */
-export interface KbPack {
-  id: string;
-  name: string;
-  description: string;
-  skillId: string;
-  installed: boolean;
-}
-
 export const kb = {
   scan: () => invoke<number>("kb_scan"),
-  /** 名人资料包列表（含安装状态） */
-  packList: () => invoke<KbPack[]>("kb_pack_list"),
-  /** 安装资料包：资料拷入 raw/ + 配套 skill 装入技能目录，返回索引文件总数 */
-  packInstall: (id: string) => invoke<number>("kb_pack_install", { id }),
-  /** 移除资料包：删 raw/ 下该名人目录 + 卸配套 skill，返回索引文件总数 */
-  packRemove: (id: string) => invoke<number>("kb_pack_remove", { id }),
   /** 构建知识网：跑一个有写权限的 wiki 维护者 agent，摄入即编译。返回 runId，进度走 kb:compile 事件 */
   compile: () => invoke<string>("kb_compile"),
   /** wiki 质量检查：死双链/缺 type/孤儿页/不安全路径，纯规则即时返回 */
   lint: () => invoke<KbLintReport>("kb_lint"),
-  /** 信源安全扫描：遍历 KB 文本文件扫提示词注入痕迹，纯规则即时返回 */
-  scanSources: () => invoke<KbThreatReport>("kb_scan_sources"),
-  /** 隔离可疑文件：移出 raw/ 到 .quarantine/（模型不再读到），可逆，返回隔离后相对路径 */
-  quarantine: (relPath: string) => invoke<string>("kb_quarantine", { relPath }),
   /** 自动补双链：只读 claude 出 {term,target} 建议，Rust 执行替换。返回 runId，进度走 kb:enrich */
   enrichLinks: () => invoke<string>("kb_enrich_links"),
   /** 智能去重：规则粗筛 + AI 细判 + 代码合并。返回 runId，进度走 kb:dedup */
@@ -417,9 +350,6 @@ export const kb = {
   clear: () => invoke<number>("kb_clear"),
   ingest: (sourcePath: string) =>
     invoke<string>("kb_ingest", { sourcePath }),
-  /** 批量转换 md:文件/文件夹下非视频类可抽文本的全转 md 入 raw/ 并索引,视频/图片等跳过 */
-  convertBatch: (paths: string[]) =>
-    invoke<KbConvertReport>("kb_convert_batch", { paths }),
   /** 拖拽上传：任意格式 → 转 markdown 入 raw/，返回逐文件结果 */
   uploadFiles: (paths: string[]) =>
     invoke<KbUploadResult[]>("kb_upload_files", { paths }),
@@ -452,6 +382,8 @@ export interface ChatSendArgs {
   conversationId?: string;
   /** 目标模式：完成条件。设置后 Claude 会持续推进直到达成，不中途收尾。 */
   goal?: string;
+  /** 「请教毛主席」：注入毛选式客观分析指令，调用毛主席资料库，生成标注来源的 HTML。 */
+  consultMao?: boolean;
   /** 「动态编排」：多智能体编排——编排器拆 N 个独立子任务，Task 子代理并行扇出，每条流水线 实现→对抗式校验→修复，最后汇总。 */
   dynamicWorkflow?: boolean;
   /** 「知识库严格搜索」：打开时才把 KB 结构化 wiki + 双链地图注入上下文。默认 false。 */
@@ -514,27 +446,7 @@ export const chat = {
       conversationId: conversationId ?? null,
       paths,
     }),
-  /** 剪贴板贴图：base64 落盘到会话 uploads，返回附件 */
-  attachImage: (
-    conversationId: string | undefined,
-    name: string,
-    dataBase64: string
-  ) =>
-    invoke<AttachedFile>("chat_attach_image", {
-      conversationId: conversationId ?? null,
-      name,
-      dataBase64,
-    }),
 };
-
-/** 在系统默认浏览器打开外部链接（回复正文里的 http/https 链接） */
-export async function openUrl(url: string): Promise<void> {
-  if (isTauri) {
-    await invoke<void>("open_url", { url });
-    return;
-  }
-  window.open(url, "_blank", "noopener,noreferrer");
-}
 
 // ──────────────────────────────────────────────────────────────
 // Artifacts module — 对话生成的成品文件，右侧抽屉预览
@@ -898,28 +810,7 @@ export const provider = {
   codexPollLogin: (deviceCode: string, userCode: string) =>
     invoke<CodexPollResult>("codex_poll_login", { deviceCode, userCode }),
   codexProxyInfo: () => invoke<CodexProxyInfo>("codex_proxy_info"),
-  // ── Claude 官方订阅 OAuth(对话框内复刻 setup-token)──
-  claudeLoginStart: () => invoke<ClaudeLoginStart>("claude_login_start"),
-  claudeLoginSubmit: (code: string) =>
-    invoke<ClaudeLoginResult>("claude_login_submit", { code }),
-  claudeAuthStatus: () => invoke<ClaudeAuthStatus>("claude_auth_status"),
 };
-
-export interface ClaudeLoginStart {
-  url: string;
-}
-export interface ClaudeLoginResult {
-  ok: boolean;
-  email?: string | null;
-  credentialsPath: string;
-}
-export interface ClaudeAuthStatus {
-  loggedIn: boolean;
-  hasRefresh: boolean;
-  expired: boolean;
-  expiresAt: number;
-  credentialsPath: string;
-}
 
 // ──────────────────────────────────────────────────────────────
 // 环境医生 module — 新用户「环境监测 + 配置安装」(claude / pwsh / PATH)
@@ -1004,21 +895,8 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return 0;
     case "kb_clear":
       return 0;
-    case "kb_pack_list":
-      return [];
-    case "kb_pack_install":
-    case "kb_pack_remove":
-      return 0;
     case "kb_ingest":
       return "browser-stub";
-    case "kb_convert_batch":
-      return {
-        total: 0,
-        converted: 0,
-        skippedVideo: 0,
-        skippedOther: 0,
-        failed: [],
-      };
     case "kb_upload_files": {
       const paths = (_args?.paths as string[]) ?? [];
       return paths.map((p) => ({
@@ -1027,14 +905,6 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         ok: true,
         message: "(browser stub)",
       }));
-    }
-    case "chat_attach_image": {
-      const name = String(_args?.name ?? "pasted.png");
-      return { name, path: name, kind: "image", size: 0, ok: true };
-    }
-    case "open_url": {
-      window.open(String(_args?.url ?? ""), "_blank", "noopener,noreferrer");
-      return undefined;
     }
     case "chat_attach_files": {
       const paths = (_args?.paths as string[]) ?? [];

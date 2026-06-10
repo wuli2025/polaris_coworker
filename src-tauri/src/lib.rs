@@ -112,8 +112,6 @@ pub fn run() {
             kb::kb_convert_batch,
             kb::kb_graph,
             kb::kb_lint,
-            kb::kb_scan_sources,
-            kb::kb_quarantine,
             kb::kb_enrich_links,
             kb::kb_dedup,
             // 名人资料包（下载到自己的资料库，附带配套 skill）
@@ -198,9 +196,6 @@ pub fn run() {
             provider::codex_status,
             provider::codex_start_login,
             provider::codex_poll_login,
-            provider::claude_login_start,
-            provider::claude_login_submit,
-            provider::claude_auth_status,
             codex_proxy::codex_proxy_info,
             // Forge 跨平台渲染能力 preflight（能出 PPT/视频吗、缺啥降级，三平台各报各的阶梯）
             forge::forge_preflight,
