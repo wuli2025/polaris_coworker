@@ -2,12 +2,23 @@
 import { ref, onMounted, computed, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { marked } from "marked";
+import { sanitizeHtml } from "../lib/sanitize";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
-import { Upload, LoaderCircle, CheckCircle2, XCircle, X, Trash2 } from "@lucide/vue";
+import {
+  Upload,
+  LoaderCircle,
+  CheckCircle2,
+  XCircle,
+  X,
+  Trash2,
+  Download,
+  Sparkles,
+} from "@lucide/vue";
 import {
   kb,
   type KbHit,
+  type KbPack,
   artifacts as artifactsApi,
   type ArtifactSearchHit,
 } from "../tauri";
@@ -20,14 +31,20 @@ const app = useAppStore();
 const artifactsStore = useArtifactsStore();
 const kbStore = useKbStore();
 
-type Tab = "overview" | "browse" | "manage";
+type Tab = "overview" | "packs" | "browse" | "manage";
 const tab = ref<Tab>("browse");
 const files = ref<string[]>([]);
 const selected = ref<string | null>(null);
 const markdown = ref("");
-const rendered = computed(() => (markdown.value ? marked.parse(markdown.value) : ""));
+// 知识库 .md 含 AI 生成 / 抓取的网页 / 导入文档(不可信来源)，必须过 DOMPurify，
+// 否则 markdown 内嵌的 <img onerror> 等可在特权 webview 触发 XSS。
+const rendered = computed(() =>
+  markdown.value ? sanitizeHtml(marked.parse(markdown.value) as string) : "",
+);
 const query = ref("");
 const hits = ref<KbHit[]>([]);
+// 搜索结果首屏只渲染 100 条,「展示更多」逐段放开(大结果集不再一次性铺 DOM)
+const hitCap = ref(100);
 // 历史对话产物命中（搜索记忆把过往输出文件也算入）
 const artHits = ref<ArtifactSearchHit[]>([]);
 const rootPath = ref("");
@@ -42,10 +59,13 @@ const {
   compiling,
   compileLog,
   compileMsg,
+  pipelineStage,
   lastDocCount,
   doneTick,
   linting,
   lintReport,
+  scanning,
+  threatReport,
 } = storeToRefs(kbStore);
 
 onMounted(async () => {
@@ -53,8 +73,51 @@ onMounted(async () => {
   // 若离开期间已有正在运行/完成的编译,重挂时确保监听在位并同步计数
   await kbStore.ensureListener();
   if (lastDocCount.value != null) scanned.value = lastDocCount.value;
-  await refreshList();
+  await Promise.all([refreshList(), refreshPacks()]);
 });
+
+// ─────────── 名人资料包（下载到自己的资料库，附带配套 skill） ───────────
+const packs = ref<KbPack[]>([]);
+const packBusy = ref<string | null>(null); // 正在装/卸的 pack id
+const packMsg = ref("");
+
+async function refreshPacks() {
+  try {
+    packs.value = await kb.packList();
+  } catch {
+    packs.value = [];
+  }
+}
+
+async function installPack(p: KbPack) {
+  packBusy.value = p.id;
+  packMsg.value = "";
+  try {
+    await kb.packInstall(p.id);
+    packMsg.value = `「${p.name}」已装入资料库,配套技能「${p.skillId}」已同步安装`;
+    await Promise.all([refreshPacks(), refreshList()]);
+  } catch (e: any) {
+    packMsg.value = `安装失败:${e?.message ?? e}`;
+  } finally {
+    packBusy.value = null;
+  }
+}
+
+async function removePack(p: KbPack) {
+  if (!confirm(`移除「${p.name}」资料包?\n会删除 raw/${p.name}/ 下全部资料,并卸载配套技能。`))
+    return;
+  packBusy.value = p.id;
+  packMsg.value = "";
+  try {
+    await kb.packRemove(p.id);
+    packMsg.value = `「${p.name}」已移除`;
+    await Promise.all([refreshPacks(), refreshList()]);
+  } catch (e: any) {
+    packMsg.value = `移除失败:${e?.message ?? e}`;
+  } finally {
+    packBusy.value = null;
+  }
+}
 
 // 编译完成(后台也可能在别的视图触发)→ 刷新文件列表与计数
 watch(doneTick, () => {
@@ -89,25 +152,81 @@ async function doScan() {
   await refreshList();
 }
 
-// 构建知识网: 委托全局 store(摄入即编译, 进度走 kb:compile 事件, 脱离本组件生命周期)
+// 构建知识网: 一键流水线「编译 → 自动补双链 → 智能去重」, 委托全局 store
+// (进度走 kb:compile / kb:enrich / kb:dedup 事件, 脱离本组件生命周期)
 async function doCompile() {
-  await kbStore.startCompile();
+  await kbStore.startBuildAll();
 }
-
-// 维护知识网 (借鉴 llm_wiki「AI 出决策、代码执行」): 自动补双链 / 智能去重
-async function doEnrich() {
-  await kbStore.startMaintain("enrich");
-}
-async function doDedup() {
-  await kbStore.startMaintain("dedup");
-}
+// 流水线阶段 → 按钮文案
+const buildLabel = computed(() => {
+  if (!compiling.value) return "构建知识网";
+  switch (pipelineStage.value) {
+    case "compile":
+      return "1/3 编译知识网…";
+    case "enrich":
+      return "2/3 自动补双链…";
+    case "dedup":
+      return "3/3 智能去重…";
+    default:
+      return "正在构建知识网…";
+  }
+});
 // wiki 质量检查 (纯规则, 同步返回报告)
 async function doLint() {
   await kbStore.runLint();
 }
 
+// 信源安全扫描 (提示词注入痕迹, 纯规则)
+async function doSecurityScan() {
+  await kbStore.runScan();
+}
+const quarantining = ref<string | null>(null);
+async function doQuarantine(path: string) {
+  if (quarantining.value) return;
+  quarantining.value = path;
+  try {
+    await kbStore.quarantine(path);
+  } finally {
+    quarantining.value = null;
+  }
+}
+const sevLabel: Record<string, string> = { high: "高危", medium: "可疑", low: "留意" };
+const catLabel: Record<string, string> = {
+  "instruction-override": "指令覆盖",
+  "role-hijack": "角色劫持",
+  "tool-coercion": "诱导执行",
+  exfiltration: "数据外泄",
+  "hidden-content": "隐藏内容",
+  "suspicious-link": "危险链接",
+};
+
+// ── 批量转换 md 文件 (原「快速重扫」位) ──
+// 填文件/文件夹绝对路径 → 非视频类可抽文本的全转 md 入 raw/ 并索引;
+// 视频跳过(留给将来 ASR), 图片等抽不出文本的也跳过、不原样复制。
+const convertPath = ref("");
+const converting = ref(false);
+const convertMsg = ref("");
+async function doConvertBatch() {
+  const p = convertPath.value.trim();
+  if (!p || converting.value) return;
+  converting.value = true;
+  convertMsg.value = "";
+  try {
+    const r = await kb.convertBatch([p]);
+    let msg = `共 ${r.total} 个文件:转换 ${r.converted} · 跳过视频 ${r.skippedVideo} · 跳过其它 ${r.skippedOther}`;
+    if (r.failed.length) msg += ` · 失败 ${r.failed.length}(${r.failed[0]})`;
+    convertMsg.value = msg;
+    await refreshList();
+  } catch (e: any) {
+    convertMsg.value = `失败:${e?.message ?? e}`;
+  } finally {
+    converting.value = false;
+  }
+}
+
 async function doSearch() {
   const q = query.value.trim();
+  hitCap.value = 100;
   if (!q) {
     hits.value = [];
     artHits.value = [];
@@ -155,7 +274,7 @@ const clearMsg = ref("");
 async function doClear() {
   if (
     !confirm(
-      "确定清空整个资料库吗?\n这会删除包括毛主席资料库在内的全部资料,且不可撤销;清空后重启也不会再自动恢复默认资料。"
+      "确定清空整个资料库吗?\n这会删除全部资料(含已安装的名人资料包),且不可撤销;资料包可在「名人资料包」里重新安装。"
     )
   )
     return;
@@ -243,11 +362,12 @@ const { isOver: dropOver } = useFileDrop({
     </div>
 
     <div class="head">
-      <div class="title">维基知识库</div>
+      <div class="title">名人知识库</div>
       <div class="tabs">
         <button
           v-for="t in [
             { k: 'overview', l: '概览' },
+            { k: 'packs', l: '名人资料包' },
             { k: 'browse', l: '浏览' },
             { k: 'manage', l: '管理' },
           ]"
@@ -293,6 +413,55 @@ const { isOver: dropOver } = useFileDrop({
       <span v-if="scanned !== null" class="muted">扫描完成,共 {{ scanned }} 个文件</span>
     </div>
 
+    <div v-if="tab === 'packs'" class="body packs">
+      <div class="packs-intro">
+        名人资料包:把名人的著作资料<strong>下载到自己的资料库</strong>(<code>raw/</code> 下),
+        并附带安装配套技能 —— 技能里写好了这个资料库的使用方法,装完即可在对话里直接请教。
+      </div>
+      <div class="pack-grid">
+        <div v-for="p in packs" :key="p.id" class="card pack-card">
+          <div class="pack-head">
+            <div class="card-title">{{ p.name }}</div>
+            <span v-if="p.installed" class="pack-badge installed">已装入</span>
+          </div>
+          <div class="card-body">{{ p.description }}</div>
+          <div class="pack-skill">
+            <Sparkles :size="13" :stroke-width="1.8" />
+            <span>配套技能:<code>{{ p.skillId }}</code></span>
+          </div>
+          <div class="pack-actions">
+            <button
+              v-if="!p.installed"
+              class="primary-btn"
+              :disabled="packBusy === p.id"
+              @click="installPack(p)"
+            >
+              <LoaderCircle
+                v-if="packBusy === p.id"
+                :size="14"
+                :stroke-width="1.8"
+                class="spin"
+              />
+              <Download v-else :size="14" :stroke-width="1.8" />
+              <span>{{ packBusy === p.id ? "正在装入…" : "下载到我的资料库" }}</span>
+            </button>
+            <button
+              v-else
+              class="btn"
+              :disabled="packBusy === p.id"
+              @click="removePack(p)"
+            >
+              {{ packBusy === p.id ? "正在移除…" : "移除" }}
+            </button>
+          </div>
+        </div>
+        <div v-if="!packs.length" class="muted empty">
+          暂无可用资料包(浏览器模式或资源目录缺失)
+        </div>
+      </div>
+      <div v-if="packMsg" class="muted pack-msg">{{ packMsg }}</div>
+    </div>
+
     <div v-if="tab === 'browse'" class="body browse">
       <div class="left">
         <div class="search-row">
@@ -306,7 +475,7 @@ const { isOver: dropOver } = useFileDrop({
         <div v-if="hits.length" class="hit-list">
           <div class="section-title">搜索结果</div>
           <div
-            v-for="h in hits"
+            v-for="h in hits.slice(0, hitCap)"
             :key="h.path"
             class="hit"
             @click="openFile(h.path)"
@@ -315,11 +484,14 @@ const { isOver: dropOver } = useFileDrop({
             <div class="hit-snip">{{ h.snippet }}</div>
             <div class="hit-meta">score {{ h.score.toFixed(1) }} · {{ h.path }}</div>
           </div>
+          <button v-if="hits.length > hitCap" class="btn more" @click="hitCap += 100">
+            展示更多（还有 {{ hits.length - hitCap }} 条）
+          </button>
         </div>
         <div v-if="artHits.length" class="hit-list">
           <div class="section-title">历史对话产物</div>
           <div
-            v-for="a in artHits"
+            v-for="a in artHits.slice(0, hitCap)"
             :key="a.path"
             class="hit"
             @click="openArtifact(a.path)"
@@ -382,11 +554,14 @@ const { isOver: dropOver } = useFileDrop({
         <div v-if="ingestMsg" class="ingest-msg">{{ ingestMsg }}</div>
       </div>
       <div class="card accent-card">
-        <div class="card-title">构建知识网 · 摄入即编译</div>
+        <div class="card-title">构建知识网 · 摄入即编译 + 自动维护</div>
         <div class="card-body">
-          让 wiki 维护者读 <code>raw/</code> 原始资料,抽取实体与思想脉络,在
-          <code>wiki/</code> 写概念页并用 <code>[[双链]]</code> 互联 —— 把散落的资料
-          <strong>编译成一张有关系的知识网</strong>。原始资料只读不改。耗时分钟级。
+          一键跑完三步:<strong>① 编译</strong>(wiki 维护者读 <code>raw/</code>
+          原始资料,抽取实体与思想脉络,在 <code>wiki/</code> 写概念页并用
+          <code>[[双链]]</code> 互联,把散落的资料<strong>编译成一张有关系的知识网</strong>)
+          → <strong>② 补双链</strong>(只读 AI 找出该互联却漏链的词,<em>替换由代码执行,正文不乱改</em>)
+          → <strong>③ 去重</strong>(规则粗筛同名页 → AI 判真重复 → 合并并重写全库双链)。
+          原始资料只读不改。耗时分钟级。
         </div>
         <button class="primary-btn" :disabled="compiling" @click="doCompile">
           <LoaderCircle
@@ -395,7 +570,7 @@ const { isOver: dropOver } = useFileDrop({
             :stroke-width="1.8"
             class="spin"
           />
-          <span>{{ compiling ? "正在构建知识网…" : "构建知识网" }}</span>
+          <span>{{ buildLabel }}</span>
         </button>
         <span v-if="compileMsg" class="muted clear-msg">{{ compileMsg }}</span>
         <div v-if="compileLog.length" class="compile-log">
@@ -405,26 +580,12 @@ const { isOver: dropOver } = useFileDrop({
         </div>
       </div>
       <div class="card">
-        <div class="card-title">维护知识网 · AI 出决策 / 代码执行</div>
+        <div class="card-title">质量检查 · 纯规则秒级</div>
         <div class="card-body">
-          知识网构建后会越积越乱。这三件事保持它整洁:
-          <strong>补双链</strong>(只读 AI 找出该互联却漏链的词,<em>替换由代码执行,正文不乱改</em>)、
-          <strong>去重</strong>(规则粗筛同名页 → AI 判真重复 → 合并并重写全库双链)、
-          <strong>体检</strong>(扫死链/缺 type/孤儿页,纯规则秒级)。
+          给知识网体检:扫<strong>死链 / 缺 type / 孤儿页 / 危险路径</strong>,
+          不改任何文件、即时出报告。构建完或手动改完 wiki 后随手查一下。
         </div>
         <div class="maintain-row">
-          <button class="primary-btn" :disabled="compiling" @click="doEnrich">
-            <LoaderCircle
-              v-if="compiling"
-              :size="14"
-              :stroke-width="1.8"
-              class="spin"
-            />
-            <span>自动补双链</span>
-          </button>
-          <button class="primary-btn" :disabled="compiling" @click="doDedup">
-            <span>智能去重</span>
-          </button>
           <button class="primary-btn" :disabled="linting" @click="doLint">
             <span>{{ linting ? "体检中…" : "质量检查" }}</span>
           </button>
@@ -452,19 +613,87 @@ const { isOver: dropOver } = useFileDrop({
         </div>
       </div>
       <div class="card">
-        <div class="card-title">快速重扫 · 索引重建</div>
+        <div class="card-title">信源安全扫描 · 防提示词注入</div>
         <div class="card-body">
-          只重扫 KB 根下所有 .md、刷新内存索引与图谱(秒级,不改文件、不生成知识)。
-          手动改完文件后用它刷新。
+          扫 <code>raw/</code> 等外部资料里有没有<strong>试图操纵 AI 的隐藏指令</strong>(提示词注入):
+          「忽略以上指令」「你现在是…」「运行以下命令」「把密钥发送到…」、零宽隐藏字符、危险链接等。
+          模型答题时会主动 Read 这些资料,被注入的文档可能指挥它跑命令/外发数据 ——
+          扫到可疑信源可<strong>一键隔离</strong>(移出 raw/,模型不再读到,可逆)。
         </div>
-        <button class="primary-btn" @click="doScan">立即扫描</button>
+        <div class="maintain-row">
+          <button class="primary-btn" :disabled="scanning" @click="doSecurityScan">
+            <span>{{ scanning ? "扫描中…" : "安全扫描" }}</span>
+          </button>
+        </div>
+        <div v-if="threatReport" class="lint-report">
+          <div class="lint-summary">
+            扫 {{ threatReport.scannedFiles }} 个文件 ·
+            可疑文件 <b :class="{ bad: threatReport.flaggedFiles }">{{ threatReport.flaggedFiles }}</b> ·
+            高危 <b :class="{ bad: threatReport.high }">{{ threatReport.high }}</b> ·
+            可疑 <b :class="{ bad: threatReport.medium }">{{ threatReport.medium }}</b> ·
+            留意 <b>{{ threatReport.low }}</b>
+          </div>
+          <div v-if="threatReport.hits.length" class="lint-issues">
+            <div
+              v-for="(h, i) in threatReport.hits.slice(0, 80)"
+              :key="i"
+              class="threat-line"
+            >
+              <span class="threat-sev" :class="'sev-' + h.severity">{{ sevLabel[h.severity] || h.severity }}</span>
+              <span class="lint-kind">{{ catLabel[h.category] || h.category }}</span>
+              <span class="threat-where">
+                <span class="lint-path">{{ h.path }}</span>
+                <span class="threat-snip">第 {{ h.line }} 行：{{ h.snippet }}</span>
+              </span>
+              <button
+                class="quarantine-btn"
+                :disabled="quarantining === h.path"
+                title="移出 raw/ 到 .quarantine/，模型不再读到（可逆）"
+                @click="doQuarantine(h.path)"
+              >
+                {{ quarantining === h.path ? "隔离中…" : "隔离" }}
+              </button>
+            </div>
+          </div>
+          <div v-else class="muted">未发现注入痕迹,信源干净 ✓</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">批量转换 md 文件 · 非视频类</div>
+        <div class="card-body">
+          填本机文件或文件夹绝对路径(文件夹递归展开),把里面的<strong>非视频类</strong>文件
+          批量转换成 Markdown 入 <code>raw/</code> 并索引 —— 支持 PDF / Word / Excel /
+          PPT / 文本 / 代码;<strong>视频跳过</strong>,图片等抽不出文本的也跳过(不复制原件)。
+          同一文件内容没变时重跑会自动复用,不会重复转换。
+        </div>
+        <div class="ingest-row">
+          <input
+            v-model="convertPath"
+            placeholder="例:D:\资料文件夹 或 D:\资料\报告.pdf"
+            @keydown.enter="doConvertBatch"
+          />
+          <button
+            class="primary-btn"
+            :disabled="converting"
+            @click="doConvertBatch"
+          >
+            <LoaderCircle
+              v-if="converting"
+              :size="14"
+              :stroke-width="1.8"
+              class="spin"
+            />
+            <span>{{ converting ? "转换中…" : "批量转换" }}</span>
+          </button>
+        </div>
+        <div v-if="convertMsg" class="ingest-msg">{{ convertMsg }}</div>
       </div>
       <div class="card danger-card">
         <div class="card-title">清空资料库</div>
         <div class="card-body">
-          删除 <code>raw/</code> 下的<strong>全部资料</strong>(含默认的毛主席资料库),
-          保留目录结构。此操作<strong>不可撤销</strong>,且清空后重启不会再自动恢复默认资料。
-          也可在「浏览」里逐条点 × 删除单份资料。
+          删除 <code>raw/</code> 下的<strong>全部资料</strong>(含已安装的名人资料包),
+          保留目录结构。此操作<strong>不可撤销</strong>;名人资料包可在「名人资料包」tab
+          重新安装。也可在「浏览」里逐条点 × 删除单份资料。
         </div>
         <button class="danger-btn" @click="doClear">
           <Trash2 :size="14" :stroke-width="1.8" />
@@ -480,7 +709,7 @@ const { isOver: dropOver } = useFileDrop({
 .wiki {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   position: relative;
 }
 .head {
@@ -547,6 +776,68 @@ const { isOver: dropOver } = useFileDrop({
   flex-direction: column;
   gap: 18px;
 }
+.body.packs {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+.packs-intro {
+  font-size: 12.5px;
+  color: var(--text-2);
+  line-height: 1.7;
+}
+.pack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+}
+.pack-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pack-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.pack-head .card-title {
+  margin-bottom: 0;
+  font-size: 15px;
+}
+.pack-badge.installed {
+  font-size: 11px;
+  color: var(--ok);
+  border: 1px solid var(--ok-soft);
+  background: var(--ok-soft);
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+.pack-skill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.pack-skill code {
+  background: var(--code-bg);
+  padding: 1px 6px;
+  border-radius: 2px;
+  font-family: var(--mono);
+}
+.pack-actions {
+  margin-top: 4px;
+}
+.pack-actions .primary-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.pack-msg {
+  font-size: 12px;
+}
 
 .cards {
   display: grid;
@@ -575,8 +866,8 @@ const { isOver: dropOver } = useFileDrop({
 .primary-btn {
   align-self: flex-start;
   padding: 7px 16px;
-  background: var(--ink);
-  color: #fafaf7;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   border: none;
   border-radius: 4px;
   font-size: 12.5px;
@@ -800,7 +1091,7 @@ const { isOver: dropOver } = useFileDrop({
   color: var(--accent, #2f6df0);
 }
 .lint-summary b.bad {
-  color: #d24b4b;
+  color: var(--vermilion);
 }
 .lint-issues {
   max-height: 200px;
@@ -819,18 +1110,80 @@ const { isOver: dropOver } = useFileDrop({
 }
 .lint-kind {
   flex: none;
-  color: #c47f00;
+  color: var(--gold);
   font-family: var(--mono, monospace);
 }
 .lint-path {
   flex: none;
-  color: var(--text-1, #1f2733);
+  color: var(--text);
   font-family: var(--mono, monospace);
 }
 .lint-detail {
   color: var(--dim, #888);
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ── 信源安全扫描命中行 ── */
+.threat-line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border, rgba(0, 0, 0, 0.06));
+}
+.threat-line:last-child {
+  border-bottom: none;
+}
+.threat-sev {
+  flex: none;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+.threat-sev.sev-high {
+  color: #fff;
+  background: var(--vermilion, #e5484d);
+}
+.threat-sev.sev-medium {
+  color: #7a4a00;
+  background: rgba(255, 166, 77, 0.28);
+}
+.threat-sev.sev-low {
+  color: var(--dim, #888);
+  background: rgba(0, 0, 0, 0.06);
+}
+.threat-where {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.threat-snip {
+  color: var(--dim, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.quarantine-btn {
+  flex: none;
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--vermilion, #e5484d);
+  color: var(--vermilion, #e5484d);
+  background: transparent;
+  cursor: pointer;
+}
+.quarantine-btn:hover:not(:disabled) {
+  background: var(--vermilion, #e5484d);
+  color: #fff;
+}
+.quarantine-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .placeholder {
@@ -924,6 +1277,7 @@ const { isOver: dropOver } = useFileDrop({
   z-index: 50;
   background: rgba(44, 70, 97, 0.07);
   border: 2px dashed var(--primary);
+  /* 黑夜模式见文件底部 html[data-theme="dark"] 覆盖 */
   border-radius: 14px;
   display: flex;
   align-items: center;
@@ -983,7 +1337,7 @@ const { isOver: dropOver } = useFileDrop({
   color: var(--muted);
 }
 .upload-row.ok {
-  color: #2f9e44;
+  color: var(--ok);
 }
 .upload-row.err {
   color: var(--vermilion);
@@ -1011,5 +1365,10 @@ const { isOver: dropOver } = useFileDrop({
   to {
     transform: rotate(360deg);
   }
+}
+
+/* 黑夜模式：拖拽覆盖层的浅蓝雾在深空底上隐形，换成主色蓝雾 */
+html[data-theme="dark"] .kb-drop-overlay {
+  background: rgba(91, 140, 255, 0.12);
 }
 </style>

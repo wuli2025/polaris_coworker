@@ -2,6 +2,8 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import {
   convApi,
+  isTauri,
+  invoke,
   type Conversation,
   type Project,
 } from "../tauri";
@@ -60,6 +62,44 @@ export const useAppStore = defineStore("app", () => {
     persistPinned();
   }
 
+  // 主题：浅色（默认·暖白水墨）/ 黑夜（深空玻璃，抄自智能选股版）。
+  // 挂到 <html data-theme="dark"> 上由 style.css 的 token 覆盖块全局换肤。
+  const THEME_KEY = "polaris.theme.v1";
+  type Theme = "light" | "dark";
+  function loadTheme(): Theme {
+    try {
+      return localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light";
+    } catch {
+      return "light";
+    }
+  }
+  const theme = ref<Theme>(loadTheme());
+  function applyTheme() {
+    if (theme.value === "dark") {
+      document.documentElement.setAttribute("data-theme", "dark");
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+    }
+    // 原生标题栏跟随主题染成框面色（仅桌面端；Win11 生效，Win10 静默跳过）
+    if (isTauri) {
+      const c =
+        theme.value === "dark"
+          ? { caption: "#1f1f1f", text: "#ececea" }
+          : { caption: "#f3f2eb", text: "#1a1a1c" }; // 浅色=框面暖米同色，与侧栏无色差
+      invoke("set_titlebar_color", c).catch(() => {});
+    }
+  }
+  function setTheme(t: Theme) {
+    theme.value = t;
+    try {
+      localStorage.setItem(THEME_KEY, t);
+    } catch {
+      /* storage may be unavailable */
+    }
+    applyTheme();
+  }
+  applyTheme(); // store 初始化（App 启动）时立即生效，避免闪白
+
   // 任务完成但用户未查看的会话集合 → 侧栏显示墨蓝色未读点
   const unreadConvs = ref<Set<string>>(new Set());
   function markUnread(convId: string) {
@@ -92,7 +132,22 @@ export const useAppStore = defineStore("app", () => {
     drawerCollapsed.value = !drawerCollapsed.value;
   }
 
-  const sidebarWidth = computed(() => (sidebarCollapsed.value ? 48 : 260));
+  // 侧栏宽度可拖拽调节(200–420px),记住选择
+  const SIDEBAR_W_KEY = "polaris.sidebarWidth.v1";
+  const sidebarUserWidth = ref(
+    Math.min(420, Math.max(200, parseInt(localStorage.getItem(SIDEBAR_W_KEY) || "260") || 260))
+  );
+  function setSidebarWidth(w: number) {
+    sidebarUserWidth.value = Math.min(420, Math.max(200, Math.round(w)));
+    try {
+      localStorage.setItem(SIDEBAR_W_KEY, String(sidebarUserWidth.value));
+    } catch {
+      /* storage 不可用 */
+    }
+  }
+  const sidebarWidth = computed(() =>
+    sidebarCollapsed.value ? 48 : sidebarUserWidth.value
+  );
   // 收起后右抽屉完全消失（0 宽，不留小框/导轨）；需要时点对话顶栏的抽屉按钮或生成产物自动展开
   const drawerWidth = computed(() => (drawerCollapsed.value ? 0 : 300));
 
@@ -100,17 +155,33 @@ export const useAppStore = defineStore("app", () => {
   const showMcpModal = ref(false);
 
   async function refreshProjects() {
-    projects.value = await convApi.listProjects();
+    try {
+      projects.value = await convApi.listProjects();
+    } catch (e) {
+      // 静默失败=侧栏空白没人知道为什么;报出去并保留旧列表
+      const { toast } = await import("../composables/useToast");
+      const { humanizeError } = await import("../lib/humanizeError");
+      toast.error(`项目列表加载失败:${humanizeError(e)}`);
+      return;
+    }
     if (!currentProjectId.value && projects.value.length) {
       currentProjectId.value = projects.value[0].id;
       expandedProjects.value.add(currentProjectId.value);
-      await refreshConversations(currentProjectId.value);
     }
+    // 全量加载各项目对话：侧栏「项目按最近对话活跃排序」与行尾相对时间都依赖各项目的对话时间
+    await Promise.all(projects.value.map((p) => refreshConversations(p.id)));
   }
 
   async function refreshConversations(projectId: string) {
-    conversationsByProject.value[projectId] =
-      await convApi.listConversations(projectId);
+    try {
+      conversationsByProject.value[projectId] =
+        await convApi.listConversations(projectId);
+    } catch (e) {
+      const { toast } = await import("../composables/useToast");
+      const { humanizeError } = await import("../lib/humanizeError");
+      toast.error(`对话列表加载失败:${humanizeError(e)}`);
+      return;
+    }
     // Vue 3 reactive: 替换 ref 触发更新
     conversationsByProject.value = { ...conversationsByProject.value };
   }
@@ -158,7 +229,12 @@ export const useAppStore = defineStore("app", () => {
     await convApi.openProjectDir(projectId);
   }
 
-  async function createConversation(projectId: string) {
+  /**
+   * @param navigate 是否切到 chat 视图。默认 true(侧栏/对话面板新建即跳进对话)。
+   *   工坊类组件(Deck/Web 等)自己管理视图、就地展示预览, 必须传 false ——
+   *   否则 setView('chat') 会卸载工坊组件、连带销毁其状态机/预览/「继续修改」。
+   */
+  async function createConversation(projectId: string, navigate = true) {
     const c = await convApi.createConversation(projectId);
     const cur = conversationsByProject.value[projectId] ?? [];
     conversationsByProject.value = {
@@ -168,7 +244,7 @@ export const useAppStore = defineStore("app", () => {
     expandedProjects.value = new Set([...expandedProjects.value, projectId]);
     currentConvId.value = c.id;
     currentProjectId.value = projectId;
-    setView("chat");
+    if (navigate) setView("chat");
     return c;
   }
 
@@ -210,8 +286,11 @@ export const useAppStore = defineStore("app", () => {
     sidebarCollapsed,
     drawerCollapsed,
     sidebarWidth,
+    setSidebarWidth,
     drawerWidth,
     showMcpModal,
+    theme,
+    setTheme,
     setView,
     toggleSidebar,
     toggleDrawer,

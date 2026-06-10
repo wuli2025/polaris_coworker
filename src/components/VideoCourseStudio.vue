@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from "vue";
+import { ref, computed, watch } from "vue";
+import { usePolling } from "../composables/usePolling";
 import {
   Clapperboard,
   FileText,
@@ -99,6 +100,7 @@ const voice = ref("male-qn-jingying");
 type Lang = { code: string; name: string; boost: string };
 const DUB_LANGS: Lang[] = [
   { code: "zh-Hans", name: "中文 · 普通话", boost: "Chinese" },
+  { code: "zh-TW", name: "台湾话 · 台湾腔国语", boost: "Chinese" },
   { code: "yue", name: "粤语", boost: "Chinese,Yue" },
   { code: "en", name: "English 英语", boost: "English" },
   { code: "ja", name: "日本語 日语", boost: "Japanese" },
@@ -148,6 +150,35 @@ function toggleSub(code: string) {
   else subLangs.value.push(code);
 }
 const burnList = computed(() => (burnSubs.value ? subLangs.value.slice(0, 2) : []));
+
+// ── 参数记忆:音色/语速/字幕/全自动开关记住上次选择(刷新/重开不用重配) ──
+const VC_PREFS_KEY = "polaris.videocourse.prefs.v1";
+try {
+  const p = JSON.parse(localStorage.getItem(VC_PREFS_KEY) || "{}");
+  if (typeof p.voice === "string") voice.value = p.voice;
+  if (typeof p.speed === "number") speed.value = p.speed;
+  if (Array.isArray(p.subLangs) && p.subLangs.length) subLangs.value = p.subLangs;
+  if (typeof p.burnSubs === "boolean") burnSubs.value = p.burnSubs;
+  if (typeof p.autoMode === "boolean") autoMode.value = p.autoMode;
+} catch {
+  /* 损坏的存档忽略 */
+}
+watch([voice, speed, subLangs, burnSubs, autoMode], () => {
+  try {
+    localStorage.setItem(
+      VC_PREFS_KEY,
+      JSON.stringify({
+        voice: voice.value,
+        speed: speed.value,
+        subLangs: subLangs.value,
+        burnSubs: burnSubs.value,
+        autoMode: autoMode.value,
+      })
+    );
+  } catch {
+    /* storage 不可用 */
+  }
+});
 
 // 背景音乐
 const bgmPath = ref<string>("");
@@ -261,6 +292,14 @@ function i18nBlock(): string {
   // —— 配音语言 ——
   if (dubLang.value === "zh-Hans") {
     lines.push("- 配音语言：中文 · 普通话。MiniMax 合成时 language_boost=Chinese。");
+  } else if (dubLang.value === "zh-TW") {
+    lines.push(
+      "- 配音语言：台湾话 · 台湾腔国语（仍是中文，MiniMax language_boost=Chinese）。",
+      "  · **逐字稿、口播稿、以及 narrations.ts 里的台词，全部用台湾腔国语书写**——不是翻译，而是改写成台湾人日常讲话的口吻：",
+      "    用台湾惯用词（影片/视频→影片、网络→网路、数字→数位、质量→品质、短信→简讯、出租车→计程车、夜宵→宵夜、高手→达人、视频博主→YouTuber），",
+      "    句尾常带「喔/啦/耶/齁/吼/嘛/啊」等软化语气词，语气亲切、节奏稍缓，避免大陆官腔与儿化音、避免「视频/搞/挺…的」这类陆系说法。",
+      "  · 配音合成 language_boost 仍为 Chinese——台湾腔靠文本的用词与语气体现，不要改 boost，也不要在 audio-segments.json 里另设 language_boost。",
+    );
   } else {
     lines.push(
       `- 配音语言：${dubInfo.value.name}（code=${dubLang.value}）。`,
@@ -380,8 +419,9 @@ async function ensureConv(): Promise<string> {
     projectId = app.currentProjectId;
     if (!projectId) throw new Error("创建课件视频项目失败");
   }
-  const conv = await app.createConversation(projectId);
-  // createConversation 内部会 setView("chat")；视图最终由 startPlan 决定（跳到对话框）
+  // navigate=false: 不让 createConversation 跳 chat ——规划模式必须留在本视图,
+  // 否则组件卸载会销毁 planning→review→confirm 状态机(watch/poll 全死)。
+  const conv = await app.createConversation(projectId, false);
   return conv.id;
 }
 
@@ -401,10 +441,9 @@ async function startPlan() {
       }
     }
 
-    // 开始生成后，自动跳到正在生成的对话框看实时进度
-    app.setView("chat");
-
     if (autoMode.value) {
+      // 全自动: 没有人工规划环节, 跳到对话框看实时执行进度。
+      app.setView("chat");
       phase.value = "executing";
       const display = `🎬 课件视频（全自动）·${durationText.value}：${preview()}`;
       await chat.send(id, autoPrompt(), display, undefined, {
@@ -444,6 +483,30 @@ async function confirmExecute() {
       skillIds: ["polaris-video-studio"],
       goal: "按已确认的三份规划文件，制作出最终 MP4 视频并保存到产物目录",
     });
+  } catch (e: any) {
+    error.value = e?.message ?? String(e);
+    phase.value = "review";
+  }
+}
+
+/** 单项补齐:只重新生成缺失的那一份规划文件,不动其余两份 */
+async function retryPlanFile(f: PlanFile) {
+  if (!convId.value || sending.value) return;
+  error.value = null;
+  phase.value = "planning";
+  try {
+    await chat.send(
+      convId.value,
+      `继续上面的规划任务:三份规划文件里「${f.label}」还没有生成(或文件名不匹配)。` +
+        `请只补齐这一份 —— 文件名必须包含「${f.label.split(" ")[0]}」、以 .md 保存到产物目录;` +
+        `其余两份已生成的不要改动。`,
+      `🎬 补齐规划文件:${f.label}`,
+      undefined,
+      {
+        permissionMode: "auto_current",
+        skillIds: ["polaris-video-studio"],
+      }
+    );
   } catch (e: any) {
     error.value = e?.message ?? String(e);
     phase.value = "review";
@@ -512,16 +575,33 @@ async function loadOutputs() {
   }
 }
 
+// 执行阶段真实进度:从对话流的工具/产物事件推断到哪一步了(纯前端,零协议变更)
+const execProgress = computed(() => {
+  const arts: string[] = [];
+  for (const b of chat.bubblesFor(convId.value)) {
+    if (b.artifacts) arts.push(...b.artifacts);
+  }
+  const has = (re: RegExp) => arts.some((a) => re.test(a));
+  return {
+    ppt: has(/\.(html?|css)$/i),
+    audio: has(/\.(mp3|wav|m4a|aac)$/i),
+    record: has(/\.(png|jpe?g|webm)$/i),
+    final: has(/\.(mp4|mov)$/i) || outputs.value.length > 0,
+  };
+});
+
 // 监听发送状态：planning/executing 结束时拉产物
 watch(sending, async (now, before) => {
   if (before && !now) {
     if (phase.value === "planning") {
       await loadPlanFiles();
-      if (planReady.value) {
-        activePlanTab.value = "script";
+      // 只要有产出就直接进 review:能看的先看,缺的 tab 标「未生成」+ 单项补齐。
+      // 一份都没有才留在 planning 的「未凑齐」面板(那时 review 没东西可看)。
+      if (planFilesReadyCount.value > 0) {
+        activePlanTab.value =
+          planFiles.value.find((f) => f.path)?.key ?? "script";
         phase.value = "review";
       }
-      // 没凑齐三份：留在 planning，由 planStalled 渲染「未凑齐」面板，不强行进 review。
     } else if (phase.value === "executing") {
       await loadPlanFiles();
       await loadOutputs();
@@ -530,22 +610,14 @@ watch(sending, async (now, before) => {
   }
 });
 
-// 规划中也轮询，让文件一就绪就显示
-let poll: ReturnType<typeof setInterval> | null = null;
+// 规划中也轮询，让文件一就绪就显示(共享轮询:后台暂停/回前台补拉/卸载自清)
+const poller = usePolling(() => {
+  if (phase.value === "executing") loadOutputs();
+  loadPlanFiles();
+}, 4000);
 watch(phase, (p) => {
-  if (poll) {
-    clearInterval(poll);
-    poll = null;
-  }
-  if (p === "planning" || p === "executing") {
-    poll = setInterval(() => {
-      if (phase.value === "executing") loadOutputs();
-      loadPlanFiles();
-    }, 4000);
-  }
-});
-onUnmounted(() => {
-  if (poll) clearInterval(poll);
+  if (p === "planning" || p === "executing") poller.start();
+  else poller.stop();
 });
 
 function openConv() {
@@ -888,6 +960,13 @@ function fillDemo() {
           <div v-else class="vc-viewer-empty">
             <FileText :size="28" />
             <span>{{ activePlanFile?.path ? "（空文件）" : "尚未生成" }}</span>
+            <button
+              v-if="activePlanFile && !activePlanFile.path"
+              class="vc-primary vc-fill-one"
+              @click="retryPlanFile(activePlanFile)"
+            >
+              <RefreshCw :size="14" /><span>补齐这份</span>
+            </button>
           </div>
         </div>
       </section>
@@ -898,10 +977,22 @@ function fillDemo() {
         <h2 class="vc-center-title">正在制作视频…</h2>
         <p class="vc-center-sub">开发 PPT → 配音 → 录屏 → 合成 MP4，约需几分钟。</p>
         <div class="vc-exec-steps">
-          <div class="vc-exec-step"><Layers :size="14" /> 开发 HTML PPT</div>
-          <div class="vc-exec-step"><Mic :size="14" /> MiniMax 配音（{{ VOICES.find(v=>v.id===voice)?.name }} · {{ speed.toFixed(2) }}×）</div>
-          <div class="vc-exec-step"><Eye :size="14" /> 无头录屏</div>
-          <div class="vc-exec-step"><VideoIcon :size="14" /> ffmpeg 合成{{ bgmPath ? " + 背景音乐" : "" }}</div>
+          <div class="vc-exec-step" :class="{ on: execProgress.ppt }">
+            <CheckCircle2 v-if="execProgress.ppt" :size="14" /><Layers v-else :size="14" />
+            开发 HTML PPT
+          </div>
+          <div class="vc-exec-step" :class="{ on: execProgress.audio }">
+            <CheckCircle2 v-if="execProgress.audio" :size="14" /><Mic v-else :size="14" />
+            MiniMax 配音（{{ VOICES.find(v=>v.id===voice)?.name }} · {{ speed.toFixed(2) }}×）
+          </div>
+          <div class="vc-exec-step" :class="{ on: execProgress.record }">
+            <CheckCircle2 v-if="execProgress.record" :size="14" /><Eye v-else :size="14" />
+            无头录屏
+          </div>
+          <div class="vc-exec-step" :class="{ on: execProgress.final }">
+            <CheckCircle2 v-if="execProgress.final" :size="14" /><VideoIcon v-else :size="14" />
+            ffmpeg 合成{{ bgmPath ? " + 背景音乐" : "" }}
+          </div>
         </div>
         <button class="vc-ghost-btn" @click="openConv">在对话里看实时进度 →</button>
       </section>
@@ -1327,6 +1418,15 @@ function fillDemo() {
 }
 .vc-plan-dot.ready { color: #2e7d32; border-color: rgba(46,125,50,0.4); }
 .vc-exec-steps { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+.vc-exec-step.on {
+  color: var(--primary-deep);
+}
+.vc-exec-step.on :deep(svg) {
+  color: var(--ok, #3a9d6e);
+}
+.vc-fill-one {
+  margin-top: 12px;
+}
 .vc-exec-step {
   display: inline-flex;
   align-items: center;

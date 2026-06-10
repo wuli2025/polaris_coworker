@@ -2,6 +2,9 @@
 import { onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { kb, isTauri } from "../tauri";
+import { useAppStore } from "../stores/app";
+
+const app = useAppStore();
 
 const currentRoot = ref("");
 const defaultRoot = ref("");
@@ -10,9 +13,13 @@ const busy = ref(false);
 const message = ref<{ kind: "ok" | "err"; text: string } | null>(null);
 
 async function refresh() {
-  currentRoot.value = await kb.root();
-  defaultRoot.value = await kb.defaultRoot();
-  draft.value = currentRoot.value;
+  try {
+    currentRoot.value = await kb.root();
+    defaultRoot.value = await kb.defaultRoot();
+    draft.value = currentRoot.value;
+  } catch (e) {
+    message.value = { kind: "err", text: `读取 KB 路径失败:${String(e)}` };
+  }
 }
 
 onMounted(refresh);
@@ -33,6 +40,7 @@ async function pickFolder() {
 }
 
 async function save() {
+  if (busy.value) return; // 防双发:重扫索引是重操作
   const v = draft.value.trim();
   if (!v) {
     message.value = { kind: "err", text: "路径不能为空" };
@@ -65,6 +73,38 @@ function useDefault() {
       <h1>设置</h1>
       <p class="sub">配置 Polaris 工作台的本地路径与运行参数。</p>
     </header>
+
+    <section class="block">
+      <div class="b-title">外观</div>
+      <div class="b-desc">
+        浅色为默认的暖白水墨主题；黑夜模式为石墨炭黑主题(中性深色 +
+        石墨卡面 + 暖金点缀)，切换立即生效并记住选择。
+      </div>
+      <div class="theme-row">
+        <button
+          class="theme-card"
+          :class="{ active: app.theme === 'light' }"
+          @click="app.setTheme('light')"
+        >
+          <span class="theme-swatch light-sw">
+            <span class="sw-side"></span>
+            <span class="sw-main"><span class="sw-card"></span></span>
+          </span>
+          <span class="theme-name">浅色 · 暖白水墨</span>
+        </button>
+        <button
+          class="theme-card"
+          :class="{ active: app.theme === 'dark' }"
+          @click="app.setTheme('dark')"
+        >
+          <span class="theme-swatch dark-sw">
+            <span class="sw-side"></span>
+            <span class="sw-main"><span class="sw-card"></span></span>
+          </span>
+          <span class="theme-name">黑夜 · 石墨炭黑</span>
+        </button>
+      </div>
+    </section>
 
     <section class="block">
       <div class="b-title">知识库根目录(KB 根)</div>
@@ -118,7 +158,6 @@ function useDefault() {
       <ul class="todo">
         <li>Claude Code 二进制路径</li>
         <li>沙箱镜像名 / Docker socket</li>
-        <li>主题(墨蓝 / 朱砂 / 自定义)</li>
       </ul>
     </section>
   </div>
@@ -247,9 +286,9 @@ function useDefault() {
   cursor: not-allowed;
 }
 .btn.primary {
-  background: var(--ink);
-  color: #fff;
-  border-color: var(--ink);
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
+  border-color: var(--btn-solid-bg);
 }
 .btn.primary:hover:not(:disabled) {
   background: var(--primary);
@@ -271,6 +310,82 @@ function useDefault() {
 .link-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* 主题切换卡：左侧栏+主区的微缩示意图，所见即所得 */
+.theme-row {
+  display: flex;
+  gap: 14px;
+}
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.theme-card:hover {
+  border-color: var(--border-strong);
+}
+.theme-card.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
+.theme-swatch {
+  display: flex;
+  width: 148px;
+  height: 88px;
+  border-radius: 5px;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+}
+.theme-swatch .sw-side {
+  width: 34%;
+}
+.theme-swatch .sw-main {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 8px;
+}
+.theme-swatch .sw-card {
+  width: 86%;
+  height: 26px;
+  border-radius: 7px;
+}
+.light-sw {
+  background: #ffffff;
+}
+.light-sw .sw-side {
+  background: #ffffff;
+}
+.light-sw .sw-card {
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(190, 182, 162, 0.6);
+}
+.dark-sw {
+  background: #181818;
+}
+.dark-sw .sw-side {
+  background: #1f1f1f;
+}
+.dark-sw .sw-card {
+  background: rgba(43, 43, 41, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+.theme-name {
+  font-size: 12px;
+  color: var(--text-2);
+  letter-spacing: 0.5px;
+}
+.theme-card.active .theme-name {
+  color: var(--primary);
+  font-weight: 600;
 }
 
 .msg {

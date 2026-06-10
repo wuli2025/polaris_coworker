@@ -266,6 +266,11 @@ pub fn project_run(app: AppHandle, root: String) -> Result<(), String> {
     if !root_path.join(MANIFEST_NAME).exists() {
         return Err("找不到项目清单 polaris.project.json".into());
     }
+    // 信任边界: root 必须落在受信任的产物目录内。否则攻击者只要在任意可写处放一个
+    // polaris.project.json, 诱导 project_run 即可执行清单里的 setup/install/run 命令 = 任意命令执行。
+    if !root_is_trusted(&root_path) {
+        return Err("项目路径不在受信任的产物目录内，拒绝运行".into());
+    }
     let m = read_manifest(&root_path)?;
     if m.services.is_empty() {
         return Err("项目清单里没有声明任何可启动服务 (services)".into());
@@ -275,6 +280,28 @@ pub fn project_run(app: AppHandle, root: String) -> Result<(), String> {
         run_pipeline(&app, &root, &root_path, m);
     });
     Ok(())
+}
+
+/// 校验 root 落在受信任的产物目录内(KB conversations 或 ~/Polaris/data/artifacts)。
+/// 这两处才是 claude 写出可运行项目的合法位置; 其它任意路径一律拒绝。
+fn root_is_trusted(root: &Path) -> bool {
+    let canon = match std::fs::canonicalize(root) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let mut bases: Vec<PathBuf> = Vec::new();
+    let kb_root = PathBuf::from(crate::kb::kb_root());
+    if !kb_root.as_os_str().is_empty() {
+        bases.push(kb_root.join("conversations"));
+    }
+    if let Some(u) = directories::UserDirs::new() {
+        bases.push(u.home_dir().join("Polaris").join("data").join("artifacts"));
+    }
+    bases.iter().any(|b| {
+        std::fs::canonicalize(b)
+            .map(|cb| crate::kb::path_contains(&cb, &canon))
+            .unwrap_or(false)
+    })
 }
 
 /// 后台线程: 串行装依赖 → 起各服务 → 就绪探测 → emit ready。失败处处 emit exit。

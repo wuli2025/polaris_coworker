@@ -100,6 +100,8 @@ export const useProjectsStore = defineStore("projects", () => {
 
   /** 一键运行（或为已在跑的项目重新打开预览：后端 run 命中已运行会直接回 ready）。 */
   async function run(p: ProjectInfo) {
+    // 启动中再点一次会双发起两个同名项目进程,直接吞掉
+    if (starting.value && activeRoot.value === p.root) return;
     await bind();
     activeRoot.value = p.root;
     previewUrl.value = p.open ?? null;

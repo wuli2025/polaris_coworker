@@ -2,9 +2,14 @@
 //!
 //! 剥离自 cc-switch 的 Claude 供应商能力, 与 Polaris 墨蓝水墨前端融为一体。
 //! - 每个供应商携带一份完整 `settings_config`(env + includeCoAuthoredBy/attribution
-//!   等顶层键)。切换 = 把它合并写进 `~/.claude/settings.json`(只接管我们管理的键,
-//!   其余原样保留;首次改动前 .polaris.bak 备份)。Polaris 每次 spawn `claude` 重读
-//!   settings, 故下一条消息即生效。
+//!   等顶层键)。
+//! - 联动/隔离两档(store.link_global, 默认**隔离**):
+//!   * 隔离 — 切换只写 Polaris 进程 env(spawn 的 claude 子进程继承, 且进程 env 实测
+//!     优先于 settings.json), 终端里用户自己的 `claude` 完全不受影响 —— 根治
+//!     「Polaris 切 MiniMax 把外部 CLI 一起带跑」的串台。
+//!   * 联动 — 行为同旧版: 额外把 settings_config 合并写进 `~/.claude/settings.json`
+//!     (只接管我们管理的键, 其余原样保留; 首次改动前 .polaris.bak 备份),
+//!     终端 CLI 跟着 Polaris 一起切。
 //! - 用量看板: 读 `~/.claude/projects/**/*.jsonl`(ccusage 思路), 聚合 token + 按内置
 //!   定价表估算成本, 今日/周/月/年 + 14 天趋势。零额外网络、零额外依赖。
 //! - Codex / Copilot: 说 OpenAI 协议, 让 `claude` 直连需翻译代理(cc-switch 的 proxy/,
@@ -205,6 +210,11 @@ struct LegacyKey {
 struct Store {
     #[serde(default)]
     current_id: String,
+    /// true = 联动(切换写 ~/.claude/settings.json, 终端 CLI 跟着变);
+    /// false(默认) = 隔离(只作用于 Polaris 自己 spawn 的 claude, 走进程 env)。
+    /// 老 store 没有此字段 → serde 默认 false → 升级即自动隔离, 串台就此止住。
+    #[serde(default)]
+    link_global: bool,
     #[serde(default)]
     items: Vec<StoredProvider>,
     // legacy（迁移后清空, 不再写出）
@@ -396,14 +406,42 @@ pub fn init(_app: &AppHandle) -> Result<()> {
         persist();
     }
 
-    // 若上次退出时正路由到 Codex(本地代理), 重启后端口可能变 → 重新拉起代理并校正
-    // ANTHROPIC_BASE_URL, 否则 settings.json 里残留的旧端口会让 claude 连不上。
     {
         let store = STORE.read().clone();
         let views = build_views(&store);
-        if detect_current(&views, &store) == "codex" {
-            if let Ok(port) = crate::codex_proxy::ensure_running() {
-                let _ = apply_settings_config(&codex_route_config(port));
+        if store.link_global {
+            // 联动: 若上次退出时正路由到 Codex(本地代理), 重启后端口可能变 → 重新拉起
+            // 代理并校正 ANTHROPIC_BASE_URL, 否则 settings.json 残留旧端口 claude 连不上。
+            if detect_current(&views, &store) == "codex" {
+                if let Ok(port) = crate::codex_proxy::ensure_running() {
+                    let cfg = codex_route_config(port);
+                    let _ = apply_settings_config(&cfg);
+                    apply_process_env(&cfg);
+                }
+            }
+        } else {
+            // 隔离(默认):
+            // ① 一次性净化 —— 联动时代(或旧版本)写进全局 settings.json 的受管键还躺在
+            //    那里污染外部 CLI。仅当全局 base_url 恰等于「Polaris 当前供应商」的
+            //    base_url(强证据是我们写的)才清, 用户自己在终端配的第三方不动。
+            let live_base = read_live_env()
+                .get("ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str())
+                .map(normalize_url)
+                .unwrap_or_default();
+            if !live_base.is_empty() {
+                if let Some(cur) = views.iter().find(|v| v.id == store.current_id) {
+                    if normalize_url(&cur.base_url) == live_base {
+                        let _ = apply_settings_config(&json!({ "env": {} }));
+                    }
+                }
+            }
+            // ② 重启后进程 env 是空的, 把当前供应商重新作用上去, 否则 Polaris 内的
+            //    选择一重启就回落官方。配置不全(如 key 被删)就静默跳过 = 官方。
+            if let Some(v) = views.iter().find(|v| v.id == store.current_id) {
+                if let Ok(cfg) = cfg_for_view(v) {
+                    apply_process_env(&cfg);
+                }
             }
         }
     }
@@ -485,6 +523,8 @@ pub struct ProviderView {
 pub struct ProviderListResult {
     pub providers: Vec<ProviderView>,
     pub current_id: String,
+    /// true = 联动(写全局 settings.json), false = 隔离(仅 Polaris 内生效)
+    pub link_global: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -598,12 +638,19 @@ fn build_views(store: &Store) -> Vec<ProviderView> {
 }
 
 fn detect_current(views: &[ProviderView], store: &Store) -> String {
-    let live = read_live_env();
-    let live_base = live
-        .get("ANTHROPIC_BASE_URL")
-        .and_then(|v| v.as_str())
-        .map(normalize_url)
-        .unwrap_or_default();
+    // 联动: 真相在全局 settings.json(外部 cc-switch 等改动也能被察觉);
+    // 隔离: 全局与我们无关, 真相在本进程 env(apply_process_env 设的)。
+    let live_base = if store.link_global {
+        read_live_env()
+            .get("ANTHROPIC_BASE_URL")
+            .and_then(|v| v.as_str())
+            .map(normalize_url)
+            .unwrap_or_default()
+    } else {
+        std::env::var("ANTHROPIC_BASE_URL")
+            .map(|s| normalize_url(&s))
+            .unwrap_or_default()
+    };
 
     if live_base.is_empty() {
         if store.current_id == "claude-official" || store.current_id.is_empty() {
@@ -756,7 +803,174 @@ pub fn provider_list() -> Result<ProviderListResult, String> {
     let store = STORE.read().clone();
     let providers = build_views(&store);
     let current_id = detect_current(&providers, &store);
-    Ok(ProviderListResult { providers, current_id })
+    Ok(ProviderListResult {
+        providers,
+        current_id,
+        link_global: store.link_global,
+    })
+}
+
+/// 把供应商视图换算成待生效的 settings_config(codex 会顺带拉起本地翻译代理)。
+fn cfg_for_view(v: &ProviderView) -> Result<Value, String> {
+    if v.kind == "copilot" {
+        return Err("GitHub Copilot 说 OpenAI 协议, 翻译代理暂未覆盖".to_string());
+    }
+    if v.kind == "codex" {
+        // Codex(ChatGPT) → 路由到本地翻译代理: 先确认已授权, 再拉起代理并把
+        // ANTHROPIC_BASE_URL 指到 127.0.0.1:port, claude 即透明用上 ChatGPT 订阅。
+        let authed = codex_auth_path()
+            .map(|p| codex_auth_has_tokens(&p))
+            .unwrap_or(false);
+        if !authed {
+            return Err("请先授权 ChatGPT (Codex), 再切换到它".to_string());
+        }
+        let port = crate::codex_proxy::ensure_running()?;
+        return Ok(codex_route_config(port));
+    }
+    if v.kind == "official" {
+        return Ok(json!({ "env": {} }));
+    }
+    if v.auth_token.trim().is_empty() {
+        return Err("该供应商尚未配置 API Key, 请先在弹窗中填写".to_string());
+    }
+    Ok(v.settings_config.clone())
+}
+
+/// 同步当前进程 env: spawn 出去的 claude 子进程会继承父进程 env, 而进程 env 通常**优先于**
+/// settings.json 的 env(实测), 不先清后置就会出现:
+///   ① 切到 M3 → 进程被 set 了 ANTHROPIC_BASE_URL=minimaxi
+///   ② 切回官方 → 只清了 settings, 父进程残留仍把 claude 拖到 minimaxi → 一直只能用 M3
+/// 先按 MANAGED_ENV_KEYS 全清, 再把新 cfg.env 写进当前进程 —— 切换结果确定。
+/// 隔离模式下这就是切换的**唯一**生效通道。
+fn apply_process_env(cfg: &Value) {
+    for k in MANAGED_ENV_KEYS {
+        std::env::remove_var(k);
+    }
+    if let Some(src_env) = cfg.get("env").and_then(|e| e.as_object()) {
+        for (k, val) in src_env {
+            if let Some(s) = val.as_str() {
+                std::env::set_var(k, s);
+            }
+        }
+    }
+}
+
+// ───────────────── 隔离模式·私有 claude 配置目录(会话账本隔离) ─────────────────
+//
+// 配置隔离(进程 env)只解决「外部 CLI 用哪家」; 但 claude 的会话 jsonl 仍写进共享
+// `~/.claude/projects/`, cc-switch 这类监控按分钟扫那里记账 → 监控里永远有
+// Polaris 自动任务的 MiniMax 行。深隔离: 隔离模式下跑**非官方**供应商时, 给子进程
+// CLAUDE_CONFIG_DIR=~/Polaris/claude-home, 会话记录/customApiKeyResponses 全落私有
+// 目录, 共享账本只剩用户本人的会话。官方档仍用共享 ~/.claude —— OAuth 凭证在那,
+// 且官方会话本来就该记在用户自己的账上。
+
+/// 隔离模式下第三方/Codex 任务的私有 claude 配置目录。
+pub fn private_claude_home() -> Option<PathBuf> {
+    UserDirs::new().map(|u| u.home_dir().join("Polaris").join("claude-home"))
+}
+
+/// 所有已存供应商 key 的「尾 20 字符」—— claude 在 .claude.json 的
+/// customApiKeyResponses.approved 里就是按这个尾巴记录「该 key 已被用户批准」。
+/// 预先播种进私有目录, headless 首启不会因 key 审批交互被卡死。
+fn provider_key_tails(store: &Store) -> Vec<String> {
+    let mut tails: Vec<String> = Vec::new();
+    for it in &store.items {
+        for field in [DEFAULT_TOKEN_FIELD, API_KEY_FIELD] {
+            let tok = cfg_env_str(&it.settings_config, field);
+            let tok = tok.trim();
+            if tok.is_empty() {
+                continue;
+            }
+            let chars: Vec<char> = tok.chars().collect();
+            let tail: String = chars[chars.len().saturating_sub(20)..].iter().collect();
+            if !tails.contains(&tail) {
+                tails.push(tail);
+            }
+        }
+    }
+    tails
+}
+
+/// 创建并播种私有配置目录(幂等, 内容没变就不落盘):
+/// .claude.json 里 hasCompletedOnboarding=true + 全部供应商 key 尾巴进 approved。
+fn ensure_private_home(home: &Path, store: &Store) -> Result<(), String> {
+    fs::create_dir_all(home).map_err(|e| format!("创建私有 claude 目录失败: {e}"))?;
+    let path = home.join(".claude.json");
+    let mut root: Value = if path.exists() {
+        let txt = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&txt).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+    if !root.is_object() {
+        root = json!({});
+    }
+    let obj = root.as_object_mut().unwrap();
+    let mut changed = false;
+
+    if obj.get("hasCompletedOnboarding").and_then(|v| v.as_bool()) != Some(true) {
+        obj.insert("hasCompletedOnboarding".into(), Value::Bool(true));
+        changed = true;
+    }
+
+    let resp = obj
+        .entry("customApiKeyResponses".to_string())
+        .or_insert_with(|| json!({ "approved": [], "rejected": [] }));
+    if !resp.is_object() {
+        *resp = json!({ "approved": [], "rejected": [] });
+        changed = true;
+    }
+    let resp = resp.as_object_mut().unwrap();
+    let approved = resp
+        .entry("approved".to_string())
+        .or_insert_with(|| json!([]));
+    if !approved.is_array() {
+        *approved = json!([]);
+        changed = true;
+    }
+    let arr = approved.as_array_mut().unwrap();
+    for tail in provider_key_tails(store) {
+        if !arr.iter().any(|v| v.as_str() == Some(tail.as_str())) {
+            arr.push(Value::String(tail));
+            changed = true;
+        }
+    }
+
+    if changed {
+        let txt = serde_json::to_string_pretty(&root)
+            .map_err(|e| format!("序列化私有 .claude.json 失败: {e}"))?;
+        atomic_write(&path, &txt).map_err(|e| format!("写私有 .claude.json 失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 给宿主机 spawn 的 claude 子进程套供应商作用域。chat.rs / kb.rs 所有宿主 spawn
+/// 点统一调这一个入口; 不满足深隔离条件(联动 / 官方档 / env 没有 base_url)时什么都不做,
+/// 子进程照旧用共享 ~/.claude。
+pub fn scope_child_claude(cmd: &mut Command) {
+    let store = STORE.read().clone();
+    if store.link_global {
+        return;
+    }
+    if store.current_id.is_empty() || store.current_id == "claude-official" {
+        return;
+    }
+    // 进程 env 没有 base_url = 实际跑在官方档(如配置不全回落), 不隔离。
+    if std::env::var("ANTHROPIC_BASE_URL")
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return;
+    }
+    let Some(home) = private_claude_home() else {
+        return;
+    };
+    // 播种失败宁可回落共享目录, 也不让任务带着半成品配置首启卡死。
+    if ensure_private_home(&home, &store).is_err() {
+        return;
+    }
+    cmd.env("CLAUDE_CONFIG_DIR", &home);
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -768,50 +982,45 @@ pub fn provider_switch(id: String) -> Result<String, String> {
         .find(|v| v.id == id)
         .ok_or_else(|| format!("供应商不存在: {id}"))?;
 
-    if v.kind == "copilot" {
-        return Err("GitHub Copilot 说 OpenAI 协议, 翻译代理暂未覆盖".to_string());
+    let cfg = cfg_for_view(v)?;
+    // 联动才碰全局 settings.json; 隔离只走进程 env, 外部 CLI 原封不动。
+    if store.link_global {
+        apply_settings_config(&cfg)?;
     }
-
-    let cfg = if v.kind == "codex" {
-        // Codex(ChatGPT) → 路由到本地翻译代理: 先确认已授权, 再拉起代理并把
-        // ANTHROPIC_BASE_URL 指到 127.0.0.1:port, claude 即透明用上 ChatGPT 订阅。
-        let authed = codex_auth_path()
-            .map(|p| codex_auth_has_tokens(&p))
-            .unwrap_or(false);
-        if !authed {
-            return Err("请先授权 ChatGPT (Codex), 再切换到它".to_string());
-        }
-        let port = crate::codex_proxy::ensure_running()?;
-        codex_route_config(port)
-    } else if v.kind == "official" {
-        json!({ "env": {} })
-    } else {
-        if v.auth_token.trim().is_empty() {
-            return Err("该供应商尚未配置 API Key, 请先在弹窗中填写".to_string());
-        }
-        v.settings_config.clone()
-    };
-    apply_settings_config(&cfg)?;
-
-    // 同步当前进程 env: spawn 出去的 claude 子进程会继承父进程 env, 而进程 env 通常**优先于**
-    // settings.json 的 env(实测), 不在此处先清后置就会出现:
-    //   ① 切到 M3 → 进程被 set 了 ANTHROPIC_BASE_URL=minimaxi
-    //   ② 切回官方 → 只清了 settings, 父进程残留仍把 claude 拖到 minimaxi → 一直只能用 M3
-    // 先按 MANAGED_ENV_KEYS 全清, 再把新 cfg.env 写进当前进程 —— 切换结果确定。
-    for k in MANAGED_ENV_KEYS {
-        std::env::remove_var(k);
-    }
-    if let Some(src_env) = cfg.get("env").and_then(|e| e.as_object()) {
-        for (k, val) in src_env {
-            if let Some(s) = val.as_str() {
-                std::env::set_var(k, s);
-            }
-        }
-    }
+    apply_process_env(&cfg);
 
     STORE.write().current_id = id.clone();
     persist();
     Ok(id)
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn provider_set_link_mode(link: bool) -> Result<bool, String> {
+    STORE.write().link_global = link;
+    persist();
+
+    let store = STORE.read().clone();
+    let views = build_views(&store);
+    let cur = views.iter().find(|v| v.id == store.current_id);
+    if link {
+        // 开联动: 当前供应商立刻写入全局, 终端 CLI 即刻跟上。
+        if let Some(v) = cur {
+            if let Ok(cfg) = cfg_for_view(v) {
+                apply_settings_config(&cfg)?;
+                apply_process_env(&cfg);
+            }
+        }
+    } else {
+        // 关联动(转隔离): 全局退回官方(只清我们的受管键, 其余原样保留),
+        // Polaris 自身改用进程 env 维持当前选择 —— 终端立刻恢复干净。
+        apply_settings_config(&json!({ "env": {} }))?;
+        if let Some(v) = cur {
+            if let Ok(cfg) = cfg_for_view(v) {
+                apply_process_env(&cfg);
+            }
+        }
+    }
+    Ok(link)
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -1331,10 +1540,17 @@ fn line_cost(u: &Usage, model: &str) -> f64 {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn usage_summary() -> Result<UsageSummary, String> {
-    let Some(dir) = claude_dir().map(|d| d.join("projects")) else {
-        return Ok(empty_summary());
-    };
-    if !dir.exists() {
+    // 共享 ~/.claude/projects + 隔离模式的私有账本, 两处都算 —— 深隔离只是把
+    // 第三方会话从外部监控的视野里挪走, Polaris 自己的看板仍要看全。
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(d) = claude_dir().map(|d| d.join("projects")) {
+        dirs.push(d);
+    }
+    if let Some(d) = private_claude_home().map(|d| d.join("projects")) {
+        dirs.push(d);
+    }
+    dirs.retain(|d| d.exists());
+    if dirs.is_empty() {
         return Ok(empty_summary());
     }
 
@@ -1361,7 +1577,7 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
     let mut year = TokenBucket::default();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for entry in WalkDir::new(&dir).into_iter().flatten() {
+    for entry in dirs.iter().flat_map(|d| WalkDir::new(d).into_iter().flatten()) {
         if !entry.file_type().is_file() {
             continue;
         }

@@ -292,14 +292,10 @@ pub fn synth_with_strategy(text: &str, out_mp3: &str) -> Result<Value, String> {
     let tier = discover_strategy();
     let mut r: Result<Value, String> = match tier {
         Tier::MiniMax => synth_minimax_strategy(text, out_mp3, None, None),
-        #[cfg(target_os = "macos")]
-        Tier::MacSay => synth_macos_say(text, out_mp3),
-        #[cfg(target_os = "windows")]
-        Tier::WinSapi => synth_windows_sapi(text, out_mp3),
-        #[cfg(target_os = "linux")]
-        Tier::LinuxEspeak => synth_linux_espeak(text, out_mp3),
         Tier::Silent => synth_silent(out_mp3),
-        Tier::MacSay | Tier::LinuxEspeak => synth_silent(out_mp3),
+        // macOS/Windows/Linux 离线兜底统一走 Silent stub;
+        // 真实系统调用(WinSapi/LinuxEspeak/MacSay)在 P1.5 按平台填
+        Tier::MacSay | Tier::WinSapi | Tier::LinuxEspeak => synth_silent(out_mp3),
     };
     if r.is_err() && tier != Tier::Silent {
         // 自动降 Silent

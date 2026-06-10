@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from "vue";
+import { ref, computed, watch } from "vue";
+import { usePolling } from "../composables/usePolling";
 import {
   Presentation,
   FileText,
@@ -28,7 +29,7 @@ const chat = useChatStore();
 const STUDIO_PROJECT_NAME = "演示工坊";
 const VIEW_KEY = "deck";
 
-const outputMode = ref<"html" | "pptx">("html");
+const outputMode = ref<"html" | "pptx">("pptx"); // 默认传统 PPT(.pptx)；点「网页 PPT」才切 html
 const isPpt = computed(() => outputMode.value === "pptx");
 
 type Phase = "config" | "generating" | "done";
@@ -123,7 +124,11 @@ function densityText(): string {
 function buildPrompt(): string {
   const themeLine =
     selectedTheme.value === "auto"
-      ? "由你根据内容自挑最合适的主题（17 套里选，或自行配色）"
+      ? "AI 自由发挥 —— 默认走**高级感**路线：优先从深色/质感主题里按内容择一(" +
+        "`aurora`(极光渐变辉光) / `glassmorphism`(毛玻璃) / `pitch-deck-vc`(融资路演) / " +
+        "`vaporwave`(蒸汽波) / `cyberpunk-neon`(赛博霓虹) / `tokyo-night`(东京夜))，" +
+        "**不要用白底**，做出深底+渐变强调色+超大标题+克制留白、一眼高级、有感染力的观感；" +
+        "仅当内容明显属于学术/公文/财报等需要素白严肃的场景，才退回浅色主题。"
       : `${curTheme.value.name}（data-theme id=${selectedTheme.value}）`;
   const lines = [
     "请使用 polaris-deck-studio skill 制作一份演示。",
@@ -185,7 +190,8 @@ async function ensureConv(): Promise<string> {
     projectId = app.currentProjectId;
     if (!projectId) throw new Error("创建演示工坊项目失败");
   }
-  const conv = await app.createConversation(projectId);
+  // navigate=false: 留在演示工坊视图就地展示生成进度/预览, 不跳 chat(否则本组件被卸载)。
+  const conv = await app.createConversation(projectId, false);
   return conv.id;
 }
 function preview(): string {
@@ -254,6 +260,14 @@ function reset() {
 
 // ───────── 产物 + 实时预览 ─────────
 const sending = computed(() => chat.isSending(convId.value));
+// 生成遮罩上的「现在在干嘛」:取对话流最近一次工具调用(纯展示)
+const lastToolHint = computed(() => {
+  const arr = chat.bubblesFor(convId.value);
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i].role === "tool") return arr[i].toolDetail || arr[i].tool || "";
+  }
+  return "";
+});
 const outputs = ref<{ path: string; name: string }[]>([]);
 const hasResult = computed(() => outputs.value.length > 0);
 const previewHtml = ref<string>("");
@@ -295,16 +309,11 @@ watch(sending, async (now, before) => {
     phase.value = "done";
   }
 });
-let poll: ReturnType<typeof setInterval> | null = null;
+// 共享轮询:页面隐藏自动暂停、回前台立即补拉、卸载自动清理
+const poller = usePolling(loadOutputs, 4000);
 watch(phase, (p) => {
-  if (poll) {
-    clearInterval(poll);
-    poll = null;
-  }
-  if (p === "generating") poll = setInterval(loadOutputs, 4000);
-});
-onUnmounted(() => {
-  if (poll) clearInterval(poll);
+  if (p === "generating") poller.start();
+  else poller.stop();
 });
 
 function openConv() {
@@ -334,8 +343,8 @@ function fillDemo() {
       <h1 class="dk-title">PPT 演示</h1>
       <span class="dk-sub">左侧配置 · 中间实时预览 · 底部继续修改</span>
       <div class="dk-toggle">
-        <button :class="{ on: !isPpt }" @click="outputMode = 'html'"><Monitor :size="13" /> 网页 PPT</button>
         <button :class="{ on: isPpt }" @click="outputMode = 'pptx'"><FileType2 :size="13" /> 传统 PPT</button>
+        <button :class="{ on: !isPpt }" @click="outputMode = 'html'"><Monitor :size="13" /> 网页 PPT</button>
       </div>
     </header>
 
@@ -461,8 +470,15 @@ function fillDemo() {
 
           <!-- 有产物：实时预览 -->
           <div v-else class="dk-preview">
-            <iframe v-if="previewHtml" class="dk-frame" :srcdoc="previewHtml" sandbox="allow-scripts allow-same-origin"></iframe>
-            <div v-else class="dk-frame-empty"><Monitor :size="30" /><span>预览加载中…可在对话或目录查看</span></div>
+            <!-- 安全: 只给 allow-scripts(deck runtime 需要), 绝不加 allow-same-origin ——
+                 二者并存会让 srcdoc 内 AI 生成的脚本自拆沙箱、同源访问 __TAURI_INTERNALS__ 调后端。
+                 deck 在不透明源里照常翻页/动画(只操作自身 document)。 -->
+            <iframe v-if="previewHtml" class="dk-frame" :srcdoc="previewHtml" sandbox="allow-scripts"></iframe>
+            <div v-else class="dk-frame-empty">
+              <Monitor :size="30" />
+              <span>{{ phase === 'generating' ? '预览加载中…可在对话或目录查看' : '预览没有加载出来' }}</span>
+              <button v-if="phase !== 'generating'" class="dk-ghost" @click="loadOutputs">重新加载预览</button>
+            </div>
             <div v-if="isPpt && pptxOut" class="dk-preview-tip">
               预览是网页 deck；最终 <b>.pptx</b> 已生成，点左侧产物或「打开」查看。
             </div>
@@ -472,6 +488,7 @@ function fillDemo() {
           <div v-if="phase === 'generating'" class="dk-overlay">
             <Loader :size="30" class="spin" />
             <span>{{ lastAction === 'revise' ? '正在按修改重做…' : '正在制作 PPT…' }}</span>
+            <span v-if="lastToolHint" class="dk-tool-hint">{{ lastToolHint }}</span>
             <button class="dk-ghost" @click="openConv">在对话里看进度 →</button>
           </div>
         </div>
@@ -581,6 +598,7 @@ function fillDemo() {
 
 /* 生成遮罩 */
 .dk-overlay { position: absolute; inset: 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: color-mix(in srgb, var(--bg) 78%, transparent); backdrop-filter: blur(2px); border-radius: 10px; color: var(--text); font-size: 14px; font-weight: 600; }
+.dk-tool-hint { max-width: 80%; font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 底部 composer */
 .dk-composer { border-top: 1px solid var(--border-soft); background: var(--panel); padding: 12px 18px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

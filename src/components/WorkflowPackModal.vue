@@ -574,9 +574,9 @@ function submit() {
   background: var(--selection-bg);
 }
 .btn-add {
-  background: var(--ink);
-  color: #fff;
-  border-color: var(--ink);
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
+  border-color: var(--btn-solid-bg);
 }
 .btn-add:hover {
   background: var(--primary);

@@ -480,6 +480,7 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         // ── Provider + 用量 + Codex ──
         "provider_list" => ok(provider::provider_list()?),
         "provider_switch" => ok(provider::provider_switch(req_str(a, "id")?)?),
+        "provider_set_link_mode" => ok(provider::provider_set_link_mode(bool_def(a, "link", false))?),
         "provider_save" => {
             let input: provider::ProviderInput =
                 serde_json::from_value(a.get("input").cloned().unwrap_or(Value::Null))

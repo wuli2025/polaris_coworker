@@ -77,6 +77,12 @@ function onEsc(e: KeyboardEvent) {
   else open.value = false;
 }
 
+/** 联动/隔离切换;后端会顺带把全局 settings.json 写入当前供应商(开)或清回官方(关) */
+async function toggleLink() {
+  await store.setLinkMode(!store.linkGlobal);
+  await store.refresh();
+}
+
 function fmt(n: number): string {
   if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
   if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
@@ -330,7 +336,7 @@ function subtitleOf(p: ProviderView): string {
             <header class="panel-head">
               <div class="head-titles">
                 <div class="title">API 供应商</div>
-                <div class="subtitle">点选即切换 · 写入 ~/.claude/settings.json</div>
+                <div class="subtitle">{{ store.linkGlobal ? "点选即切换 · 联动写入 ~/.claude/settings.json" : "点选即切换 · 仅 Polaris 内生效" }}</div>
               </div>
               <div class="head-actions">
                 <button class="icon-btn" title="添加供应商" @click="addCustom">
@@ -349,6 +355,29 @@ function subtitleOf(p: ProviderView): string {
                 <input v-model="filter" class="search-input" placeholder="搜索供应商 / 主机名…" />
                 <button v-if="filter" class="icon-btn sm" @click="filter = ''">
                   <X :size="13" :stroke-width="1.8" />
+                </button>
+              </div>
+
+              <!-- 联动/隔离开关:隔离(默认)只影响 Polaris 自己 spawn 的 claude,
+                   联动才写 ~/.claude/settings.json 让终端 CLI 跟着切 -->
+              <div class="link-row">
+                <div class="link-info">
+                  <span class="link-title">联动系统 CLI</span>
+                  <span class="link-desc">{{
+                    store.linkGlobal
+                      ? "切换会写入 ~/.claude/settings.json,终端 claude 跟着变"
+                      : "已隔离:配置与会话账本仅 Polaris 自用,终端与监控不受影响"
+                  }}</span>
+                </div>
+                <button
+                  class="link-switch"
+                  :class="{ on: store.linkGlobal }"
+                  role="switch"
+                  :aria-checked="store.linkGlobal"
+                  :title="store.linkGlobal ? '点击改为隔离(终端恢复官方/原配置)' : '点击开启联动(终端跟随 Polaris 切换)'"
+                  @click="toggleLink"
+                >
+                  <span class="knob" />
                 </button>
               </div>
 
@@ -785,6 +814,36 @@ function subtitleOf(p: ProviderView): string {
 .s-ic { color: var(--muted); flex-shrink: 0; }
 .search-input { flex: 1; border: none; background: transparent; font-size: 12px; color: var(--text); }
 .search-input:focus { outline: none; }
+
+/* ── 联动/隔离开关行 ───────────────────────── */
+.link-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 7px 10px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  background: var(--bg-soft);
+}
+.link-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.link-title { font-size: 11.5px; font-weight: 600; color: var(--text); }
+.link-desc { font-size: 9.5px; color: var(--dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link-switch {
+  position: relative; flex-shrink: 0;
+  width: 32px; height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  padding: 0; cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.link-switch .knob {
+  position: absolute; top: 2px; left: 2px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+.link-switch.on { background: var(--primary); border-color: var(--primary); }
+.link-switch.on .knob { transform: translateX(14px); background: #fff; }
 
 /* ── 当前状态卡 (新) ───────────────────────── */
 .now-card {

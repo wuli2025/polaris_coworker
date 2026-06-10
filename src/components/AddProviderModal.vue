@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { X, Check, Eye, EyeOff, Sparkles, Search, Link2 } from "@lucide/vue";
+import { X, Check, Eye, EyeOff, Sparkles, Link2 } from "@lucide/vue";
+import SearchGlass from "./icons/SearchGlass.vue";
 import { useProvidersStore } from "../stores/providers";
 import type { ProviderView } from "../tauri";
 
@@ -286,7 +287,7 @@ function dotColor(p: ProviderView) {
           <div class="grid-head">
             <span class="sec-title">预设供应商</span>
             <div class="grid-search">
-              <Search :size="12" :stroke-width="1.8" />
+              <SearchGlass :size="12" :stroke-width="1.8" />
               <input v-model="filter" placeholder="搜索…" />
             </div>
           </div>
@@ -767,9 +768,9 @@ function dotColor(p: ProviderView) {
 }
 .btn-cancel:hover { background: var(--selection-bg); }
 .btn-add {
-  background: var(--ink);
-  color: #fff;
-  border-color: var(--ink);
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
+  border-color: var(--btn-solid-bg);
 }
 .btn-add:hover { background: var(--primary); border-color: var(--primary); }
 .btn-add:disabled { opacity: 0.5; }

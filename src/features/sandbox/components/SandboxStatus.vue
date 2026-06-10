@@ -257,7 +257,7 @@ async function runCmd() {
 .sandbox {
   position: relative;
   padding: 22px 30px;
-  height: 100vh;
+  height: 100%;
   overflow-y: auto;
   background: var(--bg);
 }
@@ -431,8 +431,8 @@ async function runCmd() {
 }
 .primary-btn {
   padding: 7px 14px;
-  background: var(--ink);
-  color: #fafaf7;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   border: none;
   border-radius: 4px;
   font-size: 12.5px;

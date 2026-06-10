@@ -148,6 +148,7 @@ async function finishInstall(ok: boolean, message: string) {
 }
 
 async function installClaude(method: "native" | "npm") {
+  if (busyKind.value) return; // 防双发:已有安装流程在跑
   // npm 方式但缺 Node/npm → 先自动装 Node, 装完由 finishInstall 链式继续装 Claude。
   // 这样用户一次点击即「Node.js + npm + Claude Code」一起装齐 (两端通用)。
   if (method === "npm" && !npmReady.value) {
@@ -174,6 +175,7 @@ async function installClaude(method: "native" | "npm") {
 }
 
 async function installNode() {
+  if (busyKind.value && busyKind.value !== "claude-npm") return; // 防双发
   banner.value = null;
   logs.value = [];
   busyKind.value = "node";
@@ -191,6 +193,7 @@ async function installNode() {
 }
 
 async function installPwsh() {
+  if (busyKind.value) return; // 防双发
   banner.value = null;
   logs.value = [];
   busyKind.value = "pwsh";
@@ -723,7 +726,7 @@ const npmReady = computed(() => !!report.value?.npm.found);
   cursor: pointer;
 }
 .btn:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
-.btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+.btn.primary { background: var(--btn-solid-bg); color: var(--btn-solid-text); border-color: var(--btn-solid-bg); }
 .btn.primary:hover:not(:disabled) { background: var(--primary); border-color: var(--primary); }
 .btn.ghost { color: var(--text-2); }
 .btn.text { border-color: transparent; color: var(--muted); }

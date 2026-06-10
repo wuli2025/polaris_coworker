@@ -24,6 +24,7 @@ import {
   Presentation,
   Globe,
 } from "@lucide/vue";
+import SearchGlass from "./icons/SearchGlass.vue";
 import { useAppStore } from "../stores/app";
 import { useChatStore } from "../stores/chat";
 import ProviderDock from "./ProviderDock.vue";
@@ -118,62 +119,59 @@ async function archiveProj(proj: { id: string; name: string }) {
   }
 }
 
-// 对话按「几天的一个对话」分组：置顶 → 今天 → 昨天 → 7 天内 → 更早，
-// 各组内按最近活跃时间倒序（最新的在最上）。仿 Codex：项目名虚化、对话实体可标注。
-interface ConvGroup {
-  label: string;
-  items: Conversation[];
-}
+// 对话排序（仿 Codex 扁平列表）：运行中 → 置顶 → 按最近活跃倒序；
+// 不再按「今天/昨天」分组，时间改为行尾相对时间（「4 小时」）。
 const DAY_MS = 86_400_000;
 // updatedAt 兼容秒/毫秒：小于 1e12 视为秒，统一换算成毫秒
 function toMs(t: number): number {
   return t < 1e12 ? t * 1000 : t;
 }
 // 有效活跃时间(ms)：取后端 updatedAt 与本地「最近交互」打点的较大值。
-// 这样刚发送/正在运行的对话会冒泡到最上，并落入「今天」分组（仿 Codex）。
+// 这样刚发送/正在运行的对话会冒泡到最上（仿 Codex）。
 function effMs(c: Conversation): number {
   return Math.max(toMs(c.updatedAt), chat.activityAt(c.id));
 }
-// 该时间(ms)属于「今天起算的第几天前」（0=今天, 1=昨天, ...）
-function daysAgoMs(ms: number): number {
-  const now = new Date();
-  const startToday = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate()
-  ).getTime();
-  return Math.floor((startToday - ms) / DAY_MS);
+// 行尾相对时间（仿 Codex「4 小时」）
+function fmtAgo(ms: number): string {
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return "刚刚";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟`;
+  if (diff < DAY_MS) return `${Math.floor(diff / 3_600_000)} 小时`;
+  if (diff < 30 * DAY_MS) return `${Math.floor(diff / DAY_MS)} 天`;
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}月${d.getDate()}日`;
 }
-function convGroups(projectId: string): ConvGroup[] {
-  const list = app.conversationsByProject[projectId] || [];
-  // 排序键：运行中的对话恒置最前，其余按有效活跃时间倒序（最新在上）。
-  const sortKey = (c: Conversation) =>
-    (chat.isSending(c.id) ? 1e15 : 0) + effMs(c);
-  const byTimeDesc = (a: Conversation, b: Conversation) => sortKey(b) - sortKey(a);
-  const pinned = list.filter((c) => app.isPinned(c.id)).sort(byTimeDesc);
-  const rest = list.filter((c) => !app.isPinned(c.id)).sort(byTimeDesc);
-
-  const today: Conversation[] = [];
-  const yest: Conversation[] = [];
-  const week: Conversation[] = [];
-  const older: Conversation[] = [];
-  for (const c of rest) {
-    // 运行中的对话强制归入「今天」，避免历史对话跑起来还留在「更早」
-    const d = chat.isSending(c.id) ? 0 : daysAgoMs(effMs(c));
-    if (d <= 0) today.push(c);
-    else if (d === 1) yest.push(c);
-    else if (d <= 7) week.push(c);
-    else older.push(c);
-  }
-
-  const groups: ConvGroup[] = [];
-  if (pinned.length) groups.push({ label: "置顶", items: pinned });
-  if (today.length) groups.push({ label: "今天", items: today });
-  if (yest.length) groups.push({ label: "昨天", items: yest });
-  if (week.length) groups.push({ label: "7 天内", items: week });
-  if (older.length) groups.push({ label: "更早", items: older });
-  return groups;
+// 对话过滤(按标题即时过滤;过滤中所有项目视为展开)
+const convFilter = ref("");
+// 排序键：运行中恒最前 > 置顶 > 最近活跃
+function convSortKey(c: Conversation): number {
+  return (
+    (chat.isSending(c.id) ? 1e15 : 0) +
+    (app.isPinned(c.id) ? 1e14 : 0) +
+    effMs(c)
+  );
 }
+function sortedConvs(projectId: string): Conversation[] {
+  let list = app.conversationsByProject[projectId] || [];
+  const q = convFilter.value.trim().toLowerCase();
+  if (q) list = list.filter((c) => c.title.toLowerCase().includes(q));
+  return [...list].sort((a, b) => convSortKey(b) - convSortKey(a));
+}
+// 项目也按「最近的对话最先来」排序：取项目内对话的最大活跃时间（运行中恒置顶），
+// 没有对话的项目用创建时间垫底。
+const sortedProjects = computed(() => {
+  const recency = (pid: string, createdAt: number) => {
+    let r = toMs(createdAt);
+    for (const c of app.conversationsByProject[pid] || []) {
+      const k = (chat.isSending(c.id) ? 1e15 : 0) + effMs(c);
+      if (k > r) r = k;
+    }
+    return r;
+  };
+  return [...app.projects].sort(
+    (a, b) => recency(b.id, b.createdAt) - recency(a.id, a.createdAt)
+  );
+});
 </script>
 
 <template>
@@ -262,6 +260,17 @@ function convGroups(projectId: string): ConvGroup[] {
         </button>
       </div>
 
+      <!-- 对话过滤(标题即时过滤,Esc 清空) -->
+      <div class="conv-filter">
+        <SearchGlass :size="13" :stroke-width="1.8" class="cf-ic" />
+        <input
+          v-model="convFilter"
+          placeholder="搜对话…"
+          @keydown.esc="convFilter = ''"
+        />
+        <button v-if="convFilter" class="cf-x" @click="convFilter = ''">×</button>
+      </div>
+
       <div v-if="showNewProject" class="new-proj-row">
         <input
           v-model="newProjectName"
@@ -273,7 +282,7 @@ function convGroups(projectId: string): ConvGroup[] {
         <button class="primary-mini" @click="submitNewProject">建</button>
       </div>
 
-      <div v-for="proj in app.projects" :key="proj.id" class="proj-block">
+      <div v-for="proj in sortedProjects" :key="proj.id" class="proj-block">
         <div
           class="proj"
           :class="{ active: app.currentProjectId === proj.id, open: app.expandedProjects.has(proj.id) }"
@@ -316,44 +325,43 @@ function convGroups(projectId: string): ConvGroup[] {
           </div>
         </div>
 
-        <template v-if="app.expandedProjects.has(proj.id)">
-          <template v-for="g in convGroups(proj.id)" :key="g.label">
-            <div class="day-label">{{ g.label }}</div>
-            <div
-              v-for="c in g.items"
-              :key="c.id"
-              class="conv"
-              :class="{ active: app.currentConvId === c.id, pinned: app.isPinned(c.id) }"
-              @click="app.selectConversation(c)"
-            >
-              <span
-                v-if="app.unreadConvs.has(c.id)"
-                class="cv-dot"
-                title="有已完成的任务待查看"
-              ></span>
-              <Pin
-                v-if="app.isPinned(c.id)"
-                :size="11"
-                :stroke-width="1.8"
-                class="cv-pin"
-              />
-              <span class="cv-name" :title="c.title">{{ c.title }}</span>
-              <!-- 运行中：转圈圈（仿 Codex）；空闲时该位置 hover 显示删除按钮 -->
-              <span
-                v-if="chat.isSending(c.id)"
-                class="cv-spin"
-                title="正在运行…"
-              ></span>
+        <template v-if="app.expandedProjects.has(proj.id) || convFilter.trim()">
+          <div
+            v-for="c in sortedConvs(proj.id)"
+            :key="c.id"
+            class="conv"
+            :class="{ active: app.currentConvId === c.id, pinned: app.isPinned(c.id) }"
+            @click="app.selectConversation(c)"
+          >
+            <span
+              v-if="app.unreadConvs.has(c.id)"
+              class="cv-dot"
+              title="有已完成的任务待查看"
+            ></span>
+            <Pin
+              v-if="app.isPinned(c.id)"
+              :size="11"
+              :stroke-width="1.8"
+              class="cv-pin"
+            />
+            <span class="cv-name" :title="c.title">{{ c.title }}</span>
+            <!-- 行尾：运行中转圈圈；空闲时显示相对时间（仿 Codex「4 小时」），hover 换成删除 -->
+            <span
+              v-if="chat.isSending(c.id)"
+              class="cv-spin"
+              title="正在运行…"
+            ></span>
+            <template v-else>
+              <span class="cv-time">{{ fmtAgo(effMs(c)) }}</span>
               <button
-                v-else
                 class="ca delete"
                 title="删除对话"
                 @click.stop="confirmDelete(c)"
               >
                 ×
               </button>
-            </div>
-          </template>
+            </template>
+          </div>
           <div
             v-if="(app.conversationsByProject[proj.id] || []).length === 0"
             class="empty-hint"
@@ -375,8 +383,16 @@ function convGroups(projectId: string): ConvGroup[] {
 
 <style scoped>
 .sb {
-  background: var(--bg-soft);
-  border-right: 1px solid var(--border-soft);
+  /* 仿 Codex：比主区略深一档的暖米，无分割线靠色差分区；中部透一点点更亮的暖光 */
+  background: linear-gradient(
+    180deg,
+    var(--bg-side) 0%,
+    var(--bg-side) 32%,
+    var(--bg-side-mid) 50%,
+    var(--bg-side) 68%,
+    var(--bg-side) 100%
+  );
+  border-right: none;
   display: flex;
   flex-direction: column;
   padding: 8px 8px 6px;
@@ -534,8 +550,8 @@ function convGroups(projectId: string): ConvGroup[] {
   color: var(--text);
 }
 .ic-btn.plus {
-  background: var(--ink);
-  color: #fff;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   font-size: 11px;
 }
 .ic-btn.plus:hover {
@@ -558,6 +574,46 @@ function convGroups(projectId: string): ConvGroup[] {
   color: var(--text);
 }
 
+/* 对话过滤框 */
+.conv-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 10px 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--bg-soft);
+}
+.conv-filter .cf-ic {
+  color: var(--dim);
+  flex-shrink: 0;
+}
+.conv-filter input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 12px;
+  color: var(--text);
+}
+.conv-filter input::placeholder {
+  color: var(--dim);
+}
+.cf-x {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.cf-x:hover {
+  color: var(--text);
+}
+
 .new-proj-row {
   display: flex;
   gap: 4px;
@@ -577,8 +633,8 @@ function convGroups(projectId: string): ConvGroup[] {
 }
 .primary-mini {
   padding: 2px 10px;
-  background: var(--ink);
-  color: #fff;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   border: none;
   border-radius: 3px;
   font-size: 11px;
@@ -703,12 +759,15 @@ function convGroups(projectId: string): ConvGroup[] {
   z-index: 45;
 }
 
-.day-label {
-  font-size: 10px;
+/* 行尾相对时间（仿 Codex）：常态显示，hover 让位给删除按钮 */
+.cv-time {
+  flex-shrink: 0;
+  font-size: 10.5px;
   color: var(--dim);
-  padding: 7px 10px 3px 30px;
-  font-family: var(--serif);
-  letter-spacing: 1.5px;
+  white-space: nowrap;
+}
+.conv:hover .cv-time {
+  display: none;
 }
 /* 对话 = 实体（仿 Codex）：更醒目、可点的主条目，颜色加深、字号略大 */
 .conv {
@@ -726,8 +785,15 @@ function convGroups(projectId: string): ConvGroup[] {
   background: var(--selection-bg);
   color: var(--text);
 }
+/* 常态隐藏删除钮（位置由 .cv-time 占着，hover 二者互换，行宽不跳动） */
+.conv .ca.delete {
+  display: none;
+}
 .conv:hover .ca {
   opacity: 1;
+}
+.conv:hover .ca.delete {
+  display: inline-flex;
 }
 .conv.active {
   background: var(--selection-bg-hover);

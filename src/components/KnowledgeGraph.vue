@@ -379,14 +379,18 @@ onMounted(async () => {
   setTimeout(() => emit("ready"), 3500);
 });
 
-// KeepAlive：切回本视图时恢复自转；切走时暂停(DOM 脱离，星场/自转都停，不空耗)
+// KeepAlive：切回本视图时恢复自转；切走时暂停自转 raf + 星场 CSS 动画
+// (animation-play-state 显式暂停,确保缓存期间合成器零开销)
+const bgPaused = ref(false);
 onActivated(() => {
+  bgPaused.value = false;
   if (!cy) return;
   cy.resize(); // KeepAlive 重新挂载后画布尺寸可能需校正
   if (spinning.value) startSpinLoop();
 });
 onDeactivated(() => {
   cancelSpinLoop();
+  bgPaused.value = true;
 });
 
 onUnmounted(() => {
@@ -399,7 +403,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="graph">
+  <div class="graph" :class="{ 'bg-paused': bgPaused }">
     <div class="head">
       <div class="title">知识图谱</div>
       <div class="tools" v-if="!empty">
@@ -491,7 +495,7 @@ onUnmounted(() => {
   position: relative;
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   background: var(--bg);
 }
 .head {
@@ -592,6 +596,11 @@ onUnmounted(() => {
     radial-gradient(34% 30% at 60% 24%, rgba(92, 122, 210, 0.12), transparent 70%);
   filter: blur(8px);
   animation: nebula 22s ease-in-out infinite alternate;
+}
+/* KeepAlive 切走时显式暂停星场/星云动画,合成器零开销 */
+.graph.bg-paused .nebula,
+.graph.bg-paused .stars {
+  animation-play-state: paused;
 }
 /* 多层星场: 渐变平铺成星点, transform/opacity 走合成层 → 轻量 */
 .stars {

@@ -492,8 +492,8 @@ onMounted(refresh);
   letter-spacing: 1px;
 }
 .badge.on {
-  background: var(--ink);
-  color: #fff;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
 }
 .badge.miss {
   background: transparent;
@@ -585,9 +585,9 @@ onMounted(refresh);
   background: transparent;
 }
 .btn.primary {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: #fff;
+  background: var(--btn-solid-bg);
+  border-color: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
 }
 .btn.primary:hover {
   background: var(--primary);

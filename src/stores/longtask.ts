@@ -107,7 +107,9 @@ export const useLongTaskStore = defineStore("longTask", () => {
     if (!isRunning(convId)) return; // 被用户中途停掉
 
     let manifest = await safeManifest(convId);
-    let prevPending = pendingCount(manifest);
+    // 初值设最大值: 否则续批循环第一圈用「轮0后的 manifest」自比, pending===prevPending
+    // 必然误判一次 stall(白白消耗一次容忍额度)。设为 +∞ 让第一圈只建立基线、不计 stall。
+    let prevPending = Number.MAX_SAFE_INTEGER;
     let stalls = 0;
 
     // ── 续批循环 ──

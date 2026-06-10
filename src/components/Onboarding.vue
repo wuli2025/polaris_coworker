@@ -294,9 +294,9 @@ code {
   border: 1px solid transparent;
 }
 .btn.primary {
-  background: var(--ink);
-  color: #fff;
-  border-color: var(--ink);
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
+  border-color: var(--btn-solid-bg);
 }
 .btn.primary:hover:not(:disabled) {
   background: var(--primary);

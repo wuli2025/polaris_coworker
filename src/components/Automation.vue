@@ -18,6 +18,7 @@ import {
   LoaderCircle,
   X,
   CircleStop,
+  Square,
 } from "@lucide/vue";
 import { useAutomationStore, type AutomationFlow } from "../stores/automation";
 import { useAppStore } from "../stores/app";
@@ -79,6 +80,9 @@ function closePanel() {
 function stopRun() {
   if (auto.activeConvId) chat.cancel(auto.activeConvId);
 }
+function stopFlow(f: AutomationFlow) {
+  if (f.lastConvId) chat.cancel(f.lastConvId);
+}
 </script>
 
 <template>
@@ -121,8 +125,12 @@ function stopRun() {
             <span v-if="f.loopCount > 1" class="meta"><Repeat :size="12" :stroke-width="1.6" /> ×{{ f.loopCount }}</span>
           </div>
           <div class="c-act">
-            <button class="run-btn" :disabled="running(f)" @click="run(f)">
-              <Play :size="13" :stroke-width="2" /> {{ running(f) ? "运行中…" : "运行" }}
+            <!-- 运行中:卡片上直接给停止入口(不依赖右侧面板还开着) -->
+            <button v-if="running(f)" class="run-btn stop" @click="stopFlow(f)">
+              <Square :size="12" :stroke-width="2" /> 停止
+            </button>
+            <button v-else class="run-btn" @click="run(f)">
+              <Play :size="13" :stroke-width="2" /> 运行
             </button>
             <button class="mini-btn" title="编辑" @click="edit(f)">
               <SquarePen :size="14" :stroke-width="1.7" />
@@ -251,7 +259,7 @@ function stopRun() {
   display: inline-flex; align-items: center; justify-content: center;
   background: var(--selection-bg);
 }
-.card.new:hover .new-plus { background: var(--ink); color: #fff; }
+.card.new:hover .new-plus { background: var(--btn-solid-bg); color: var(--btn-solid-text); }
 .new-text { font-size: 13px; letter-spacing: 1px; }
 
 .c-head { display: flex; align-items: center; gap: 9px; }
@@ -300,13 +308,15 @@ function stopRun() {
   flex: 1;
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   border: none;
-  background: var(--ink); color: #fff;
+  background: var(--btn-solid-bg); color: var(--btn-solid-text);
   font-size: 12.5px; letter-spacing: 1px;
   padding: 7px 12px; border-radius: 8px;
   cursor: pointer;
 }
 .run-btn:hover:not(:disabled) { background: var(--primary); }
 .run-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.run-btn.stop { background: var(--vermilion); color: #fff; }
+.run-btn.stop:hover { background: var(--vermilion); opacity: 0.88; }
 .mini-btn {
   border: 1px solid var(--border);
   background: transparent; color: var(--muted);
@@ -355,7 +365,7 @@ function stopRun() {
 }
 .bubble { font-size: 12.5px; line-height: 1.7; }
 .bubble.user .b-text {
-  background: var(--ink); color: #fff;
+  background: var(--btn-solid-bg); color: var(--btn-solid-text);
   padding: 8px 11px; border-radius: 10px 10px 2px 10px;
   align-self: flex-end;
   white-space: pre-wrap; word-break: break-word;

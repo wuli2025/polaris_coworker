@@ -376,8 +376,17 @@ export const useWorkflowsStore = defineStore("workflows", () => {
     }
   }
 
+  // 200ms debounce:连续保存/删除合并成一次序列化
+  let persistTimer: ReturnType<typeof setTimeout> | undefined;
   function persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(packs.value));
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(packs.value));
+      } catch {
+        /* storage 不可用 */
+      }
+    }, 200);
   }
 
   function openCreate() {

@@ -3,7 +3,6 @@ import { ref, onMounted, computed } from "vue";
 import {
   Puzzle,
   Plus,
-  Search,
   Sparkles,
   Globe,
   Wrench,
@@ -18,6 +17,7 @@ import {
   FolderOpen,
   X,
 } from "@lucide/vue";
+import SearchGlass from "./icons/SearchGlass.vue";
 import { skills as skillsApi, isTauri, type Skill } from "../tauri";
 import { useSkillsStore } from "../stores/skills";
 
@@ -89,7 +89,7 @@ function iconForSkill(skill: Skill) {
     xlsx: Table,
     "edge-tts": AudioLines,
     hyperframes: Clapperboard,
-    "web-search": Search,
+    "web-search": SearchGlass,
     "image-gen": ImageIcon,
     "cloak-browser": Ghost,
   };
@@ -257,7 +257,7 @@ async function submitCreate() {
         </button>
       </div>
       <div class="sc-search">
-        <Search :size="14" :stroke-width="1.8" class="sc-search-icon" />
+        <SearchGlass :size="14" :stroke-width="1.8" class="sc-search-icon" />
         <input v-model="searchQuery" placeholder="搜索技能..." type="text" />
       </div>
     </div>
@@ -405,7 +405,7 @@ async function submitCreate() {
 
 <style scoped>
 .skill-center {
-  height: 100vh;
+  height: 100%;
   overflow-y: auto;
   padding: 24px 32px;
   background: var(--bg);
@@ -439,8 +439,8 @@ async function submitCreate() {
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  background: var(--ink);
-  color: #fafaf7;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   border: none;
   border-radius: 6px;
   font-size: 12.5px;
@@ -652,12 +652,12 @@ async function submitCreate() {
 }
 .sc-card-delete:hover {
   color: var(--vermilion);
-  background: rgba(192, 57, 43, 0.06);
+  background: var(--vermilion-soft);
 }
 .sc-card-use {
   padding: 5px 14px;
-  background: var(--ink);
-  color: #fafaf7;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   border: none;
   border-radius: 5px;
   font-size: 12px;
@@ -673,8 +673,8 @@ async function submitCreate() {
   align-items: center;
   gap: 5px;
   padding: 5px 14px;
-  background: var(--ink);
-  color: #fafaf7;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   border: none;
   border-radius: 6px;
   font-size: 12px;
@@ -694,8 +694,8 @@ async function submitCreate() {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
-  background: rgba(16, 185, 129, 0.1);
-  color: #0f9d6b;
+  background: var(--ok-soft);
+  color: var(--ok);
   border-radius: 10px;
   font-size: 11px;
   font-weight: 600;
@@ -717,7 +717,7 @@ async function submitCreate() {
   position: absolute;
   cursor: pointer;
   inset: 0;
-  background: #ccc;
+  background: var(--border-strong);
   border-radius: 20px;
   transition: 0.2s;
 }
@@ -748,8 +748,8 @@ input:checked + .slider::before {
 .sc-empty-btn {
   margin-top: 12px;
   padding: 6px 16px;
-  background: var(--ink);
-  color: #fafaf7;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   border: none;
   border-radius: 6px;
   font-size: 12.5px;
@@ -763,7 +763,7 @@ input:checked + .slider::before {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(20, 20, 25, 0.35);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -864,8 +864,8 @@ input:checked + .slider::before {
   background: var(--border);
 }
 .modal-btn.primary {
-  background: var(--ink);
-  color: #fafaf7;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
 }
 .modal-btn.primary:hover {
   background: var(--primary);

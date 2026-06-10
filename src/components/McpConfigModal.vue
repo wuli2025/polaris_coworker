@@ -6,13 +6,13 @@ import {
   Eye,
   EyeOff,
   Sparkles,
-  Search,
   Plus,
   Trash2,
   Terminal,
   Globe,
   Server,
 } from "@lucide/vue";
+import SearchGlass from "./icons/SearchGlass.vue";
 
 const props = withDefaults(defineProps<{ inline?: boolean }>(), { inline: false });
 const emit = defineEmits<{ (e: "close"): void }>();
@@ -290,7 +290,7 @@ async function submit() {
           <div class="grid-head">
             <span class="sec-title">预设 MCP 服务</span>
             <div class="grid-search">
-              <Search :size="12" :stroke-width="1.8" />
+              <SearchGlass :size="12" :stroke-width="1.8" />
               <input v-model="filter" placeholder="搜索…" />
             </div>
           </div>
@@ -832,9 +832,9 @@ async function submit() {
 }
 .btn-cancel:hover { background: var(--selection-bg); }
 .btn-add {
-  background: var(--ink);
-  color: #fff;
-  border-color: var(--ink);
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
+  border-color: var(--btn-solid-bg);
 }
 .btn-add:hover { background: var(--primary); border-color: var(--primary); }
 .btn-add:disabled { opacity: 0.5; }

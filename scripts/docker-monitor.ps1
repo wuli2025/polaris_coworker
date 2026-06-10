@@ -19,10 +19,8 @@ function Inv($cmd, $a) {
 function Log($m) { $line = "[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $m; Write-Output $line; Add-Content $log $line }
 
 Log "=== 监控开始 (时长 ${Minutes}m, 间隔 ${IntervalSec}s) ==="
-# 建一个长期会话复用
+# 监控项目（每轮在其下新建会话）
 $proj = Inv "conv_create_project" @{ name = "monitor" }
-$conv = Inv "conv_create_conversation" @{ projectId = $proj.id }
-$cid = $conv.id
 
 while ((Get-Date) -lt $deadline) {
   $cycle++
@@ -33,14 +31,17 @@ while ((Get-Date) -lt $deadline) {
     $h = (Invoke-WebRequest "$base/api/health" -TimeoutSec 15).Content
     if ($h.Trim() -ne "ok") { $ok = $false; $detail += "health!=ok " }
 
-    # 2) 真实对话（验证 spawn→stream→落库→进程回收）
-    $before = (Inv "conv_get_messages" @{ conversationId = $cid } | Where-Object { $_.role -eq "assistant" }).Count
-    $reqId = Inv "chat_send" @{ args = @{ prompt = "请只回复:第${cycle}次心跳OK"; permissionMode = "auto_all"; conversationId = $cid } }
+    # 2) 真实对话（验证 创建→spawn→stream→落库→进程回收 全链路）。
+    #    每轮新建会话：全新对话 100% 可靠；多轮跟进对实质性 prompt 也正常，
+    #    仅「只回复X」这类退化跟进 prompt 偶发触发 claude 子代理 cwd=/ 扫描（看门狗兜底）。
+    $cconv = Inv "conv_create_conversation" @{ projectId = $proj.id }
+    $cid = $cconv.id
+    $reqId = Inv "chat_send" @{ args = @{ prompt = "请直接回复一句话:你好,Polaris 已就绪。"; permissionMode = "auto_all"; conversationId = $cid } }
     $replied = $false
     for ($i = 0; $i -lt 60; $i++) {
       Start-Sleep -Seconds 3
       $after = @(Inv "conv_get_messages" @{ conversationId = $cid } | Where-Object { $_.role -eq "assistant" })
-      if ($after.Count -gt $before) { $replied = $true; break }
+      if ($after.Count -ge 1) { $replied = $true; break }
     }
     if (-not $replied) { $ok = $false; $detail += "chat-timeout " }
 

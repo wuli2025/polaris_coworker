@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from "vue";
+import { ref, computed, watch } from "vue";
+import { usePolling } from "../composables/usePolling";
 import {
   Globe,
   FileText,
@@ -34,7 +35,16 @@ const convId = ref<string | null>(null);
 const lastAction = ref<"create" | "revise">("create");
 
 // ───────── 配置 ─────────
-const brandName = ref("");
+// 品牌名记住上次填写(重开/重置不用再敲)
+const BRAND_KEY = "polaris.webstudio.brand.v1";
+const brandName = ref(localStorage.getItem(BRAND_KEY) ?? "");
+watch(brandName, (v) => {
+  try {
+    localStorage.setItem(BRAND_KEY, v);
+  } catch {
+    /* storage 不可用就算了 */
+  }
+});
 const contentText = ref("");
 const charCount = computed(() => contentText.value.length);
 const uploads = ref<AttachedFile[]>([]);
@@ -171,7 +181,8 @@ async function ensureConv(): Promise<string> {
     projectId = app.currentProjectId;
     if (!projectId) throw new Error("创建网站工坊项目失败");
   }
-  const conv = await app.createConversation(projectId);
+  // navigate=false: 留在网站工坊视图就地展示进度/预览, 不跳 chat(否则本组件被卸载)。
+  const conv = await app.createConversation(projectId, false);
   return conv.id;
 }
 function preview(): string {
@@ -240,6 +251,14 @@ function reset() {
 
 // ───────── 产物 + 实时预览 ─────────
 const sending = computed(() => chat.isSending(convId.value));
+// 生成遮罩上的「现在在干嘛」:取对话流最近一次工具调用(纯展示)
+const lastToolHint = computed(() => {
+  const arr = chat.bubblesFor(convId.value);
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i].role === "tool") return arr[i].toolDetail || arr[i].tool || "";
+  }
+  return "";
+});
 const outputs = ref<{ path: string; name: string }[]>([]);
 const hasResult = computed(() => outputs.value.length > 0);
 const previewHtml = ref<string>("");
@@ -278,16 +297,11 @@ watch(sending, async (now, before) => {
     phase.value = "done";
   }
 });
-let poll: ReturnType<typeof setInterval> | null = null;
+// 共享轮询:页面隐藏自动暂停、回前台立即补拉、卸载自动清理
+const poller = usePolling(loadOutputs, 4000);
 watch(phase, (p) => {
-  if (poll) {
-    clearInterval(poll);
-    poll = null;
-  }
-  if (p === "generating") poll = setInterval(loadOutputs, 4000);
-});
-onUnmounted(() => {
-  if (poll) clearInterval(poll);
+  if (p === "generating") poller.start();
+  else poller.stop();
 });
 
 function openConv() {
@@ -420,13 +434,19 @@ function fillDemo() {
           </div>
 
           <div v-else class="wb-preview">
-            <iframe v-if="previewHtml" class="wb-frame" :srcdoc="previewHtml" sandbox="allow-scripts allow-same-origin"></iframe>
-            <div v-else class="wb-frame-empty"><Globe :size="30" /><span>预览加载中…可在对话或目录查看</span></div>
+            <!-- 安全: 只给 allow-scripts, 不加 allow-same-origin(否则 srcdoc 脚本可自拆沙箱触达后端)。 -->
+            <iframe v-if="previewHtml" class="wb-frame" :srcdoc="previewHtml" sandbox="allow-scripts"></iframe>
+            <div v-else class="wb-frame-empty">
+              <Globe :size="30" />
+              <span>{{ phase === 'generating' ? '预览加载中…可在对话或目录查看' : '预览没有加载出来' }}</span>
+              <button v-if="phase !== 'generating'" class="wb-ghost" @click="loadOutputs">重新加载预览</button>
+            </div>
           </div>
 
           <div v-if="phase === 'generating'" class="wb-overlay">
             <Loader :size="30" class="spin" />
             <span>{{ lastAction === 'revise' ? '正在按修改重做…' : '正在制作网站…' }}</span>
+            <span v-if="lastToolHint" class="wb-tool-hint">{{ lastToolHint }}</span>
             <button class="wb-ghost" @click="openConv">在对话里看进度 →</button>
           </div>
         </div>
@@ -523,6 +543,7 @@ function fillDemo() {
 .wb-frame-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); border: 1px dashed var(--border); border-radius: 10px; }
 
 .wb-overlay { position: absolute; inset: 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: color-mix(in srgb, var(--bg) 78%, transparent); backdrop-filter: blur(2px); border-radius: 10px; color: var(--text); font-size: 14px; font-weight: 600; }
+.wb-tool-hint { max-width: 80%; font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .wb-composer { border-top: 1px solid var(--border-soft); background: var(--panel); padding: 12px 18px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .wb-comp-i { color: var(--primary); flex-shrink: 0; }

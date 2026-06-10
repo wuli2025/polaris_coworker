@@ -21,6 +21,7 @@ import {
   KeyRound,
   RefreshCw,
   LogOut,
+  Palette,
 } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 import { useChatStore } from "../stores/chat";
@@ -33,6 +34,7 @@ import {
   type MediaAccountStatus,
 } from "../tauri";
 import { useFileDrop } from "../composables/useFileDrop";
+import { toast } from "../composables/useToast";
 
 const app = useAppStore();
 const chat = useChatStore();
@@ -83,10 +85,13 @@ const RESEARCH: SkillCard[] = [
 ];
 
 // 排版 / 产出技能（多选，按平台切换）
+// 长图模式(__longimg)与「壹伴排版 + CloakBrowser 直传」互斥：长图是端到端替代链路,
+// 默认推荐只勾长图，想切回 HTML 注入模式用户自己加回另外两张。
 const WX_OUTPUT: SkillCard[] = [
-  { id: "wechat-md-typesetter", label: "壹伴排版优化", hint: "套主题压内联样式，进微信不乱版", icon: "🖋", isSkill: true, wx: true },
-  { id: "cloak-browser", label: "CloakBrowser 直传", hint: "直注公众号编辑器存草稿，不格式错", icon: "🌐", isSkill: true, wx: true },
-  { id: "image-gen", label: "AI 配图", hint: "自动配封面/插图，失败有兜底", icon: "🖼", isSkill: true },
+  { id: "__longimg", label: "长图模式", hint: "默认·正文渲染成长图上传：零清洗零字数问题，所见即所得", icon: "🖼", isSkill: false, wx: true },
+  { id: "wechat-md-typesetter", label: "壹伴排版优化", hint: "套主题压内联样式，进微信不乱版（与长图互斥）", icon: "🖋", isSkill: true, wx: true },
+  { id: "cloak-browser", label: "CloakBrowser 直传", hint: "直注公众号编辑器存草稿，不格式错（与长图互斥）", icon: "🌐", isSkill: true, wx: true },
+  { id: "image-gen", label: "AI 配图", hint: "自动配封面/插图，失败有兜底", icon: "🎨", isSkill: true },
   { id: "__deai", label: "去 AI 痕", hint: "把机翻腔改成人话", icon: "🪶", isSkill: false },
 ];
 const XHS_OUTPUT: SkillCard[] = [
@@ -98,7 +103,7 @@ const XHS_OUTPUT: SkillCard[] = [
 const outputList = computed(() => (platform.value === "wechat" ? WX_OUTPUT : XHS_OUTPUT));
 
 const selResearch = ref<Set<string>>(new Set(["hot-topic-radar", "deep-research"]));
-const selOutput = ref<Set<string>>(new Set(["wechat-md-typesetter", "cloak-browser"]));
+const selOutput = ref<Set<string>>(new Set(["__longimg"]));
 const selCustom = ref<Set<string>>(new Set());
 
 function toggleResearch(id: string) {
@@ -146,7 +151,7 @@ function pickPlatform(p: Platform) {
   customWriteSkillId.value = null;
   selResearch.value = new Set(["hot-topic-radar", "deep-research"]);
   selOutput.value = p === "wechat"
-    ? new Set(["wechat-md-typesetter", "cloak-browser"])
+    ? new Set(["__longimg"])
     : new Set(["gz-notion-infographic", "cloak-browser"]);
 }
 function pickWrite(id: string) {
@@ -160,7 +165,7 @@ function applyRecommended() {
   customWriteSkillId.value = null;
   selResearch.value = new Set(["hot-topic-radar", "deep-research"]);
   selOutput.value = platform.value === "wechat"
-    ? new Set(["wechat-md-typesetter", "cloak-browser"])
+    ? new Set(["__longimg"])
     : new Set(["gz-notion-infographic", "cloak-browser"]);
   selCustom.value = new Set();
 }
@@ -179,6 +184,8 @@ const finalSkillIds = computed(() => {
   ids.add(platform.value === "wechat" ? "wechat-pipeline" : "xiaohongshu-pipeline");
   selResearch.value.forEach((r) => { if (!r.startsWith("__")) ids.add(r); });
   selOutput.value.forEach((o) => { if (!o.startsWith("__")) ids.add(o); });
+  // 长图模式靠壹伴脚本的 snapshot/publish-image 跑,隐式带上该技能
+  if (selOutput.value.has("__longimg")) ids.add("wechat-md-typesetter");
   if (customWriteSkillId.value) ids.add(customWriteSkillId.value);
   selCustom.value.forEach((c) => ids.add(c));
   return Array.from(ids);
@@ -349,8 +356,17 @@ function loadRefs() {
     persistRefs();
   }
 }
+// 200ms debounce:连续增删不必每次同步序列化整个列表
+let refsTimer: ReturnType<typeof setTimeout> | undefined;
 function persistRefs() {
-  localStorage.setItem(REFS_KEY, JSON.stringify(refs.value));
+  clearTimeout(refsTimer);
+  refsTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(REFS_KEY, JSON.stringify(refs.value));
+    } catch {
+      /* storage 不可用 */
+    }
+  }, 200);
 }
 function addRef() {
   const t = newRef.value.title.trim();
@@ -442,17 +458,28 @@ function planPrompt(): string {
   }
   // 排版 + 投递（仅公众号，且勾了对应技能时显式编排，确保"出文件→直送草稿"链路）
   if (platform.value === "wechat") {
+    const wantLongImg = selOutput.value.has("__longimg");
     const wantTypeset = selOutput.value.has("wechat-md-typesetter");
     const wantCloak = selOutput.value.has("cloak-browser");
-    if (wantTypeset || wantCloak) {
+    if (wantLongImg) {
+      // 长图模式优先级最高：渲染权在自己手里,编辑器只当图床,零清洗零字数问题
+      lines.push(
+        "",
+        "【长图模式 · 已在面板选定，写进规划并按此执行，不用再问我】",
+        "- 成稿后只产出**干净的语义正文 HTML**（h2/h3/p/strong/blockquote/hr/ul 等，零内联样式），存成 .html 文件报绝对路径。",
+        "- 跑「壹伴排版优化」技能的 `wechat_yiban.py --mode snapshot --body-file <正文.html> --theme <主题> --title <标题>`：按约定主题（墨韵/极简/科技蓝/杂志/清新绿/活力橙/米纸/黛青）渲成长图并在段落空隙切片，把成品 HTML 和切片图路径都报给我先眼检。",
+        "- 我确认后跑 `wechat_yiban.py --mode publish-image --slices-dir <切片目录> --title <标题> --intro <一两句真文字导语>`：开头插导语（利于摘要/搜一搜），切片按序粘贴进正文（编辑器原生欢迎图片，零清洗），保存为草稿（绝不自动发布），窗口留着让我核对后自己点发布。"
+      );
+    } else if (wantTypeset || wantCloak) {
       lines.push("", "【排版 / 投递 · 已在面板选定，写进规划并按此执行，不用再问我】");
       if (wantTypeset)
         lines.push(
-          "- 成稿后用「壹伴排版优化」技能把正文渲成微信兼容的内联样式 HTML（套主题、移动端字号、标题色块/引用块/分割线全内联），存成 .html 文件并报绝对路径，让我能先预览。"
+          "- 壹伴式分工：成稿后只产出**干净的语义正文 HTML**（h2/h3/p/strong/blockquote/hr/ul 等，**零内联样式**），存成 .html 文件报绝对路径——样式不要写进正文，交给壹伴脚本套。",
+          "- 用「壹伴排版优化」技能的 `wechat_yiban.py --mode render` 按约定风格（墨韵/极简/科技蓝/杂志）渲出预览成品 HTML 给我先眼检，报绝对路径。"
         );
       if (wantCloak)
         lines.push(
-          "- 然后用 CloakBrowser 打开公众号后台图文编辑器，把排好的 HTML 直接注入编辑器、正文图走素材库上传，保存为草稿（绝不自动发布），窗口留着让我核对后自己点发布。"
+          "- 然后 `wechat_yiban.py --mode publish`：用 CloakBrowser 打开公众号后台编辑器，**只注入语义正文**，在编辑器 DOM 上按约定风格一键套样式（标题色块/引用卡/分割线/列表转段落全内联），正文图走素材库上传，填标题，保存为草稿（绝不自动发布），窗口留着让我核对后自己点发布。"
         );
     }
   }
@@ -620,8 +647,32 @@ async function runAccountTask(platform: "wechat" | "xhs", mode: "login" | "check
         "请用「post-to-xhs」技能帮我登录小红书并把登录态存好：先检测登录态（check-login）；若已登录，直接告诉我「已登录、无需重扫」；若未登录，走扫码登录（get-login-qrcode / login）让我扫码，登录态会持久化到 Chrome Profile，**扫这一次，以后发文都复用、不用再扫**。完成后用一句话确认状态。全程不要发布任何内容。";
     }
     const display = mode === "check" ? `🔎 检测${plat}登录态` : `🔑 扫码绑定${plat}账号`;
+    toast.info(`已在对话中开始${mode === "check" ? "检测登录态" : "扫码绑定"},完成后回「自媒体运营」刷新查看`);
     app.setView("chat");
     await chat.send(id, prompt, display, undefined, { permissionMode: "auto_current", skillIds: [] });
+  } catch (e: any) {
+    error.value = e?.message ?? String(e);
+    app.setView("media_ops");
+  } finally {
+    accBusy.value = null;
+  }
+}
+
+// 可视化排版面板：CloakBrowser 打开公众号后台，编辑器页面右侧注入「北极星·排版面板」
+// （主题模板墙一点换肤 + AI 大白话改风格 + 清除样式 + 保存草稿）。脚本常驻到用户关窗口。
+async function openYibanPanel() {
+  if (accBusy.value) return;
+  accBusy.value = "wechat";
+  accMsg.value = null;
+  error.value = null;
+  try {
+    const id = await ensureConv();
+    convId.value = id;
+    const prompt =
+      "请用「壹伴排版优化」技能打开可视化排版面板：先确认 CloakBrowser 已装（没装就 `pip install ~/Polaris/plugins/cloakbrowser`），然后跑 `python ~/Polaris/skills/wechat-md-typesetter/scripts/wechat_yiban.py --mode panel`。它会打开公众号后台；我自己打开草稿箱里的文章或「写图文」后，编辑器右侧会自动出现「北极星·排版面板」——我点主题模板换肤、或用大白话让 AI 改风格。脚本会**常驻到我关掉浏览器窗口**，期间把它 stdout 里的进度（面板已注入 / AI 改风格请求等）转述给我；全程只动样式不动文字、只存草稿、绝不自动发布。";
+    toast.info("已在对话中启动排版面板:浏览器窗口稍后弹出,进度在对话里转述");
+    app.setView("chat");
+    await chat.send(id, prompt, "🎨 打开可视化排版面板", undefined, { permissionMode: "auto_current", skillIds: [] });
   } catch (e: any) {
     error.value = e?.message ?? String(e);
     app.setView("media_ops");
@@ -1076,6 +1127,9 @@ onMounted(async () => {
                 </button>
                 <button class="mo-ghost" :disabled="!!accBusy" @click="runAccountTask(a.platform, 'check')">
                   <RefreshCw :size="13" /><span>检测登录态</span>
+                </button>
+                <button v-if="a.platform === 'wechat'" class="mo-ghost" :disabled="!!accBusy" @click="openYibanPanel" title="编辑器右侧出模板墙+AI改风格,像壹伴一样点着改">
+                  <Palette :size="13" /><span>排版面板</span>
                 </button>
                 <button v-if="a.bound" class="mo-ghost danger" :disabled="!!accBusy" @click="forgetAccount(a.platform)">
                   <LogOut :size="13" /><span>解绑</span>

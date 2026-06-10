@@ -13,6 +13,8 @@ import {
 export const useProvidersStore = defineStore("providers", () => {
   const providers = ref<ProviderView[]>([]);
   const currentId = ref<string>("claude-official");
+  /** true = 联动系统 CLI(写 ~/.claude/settings.json); false = 隔离, 仅 Polaris 内生效 */
+  const linkGlobal = ref(false);
   const usage = ref<UsageSummary | null>(null);
   const codex = ref<CodexStatus | null>(null);
   const codexProxy = ref<CodexProxyInfo | null>(null);
@@ -51,6 +53,7 @@ export const useProvidersStore = defineStore("providers", () => {
       const res = await providerApi.list();
       providers.value = res.providers;
       currentId.value = res.currentId || "claude-official";
+      linkGlobal.value = !!res.linkGlobal;
     } catch (e) {
       error.value = String(e);
     } finally {
@@ -103,6 +106,19 @@ export const useProvidersStore = defineStore("providers", () => {
     return r.status;
   }
 
+  /** 切换「联动系统 CLI / 隔离」模式;开联动会把当前供应商写入全局 settings.json,
+   *  关联动会把全局清回官方(终端 CLI 立刻恢复干净)、Polaris 内选择不变 */
+  async function setLinkMode(link: boolean): Promise<boolean> {
+    error.value = null;
+    try {
+      linkGlobal.value = await providerApi.setLinkMode(link);
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
   /** 切换供应商；返回是否成功（失败时 error 已设置，常见为缺 key） */
   async function switchTo(id: string): Promise<boolean> {
     error.value = null;
@@ -144,6 +160,7 @@ export const useProvidersStore = defineStore("providers", () => {
   return {
     providers,
     currentId,
+    linkGlobal,
     usage,
     codex,
     codexProxy,
@@ -164,6 +181,7 @@ export const useProvidersStore = defineStore("providers", () => {
     refreshCodexProxy,
     codexStartLogin,
     codexPollLogin,
+    setLinkMode,
     switchTo,
     save,
     remove,

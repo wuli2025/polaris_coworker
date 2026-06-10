@@ -300,8 +300,8 @@ const lastChecked = computed(() => {
   padding: 11px 0;
   border: none;
   border-radius: 11px;
-  background: var(--ink);
-  color: #fafaf7;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   font-size: 13.5px;
   font-weight: 600;
   letter-spacing: 1px;

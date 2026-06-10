@@ -45,7 +45,12 @@ PolarisKB/.polaris_seeded
 # Docker 化本地产物（勿提交）
 .claude-seed/
 .docker-build.log
+.docker-monitor.log
+.docker-monitor-dry.log
 docker-compose.override.yml
+
+# UI 预览构建产物（并行会话生成,8GB+,勿提交）
+src-tauri/target-ui-preview/
 
 __pycache__/
 *.pyc

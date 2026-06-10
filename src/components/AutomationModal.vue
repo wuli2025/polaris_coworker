@@ -39,7 +39,10 @@ const form = reactive<FlowDraft>({
   deepResearch: true,
 });
 
+const overlayEl = ref<HTMLDivElement | null>(null);
 onMounted(() => {
+  // 打开即把焦点收进模态(Esc 立即可用,Tab 进表单)
+  requestAnimationFrame(() => overlayEl.value?.focus());
   const t = editing.value;
   if (t) {
     form.id = t.id;
@@ -66,6 +69,16 @@ function toggle(m: Menu) {
 }
 function closeMenu() {
   openMenu.value = "";
+}
+
+// Esc 关闭(与其它模态对齐:先关内层菜单,再关整个编辑器)
+function onEsc(e: KeyboardEvent) {
+  if (e.key !== "Escape") return;
+  if (openMenu.value) {
+    openMenu.value = "";
+    return;
+  }
+  auto.closeEditor();
 }
 
 const projectName = computed(() => {
@@ -118,7 +131,7 @@ async function submit() {
 </script>
 
 <template>
-  <div class="overlay" @click.self="auto.closeEditor()">
+  <div ref="overlayEl" class="overlay" tabindex="-1" @click.self="auto.closeEditor()" @keydown="onEsc">
     <div class="modal" @click="closeMenu">
       <!-- 头部 -->
       <header class="m-head">
@@ -558,8 +571,8 @@ async function submit() {
 .btn-cancel:hover { color: var(--ink); background: var(--selection-bg); }
 .btn-create {
   border: none;
-  background: var(--ink);
-  color: #fff;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   font-size: 13px;
   padding: 7px 20px;
   border-radius: 8px;

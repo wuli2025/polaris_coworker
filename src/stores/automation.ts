@@ -366,8 +366,17 @@ export const useAutomationStore = defineStore("automation", () => {
     }
   }
 
+  // 200ms debounce:save/remove/seed 连发时合并成一次序列化
+  let persistTimer: ReturnType<typeof setTimeout> | undefined;
   function persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(flows.value));
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(flows.value));
+      } catch {
+        /* storage 不可用 */
+      }
+    }, 200);
   }
 
   function openCreate() {
@@ -479,7 +488,6 @@ export const useAutomationStore = defineStore("automation", () => {
   // ───────────── 轻量本地调度器：app 开着时按 schedule 触发 ─────────────
   // 每分钟检查一次；daily=到点且当天未跑过则跑；interval=距上次 ≥ everyHours 小时则跑。
   let timer: number | undefined;
-  const lastDailyFire = ref<Record<string, string>>({}); // flowId -> "YYYY-MM-DD HH:MM"
 
   function tick() {
     const now = new Date();
@@ -492,13 +500,13 @@ export const useAutomationStore = defineStore("automation", () => {
 
       if (s.kind === "daily" && s.time) {
         const [hh, mm] = s.time.split(":").map((x) => parseInt(x, 10));
-        const stamp = `${now.toDateString()} ${s.time}`;
-        if (
-          now.getHours() === hh &&
-          now.getMinutes() === mm &&
-          lastDailyFire.value[f.id] !== stamp
-        ) {
-          lastDailyFire.value[f.id] = stamp;
+        if (Number.isNaN(hh) || Number.isNaN(mm)) continue;
+        // 今天的计划时刻。用「时间戳窗口」而非分钟精确相等: 到点或之后(哪怕休眠/定时器
+        // 节流错过了那一分钟)且本次计划时刻后还没跑过 → 补跑。lastRunAt 保证当天只跑一次。
+        const scheduled = new Date(
+          now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0, 0
+        ).getTime();
+        if (now.getTime() >= scheduled && (f.lastRunAt ?? 0) < scheduled) {
           void runFlow(f);
         }
       } else if (s.kind === "interval" && s.everyHours && s.everyHours > 0) {

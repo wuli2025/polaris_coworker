@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { marked } from "marked";
+import { sanitizeHtml } from "../lib/sanitize";
 import {
   X,
   RefreshCw,
@@ -29,6 +30,7 @@ import {
   Boxes,
   Terminal,
 } from "@lucide/vue";
+import ArtifactEditor from "./ArtifactEditor.vue";
 import { useAppStore } from "../stores/app";
 import { useArtifactsStore } from "../stores/artifacts";
 import { useWorkflowsStore, type WorkflowPack } from "../stores/workflows";
@@ -55,7 +57,11 @@ function onRunProject(p: ProjectInfo) {
   projects.run(p);
 }
 function onStopActive() {
-  if (projects.activeRoot) projects.stop(projects.activeRoot);
+  if (!projects.activeRoot) return;
+  // 停止=杀整个进程树,误点不可恢复,二次确认
+  const name = projects.active?.name ?? "项目";
+  if (!confirm(`停止运行「${name}」?进程树会被结束。`)) return;
+  projects.stop(projects.activeRoot);
 }
 function onOpenPreviewExternal() {
   // 用系统默认浏览器打开运行中的应用（artifact_open_external 对 URL 同样适用）
@@ -160,6 +166,12 @@ function fmtTime(unixSec: number): string {
     : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
 }
 
+// 仅 HTML / SVG 成品可进编辑器（网页 PPT / 网页）
+const canEdit = computed(() => {
+  const k = artifacts.payload?.kind;
+  return k === "html" || k === "svg";
+});
+
 const headIcon = computed(() => {
   const k = artifacts.payload?.kind;
   if (k === "html" || k === "svg") return FileCode;
@@ -171,7 +183,7 @@ const headIcon = computed(() => {
 const renderedMd = computed(() => {
   const p = artifacts.payload;
   if (p?.kind === "markdown" && p.text) {
-    return marked.parse(p.text) as string;
+    return sanitizeHtml(marked.parse(p.text) as string);
   }
   return "";
 });
@@ -266,6 +278,9 @@ function fmtSize(n: number): string {
       </div>
     </template>
 
+    <!-- ───────── 成品编辑器（仿豆包，放大态）───────── -->
+    <ArtifactEditor v-else-if="artifacts.current && artifacts.editing" />
+
     <!-- ───────── 成品预览模式 ───────── -->
     <template v-else-if="artifacts.current">
       <div class="pv-head">
@@ -285,6 +300,15 @@ function fmtSize(n: number): string {
             <FolderOpen :size="15" :stroke-width="1.8" />
           </button>
           <button
+            v-if="canEdit"
+            class="pv-btn"
+            title="编辑（放大到编辑器，可拖动/缩放元素、改文字/换主题/改源码）"
+            @click="artifacts.enterEdit()"
+          >
+            <PencilLine :size="15" :stroke-width="1.8" />
+          </button>
+          <button
+            v-else
             class="pv-btn"
             :title="artifacts.expanded ? '收起' : '放大'"
             @click="artifacts.toggleExpand()"
@@ -574,11 +598,17 @@ function fmtSize(n: number): string {
 
 <style scoped>
 .dr {
-  background: var(--panel);
-  border-left: 1px solid var(--border-soft);
+  /* 与主区面板同底色（--bg-chat），左右两块面板一样白、无色差 */
+  background: var(--bg-chat);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative; /* 编辑器以 absolute inset:0 覆盖 */
+  /* 与主区同款圆润嵌入面板（左缘不留缝，由主区的右缝隙分隔） */
+  margin: 8px 8px 8px 0;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
 }
 /* 收起：整列不渲染 —— 右侧边彻底消失，不留任何导轨/小框 */
 .dr.collapsed {

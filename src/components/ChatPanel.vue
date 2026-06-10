@@ -2,7 +2,6 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
 import {
   Puzzle,
-  Search,
   ChevronDown,
   X,
   ArrowRight,
@@ -18,6 +17,7 @@ import {
   Ghost,
   FileCode,
   File as FileIcon,
+  FolderOpen,
   ExternalLink,
   Paperclip,
   LoaderCircle,
@@ -29,13 +29,15 @@ import {
   Copy,
   Trash2,
   Check,
-  Star,
   Workflow,
   PanelRightOpen,
   PanelRightClose,
   BookOpen,
   Layers,
+  Hand,
+  RotateCcw,
 } from "@lucide/vue";
+import SearchGlass from "./icons/SearchGlass.vue";
 import {
   chat,
   convApi,
@@ -45,7 +47,9 @@ import {
   type AttachedFile,
   type Message,
 } from "../tauri";
-import { marked } from "marked";
+import { renderMarkdown, mdVersion } from "../lib/markdown";
+import { toast } from "../composables/useToast";
+import { humanizeError } from "../lib/humanizeError";
 import { useAppStore } from "../stores/app";
 import { useSkillsStore } from "../stores/skills";
 import { useArtifactsStore } from "../stores/artifacts";
@@ -55,7 +59,7 @@ import { useLongTaskStore, detectLongTask } from "../stores/longtask";
 import { useFileDrop } from "../composables/useFileDrop";
 
 function fileName(path: string): string {
-  return path.split("/").pop() || path;
+  return path.replace(/\/+$/, "").split("/").pop() || path;
 }
 
 function fileExt(path: string): string {
@@ -64,12 +68,21 @@ function fileExt(path: string): string {
   return i >= 0 ? n.slice(i + 1).toLowerCase() : "";
 }
 
+/** 尾随 `/` = 后端归并上报的「应用文件夹」产物（整个应用一个 chip） */
+function isFolderArtifact(path: string): boolean {
+  return path.endsWith("/");
+}
+
 function artifactIcon(path: string) {
+  if (isFolderArtifact(path)) return FolderOpen;
   const ext = fileExt(path);
   if (["html", "htm", "svg", "js", "ts", "css", "json", "xml"].includes(ext))
     return FileCode;
   if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"].includes(ext))
     return ImageIcon;
+  if (["mp4", "mov", "webm", "mkv", "avi"].includes(ext)) return Clapperboard;
+  if (["mp3", "wav", "m4a", "aac", "flac", "ogg"].includes(ext))
+    return AudioLines;
   if (["csv", "tsv", "xlsx", "xls"].includes(ext)) return Table;
   if (["md", "markdown", "txt", "pdf"].includes(ext)) return FileText;
   return FileIcon;
@@ -82,8 +95,12 @@ const chatStore = useChatStore();
 const workflowsStore = useWorkflowsStore();
 const longTaskStore = useLongTaskStore();
 
-/** 点击成品文件 chip → 展开右侧抽屉并预览 */
+/** 点击成品文件 chip → 展开右侧抽屉并预览；应用文件夹 → 直接在文件管理器打开 */
 function openArtifact(path: string) {
+  if (isFolderArtifact(path)) {
+    artifactsStore.openFolder(path);
+    return;
+  }
   app.drawerCollapsed = false;
   artifactsStore.open(path);
 }
@@ -99,12 +116,14 @@ const currentProjectName = computed(
 );
 const isMaoProject = computed(() => currentProjectName.value === "毛主席");
 
-// ─────────── 回复渲染：markdown + 终端码清洗 ───────────
-// 后端发来的是干净 markdown，这里渲染成 HTML（剥掉极少数残留的 ANSI 控制码）。
+// ─────────── 回复渲染：统一 markdown 管线(lib/markdown) ───────────
+// 已完成回合按原文命中缓存(流式期间不再全量重算);shiki/KaTeX 异步增强,
+// 完成后 mdVersion 变化触发重读缓存。流式中的活跃回合传 enhance=false 省 CPU。
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
-function renderMd(text: string): string {
+function renderMd(text: string, enhance = true): string {
+  void mdVersion.value; // 注册响应式依赖:增强完成后刷新
   const clean = (text || "").replace(ANSI_RE, "");
-  return marked.parse(clean, { gfm: true, breaks: true }) as string;
+  return renderMarkdown(clean, { enhance });
 }
 
 // 工具名 → 友好中文（对话里以优雅 pill 呈现，不再是终端灰块）
@@ -128,14 +147,23 @@ function toolLabel(n: string): string {
 
 // 一个「回合」= 一条用户消息 + 其后的助手正文/工具/产物，直到下一条用户消息。
 // 助手多段文本拼成一块 markdown；工具折叠成 pill；所有生成文件聚合到回合末尾。
+interface TurnTool {
+  name: string;
+  /** 连续同名合并的次数 */
+  count: number;
+  /** 各次调用的输入摘要(命令/路径/检索词) */
+  details: string[];
+}
 interface Turn {
   key: number;
   user?: Bubble;
   text: string;
-  tools: { name: string }[];
+  tools: TurnTool[];
   artifacts: string[];
   errors: string[];
   hasAssistant: boolean;
+  /** 回合时间(用户消息时刻,无则首条气泡时刻) */
+  at?: number;
 }
 const ERR_RE = /^\[(错误|发送失败|result error)/;
 const renderTurns = computed<Turn[]>(() => {
@@ -151,6 +179,7 @@ const renderTurns = computed<Turn[]>(() => {
       artifacts: [],
       errors: [],
       hasAssistant: false,
+      at: user?.at,
     };
     out.push(turn);
     cur = turn;
@@ -162,10 +191,21 @@ const renderTurns = computed<Turn[]>(() => {
       continue;
     }
     const t: Turn = cur ?? startTurn(undefined);
+    if (t.at === undefined && b.at !== undefined) t.at = b.at;
     if (b.role === "tool") {
       const name = b.tool || "工具";
-      // 合并连续同名工具，避免刷屏
-      if (t.tools[t.tools.length - 1]?.name !== name) t.tools.push({ name });
+      // 合并连续同名工具，避免刷屏;输入摘要逐条留底供展开查看
+      const last = t.tools[t.tools.length - 1];
+      if (last?.name === name) {
+        last.count++;
+        if (b.toolDetail) last.details.push(b.toolDetail);
+      } else {
+        t.tools.push({
+          name,
+          count: 1,
+          details: b.toolDetail ? [b.toolDetail] : [],
+        });
+      }
     } else {
       const txt = b.text || "";
       if (ERR_RE.test(txt.trim())) {
@@ -183,6 +223,70 @@ const renderTurns = computed<Turn[]>(() => {
 });
 function isPending(t: Turn): boolean {
   return sending.value && t === renderTurns.value[renderTurns.value.length - 1];
+}
+
+// ── 历史折叠:长对话只渲染最近 N 回合,顶部「加载更早」逐段放开 ──
+const FOLD_STEP = 30;
+const visibleLimit = ref(FOLD_STEP);
+const hiddenCount = computed(() =>
+  Math.max(0, renderTurns.value.length - visibleLimit.value)
+);
+const visibleTurns = computed(() =>
+  hiddenCount.value > 0 ? renderTurns.value.slice(hiddenCount.value) : renderTurns.value
+);
+function showEarlier() {
+  const el = scrollEl.value;
+  const prevH = el?.scrollHeight ?? 0;
+  const prevTop = el?.scrollTop ?? 0;
+  visibleLimit.value += FOLD_STEP;
+  // 维持视口锚定,别跳
+  nextTick(() => {
+    if (el) el.scrollTop = prevTop + (el.scrollHeight - prevH);
+  });
+}
+
+// ── 工具 pill 展开详情 ──
+const expandedTool = ref<string | null>(null);
+function toggleTool(turnKey: number, idx: number) {
+  const k = `${turnKey}:${idx}`;
+  expandedTool.value = expandedTool.value === k ? null : k;
+}
+
+// ── 回合时间 / 本会话 token 估算 ──
+function fmtTime(at?: number): string {
+  if (!at) return "";
+  const d = new Date(at);
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
+// ── 重新生成 / 编辑重发 ──
+async function regenerate(t: Turn) {
+  if (!t.user || sending.value) return;
+  const convId = app.currentConvId;
+  if (!convId) return;
+  const text = t.user.text || "";
+  const files = t.user.files;
+  let prompt = text || "请查看我上传的附件。";
+  if (files && files.length) {
+    const lines = files.map((a) => `- ${a.path}`).join("\n");
+    prompt += `\n\n---\n[附件]（用户拖拽上传，可用 Read 等工具读取）：\n${lines}`;
+  }
+  await chatStore.send(convId, prompt, text || "（仅附件）", files, {
+    permissionMode: permMode.value,
+    skillIds: Array.from(skillsStore.enabledSkills),
+    useKb: kbMode.value || undefined,
+  });
+}
+function editTurn(t: Turn) {
+  if (!t.user?.text) return;
+  input.value = t.user.text;
+  nextTick(() => {
+    inputEl.value?.focus();
+    autoGrow();
+  });
 }
 
 // 复制某一回合的回答正文（回答下方的「复制」按钮）
@@ -222,15 +326,6 @@ onMounted(() => nextTick(autoGrow));
 function toggleGoal() {
   goalMode.value = !goalMode.value;
   if (goalMode.value) nextTick(() => inputEl.value?.focus());
-}
-
-// ─────────── 请教毛主席（模式开关，行为同「目标模式」） ───────────
-// 激活后，下一次 Enter/点发送都按「请教毛主席」走：注入毛选式分析指令、
-// 调资料库取证、生成标来源 HTML。不再是「点了立即发」，需要先写问题再发送。
-const maoMode = ref(false);
-function toggleMao() {
-  maoMode.value = !maoMode.value;
-  if (maoMode.value) nextTick(() => inputEl.value?.focus());
 }
 
 // ─────────── 动态编排（多智能体）模式开关 ───────────
@@ -330,6 +425,51 @@ function removeAttachment(i: number) {
   attachments.value.splice(i, 1);
 }
 
+// ─────────── 剪贴板贴图(截图 → Ctrl+V 直接成附件) ───────────
+function fileToBase64(f: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(f);
+  });
+}
+
+async function onPaste(e: ClipboardEvent) {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const imgs: File[] = [];
+  for (const it of Array.from(items)) {
+    if (it.kind === "file" && it.type.startsWith("image/")) {
+      const f = it.getAsFile();
+      if (f) imgs.push(f);
+    }
+  }
+  if (!imgs.length) return; // 纯文本粘贴走默认行为
+  e.preventDefault();
+  const convId = await ensureConversation();
+  for (const f of imgs) {
+    const ext = (f.type.split("/")[1] || "png").replace("jpeg", "jpg");
+    const name =
+      f.name && f.name !== "image.png"
+        ? f.name
+        : `粘贴图片-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}.${ext}`;
+    const ph = { name };
+    pendingAttach.value.push(ph);
+    try {
+      const b64 = await fileToBase64(f);
+      const res = await chat.attachImage(convId ?? undefined, name, b64);
+      if (res?.ok) attachments.value.push(res);
+      else toast.error(`贴图失败:${res?.error ?? "未知错误"}`);
+    } catch (err) {
+      toast.error(`贴图失败:${humanizeError(err)}`);
+    } finally {
+      const idx = pendingAttach.value.indexOf(ph);
+      if (idx >= 0) pendingAttach.value.splice(idx, 1);
+    }
+  }
+}
+
 const { isOver: dropOver } = useFileDrop({
   active: () => app.view === "chat",
   onDrop: onDropFiles,
@@ -383,7 +523,7 @@ function skillIcon(id: string) {
     xlsx: Table,
     "edge-tts": AudioLines,
     hyperframes: Clapperboard,
-    "web-search": Search,
+    "web-search": SearchGlass,
     "image-gen": ImageIcon,
     "cloak-browser": Ghost,
   };
@@ -407,19 +547,60 @@ function clearActiveSkill(id: string) {
 function scrollToBottom() {
   nextTick(() => {
     if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
+    atBottom.value = true;
   });
+}
+
+// ── 滚动跟随:只有用户本就在底部才跟;上翻后浮出「回到底部」钮,不再硬拽 ──
+const atBottom = ref(true);
+function onMessagesScroll() {
+  const el = scrollEl.value;
+  if (!el) return;
+  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+}
+
+// 历史加载中/失败状态(骨架屏 + 重试入口)
+const historyLoading = ref(false);
+const historyErr = computed(() => chatStore.historyError(app.currentConvId));
+async function retryHistory() {
+  historyLoading.value = true;
+  try {
+    await chatStore.loadHistory(app.currentConvId, true);
+  } finally {
+    historyLoading.value = false;
+  }
+  scrollToBottom();
 }
 
 // 切换对话：加载该对话历史（运行中的对话不会被历史覆盖），滚到底
 watch(
   () => app.currentConvId,
-  (cid) => {
-    chatStore.loadHistory(cid).then(scrollToBottom);
+  async (cid) => {
+    visibleLimit.value = FOLD_STEP;
+    expandedTool.value = null;
+    historyLoading.value = true;
+    try {
+      await chatStore.loadHistory(cid);
+    } finally {
+      historyLoading.value = false;
+    }
+    scrollToBottom();
   }
 );
 
-// 当前对话气泡变化（含后台流式增量推进）时自动滚到底
-watch(bubbles, scrollToBottom, { deep: true });
+// 当前对话气泡变化（含流式增量）时跟随滚动 —— 只看「条数 + 末条长度」这个轻签名,
+// 替代昂贵的 deep watch;且仅当用户在底部时才跟。
+const tailSig = computed(() => {
+  const arr = bubbles.value;
+  const last = arr[arr.length - 1];
+  return (
+    arr.length * 1e9 +
+    (last ? last.text.length + (last.artifacts?.length ?? 0) * 7 : 0)
+  );
+});
+watch(tailSig, () => {
+  if (atBottom.value) scrollToBottom();
+});
 
 onMounted(async () => {
   await chatStore.init(); // app 级流式监听只注册一次，按 conversationId 路由
@@ -462,20 +643,16 @@ async function send() {
     prompt += `\n\n---\n[附件]（用户拖拽上传，可用 Read 等工具读取）：\n${lines}`;
   }
 
-  // 气泡里给「请教毛主席」一个可见标记
-  const consult = maoMode.value;
-  const display = consult
-    ? `请教毛主席：${text || "（仅附件）"}`
-    : text || "（仅附件）";
+  const display = text || "（仅附件）";
 
   input.value = "";
   attachments.value = [];
+  histIdx = -1;
 
   // 分批长任务：显式开关 或 启发式判定（「N 页/张/章」且 N ≥ 阈值）→ 走分批编排循环，
   // 先规划成清单再每轮只建一小批，断线从清单续跑，规避单轮过长把连接拖死。
-  // （目标/毛主席等专用模式优先，不与分批叠加。）
+  // （目标等专用模式优先，不与分批叠加。）
   const wantBatch =
-    !consult &&
     !goalMode.value &&
     !orchestrateMode.value &&
     (batchMode.value || detectLongTask(prompt));
@@ -494,7 +671,6 @@ async function send() {
     skillIds: Array.from(skillsStore.enabledSkills),
     // 目标模式下，本条输入框内容即完成条件
     goal: goalMode.value && text ? text : undefined,
-    consultMao: consult || undefined,
     dynamicWorkflow: orchestrateMode.value || undefined,
     useKb: kbMode.value || undefined,
   });
@@ -511,12 +687,57 @@ function pickPerm(m: PermissionMode) {
   showPermDropdown.value = false;
 }
 
+// ── 输入历史召回:空输入框时 ↑ 召回上一条发过的消息,↓ 往回走/清空 ──
+let histIdx = -1;
+const userTexts = computed(() =>
+  bubbles.value.filter((b) => b.role === "user" && b.text).map((b) => b.text)
+);
+function recallHistory(dir: 1 | -1): boolean {
+  const hist = userTexts.value;
+  if (!hist.length) return false;
+  if (dir === 1) {
+    // 往更早走
+    if (histIdx === -1 && input.value.trim()) return false; // 有草稿不打断
+    histIdx = Math.min(histIdx + 1, hist.length - 1);
+  } else {
+    if (histIdx <= 0) {
+      histIdx = -1;
+      input.value = "";
+      return true;
+    }
+    histIdx--;
+  }
+  input.value = hist[hist.length - 1 - histIdx] ?? "";
+  nextTick(() => {
+    const el = inputEl.value;
+    if (el) el.selectionStart = el.selectionEnd = el.value.length;
+  });
+  return true;
+}
+
 function onKeydown(e: KeyboardEvent) {
+  if (e.isComposing || (e as any).keyCode === 229) return;
+  if (e.key === "ArrowUp" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    const el = inputEl.value;
+    if (el && el.selectionStart === 0 && el.selectionEnd === 0) {
+      if (recallHistory(1)) {
+        e.preventDefault();
+        return;
+      }
+    }
+  }
+  if (e.key === "ArrowDown" && histIdx >= 0 && !e.shiftKey) {
+    const el = inputEl.value;
+    if (el && el.selectionEnd === el.value.length) {
+      if (recallHistory(-1)) {
+        e.preventDefault();
+        return;
+      }
+    }
+  }
   if (e.key !== "Enter") return;
   // Shift+Enter 仍然换行
   if (e.shiftKey) return;
-  // 中文/日文等输入法在组合（选词）中按回车是确认候选词，不应发送
-  if (e.isComposing || (e as any).keyCode === 229) return;
   e.preventDefault();
   send();
 }
@@ -712,6 +933,14 @@ async function deleteCurrentConv() {
                 <Trash2 :size="14" :stroke-width="1.8" />
                 <span>删除对话</span>
               </button>
+              <div
+                v-if="chatStore.inputTokens(app.currentConvId) > 0"
+                class="cm-meta"
+              >
+                上轮注入 ≈
+                {{ (chatStore.inputTokens(app.currentConvId) / 1000).toFixed(1) }}k
+                tokens
+              </div>
             </div>
           </div>
         </template>
@@ -738,8 +967,19 @@ async function deleteCurrentConv() {
       </button>
     </div>
 
-    <div class="messages" ref="scrollEl">
-      <div v-if="renderTurns.length === 0" class="hero-wrap">
+    <div class="messages" ref="scrollEl" @scroll.passive="onMessagesScroll">
+      <!-- 历史加载骨架 -->
+      <div v-if="historyLoading && renderTurns.length === 0" class="hist-skeleton">
+        <div class="sk-row user"></div>
+        <div class="sk-row"></div>
+        <div class="sk-row short"></div>
+      </div>
+      <!-- 历史加载失败:不假装是空对话 -->
+      <div v-else-if="historyErr && renderTurns.length === 0" class="hist-error">
+        <span>历史加载失败:{{ historyErr }}</span>
+        <button class="hist-retry" @click="retryHistory">重试</button>
+      </div>
+      <div v-else-if="renderTurns.length === 0" class="hero-wrap">
         <!-- 毛主席项目彩蛋：未对话前的空白中部 -->
         <template v-if="isMaoProject">
           <div class="mao-hero">小同志，你好。</div>
@@ -771,9 +1011,24 @@ async function deleteCurrentConv() {
         </template>
       </div>
 
-      <div v-for="t in renderTurns" :key="t.key" class="turn">
+      <!-- 历史折叠:更早的回合不渲染,点击逐段放开 -->
+      <div v-if="hiddenCount > 0" class="earlier-wrap">
+        <button class="earlier-btn" @click="showEarlier">
+          加载更早的 {{ hiddenCount }} 个回合
+        </button>
+      </div>
+
+      <div v-for="t in visibleTurns" :key="t.key" class="turn">
         <!-- 用户消息：右侧中性气泡，无头像 -->
         <div v-if="t.user" class="msg user">
+          <button
+            v-if="t.user.text && !sending"
+            class="u-edit"
+            title="编辑并重发"
+            @click="editTurn(t)"
+          >
+            <PencilLine :size="13" :stroke-width="1.8" />
+          </button>
           <div class="bubble-user">
             <div v-if="t.user.text" class="u-text">{{ t.user.text }}</div>
             <div
@@ -804,16 +1059,35 @@ async function deleteCurrentConv() {
           "
           class="msg ai"
         >
-          <!-- 工具调用：低调 pill -->
+          <!-- 工具调用：低调 pill,点击展开输入摘要 -->
           <div v-if="t.tools.length" class="tool-strip">
-            <span v-for="(tl, j) in t.tools" :key="j" class="tool-pill">
-              <Wrench :size="11" :stroke-width="1.8" />
-              {{ toolLabel(tl.name) }}
-            </span>
+            <template v-for="(tl, j) in t.tools" :key="j">
+              <button
+                class="tool-pill"
+                :class="{
+                  open: expandedTool === `${t.key}:${j}`,
+                  clickable: tl.details.length > 0,
+                }"
+                @click="tl.details.length && toggleTool(t.key, j)"
+              >
+                <Wrench :size="11" :stroke-width="1.8" />
+                {{ toolLabel(tl.name) }}
+                <span v-if="tl.count > 1" class="tp-count">×{{ tl.count }}</span>
+              </button>
+            </template>
+          </div>
+          <div
+            v-for="(tl, j) in t.tools"
+            :key="'d' + j"
+            v-show="expandedTool === `${t.key}:${j}`"
+            class="tool-detail"
+          >
+            <div class="td-head">{{ toolLabel(tl.name) }} · 输入摘要</div>
+            <div v-for="(d, x) in tl.details" :key="x" class="td-line">{{ d }}</div>
           </div>
 
-          <!-- 正文：markdown 渲染 -->
-          <div v-if="t.text" class="md" v-html="renderMd(t.text)"></div>
+          <!-- 正文：markdown 渲染(流式中的活跃回合跳过异步高亮排队) -->
+          <div v-if="t.text" class="md" v-html="renderMd(t.text, !isPending(t))"></div>
 
           <!-- 生成中：三点呼吸 -->
           <div v-if="isPending(t)" class="typing">
@@ -848,7 +1122,7 @@ async function deleteCurrentConv() {
             </div>
           </div>
 
-          <!-- 回答下方操作：复制 -->
+          <!-- 回答下方操作：复制 / 重新生成 / 时间 -->
           <div
             v-if="t.hasAssistant && t.text && !isPending(t)"
             class="turn-actions"
@@ -857,9 +1131,31 @@ async function deleteCurrentConv() {
               <Copy :size="13" :stroke-width="1.8" />
               <span>复制</span>
             </button>
+            <button
+              v-if="t.user && !sending"
+              class="ta-btn"
+              title="用同样的问题再生成一次"
+              @click="regenerate(t)"
+            >
+              <RotateCcw :size="13" :stroke-width="1.8" />
+              <span>重新生成</span>
+            </button>
+            <span v-if="t.at" class="ta-time">{{ fmtTime(t.at) }}</span>
           </div>
         </div>
       </div>
+
+      <!-- 回到底部(上翻后浮现,流式不再硬拽) -->
+      <Transition name="copy-fade">
+        <button
+          v-if="!atBottom && renderTurns.length"
+          class="to-bottom"
+          title="回到底部"
+          @click="scrollToBottom()"
+        >
+          <ChevronDown :size="16" :stroke-width="2" />
+        </button>
+      </Transition>
     </div>
 
     <!-- 输入区域 -->
@@ -873,7 +1169,7 @@ async function deleteCurrentConv() {
           </button>
         </div>
         <div class="skill-panel-search">
-          <Search :size="14" :stroke-width="1.8" class="sp-search-icon" />
+          <SearchGlass :size="14" :stroke-width="1.8" class="sp-search-icon" />
           <input v-model="skillSearch" placeholder="搜索技能..." type="text" />
         </div>
         <div class="skill-panel-list">
@@ -958,6 +1254,7 @@ async function deleteCurrentConv() {
           rows="2"
           @keydown="onKeydown"
           @input="autoGrow"
+          @paste="onPaste"
         ></textarea>
         <div class="toolbar">
           <div class="toolbar-left">
@@ -974,7 +1271,7 @@ async function deleteCurrentConv() {
               :class="{ active: skillsStore.has('deep-research') }"
               @click="toggleSkill('deep-research')"
             >
-              <Search :size="14" :stroke-width="1.8" />
+              <SearchGlass :size="14" :stroke-width="1.8" />
               <span>深度搜索</span>
               <div class="btn-tooltip">
                 <div class="btn-tooltip-inner">
@@ -997,22 +1294,6 @@ async function deleteCurrentConv() {
                   设定一个完成条件，Claude 会持续推进直到达成
                   <div class="btn-tooltip-sub">
                     条件满足前不中途收尾、不反问，自行规划下一步
-                  </div>
-                </div>
-              </div>
-            </button>
-            <button
-              class="toolbar-btn"
-              :class="{ active: maoMode }"
-              @click="toggleMao"
-            >
-              <Star :size="14" :stroke-width="1.8" />
-              <span>请教毛主席</span>
-              <div class="btn-tooltip">
-                <div class="btn-tooltip-inner">
-                  激活后按 Enter 发送，毛主席用资料库客观分析并生成 HTML
-                  <div class="btn-tooltip-sub">
-                    毛选式大白话 · 称呼「同志」· 兼顾未来眼光看问题
                   </div>
                 </div>
               </div>
@@ -1079,7 +1360,7 @@ async function deleteCurrentConv() {
               v-else
               class="send-btn"
               title="发送 (Enter)"
-              :disabled="!input.trim()"
+              :disabled="!input.trim() && !attachments.length"
               @click="send()"
             >
               <ArrowRight :size="16" :stroke-width="2" />
@@ -1096,11 +1377,11 @@ async function deleteCurrentConv() {
             :class="{ deny: permMode === 'deny' }"
             @click="showPermDropdown = !showPermDropdown"
           >
-            <img
+            <Hand
               v-if="permMode !== 'deny'"
-              src="../assets/perm-hand.png"
+              :size="13"
+              :stroke-width="1.6"
               class="auth-hand"
-              alt="授权"
             />
             <span v-else class="auth-deny">⊘</span>
             <span class="auth-label">{{ permLabel[permMode] }}</span>
@@ -1148,7 +1429,7 @@ async function deleteCurrentConv() {
 .chat {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   position: relative;
 }
 .chat-top {
@@ -1291,6 +1572,13 @@ async function deleteCurrentConv() {
   margin: 5px 8px;
   background: var(--border-soft);
 }
+.cm-meta {
+  padding: 6px 10px 4px;
+  font-size: 10.5px;
+  color: var(--dim);
+  border-top: 1px solid var(--border-soft);
+  margin-top: 5px;
+}
 
 /* 复制反馈小提示 */
 .copy-toast {
@@ -1303,8 +1591,8 @@ async function deleteCurrentConv() {
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  background: var(--ink);
-  color: #fafaf7;
+  background: var(--btn-solid-bg);
+  color: var(--btn-solid-text);
   font-size: 12px;
   border-radius: 8px;
   box-shadow: var(--shadow-lg);
@@ -1323,7 +1611,8 @@ async function deleteCurrentConv() {
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 40px 32px 16px;
+  /* 底部留出输入玻璃卡的悬浮空间：消息从液态玻璃下穿过 */
+  padding: 40px 32px 210px;
 }
 .hero-wrap {
   margin: 60px auto 40px;
@@ -1418,11 +1707,137 @@ async function deleteCurrentConv() {
   margin: 0 auto 22px;
 }
 
+/* ── 历史骨架 / 加载失败 / 折叠 ── */
+.hist-skeleton {
+  max-width: 880px;
+  margin: 30px auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.sk-row {
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-soft) 25%,
+    var(--border-soft) 50%,
+    var(--bg-soft) 75%
+  );
+  background-size: 200% 100%;
+  animation: sk-shimmer 1.4s ease infinite;
+}
+.sk-row.user {
+  width: 40%;
+  align-self: flex-end;
+}
+.sk-row.short {
+  width: 65%;
+}
+@keyframes sk-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+.hist-error {
+  max-width: 880px;
+  margin: 30px auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: var(--vermilion-soft);
+  color: var(--vermilion);
+  font-size: 12.5px;
+}
+.hist-retry {
+  padding: 4px 14px;
+  border: 1px solid var(--vermilion);
+  background: transparent;
+  color: var(--vermilion);
+  border-radius: 7px;
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.hist-retry:hover {
+  background: var(--vermilion);
+  color: #fff;
+}
+.earlier-wrap {
+  max-width: 880px;
+  margin: 0 auto 18px;
+  text-align: center;
+}
+.earlier-btn {
+  padding: 5px 16px;
+  border: 1px solid var(--border-soft);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.earlier-btn:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+/* 回到底部悬浮钮(sticky 钉在滚动容器视口底部) */
+.to-bottom {
+  position: sticky;
+  bottom: 8px;
+  left: calc(100% - 60px);
+  z-index: 11;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+}
+.to-bottom:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
 /* 用户：右对齐中性灰气泡，无头像 */
 .msg.user {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 18px;
+}
+/* 编辑并重发(悬停气泡时浮现) */
+.u-edit {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.msg.user:hover .u-edit {
+  opacity: 1;
+}
+.u-edit:hover {
+  background: var(--bg-soft);
+  color: var(--text);
 }
 .bubble-user {
   max-width: 82%;
@@ -1461,9 +1876,44 @@ async function deleteCurrentConv() {
   border: 1px solid var(--border-soft);
   padding: 3px 9px;
   border-radius: 20px;
+  cursor: default;
+}
+.tool-pill.clickable {
+  cursor: pointer;
+}
+.tool-pill.clickable:hover,
+.tool-pill.open {
+  border-color: var(--primary);
+  color: var(--primary-deep);
+  background: var(--primary-soft);
 }
 .tool-pill :deep(svg) {
   color: var(--primary);
+}
+.tp-count {
+  font-size: 10px;
+  color: var(--muted);
+}
+/* 工具输入摘要(pill 点开) */
+.tool-detail {
+  margin: -4px 0 10px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border-soft);
+}
+.td-head {
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.td-line {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  padding: 1px 0;
+  word-break: break-all;
 }
 
 /* 生成中三点 */
@@ -1560,6 +2010,12 @@ async function deleteCurrentConv() {
   border-color: var(--border);
   color: var(--text);
   background: var(--bg-soft);
+}
+.ta-time {
+  align-self: center;
+  font-size: 10.5px;
+  color: var(--dim);
+  margin-left: 4px;
 }
 
 /* ── markdown 正文排版 ── */
@@ -1694,18 +2150,33 @@ async function deleteCurrentConv() {
 
 /* 成品文件 chips —— 回答末尾的可点击文件 */
 .artifact-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 7px;
   max-width: 320px;
   padding: 6px 10px;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
+  background: var(--panel);
+  border: 1px solid transparent;
   border-radius: 8px;
   color: var(--primary);
   font-size: 12.5px;
   cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), var(--shadow-sm);
   transition: border-color 0.15s, background 0.15s;
+}
+/* 琉璃流光描边：mask 镂空只留 1px 边缘（hover/active 时让位给实色反馈） */
+.artifact-chip::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  padding: 1px;
+  background: var(--liuli-edge);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
 }
 .artifact-chip:hover {
   border-color: var(--primary);
@@ -1714,6 +2185,10 @@ async function deleteCurrentConv() {
 .artifact-chip.active {
   border-color: var(--primary);
   background: var(--primary-soft);
+}
+.artifact-chip:hover::before,
+.artifact-chip.active::before {
+  display: none;
 }
 .artifact-chip .af-name {
   overflow: hidden;
@@ -1730,13 +2205,24 @@ async function deleteCurrentConv() {
 }
 
 /* ─────────── 输入区域 ─────────── */
+/* 输入区悬浮在消息流上方（苹果 Liquid Glass 范式）：
+   消息滚动时从玻璃卡下方穿过，透明感才真正可见。
+   容器自身不挡点击，只有卡片/按钮等子元素可交互 */
 .input-area {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 12;
   padding: 12px 32px 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  position: relative;
+  pointer-events: none;
+}
+.input-area > * {
+  pointer-events: auto;
 }
 
 /* 技能选择弹窗 */
@@ -1871,15 +2357,37 @@ async function deleteCurrentConv() {
   background: var(--primary-soft);
 }
 
-/* 输入卡片 —— 仿豆包：明显更宽（约原来的 1.7 倍），输入多了高度自动撑大 */
+/* 输入卡片 —— 宽度仿豆包（输入多了高度自动撑大）；
+   形态仿 Codex 圆润边框 + 苹果 Liquid Glass 透明琉璃：
+   半透明渐变面 + 大半径背景模糊（消息从卡下穿过时透出朦胧色），
+   鼠标进入边框以暖金调亮起，聚焦再亮一档（只变色，不位移） */
 .input-card {
   width: 100%;
   max-width: 1394px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  box-shadow: var(--shadow);
-  padding: 14px 18px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.72),
+    rgba(252, 251, 246, 0.52)
+  );
+  backdrop-filter: blur(24px) saturate(1.6);
+  border: 1px solid rgba(190, 182, 162, 0.5);
+  border-radius: 22px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.25), 0 8px 32px rgba(120, 100, 60, 0.1);
+  padding: 16px 20px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.input-card:hover {
+  border-color: rgba(167, 140, 79, 0.85);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.25),
+    0 0 0 1px rgba(167, 140, 79, 0.2), 0 8px 32px rgba(120, 100, 60, 0.14);
+}
+.input-card:focus-within {
+  border-color: rgba(151, 122, 60, 1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.25),
+    0 0 0 1px rgba(167, 140, 79, 0.32), 0 10px 36px rgba(120, 100, 60, 0.2);
 }
 textarea {
   width: 100%;
@@ -1991,7 +2499,53 @@ textarea {
 /* 目标模式激活时，输入卡片描边提示「这一框内容即完成条件」 */
 .input-card.goal-on {
   border-color: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary-soft), var(--shadow);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 0 0 1px var(--primary-soft), 0 8px 32px rgba(120, 100, 60, 0.1);
+}
+
+/* ───── 黑夜模式（深空玻璃）下的覆盖：暖白玻璃 → 深空玻璃，暖金 → 流光金 ───── */
+html[data-theme="dark"] .input-card {
+  /* 仿 Codex 深色：略亮于主区的石墨卡面（半透玻璃），中性细边 */
+  background: linear-gradient(
+    180deg,
+    rgba(43, 43, 41, 0.88),
+    rgba(36, 36, 34, 0.72)
+  );
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.02), 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+html[data-theme="dark"] .input-card:hover {
+  border-color: rgba(212, 176, 106, 0.45);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(212, 176, 106, 0.1), 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+html[data-theme="dark"] .input-card:focus-within {
+  border-color: rgba(212, 176, 106, 0.7);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(212, 176, 106, 0.18), 0 10px 36px rgba(0, 0, 0, 0.5);
+}
+html[data-theme="dark"] .input-card.goal-on {
+  border-color: var(--primary);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 0 0 1px var(--primary-soft), 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+html[data-theme="dark"] .artifact-chip {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), var(--shadow-sm);
+}
+/* 深色下 --ink 变浅色：发送键/工具提示的反色文字需跟着翻转 */
+html[data-theme="dark"] .send-btn {
+  color: #1a1a1a;
+}
+html[data-theme="dark"] .send-btn:hover {
+  color: #fff;
+}
+html[data-theme="dark"] .send-btn:disabled {
+  color: var(--dim);
+}
+html[data-theme="dark"] .btn-tooltip-inner {
+  background: #2a2a29;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .toolbar-right {
@@ -2053,9 +2607,9 @@ textarea {
   border-color: rgba(192, 57, 43, 0.2);
 }
 .auth-hand {
-  width: 13px;
-  height: 13px;
-  object-fit: contain;
+  color: var(--gold);
+  opacity: 0.85;
+  flex-shrink: 0;
 }
 .auth-deny {
   color: var(--vermilion);

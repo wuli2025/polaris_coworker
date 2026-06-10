@@ -1076,7 +1076,8 @@ fn import_from_remote(src: &str) -> Result<Vec<String>, String> {
         // .git 结尾、git@、或 github/gitlab 等仓库 URL → clone 后扫描全部技能
         let dest = tmp.join("repo");
         let dest_s = dest.to_string_lossy();
-        run_cmd("git", &["clone", "--depth", "1", src, dest_s.as_ref()])?;
+        // `--` 终止选项解析: 否则 src 以 `-` 开头(如 --upload-pack=…)会被 git 当 flag → 参数注入。
+        run_cmd("git", &["clone", "--depth", "1", "--", src, dest_s.as_ref()])?;
         import_from_dir(&dest)
     };
 

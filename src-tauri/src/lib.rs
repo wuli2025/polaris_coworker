@@ -192,6 +192,7 @@ pub fn run() {
             // API 供应商坞 + 用量看板
             provider::provider_list,
             provider::provider_switch,
+            provider::provider_set_link_mode,
             provider::provider_save,
             provider::provider_delete,
             provider::usage_summary,
