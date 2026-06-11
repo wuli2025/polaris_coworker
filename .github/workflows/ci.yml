@@ -33,14 +33,17 @@ jobs:
         shell: bash
         run: mkdir -p ../dist && echo '<!doctype html><title>stub</title>' > ../dist/index.html
       # 硬门槛: 全 workspace 单测必须过 (含 kb 路径穿越 / codex_proxy 解析边界等回归测试)
+      # --exclude polaris-cli: 它依赖主 lib 的 server feature, 若与本 job 的桌面(默认)feature
+      # 一起选中会被 cargo 统一 feature → 主 lib 同时开 tauri+server 两套 AppHandle 而 E0308。
+      # polaris-cli 的编译守护放 forge-matrix(server feature 同侧, cache 共享, 见下)。
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude polaris-cli
       # 建议性: 先不 -D warnings, 等存量 lint 清干净再收紧成硬门槛
       - name: Format check
         run: cargo fmt --all --check
         continue-on-error: true
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --exclude polaris-cli --all-targets
         continue-on-error: true
 
   # Forge 跨平台引擎(PPT/视频/TTS)三系统矩阵 —— PRD §08 的「windows+macos+docker 三 job」。
@@ -62,9 +65,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      # macOS: audiopus_sys 从源码静态编 libopus 需要 autotools(autoreconf),
+      # runner 默认没有 → `autogen.sh: autoreconf: command not found`(与 release.yml 同因同修)。
+      - name: Install macOS build deps (autotools for audiopus/libopus)
+        if: matrix.os == 'macos-latest'
+        run: brew install autoconf automake libtool
       # 引擎编译(server feature) + forge 单测(png/pptx 结构/数页/hex 解码) —— 跨平台一致性守门
       - name: Forge engine build + tests
         run: cargo test --no-default-features --features server --lib forge
+      # polaris-cli(polaris-forge 命令行)编译守护: 它拉主 lib 的 server feature,
+      # 与本 job 同侧, 增量编译近零成本。不能进 rust job 的 --workspace(feature 统一会炸)。
+      - name: polaris-cli build check
+        run: cargo check -p polaris-cli
 
   # macOS「真能出片」运行时验证:装真 Chrome,在 macOS runner 上跑 deck→截图→pptx 全流水线
   # (无需 Mac 硬件)。证明 macOS 不止编译过,而是真能产出成品。
@@ -80,6 +92,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      # 同 forge-matrix: macOS 编 audiopus/libopus 需要 autotools。
+      - name: Install macOS build deps (autotools for audiopus/libopus)
+        run: brew install autoconf automake libtool
       - name: Install Google Chrome
         run: brew install --cask google-chrome || true
       - name: 真实 deck→pptx + 文本提取 on macOS
