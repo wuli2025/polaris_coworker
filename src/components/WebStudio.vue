@@ -22,6 +22,9 @@ import { artifacts as artifactsApi, chat as chatApi, type AttachedFile } from ".
 import { useFileDrop } from "../composables/useFileDrop";
 import { groupedThemes, findTheme, type DeckTheme } from "../lib/deckThemes";
 
+// KeepAlive 的 include 按组件 name 匹配 → 显式命名:切走再回来「继续修改」状态不丢
+defineOptions({ name: "WebStudio" });
+
 const app = useAppStore();
 const chat = useChatStore();
 
@@ -276,13 +279,13 @@ async function loadOutputs() {
     /* ignore */
   }
 }
+// 修改是覆盖写原文件(文件名不变)→ 不能按路径短路,要重读内容、真变了才换 srcdoc
 async function loadPreview() {
   const htmlOut = outputs.value[0];
   if (!htmlOut) return;
-  if (htmlOut.path === previewPath.value && previewHtml.value) return;
   try {
     const p = await artifactsApi.read(htmlOut.path);
-    if (p?.text) {
+    if (p?.text && (p.text !== previewHtml.value || htmlOut.path !== previewPath.value)) {
       previewHtml.value = p.text;
       previewPath.value = htmlOut.path;
     }

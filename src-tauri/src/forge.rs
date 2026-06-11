@@ -292,11 +292,15 @@ pub fn forge_preflight() -> Value {
     });
 
     // ── 整体可出片判定 ──
-    let can_render_ppt = match plat {
+    // deck.html 截图路(网页PPT导出/视频取帧)依赖 chromium+CJK 字体;
+    // 原生 spec→pptx 路(传统PPT,路线 B)纯 Rust 零外部依赖 → 三平台恒可出 PPT,
+    // slim 镜像不再因缺 chromium 而 can_render_ppt:false。
+    let can_render_deck_ppt = match plat {
         "docker" | "linux" => chromium.is_some() && cjk == Some(true),
         _ => true,
     };
-    let can_render_video = can_render_ppt && (ffmpeg || plat == "windows" || plat == "macos");
+    let can_render_ppt = true; // 原生路兜底(spec→OOXML,无浏览器也出真可编辑 PPT)
+    let can_render_video = can_render_deck_ppt && (ffmpeg || plat == "windows" || plat == "macos");
 
     json!({
         "ok": true,
@@ -309,10 +313,12 @@ pub fn forge_preflight() -> Value {
             "tts": tts,
             "fonts": fonts,
             "pptx_pack": { "ready": true, "note": "纯 Rust OOXML，平台无关(引擎 P1 落地)" },
+            "pptx_native": { "ready": true, "note": "spec JSON → 原生可编辑 PPT(路线 B)，零浏览器，slim/CLI 可用" },
             "animation_fx": { "ready": true, "note": "Web 标准 __fx.seek，三平台一致(引擎 P3 落地)" }
         },
         "summary": {
             "can_render_ppt": can_render_ppt,
+            "can_render_deck_ppt": can_render_deck_ppt,
             "can_render_video": can_render_video,
             "blockers": preflight_blockers(plat, &chromium, ffmpeg, cjk)
         }
@@ -327,9 +333,8 @@ pub fn forge_build_pptx(images: Vec<String>, out: String) -> Result<Value, Strin
     crate::forge_pptx::build_pptx(&images, &out)
 }
 
-/// deck.html → 多页 .pptx 一步到位(逐页截图 + 纯 Rust 打包)。三平台同一份。
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub fn forge_deck_to_pptx(
+/// deck.html → 多页 .pptx 的同步内核。server 命令路由(本就在阻塞线程池里)直调这里。
+pub fn deck_to_pptx_sync(
     deck: String,
     out: String,
     width: Option<u32>,
@@ -345,6 +350,46 @@ pub fn forge_deck_to_pptx(
         searchable.unwrap_or(true), // 默认开隐形文本层(可搜索 PPT=差异化卖点)
         slides,
     )
+}
+
+/// deck.html → 多页 .pptx 一步到位(逐页截图 + 纯 Rust 打包)。三平台同一份。
+/// async + spawn_blocking: 成品编辑器「更新 PPT」从 UI 直接调用, 逐页截图+打包要
+/// 几十秒, 同步命令默认跑主线程会把整个窗口冻住 → 丢进阻塞线程池。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn forge_deck_to_pptx(
+    deck: String,
+    out: String,
+    width: Option<u32>,
+    height: Option<u32>,
+    searchable: Option<bool>,
+    slides: Option<usize>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        deck_to_pptx_sync(deck, out, width, height, searchable, slides)
+    })
+    .await
+    .map_err(|e| format!("导出任务异常退出: {e}"))?
+}
+
+/// spec JSON → 原生可编辑 .pptx 的同步内核(路线 B「传统PPT」)。零截图零浏览器,
+/// Docker slim / mac / win 三平台恒可用。spec 既可传 JSON 字符串也可传 .json 文件路径。
+pub fn spec_to_pptx_sync(spec: String, out: String) -> Result<Value, String> {
+    let json = if spec.trim_start().starts_with('{') {
+        spec
+    } else {
+        std::fs::read_to_string(&spec).map_err(|e| format!("读 spec 文件 {spec} 失败: {e}"))?
+    };
+    crate::forge_pptx_native::build_pptx_from_spec(&json, &out)
+}
+
+/// spec JSON → 原生可编辑 .pptx。async + spawn_blocking 防大 spec 冻 UI(与 deck 导出同策略)。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn forge_spec_to_pptx(spec: String, out: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || spec_to_pptx_sync(spec, out))
+        .await
+        .map_err(|e| format!("生成任务异常退出: {e}"))?
 }
 
 /// deck.html → .mp4(逐页截图 + ffmpeg 编码)。配音:audio=现成音频 / narration=文本走 TTS / 都无=无声。

@@ -33,6 +33,9 @@ import { artifacts as artifactsApi, chat as chatApi, type AttachedFile } from ".
 import { useFileDrop } from "../composables/useFileDrop";
 import { DECK_THEMES_WITH_AUTO, findTheme, type DeckTheme } from "../lib/deckThemes";
 
+// KeepAlive 的 include 按组件 name 匹配 → 显式命名:切走再回来规划/执行进度不丢
+defineOptions({ name: "VideoCourseStudio" });
+
 const app = useAppStore();
 const chat = useChatStore();
 

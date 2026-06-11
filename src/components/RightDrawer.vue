@@ -172,6 +172,41 @@ const canEdit = computed(() => {
   return k === "html" || k === "svg";
 });
 
+// ── .pptx 也能编辑：找它的网页版源稿 deck.html ──
+// .pptx 是逐页截图死图，真正可编辑的是同目录的 deck.html。预览 pptx 时
+// 找同目录的伴生 html（同名优先，否则取最新），「编辑」= 编辑 html + 保存后一键重导出。
+const isPptx = computed(() => /\.pptx$/i.test(artifacts.current?.name ?? ""));
+const pptxDeckHtml = ref<string | null>(null);
+watch(
+  () => artifacts.current?.path,
+  async (p) => {
+    pptxDeckHtml.value = null;
+    if (!p || !/\.pptx$/i.test(p)) return;
+    try {
+      const norm = (s: string) => s.replace(/\\/g, "/");
+      const np = norm(p);
+      const dir = np.slice(0, np.lastIndexOf("/") + 1);
+      const base = (np.split("/").pop() ?? "").replace(/\.pptx$/i, "");
+      const list = await artifactsApi.list(app.currentConvId ?? undefined);
+      const htmls = list.filter(
+        (e) => /\.html?$/i.test(e.name) && norm(e.path).startsWith(dir)
+      );
+      if (!htmls.length) return;
+      const exact = htmls.find((e) => e.name.replace(/\.html?$/i, "") === base);
+      pptxDeckHtml.value =
+        (exact ?? [...htmls].sort((a, b) => b.modified - a.modified)[0]).path;
+    } catch {
+      /* 找不到就不显示编辑入口 */
+    }
+  },
+  { immediate: true }
+);
+function editPptx() {
+  if (pptxDeckHtml.value && artifacts.current) {
+    artifacts.enterEditDeck(pptxDeckHtml.value, artifacts.current.path);
+  }
+}
+
 const headIcon = computed(() => {
   const k = artifacts.payload?.kind;
   if (k === "html" || k === "svg") return FileCode;
@@ -308,6 +343,14 @@ function fmtSize(n: number): string {
             <PencilLine :size="15" :stroke-width="1.8" />
           </button>
           <button
+            v-else-if="isPptx && pptxDeckHtml"
+            class="pv-btn"
+            title="编辑此 PPT（实际编辑它的网页版源稿，保存后一键重新导出 .pptx）"
+            @click="editPptx()"
+          >
+            <PencilLine :size="15" :stroke-width="1.8" />
+          </button>
+          <button
             v-else
             class="pv-btn"
             :title="artifacts.expanded ? '收起' : '放大'"
@@ -380,6 +423,17 @@ function fmtSize(n: number): string {
           <div v-else class="pv-state">
             <FileIcon :size="26" :stroke-width="1.4" />
             <span>该文件类型暂不支持内嵌预览</span>
+            <button
+              v-if="isPptx && pptxDeckHtml"
+              class="pv-open-ext primary"
+              @click="editPptx()"
+            >
+              <PencilLine :size="14" :stroke-width="1.8" />
+              <span>在 App 里编辑此 PPT</span>
+            </button>
+            <span v-if="isPptx && pptxDeckHtml" class="pv-edit-hint">
+              编辑的是它的网页版源稿，保存后可一键重新导出 .pptx
+            </span>
             <button class="pv-open-ext" @click="artifacts.openExternal()">
               <ExternalLink :size="14" :stroke-width="1.8" />
               <span>用系统程序打开</span>
@@ -746,6 +800,21 @@ function fmtSize(n: number): string {
 .pv-open-ext:hover {
   border-color: var(--primary);
   color: var(--primary);
+}
+.pv-open-ext.primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+  font-weight: 600;
+}
+.pv-open-ext.primary:hover {
+  filter: brightness(1.07);
+  color: #fff;
+}
+.pv-edit-hint {
+  font-size: 11px;
+  color: var(--dim);
+  margin-top: -6px;
 }
 .spin {
   animation: pv-spin 0.9s linear infinite;

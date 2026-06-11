@@ -36,6 +36,9 @@ import {
 import { useFileDrop } from "../composables/useFileDrop";
 import { toast } from "../composables/useToast";
 
+// KeepAlive 的 include 按组件 name 匹配 → 显式命名:切走再回来选题/配置不丢
+defineOptions({ name: "MediaOps" });
+
 const app = useAppStore();
 const chat = useChatStore();
 

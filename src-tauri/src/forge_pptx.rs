@@ -17,11 +17,11 @@ use zip::write::SimpleFileOptions;
 /// 进程内单调计数器:给每次 capture_slides 唯一临时目录,防多线程并发渲染互相覆盖帧。
 static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const NS_CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
-const NS_REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
-const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
-const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-const NS_P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+pub(crate) const NS_CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
+pub(crate) const NS_REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+pub(crate) const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+pub(crate) const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+pub(crate) const NS_P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 
 /// 从 PNG 头(IHDR)读宽高(px)。非 PNG / 损坏 → None。纯 std,不引 image crate。
 fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -38,12 +38,21 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-fn xml_decl() -> &'static str {
+pub(crate) fn xml_decl() -> &'static str {
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
 }
 
+/// 叠加文本层描述(路线 A 可编辑化,ADR-012 v2 落地)。
+/// `editable[i]=true` 的页:背景图是 ?notext=1 的「无字底」,文本框走真颜色/字体(可编辑);
+/// `editable[i]=false` 的页:背景图含字(旧 deck 或 notext 不可用),文本框退 alpha=0 隐形层(仅可搜索)。
+pub struct TextLayer<'a> {
+    pub pages: &'a [Vec<Value>],
+    pub editable: &'a [bool],
+    pub win_w: u32,
+    pub win_h: u32,
+}
+
 /// 把图片列表打成 .pptx。返回 {ok, out, slides, slide_size_emu}。
-/// text_layer=Some((每页文本rects, 窗口宽, 窗口高)) 时叠 alpha=0 隐形文本框(可搜索/读屏);None=纯图。
 pub fn build_pptx(image_paths: &[String], out_path: &str) -> Result<Value, String> {
     build_pptx_inner(image_paths, out_path, None)
 }
@@ -51,7 +60,7 @@ pub fn build_pptx(image_paths: &[String], out_path: &str) -> Result<Value, Strin
 pub fn build_pptx_inner(
     image_paths: &[String],
     out_path: &str,
-    text_layer: Option<(&[Vec<Value>], u32, u32)>,
+    text_layer: Option<TextLayer<'_>>,
 ) -> Result<Value, String> {
     if image_paths.is_empty() {
         return Err("没有图片可打包".into());
@@ -174,9 +183,12 @@ pub fn build_pptx_inner(
         let bytes = std::fs::read(p).map_err(|e| format!("读图失败 {p}: {e}"))?;
         put(&mut zip, &format!("ppt/media/image{i}.{media_ext}"), &bytes)?;
         drop(bytes); // ── 立即释放(任务 c §A.4.1 关键)──
-        // 该页的隐形文本框(若启用文本层且该页有 rects)。
-        let boxes = match text_layer {
-            Some((rects, w, h)) if idx < rects.len() => text_boxes_xml(&rects[idx], cx, cy, w, h),
+        // 该页的文本框(若启用文本层且该页有 rects):editable=可见可编辑,否则 alpha=0 隐形。
+        let boxes = match &text_layer {
+            Some(tl) if idx < tl.pages.len() => {
+                let editable = tl.editable.get(idx).copied().unwrap_or(false);
+                text_boxes_xml(&tl.pages[idx], cx, cy, tl.win_w, tl.win_h, editable)
+            }
             _ => String::new(),
         };
         put(&mut zip, &format!("ppt/slides/slide{i}.xml"), slide_xml(cx, cy, &boxes).as_bytes())?;
@@ -213,20 +225,24 @@ fn slide_xml(cx: u64, cy: u64, text_boxes: &str) -> String {
     )
 }
 
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
 
-/// 把一页的文本 rects(窗口 px)生成 alpha=0 隐形文本框 OOXML(叠在图片上=可搜索/读屏)。
-/// 窗口 px → slide EMU 按比例;px 字号 → OOXML 1/100 pt(×0.75×100=×75)。
+/// 把一页的文本 rects(窗口 px)生成文本框 OOXML。窗口 px → slide EMU 按比例;
+/// px 字号 → OOXML 1/100 pt(×0.75×100=×75)。
 ///
+/// editable=true(路线 A 可编辑化,背景图已用 ?notext=1 去字):可见文本框,带真颜色/
+/// 字体/对齐/行距,用户在 PowerPoint 里改字挪框无重影。宽度 +4% buffer 抵消浏览器与
+/// PowerPoint 断行算法差异,normAutofit 兜底防撑爆。
+///
+/// editable=false(旧 deck 降级):alpha=0 隐形层,仅可搜索/读屏。
 /// 工业级化(任务 c §A.1.3 双保险):alpha=0 + `<a:effectLst><a:noFill/></a:effectLst>` 整框透明,
-/// 应对 Keynote16 实测会把 alpha=0 渲成可见白块。两层保险:即使 Keynote 忽略 alpha,
-/// 整框 effectLst 不透明 → 仍透明。
-fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32) -> String {
+/// 应对 Keynote16 实测会把 alpha=0 渲成可见白块。
+fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32, editable: bool) -> String {
     if rects.is_empty() || win_w == 0 || win_h == 0 {
         return String::new();
     }
@@ -241,12 +257,50 @@ fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32) -> 
         }
         let ex = (getf("x") * cx as f64 / win_w as f64).round() as i64;
         let ey = (getf("y") * cy as f64 / win_h as f64).round() as i64;
-        let ew = (pw * cx as f64 / win_w as f64).round() as i64;
+        // 可编辑版宽度 +4%:浏览器断行点 ≠ PowerPoint 断行点,留余量防多折一行。
+        let wbuf = if editable { 1.04 } else { 1.0 };
+        let ew = (pw * wbuf * cx as f64 / win_w as f64).round() as i64;
         let eh = (ph * cy as f64 / win_h as f64).round() as i64;
         let sz = (getf("size").max(8.0) * 75.0).round() as i64;
         let bold = if r.get("bold").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
-        out.push_str(&format!(
-            "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"t{id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
+        if editable {
+            let italic = if r.get("italic").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
+            // 颜色/对齐来自页面提取,白名单校验防 XML 注入(deck 内容不可信)。
+            let color = r.get("color").and_then(|v| v.as_str()).unwrap_or("000000");
+            let color = if color.len() == 6 && color.bytes().all(|b| b.is_ascii_hexdigit()) {
+                color.to_uppercase()
+            } else {
+                "000000".into()
+            };
+            let algn = match r.get("align").and_then(|v| v.as_str()).unwrap_or("l") {
+                "ctr" => "ctr",
+                "r" => "r",
+                "just" => "just",
+                _ => "l",
+            };
+            let serif = r.get("serif").and_then(|v| v.as_bool()).unwrap_or(false);
+            // 安全字体链:中文 ea 必须写,否则 CJK 落到 latin 字体出豆腐块。
+            let (latin, ea) = if serif { ("Georgia", "SimSun") } else { ("Calibri", "Microsoft YaHei") };
+            let lh = getf("lh");
+            let lnspc = if lh > 0.0 {
+                format!("<a:lnSpc><a:spcPts val=\"{}\"/></a:lnSpc>", (lh * 75.0).round() as i64)
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"text{id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
+<p:spPr><a:xfrm><a:off x=\"{ex}\" y=\"{ey}\"/><a:ext cx=\"{ew}\" cy=\"{eh}\"/></a:xfrm>\
+<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\
+<p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" anchor=\"t\"><a:normAutofit/></a:bodyPr>\
+<a:p><a:pPr algn=\"{algn}\">{lnspc}</a:pPr><a:r><a:rPr lang=\"zh-CN\" sz=\"{sz}\" b=\"{bold}\" i=\"{italic}\">\
+<a:solidFill><a:srgbClr val=\"{color}\"/></a:solidFill>\
+<a:latin typeface=\"{latin}\"/><a:ea typeface=\"{ea}\"/></a:rPr>\
+<a:t>{}</a:t></a:r></a:p></p:txBody></p:sp>",
+                xml_escape(text)
+            ));
+        } else {
+            out.push_str(&format!(
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"t{id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
 <p:spPr><a:xfrm><a:off x=\"{ex}\" y=\"{ey}\"/><a:ext cx=\"{ew}\" cy=\"{eh}\"/></a:xfrm>\
 <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/>\
 <a:effectLst><a:noFill/></a:effectLst></p:spPr>\
@@ -254,14 +308,15 @@ fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32) -> 
 <a:p><a:r><a:rPr lang=\"zh-CN\" sz=\"{sz}\" b=\"{bold}\">\
 <a:solidFill><a:srgbClr val=\"000000\"><a:alpha val=\"0\"/></a:srgbClr></a:solidFill></a:rPr>\
 <a:t>{}</a:t></a:r></a:p></p:txBody></p:sp>",
-            xml_escape(text)
-        ));
+                xml_escape(text)
+            ));
+        }
         id += 1;
     }
     out
 }
 
-fn slide_layout_xml(_cx: u64, _cy: u64) -> String {
+pub(crate) fn slide_layout_xml(_cx: u64, _cy: u64) -> String {
     format!(
         "{decl}<p:sldLayout xmlns:a=\"{a}\" xmlns:r=\"{r}\" xmlns:p=\"{p}\" type=\"blank\" preserve=\"1\"><p:cSld name=\"Blank\"><p:spTree>\
 <p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\
@@ -271,7 +326,7 @@ fn slide_layout_xml(_cx: u64, _cy: u64) -> String {
     )
 }
 
-fn slide_master_xml(cx: u64, cy: u64) -> String {
+pub(crate) fn slide_master_xml(cx: u64, cy: u64) -> String {
     format!(
         "{decl}<p:sldMaster xmlns:a=\"{a}\" xmlns:r=\"{r}\" xmlns:p=\"{p}\"><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"FFFFFF\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>\
 <p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\
@@ -285,7 +340,7 @@ fn slide_master_xml(cx: u64, cy: u64) -> String {
 }
 
 /// 最小但合法的 Office 主题(clrScheme/fontScheme/fmtScheme 三件齐全, PowerPoint 才认)。
-fn theme_xml() -> String {
+pub(crate) fn theme_xml() -> String {
     format!("{decl}<a:theme xmlns:a=\"{a}\" name=\"Polaris\"><a:themeElements>\
 <a:clrScheme name=\"Polaris\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1>\
 <a:dk2><a:srgbClr val=\"1F2230\"/></a:dk2><a:lt2><a:srgbClr val=\"EEF1F8\"/></a:lt2>\
@@ -355,11 +410,13 @@ pub fn screenshot(
     Ok(json!({ "ok": true, "out": out_png, "chromium": chromium, "device_scale": device_scale }))
 }
 
-/// 隐形文本层第一步:用 chromium `--dump-dom` 抽取 deck 某页渲染后的文本+包围盒。
-/// 页面在 `?extract=1` 时(runtime.js 提供)把 `[{text,x,y,w,h}]` 写进
-/// `<script id="polaris-text-rects">`;dump-dom 输出 JS 跑完的 DOM,我们从中解析出来。
-/// **无需 chromiumoxide/CDP**。返回 rect 数组(空数组=该页无文本或非 Polaris deck)。
-pub fn extract_text_rects(deck: &str, slide: usize, width: u32, height: u32) -> Result<Vec<Value>, String> {
+/// 文本层第一步:用 chromium `--dump-dom` 抽取 deck 某页渲染后的文本+包围盒+样式。
+/// 页面在 `?extract=1` 时(runtime.js 提供)把 `[{text,x,y,w,h,size,bold,color,align,...}]`
+/// 写进 `<script id="polaris-text-rects">`;dump-dom 输出 JS 跑完的 DOM,我们从中解析出来。
+/// **无需 chromiumoxide/CDP**。返回 (rect 数组, notext_capable):
+/// capable=true 表示该 deck 的 runtime.js 支持 ?notext=1 去字渲染(新版能力标记),
+/// 调用方可走「无字背景+可见文本框」;false=旧 deck,降级 alpha=0 隐形层。
+pub fn extract_text_rects(deck: &str, slide: usize, width: u32, height: u32) -> Result<(Vec<Value>, bool), String> {
     let chromium = crate::forge::find_chromium()
         .ok_or_else(|| "未找到 chromium/chrome".to_string())?;
     let file_base = if deck.starts_with("http://")
@@ -396,20 +453,25 @@ pub fn extract_text_rects(deck: &str, slide: usize, width: u32, height: u32) -> 
 }
 
 /// 从 dump-dom 的 HTML 里抠出 `<script id="polaris-text-rects">` 的 JSON 数组。
-fn parse_text_rects(html: &str) -> Result<Vec<Value>, String> {
+/// 第二个返回值 = 标签上是否带 `data-notext-capable="1"`(新版 runtime.js 能力标记)。
+fn parse_text_rects(html: &str) -> Result<(Vec<Value>, bool), String> {
     let marker = "id=\"polaris-text-rects\"";
     let Some(i) = html.find(marker) else {
-        return Ok(Vec::new()); // 没有该元素 = 非 Polaris deck 或无文本,优雅返回空(不报错)。
+        return Ok((Vec::new(), false)); // 没有该元素 = 非 Polaris deck 或无文本,优雅返回空(不报错)。
     };
     let after = &html[i..];
     let gt = after.find('>').ok_or("text-rects script 标签异常")?;
+    // 能力标记只可能出现在开标签的属性区(gt 之前)。
+    let capable = after[..gt].contains("data-notext-capable=\"1\"");
     let body = &after[gt + 1..];
     let end = body.find("</script>").ok_or("text-rects script 未闭合")?;
     let json = body[..end].trim();
     if json.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), capable));
     }
-    serde_json::from_str::<Vec<Value>>(json).map_err(|e| format!("text-rects JSON 解析失败: {e}"))
+    let rects = serde_json::from_str::<Vec<Value>>(json)
+        .map_err(|e| format!("text-rects JSON 解析失败: {e}"))?;
+    Ok((rects, capable))
 }
 
 /// 数 deck.html 里的幻灯页数:统计 class 列表含独立 token `slide` 的元素(排除 slide-number 等)。
@@ -446,7 +508,22 @@ pub fn capture_slides(
     device_scale: u32,
     slides_override: Option<usize>,
 ) -> Result<(std::path::PathBuf, Vec<String>), String> {
-    // 上限护栏:畸形 deck/参数别 spawn 成千上万个 chromium 进程拖垮机器(让模块再也不会有问题)。
+    let (file_base, n) = resolve_deck_pages(deck, slides_override)?;
+    let frames = new_frames_dir()?;
+    let mut pngs: Vec<String> = Vec::new();
+    for i in 1..=n {
+        let png = frames.join(format!("slide-{i}.png"));
+        let url = format!("{file_base}?export=1#/{i}");
+        screenshot(&url, &png.to_string_lossy(), width, height, device_scale)
+            .map_err(|e| format!("第 {i} 页截图失败: {e}"))?;
+        pngs.push(png.to_string_lossy().to_string());
+    }
+    Ok((frames, pngs))
+}
+
+/// 解析 deck → (file://或 http 基底 URL, 页数)。capture_slides / render_deck_to_pptx 共用。
+/// 上限护栏:畸形 deck/参数别 spawn 成千上万个 chromium 进程拖垮机器。
+fn resolve_deck_pages(deck: &str, slides_override: Option<usize>) -> Result<(String, usize), String> {
     const MAX_SLIDES: usize = 300;
     const MAX_DECK_BYTES: u64 = 50 * 1024 * 1024;
     if let Some(n) = slides_override {
@@ -486,23 +563,23 @@ pub fn capture_slides(
             "幻灯页数 {n} 超过上限 {MAX_SLIDES}(疑似畸形 deck)"
         ));
     }
-    // pid + 进程内唯一序号:并发的两个渲染各用独立目录,不会互相覆盖帧(并发安全)。
+    Ok((file_base, n))
+}
+
+/// pid + 进程内唯一序号:并发的两个渲染各用独立目录,不会互相覆盖帧(并发安全)。
+fn new_frames_dir() -> Result<std::path::PathBuf, String> {
     let seq = CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
     let frames = std::env::temp_dir().join(format!("forge_deck_{}_{}", std::process::id(), seq));
     let _ = std::fs::remove_dir_all(&frames);
     std::fs::create_dir_all(&frames).map_err(|e| format!("建临时帧目录失败: {e}"))?;
-    let mut pngs: Vec<String> = Vec::new();
-    for i in 1..=n {
-        let png = frames.join(format!("slide-{i}.png"));
-        let url = format!("{file_base}?export=1#/{i}");
-        screenshot(&url, &png.to_string_lossy(), width, height, device_scale)
-            .map_err(|e| format!("第 {i} 页截图失败: {e}"))?;
-        pngs.push(png.to_string_lossy().to_string());
-    }
-    Ok((frames, pngs))
+    Ok(frames)
 }
 
 /// deck.html → 多页 .pptx 一步到位(三平台同一份)。
+///
+/// 路线 A 可编辑化(ADR-012 v2):每页先 extract 文本 rects,若该 deck 的 runtime.js
+/// 支持 ?notext=1(能力标记)且该页有文本,则背景截「无字底」+ 叠可见文本框 = 真可编辑;
+/// 旧 deck / 提取失败的页自动降级为「含字背景 + alpha=0 隐形层」(仅可搜索),绝不重影。
 pub fn render_deck_to_pptx(
     deck: &str,
     out_pptx: &str,
@@ -511,20 +588,47 @@ pub fn render_deck_to_pptx(
     searchable: bool,
     slides_override: Option<usize>,
 ) -> Result<Value, String> {
-    // PPT 默认 2x 高清(投影/全屏放大不糊字;架构文档§06①)。
-    let (frames, pngs) = capture_slides(deck, width, height, 2, slides_override)?;
-    let n = pngs.len();
-    // 隐形文本层(架构文档②差异化):逐页 dump-dom 提取文本 rects → 叠 alpha=0 文本框 = 可搜索/读屏。
-    // 额外一次 chromium/页;某页提取失败则该页降级为纯图(不阻断)。非 Polaris deck(无 runtime.js)→空。
-    let slides_text: Vec<Vec<Value>> = if searchable {
-        (1..=n)
-            .map(|i| extract_text_rects(deck, i, width, height).unwrap_or_default())
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let (file_base, n) = resolve_deck_pages(deck, slides_override)?;
+    let frames = new_frames_dir()?;
+    let mut pngs: Vec<String> = Vec::new();
+    let mut slides_text: Vec<Vec<Value>> = Vec::new();
+    let mut editable: Vec<bool> = Vec::new();
+    let run = (|| -> Result<(), String> {
+        for i in 1..=n {
+            // 先提取该页文本(额外一次 chromium/页;失败降级纯图,不阻断)。
+            let (rects, capable) = if searchable {
+                extract_text_rects(deck, i, width, height).unwrap_or((Vec::new(), false))
+            } else {
+                (Vec::new(), false)
+            };
+            // 只有「确认 runtime 支持 notext + 该页真有文本」才去字截图——
+            // 否则背景仍含字而我们又叠可见文本框就会双重文字。
+            let use_notext = capable && !rects.is_empty();
+            let png = frames.join(format!("slide-{i}.png"));
+            let url = format!(
+                "{file_base}?export=1{}#/{i}",
+                if use_notext { "&notext=1" } else { "" }
+            );
+            // PPT 默认 2x 高清(投影/全屏放大不糊字;架构文档§06①)。
+            screenshot(&url, &png.to_string_lossy(), width, height, 2)
+                .map_err(|e| format!("第 {i} 页截图失败: {e}"))?;
+            pngs.push(png.to_string_lossy().to_string());
+            slides_text.push(rects);
+            editable.push(use_notext);
+        }
+        Ok(())
+    })();
+    if let Err(e) = run {
+        let _ = std::fs::remove_dir_all(&frames);
+        return Err(e);
+    }
     let layer = if searchable {
-        Some((slides_text.as_slice(), width, height))
+        Some(TextLayer {
+            pages: slides_text.as_slice(),
+            editable: editable.as_slice(),
+            win_w: width,
+            win_h: height,
+        })
     } else {
         None
     };
@@ -532,7 +636,11 @@ pub fn render_deck_to_pptx(
     let _ = std::fs::remove_dir_all(&frames);
     let r = r?;
     let text_total: usize = slides_text.iter().map(|v| v.len()).sum();
-    Ok(json!({ "ok": true, "out": out_pptx, "slides": n, "searchable": searchable, "text_boxes": text_total, "detail": r }))
+    let editable_pages = editable.iter().filter(|b| **b).count();
+    Ok(json!({
+        "ok": true, "out": out_pptx, "slides": n, "searchable": searchable,
+        "text_boxes": text_total, "editable_pages": editable_pages, "detail": r
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -641,7 +749,7 @@ mod tests {
         let r = build_pptx_inner(
             &[img.to_string_lossy().into()],
             &out.to_string_lossy(),
-            Some((&rects, 1280, 720)),
+            Some(TextLayer { pages: &rects, editable: &[false], win_w: 1280, win_h: 720 }),
         )
         .unwrap();
         assert_eq!(r["slides"], 1);
@@ -656,6 +764,67 @@ mod tests {
         assert!(s.contains("<a:alpha val=\"0\"/>"), "应有 alpha=0 隐形文本");
         assert!(s.contains("Hello&lt;World&gt;"), "文本应 XML 转义并嵌入");
         assert!(s.contains("txBox=\"1\""), "应是文本框");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_pptx_editable_layer_visible_text() {
+        // 路线 A:editable=true 的页应产出可见文本框(真颜色/字体/对齐),不带 alpha=0。
+        let dir = std::env::temp_dir().join("polaris_forge_editlayer");
+        let _ = std::fs::create_dir_all(&dir);
+        let img = dir.join("a.png");
+        std::fs::write(&img, b"fake").unwrap();
+        let out = dir.join("out.pptx");
+        let rects = vec![vec![serde_json::json!({
+            "text":"• 真可编辑","x":50.0,"y":40.0,"w":200.0,"h":46.0,"size":40.0,
+            "bold":true,"italic":false,"color":"FF6600","align":"ctr","serif":false,"lh":48.0
+        })]];
+        build_pptx_inner(
+            &[img.to_string_lossy().into()],
+            &out.to_string_lossy(),
+            Some(TextLayer { pages: &rects, editable: &[true], win_w: 1280, win_h: 720 }),
+        )
+        .unwrap();
+        let f = std::fs::File::open(&out).unwrap();
+        let mut z = zip::ZipArchive::new(f).unwrap();
+        let mut s = String::new();
+        use std::io::Read;
+        z.by_name("ppt/slides/slide1.xml").unwrap().read_to_string(&mut s).unwrap();
+        assert!(!s.contains("<a:alpha val=\"0\"/>"), "可编辑模式不应有隐形 alpha");
+        assert!(s.contains("val=\"FF6600\""), "应带真实颜色");
+        assert!(s.contains("algn=\"ctr\""), "应带对齐");
+        assert!(s.contains("typeface=\"Microsoft YaHei\""), "中文 ea 字体必须写,防豆腐块");
+        assert!(s.contains("<a:normAutofit/>"), "应有 autofit 防换行差异撑爆");
+        assert!(s.contains("<a:lnSpc><a:spcPts val=\"3600\"/></a:lnSpc>"), "行距 48px→3600(1/100pt)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editable_layer_rejects_bad_color_align() {
+        // deck 内容不可信:畸形 color/align 必须被白名单挡掉,不可注入 XML。
+        let dir = std::env::temp_dir().join("polaris_forge_editlayer_bad");
+        let _ = std::fs::create_dir_all(&dir);
+        let img = dir.join("a.png");
+        std::fs::write(&img, b"fake").unwrap();
+        let out = dir.join("out.pptx");
+        let rects = vec![vec![serde_json::json!({
+            "text":"x","x":1.0,"y":1.0,"w":10.0,"h":10.0,"size":12.0,
+            "color":"\"/><evil>","align":"\"/><evil>"
+        })]];
+        build_pptx_inner(
+            &[img.to_string_lossy().into()],
+            &out.to_string_lossy(),
+            Some(TextLayer { pages: &rects, editable: &[true], win_w: 1280, win_h: 720 }),
+        )
+        .unwrap();
+        let f = std::fs::File::open(&out).unwrap();
+        let mut z = zip::ZipArchive::new(f).unwrap();
+        let mut s = String::new();
+        use std::io::Read;
+        z.by_name("ppt/slides/slide1.xml").unwrap().read_to_string(&mut s).unwrap();
+        assert!(!s.contains("<evil>"), "畸形值不得注入 XML");
+        assert!(s.contains("val=\"000000\""), "坏颜色应回退黑色");
+        assert!(s.contains("algn=\"l\""), "坏对齐应回退左对齐");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -686,11 +855,17 @@ mod tests {
     #[test]
     fn parse_text_rects_extracts_json() {
         let html = r#"<html><body><script type="application/json" id="polaris-text-rects">[{"text":"hi","x":10,"y":20,"w":100,"h":30}]</script></body></html>"#;
-        let r = parse_text_rects(html).unwrap();
+        let (r, capable) = parse_text_rects(html).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0]["text"], "hi");
+        assert!(!capable, "旧版无能力标记 → capable=false(降级隐形层)");
+        // 新版带能力标记 → capable=true。
+        let html2 = r#"<script type="application/json" id="polaris-text-rects" data-notext-capable="1">[{"text":"hi","x":1,"y":2,"w":3,"h":4}]</script>"#;
+        let (r2, capable2) = parse_text_rects(html2).unwrap();
+        assert_eq!(r2.len(), 1);
+        assert!(capable2);
         // 无该元素 → 优雅返回空,不报错。
-        assert_eq!(parse_text_rects("<html></html>").unwrap().len(), 0);
+        assert_eq!(parse_text_rects("<html></html>").unwrap().0.len(), 0);
     }
 
     #[test]
@@ -722,7 +897,7 @@ JSON.stringify([{text:el.textContent,x:Math.round(r.left),y:Math.round(r.top),w:
 </body></html>",
         )
         .unwrap();
-        let rects = extract_text_rects(&deck.to_string_lossy(), 1, 1280, 720)
+        let (rects, _capable) = extract_text_rects(&deck.to_string_lossy(), 1, 1280, 720)
             .expect("extract_text_rects 应成功");
         assert_eq!(rects.len(), 1, "应抽到 1 个文本框,实际: {rects:?}");
         assert_eq!(rects[0]["text"], "Hello Polaris");

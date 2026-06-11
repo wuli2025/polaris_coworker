@@ -511,7 +511,10 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             opt_usize(a, "height").map(|n| n as u32),
             opt_usize(a, "scale").map(|n| n as u32),
         ),
-        "forge_deck_to_pptx" => forge::forge_deck_to_pptx(
+        // spec JSON → 原生可编辑 .pptx(路线 B 传统PPT,零浏览器 → slim 镜像也能出 PPT)
+        "forge_spec_to_pptx" => forge::spec_to_pptx_sync(req_str(a, "spec")?, req_str(a, "out")?),
+        // 桌面同名命令是 async 包装(防冻 UI); 这里本就在阻塞线程池, 直调同步内核
+        "forge_deck_to_pptx" => forge::deck_to_pptx_sync(
             req_str(a, "deck")?,
             req_str(a, "out")?,
             opt_usize(a, "width").map(|n| n as u32),

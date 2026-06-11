@@ -22,6 +22,11 @@ import { useChatStore } from "../stores/chat";
 import { artifacts as artifactsApi, chat as chatApi, type AttachedFile } from "../tauri";
 import { useFileDrop } from "../composables/useFileDrop";
 import { groupedThemes, findTheme, type DeckTheme } from "../lib/deckThemes";
+import { specPreviewHtml } from "../lib/slidesSpec";
+
+// KeepAlive 的 include 按组件 name 匹配 → 显式命名:切去对话看进度再切回来,
+// phase/convId/产物预览都还在,「继续修改」不丢
+defineOptions({ name: "DeckStudio" });
 
 const app = useAppStore();
 const chat = useChatStore();
@@ -134,8 +139,10 @@ function buildPrompt(): string {
     "请使用 polaris-deck-studio skill 制作一份演示。",
     "",
     "## 制作配置",
-    `- 输出模式：${isPpt.value ? "pptx（最终交付 .pptx，整版图嵌入，像素级还原主题；同时保留自包含 deck.html）" : "html（最终交付自包含单文件 .html）"}`,
-    `- 主题：${themeLine}`,
+    `- 输出模式：${isPpt.value
+      ? "pptx——传统 PPT（**原生可编辑**）。不写 deck.html，改为产出结构化 spec 文件 polaris.slides.json，再转换成真文本框/真形状、100% 可编辑的 .pptx（spec 路线详见 SKILL.md「传统 PPT」一节）"
+      : "html（最终交付自包含单文件 .html）"}`,
+    `- 主题：${themeLine}${isPpt.value ? "——传统 PPT 用 spec 内置 6 色板,从中选气质最接近所选主题的一个" : ""}`,
     `- 画幅比例：${aspect.value}`,
     autoSlides.value
       ? "- 页数：由你按内容自动决定（内容多则多页、少则少页，别硬凑也别硬砍）"
@@ -155,15 +162,20 @@ function buildPrompt(): string {
   }
   lines.push("", "## 正文内容");
   lines.push(contentText.value.trim() || "（见上方素材文件）");
-  lines.push(
-    "",
-    "## 要求",
-    "- 严格按 SKILL.md：把 base.css + themes.css 内联进 <style>、runtime.js 内联进 <script>，产出**自包含** deck.html，存到产物目录。",
-    isPpt.value
-      ? "- 然后运行 install-deps.mjs（首次）+ export-pptx.mjs，把 deck.html 导成 .pptx。依赖缺失则按 SKILL.md 兜底（打印 PDF 或 python-pptx），并说明。"
-      : "- 网页模式到此即可，无需导出。",
-    "- 回答末尾用**绝对路径**列出最终产物文件。",
-  );
+  lines.push("", "## 要求");
+  if (isPpt.value) {
+    lines.push(
+      "- 严格按 SKILL.md「传统 PPT(spec 路线)」：把内容编排成 polaris.slides.json（7 种版式，标题短、要点凝练，每页可带 notes 口播稿），存到产物目录。",
+      "- 然后用 Polaris 自带 CLI 转换：`polaris-forge spec-pptx --spec=<产物目录>/polaris.slides.json --out=<产物目录>/演示.pptx`（CLI 在 ~/Polaris/bin/，Windows 为 polaris-forge.exe）。",
+      "- 若 CLI 不存在也不用慌：把 spec 按上述文件名存好即可，Polaris 会自动完成转换。",
+    );
+  } else {
+    lines.push(
+      "- 严格按 SKILL.md：把 base.css + themes.css 内联进 <style>、runtime.js 内联进 <script>，产出**自包含** deck.html，存到产物目录。",
+      "- 网页模式到此即可，无需导出。",
+    );
+  }
+  lines.push("- 回答末尾用**绝对路径**列出最终产物文件。");
   return lines.join("\n");
 }
 function revisePrompt(text: string): string {
@@ -175,7 +187,7 @@ function revisePrompt(text: string): string {
     "## 要求",
     "- 直接在**原产物文件上修改**（保持文件名不变，别另起新文件），改完重新保存。",
     isPpt.value
-      ? "- 若交付物是 .pptx，改完 deck.html 后重新运行 export-pptx.mjs 覆盖导出。"
+      ? "- 传统 PPT：直接改 polaris.slides.json，再重新运行 `polaris-forge spec-pptx` 覆盖导出 .pptx；CLI 不可用则改完 spec 即可（Polaris 自动转换）。"
       : "- 网页模式：改完自包含 .html 即可。",
     "- 回答末尾用绝对路径列出更新后的产物文件。",
   ].join("\n");
@@ -272,7 +284,9 @@ const outputs = ref<{ path: string; name: string }[]>([]);
 const hasResult = computed(() => outputs.value.length > 0);
 const previewHtml = ref<string>("");
 const previewPath = ref<string>("");
-const outRe = computed(() => (isPpt.value ? /\.(pptx|html?)$/i : /\.html?$/i));
+const outRe = computed(() =>
+  isPpt.value ? /\.pptx$|polaris\.slides\.json$|\.html?$/i : /\.html?$/i
+);
 
 async function loadOutputs() {
   if (!convId.value) return;
@@ -287,25 +301,57 @@ async function loadOutputs() {
     /* ignore */
   }
 }
-// 读取自包含 .html 喂 iframe srcdoc 做实时预览
+// 读取自包含 .html(网页模式)或 polaris.slides.json(传统PPT spec,确定性渲染)喂 iframe srcdoc。
+// 不能按「路径没变就跳过」短路:继续修改是覆盖写原文件(文件名不变),必须重读;
+// 但内容没变就不动 srcdoc,免得轮询期间 iframe 无谓重载、丢掉当前翻页。
 async function loadPreview() {
   const htmlOut = outputs.value.find((o) => /\.html?$/i.test(o.name));
-  if (!htmlOut) return;
-  if (htmlOut.path === previewPath.value && previewHtml.value) return;
-  try {
-    const p = await artifactsApi.read(htmlOut.path);
-    if (p?.text) {
-      previewHtml.value = p.text;
-      previewPath.value = htmlOut.path;
+  if (htmlOut) {
+    try {
+      const p = await artifactsApi.read(htmlOut.path);
+      if (p?.text && (p.text !== previewHtml.value || htmlOut.path !== previewPath.value)) {
+        previewHtml.value = p.text;
+        previewPath.value = htmlOut.path;
+      }
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
+    return;
+  }
+  // 传统PPT(spec 路线):spec → 预览 HTML,与导出引擎同构(预览即导出)。
+  const specOut = outputs.value.find((o) => /polaris\.slides\.json$/i.test(o.name));
+  if (specOut && isPpt.value) {
+    try {
+      const p = await artifactsApi.read(specOut.path);
+      const html = p?.text ? specPreviewHtml(p.text) : null;
+      if (html && (html !== previewHtml.value || specOut.path !== previewPath.value)) {
+        previewHtml.value = html;
+        previewPath.value = specOut.path;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+// 兜底转换:模型只写了 spec(CLI 不在/没跑成)→ 桌面端自己调原生引擎出 .pptx。
+async function ensureSpecConverted() {
+  if (!isPpt.value) return;
+  const spec = outputs.value.find((o) => /polaris\.slides\.json$/i.test(o.name));
+  if (!spec || outputs.value.some((o) => /\.pptx$/i.test(o.name))) return;
+  try {
+    const out = spec.path.replace(/polaris\.slides\.json$/i, "演示.pptx");
+    await artifactsApi.specToPptx(spec.path, out);
+    await loadOutputs();
+  } catch (e: any) {
+    error.value = `spec → PPT 转换失败：${e?.message ?? e}`;
   }
 }
 
 watch(sending, async (now, before) => {
   if (before && !now && phase.value === "generating") {
     await loadOutputs();
+    await ensureSpecConverted();
     phase.value = "done";
   }
 });
@@ -480,7 +526,7 @@ function fillDemo() {
               <button v-if="phase !== 'generating'" class="dk-ghost" @click="loadOutputs">重新加载预览</button>
             </div>
             <div v-if="isPpt && pptxOut" class="dk-preview-tip">
-              预览是网页 deck；最终 <b>.pptx</b> 已生成，点左侧产物或「打开」查看。
+              最终 <b>.pptx</b> 已生成（原生可编辑：可改字/换色/挪位置），点左侧产物打开。
             </div>
           </div>
 
