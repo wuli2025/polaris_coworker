@@ -9,19 +9,30 @@
  *   3. Playwright channel（按名字驱动系统 Edge/Chrome，仍不下载）
  *
  * 返回值直接展开进 chromium.launch(...)：要么 {executablePath}，要么 {channel}。
+ * 全都没有时抛错（带可读指引），绝不退回"自动下载一个 chromium"。
  */
 import { existsSync } from "node:fs";
 
+// 容器/Linux(尤其 root) 下 chromium 必须关沙箱才能起；/dev/shm 常很小要绕开;无 GPU。
+// 桌面 headless 截图带上也无害(标准 CI 参数)。
+const SANDBOX_OFF = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"];
+
 export function findLocalBrowser() {
+  const plat = process.platform;
+  // 非 Win/Mac(即 Docker/Linux) 一律带关沙箱参数; Win/Mac 桌面不需要(也不削弱本机浏览器安全)。
+  const argsFor = (fromEnv) => (fromEnv || plat === "linux" ? SANDBOX_OFF.slice() : []);
+
+  // 1) 显式 env —— 优先 headless-shell（Docker / 自带），再通用 chromium 覆盖。
+  //    env 提供的多半是容器/headless 浏览器(如 Docker 的 /usr/bin/chromium) → 必带关沙箱。
   for (const v of [
     process.env.POLARIS_CHROMIUM_HEADLESS_SHELL,
     process.env.POLARIS_CHROMIUM,
     process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   ]) {
-    if (v && existsSync(v)) return { executablePath: v };
+    if (v && existsSync(v)) return { executablePath: v, args: argsFor(true) };
   }
 
-  const plat = process.platform;
+  // 2) 本机已装浏览器固定路径（与 Rust find_chromium 同名同路）
   const candidates =
     plat === "win32"
       ? [
@@ -44,12 +55,14 @@ export function findLocalBrowser() {
             "/usr/bin/chromium-browser",
           ];
   for (const p of candidates) {
-    if (existsSync(p)) return { executablePath: p };
+    if (existsSync(p)) return { executablePath: p, args: argsFor(false) };
   }
 
-  return { channel: plat === "win32" ? "msedge" : "chrome" };
+  // 3) Playwright channel —— 让 Playwright 自己按名字找系统 Edge/Chrome（仍不下载二进制）
+  return { channel: plat === "win32" ? "msedge" : "chrome", args: argsFor(false) };
 }
 
+/** 给日志用的一句话说明本次选了哪个浏览器。 */
 export function describeBrowser(opt) {
   return opt.executablePath ? `本机浏览器 ${opt.executablePath}` : `系统 channel: ${opt.channel}`;
 }
