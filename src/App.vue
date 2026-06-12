@@ -32,6 +32,7 @@ const Automation = defineAsyncComponent(() => import("./components/Automation.vu
 const AutomationModal = defineAsyncComponent(() => import("./components/AutomationModal.vue"));
 const ClaudeMdPanel = defineAsyncComponent(() => import("./components/ClaudeMdPanel.vue"));
 const Settings = defineAsyncComponent(() => import("./components/Settings.vue"));
+const SenseApi = defineAsyncComponent(() => import("./components/SenseApi.vue"));
 const SkillCenter = defineAsyncComponent(() => import("./components/SkillCenter.vue"));
 const AddProviderModal = defineAsyncComponent(() => import("./components/AddProviderModal.vue"));
 const McpConfigModal = defineAsyncComponent(() => import("./components/McpConfigModal.vue"));
@@ -201,6 +202,7 @@ function startSbDrag(e: MouseEvent) {
         <FeishuSettings v-else-if="mountedView === 'feishu'" />
         <McpConfigModal v-else-if="mountedView === 'mcp'" inline @close="app.setView('chat')" />
         <Settings v-else-if="mountedView === 'settings'" />
+        <SenseApi v-else-if="mountedView === 'sense_api'" />
         <VideoCourseStudio v-else-if="mountedView === 'video_course'" />
         <MediaOps v-else-if="mountedView === 'media_ops'" />
         <DeckStudio v-else-if="mountedView === 'deck'" />

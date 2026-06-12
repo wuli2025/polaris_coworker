@@ -14,11 +14,14 @@ pub mod forge_pptx;
 pub mod forge_pptx_native; // 路线 B:spec JSON → 原生可编辑 .pptx(零浏览器,Docker slim 可用)
 pub mod forge_tts;
 pub mod forge_video;
+pub mod fable;
 pub mod infer;
 pub mod kb;
 pub mod persona;
+pub mod echo;
 pub mod project;
 pub mod provider;
+pub mod sense;
 pub mod skills;
 pub mod wecom;
 // 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。
@@ -96,6 +99,11 @@ pub fn run() {
             let _ = updater::init(h);
             // 飞书网关「开机自动启动」：若用户开了 auto_start 且凭证齐全，后台自动拉起（不阻塞启动）。
             feishu::auto_start_if_enabled(h);
+            // 寓言计划:感官 API 坞(注册表合并 + 落盘)与回声层「每日做梦」调度。
+            sense::init();
+            echo::start_scheduler(h.clone());
+            // 寓言计划:检索枢纽(fable.db 表结构就位;盘点/索引由用户在设置页触发)。
+            fable::init();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -230,6 +238,24 @@ pub fn run() {
             updater::updater_apply,
             // 原生标题栏染色（主题切换联动）
             titlebar::set_titlebar_color,
+            // 寓言计划 · 感官 API 坞(设置页:服务商配置/探活/本地感官包下载)
+            sense::sense_list,
+            sense::sense_set,
+            sense::sense_switches_set,
+            sense::sense_test,
+            sense::sense_pack_install,
+            sense::sense_pack_remove,
+            // 寓言计划 · 回声层(对话归档 + 每日做梦蒸馏)
+            conv::conv_archive_conversation,
+            echo::echo_status,
+            echo::echo_set,
+            echo::echo_dream_now,
+            // 寓言计划 · 检索枢纽(盘点 L1a + 向量索引 + 塌平混检)
+            fable::fable_status,
+            fable::fable_cancel,
+            fable::inventory::fable_inventory_start,
+            fable::index::fable_index_start,
+            fable::retrieve::fable_search,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Polaris application")
