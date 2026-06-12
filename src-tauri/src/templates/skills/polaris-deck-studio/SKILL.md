@@ -21,8 +21,9 @@ assets/base.css      幻灯片引擎 + 设计 token（来自 open-design，MIT�
 assets/themes.css    17 套主题（[data-theme] 属性选择器）
 assets/runtime.js    翻页 / 主题切换(T) / 概览(O) / 全屏(F) / 打印(P) / #/N 深链
 templates/deck.html  起始模板（含 5 页示例 + 动画用法）
-scripts/install-deps.mjs   装 playwright + pptxgenjs（仅 PPT 导出需要）
+scripts/install-deps.mjs   装 playwright + pptxgenjs（仅 PPT 导出需要；只装库，禁浏览器自动下载）
 scripts/export-pptx.mjs    deck.html → .pptx（逐页截图，整版图嵌入）
+scripts/find-browser.mjs   定位本机/自带浏览器给 Playwright（不下载；与 Rust find_chromium 同链）
 ```
 
 ---
@@ -122,7 +123,7 @@ polaris-forge spec-pptx --spec="<产物目录>/polaris.slides.json" --out="<产�
 polaris-forge pptx --deck="<产物目录>/演示-<主题>.html" --out="<产物目录>/演示-<主题>.pptx" --width=1920 --height=1080
 ```
 分层导出：每页先提取文本框（坐标/字号/颜色），背景按「隐藏文字」重新截图 → 真文本框叠在无字背景上 = **视觉还原 + 文字可编辑**（挪开文字无重影）。需要环境里有 chromium/Chrome/Edge（CLI 自动探测；Docker 需 full 镜像）。
-CLI 不可用时的旧路（Node，最后手段）：先 `node ~/Polaris/skills/polaris-deck-studio/scripts/install-deps.mjs`，再跑 `scripts/export-pptx.mjs --deck=… --out=… --width=1920 --height=1080`（整版图嵌入，文字不可编辑）。
+CLI 不可用时的旧路（Node，最后手段）：先 `node ~/Polaris/skills/polaris-deck-studio/scripts/install-deps.mjs`（只装 JS 库，浏览器用本机 Edge/Chrome，**不会自动下载 chromium**），再跑 `scripts/export-pptx.mjs --deck=… --out=… --width=1920 --height=1080`（整版图嵌入，文字不可编辑）。浏览器由 `find-browser.mjs` 自动定位；缺浏览器就走 Ctrl+P 打印 PDF 兜底。
 
 ---
 

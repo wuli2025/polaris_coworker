@@ -287,6 +287,14 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     final_prompt.push_str(longtask_convention());
     final_prompt.push_str("\n\n---\n\n");
 
+    // 2.21 脚本执行公约 (always-on): 模型爱写临时脚本干活, 但用户机器上的 `python`/`python3`
+    //      极可能是 Microsoft Store 的 0 字节占位符(实证截图: python3.exe 是占位符 → 做 PPT
+    //      只能降级成 HTML), 裸调必失败或假成功。统一要求: Python 一律 `uv run` + PEP 723 内联
+    //      依赖, 禁裸调 python/系统 pip; Node 脚本先自检可用性。uv 由环境医生预置并已注入 PATH
+    //      (见 doctor::ensure_uv_on_process_path), 三端(win/mac/docker)同构。
+    final_prompt.push_str(script_convention());
+    final_prompt.push_str("\n\n---\n\n");
+
     // 2.15 分批长任务: 超长生成(60 页 PPT 这类)拆成有界批次, 每轮只建 ≤K 个 pending 单元,
     //      用 polaris.build.json 清单做 checkpoint, 断线从下一个 pending 续跑 ——
     //      规避单轮输出过长把流式连接拖死(socket closed → 进程坏死)。
@@ -1437,6 +1445,48 @@ fn longtask_convention() -> &'static str {
 本轮完成一部分并如实告诉用户「完成 N/M, 再说一声『继续』可从断点接着跑」—— 这是唯一诚实的跨轮方式。\n\n\
 例外: 为**临时验证**起的 dev server 可以后台拉起, 但要明白它活不过本轮; 要给用户**长期可用**的服务, \
 按「可运行项目约定」打包项目并写好启动脚本, 让用户自己一键拉起。"
+}
+
+/// 脚本执行公约 (Polaris, always-on) —— 根治「Claude 写了脚本却跑不起来」。
+///
+/// 背景(实证): 用户机器上的 `python` / `python3` 常常是 Microsoft Store 的 0 字节执行别名
+/// 占位符(`%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe`), 在无控制台 spawn 的子进程里
+/// 起不来 —— 模型探测到「有 python」便去用, 结果失败或假装成功(截图实证: 做 .pptx 因此只能
+/// 降级成 HTML)。解法不是赌用户机器的解释器, 而是统一走 **uv**: 它一个二进制同时管「装解释器」
+/// 与「按脚本装依赖」, 由环境医生预置、已注入子进程 PATH(`doctor::ensure_uv_on_process_path`),
+/// win/mac/docker 三端同构。本公约把这套规范写死进每轮 system 指令, 从行为层面根治。
+fn script_convention() -> &'static str {
+    "## 脚本执行公约 (Polaris) —— 必须遵守\n\n\
+你常会写临时脚本来干活。本机的脚本运行时由北极星统一托管, 遵守以下铁律, 否则脚本大概率跑不起来。\n\n\
+**Python —— 一律走 `uv`, 禁止裸调系统 Python / pip**:\n\
+- **执行脚本**: 用 `uv run 脚本.py`(或 `uv run --no-project 脚本.py`)。\
+**禁止** `python 脚本.py` / `python3 脚本.py` —— 用户机器上的 `python` 极可能是 \
+Microsoft Store 的 0 字节占位符, 直接调用会报错或「假装成功」却没真在跑。\n\
+- **管依赖**: 用 `uv pip install` / `uv pip ...`, 或在脚本头写 PEP 723 内联声明(见下)。\
+**禁止** `pip install` / `pip3 install` 等一切系统 pip 命令。\n\
+- **声明依赖**: 脚本要用第三方库时, 在文件**开头**写 PEP 723 内联块并**钉死版本**, 让 uv 自动建临时环境, \
+**不要**外置 requirements.txt:\n\
+```python\n\
+# /// script\n\
+# requires-python = \">=3.11\"\n\
+# dependencies = [\"pillow==11.0.0\", \"requests==2.32.3\"]\n\
+# ///\n\
+```\n\
+写好后直接 `uv run 脚本.py` —— uv 会先把这些依赖装好再跑, 全程无需用户机器预装任何东西。\n\
+- **uv 找不到时**: 提示用户去「环境医生」一键安装 uv, **不要**自己去装 Python / pip。\n\n\
+**Node 脚本**: 先确认 `node` 可用(技能自带的 install-deps 脚本会自检); 不可用就改用 Python(uv) 等价实现, \
+或提示用户在环境医生里安装, **禁止** `npm install -g` 全局安装污染用户环境。\n\n\
+**浏览器自动化(操纵网页/抓取/自动填表/截图等)一律用 Playwright**:\n\
+- 新功能**统一用 Playwright**(JS/TS), 不要新写 puppeteer / selenium / 裸 CDP; 存量简单脚本(如 export-pptx)可沿用。\n\
+- **必须用 Locator + 自动等待**: 用 `page.getByRole/getByText/locator(...)` 配 `.click()/.fill()` 等(Playwright 自动等元素就绪), \
+**禁止** `waitForTimeout` 死等 + `querySelector` 手撸这类脆弱写法。\n\
+- **浏览器要找本机已装的, 绝不自动下载**: 用 `chromium.launch({...})` 时传本机浏览器 —— 优先认 \
+`POLARIS_CHROMIUM` / `POLARIS_CHROMIUM_HEADLESS_SHELL` 环境变量(app 经 ureq 分发/Docker 注入), \
+其次本机 Edge/Chrome 固定路径(`executablePath`), 再不行用 `channel:'msedge'/'chrome'`; \
+装依赖时设 `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`, **禁止** `npx playwright install chromium` 那种联网下载。\
+两套视频/演示技能的 `scripts/find-browser.mjs` 就是现成的本机浏览器探测器, 直接 import 复用。\n\n\
+**优先用内置能力**: 截图 / 出 PPT / 出视频 / TTS 这类已有 `polaris-forge` 或应用内置命令的活, \
+优先调它们; 临时脚本是最后手段。"
 }
 
 /// 粗估文本 token 数(无需 tokenizer 依赖)。ASCII 约 4 字符/token; 非 ASCII(中日韩等)

@@ -45,6 +45,23 @@ function authHeaders(): Record<string, string> {
   return t ? { authorization: `Bearer ${t}` } : {};
 }
 
+/**
+ * 受 token 保护的后端文件 URL（Docker/Web 用）。
+ * - 默认内联：HTML 在新标签渲染、图片直接显示。
+ * - download:true → 后端加 Content-Disposition: attachment，强制下载。
+ * window.open / <a download> 等导航请求带不了 Authorization 头，token 故走 query（与 /ws 同理）。
+ */
+export function backendFileUrl(
+  path: string,
+  opts?: { download?: boolean }
+): string {
+  const qs = new URLSearchParams({ path });
+  const t = authToken();
+  if (t) qs.set("token", t);
+  if (opts?.download) qs.set("download", "1");
+  return `/api/file?${qs.toString()}`;
+}
+
 async function ensureBackend(): Promise<void> {
   if (backendMode) return;
   if (!probePromise) {
@@ -916,7 +933,7 @@ export const provider = {
 // 环境医生 module — 新用户「环境监测 + 配置安装」(claude / pwsh / PATH)
 // ──────────────────────────────────────────────────────────────
 export interface ToolStatus {
-  key: "claude" | "pwsh" | "node" | "npm";
+  key: "claude" | "pwsh" | "node" | "npm" | "uv" | "python";
   name: string;
   found: boolean;
   version: string | null;
@@ -931,6 +948,10 @@ export interface EnvReport {
   pwsh: ToolStatus;
   node: ToolStatus;
   npm: ToolStatus;
+  /** uv —— Python 脚本运行时的统一托管者 (脚本执行公约依赖它) */
+  uv: ToolStatus;
+  /** 系统 Python —— 仅信息展示 (脚本由 uv 按需托管, found=false 多半是只剩 Store 占位符) */
+  python: ToolStatus;
   claudeDir: string | null;
   claudeDirOnUserPath: boolean;
   /** 是否有 claude 可用的 shell (真身 PowerShell 7 / Git Bash)；false ⇒ 对话会报缺 shell */
@@ -959,6 +980,13 @@ export interface ClaudeUpdateInfo {
   checked: boolean;
   message: string;
 }
+/** uv 缓存占用信息 */
+export interface UvCacheInfo {
+  available: boolean;
+  dir: string | null;
+  bytes: number;
+  human: string;
+}
 
 export const envDoctor = {
   check: () => invoke<EnvReport>("env_check"),
@@ -969,6 +997,12 @@ export const envDoctor = {
   /** 安装 Node.js LTS (winget) —— npm 安装方式的前置依赖 */
   installNode: () => invoke<string>("env_install_node"),
   installPwsh: () => invoke<string>("env_install_pwsh"),
+  /** 安装 uv —— Python 脚本运行时托管者 (装到 ~/.local/bin, 流式日志同安装) */
+  installUv: () => invoke<string>("env_install_uv"),
+  /** uv 缓存占用 (展示 + 决定是否提示清理) */
+  uvCacheInfo: () => invoke<UvCacheInfo>("env_uv_cache_info"),
+  /** 清理 uv 缓存 (`uv cache clean`) */
+  uvCacheClean: () => invoke<string>("env_uv_cache_clean"),
   /** 检测 Claude Code 是否有新版本 (当前版本 vs npmmirror latest) */
   checkClaudeUpdate: () => invoke<ClaudeUpdateInfo>("env_claude_update_check"),
   /** 更新 Claude Code 到最新版 (走国内 npmmirror)，流式日志同安装 */
@@ -1276,12 +1310,18 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         pwsh: tool("pwsh", "PowerShell 7", false),
         node: tool("node", "Node.js", true),
         npm: tool("npm", "npm", true),
+        uv: tool("uv", "uv", false),
+        python: tool("python", "Python", false),
         claudeDir: null,
         claudeDirOnUserPath: true,
         shellReady: false,
         ready: false,
       };
     }
+    case "env_uv_cache_info":
+      return { available: false, dir: null, bytes: 0, human: "0 B" };
+    case "env_uv_cache_clean":
+      return "浏览器预览模式无法清理 uv 缓存。";
     case "env_fix_path":
       return {
         ok: false,
@@ -1292,6 +1332,7 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
     case "env_install_claude":
     case "env_install_node":
     case "env_install_pwsh":
+    case "env_install_uv":
     case "env_update_claude":
       return "env-stub-req";
     case "env_claude_update_check":
