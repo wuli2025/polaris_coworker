@@ -256,6 +256,13 @@ pub fn run() {
             fable::inventory::fable_inventory_start,
             fable::index::fable_index_start,
             fable::retrieve::fable_search,
+            // 文件中心(知识库内的可视化文件库:类型/语义聚类/缩略图/速览)
+            fable::files::file_overview,
+            fable::files::file_grid,
+            fable::files::file_thumb,
+            fable::files::file_gist,
+            fable::files::file_cluster_build,
+            fable::files::file_warm_thumbs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Polaris application")
