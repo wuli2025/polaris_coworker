@@ -34,12 +34,15 @@ jobs:
       matrix:
         include:
           # Windows：只出 NSIS 安装包（保持与原有产物一致）
+          # --features voice-live：桌面实时语音输入(麦克风 cpal+热键 rdev+注入 enigo,
+          #   自动带上 voice-asr 的 sherpa-onnx + SenseVoice 识别核)。
+          #   注:voice-asr 已拆分为「仅识别核」,桌面要本机录音必须用 voice-live。
           - platform: windows-latest
-            args: "--bundles nsis"
+            args: "--bundles nsis --features voice-live"
             rust_targets: ""
           # macOS：universal 通用二进制（一个包同时覆盖 Intel 与 Apple Silicon）
           - platform: macos-latest
-            args: "--target universal-apple-darwin --bundles app,dmg"
+            args: "--target universal-apple-darwin --bundles app,dmg --features voice-live"
             rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
     runs-on: ${{ matrix.platform }}
     steps:
@@ -53,6 +56,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_targets }}
+
+      # voice-asr 的 sherpa-rs 用 bindgen 生成绑定 → 需 libclang。
+      #   · Windows runner 预装 LLVM 于 C:\Program Files\LLVM,显式指给 bindgen 最稳。
+      #   · macOS 的 libclang 随 Xcode 命令行工具走,clang-sys 经 xcrun 自动发现,无需额外装。
+      - name: Point bindgen at libclang (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $p = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path "$p\libclang.dll")) { choco install llvm -y }
+          "LIBCLANG_PATH=$p" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       # macOS：audiopus_sys 从源码静态编译 libopus(universal 每个 arch 各编一次),
       # 需要 autotools(autoreconf/automake/libtool)。runner 默认没有 autoreconf,

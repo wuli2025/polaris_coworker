@@ -1,0 +1,7 @@
+# voice-asr · macOS 运行时库解析
+# sherpa-onnx / onnxruntime 的 dylib 随安装包放进 <App>.app/Contents/Resources/voice-libs/
+# (见 tauri.macos.conf.json),其 install name 为 @rpath/...。给可执行文件加一条 rpath
+# 指向该目录,运行时才解析得到这些 dylib。Windows 不需要(DLL 与 exe 同目录即自动解析)。
+# 对未带 voice-asr 的 mac 构建也无害:rpath 只是一条搜索路径,目录不存在则忽略。
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-args=-Wl,-rpath,@executable_path/../Resources/voice-libs"]

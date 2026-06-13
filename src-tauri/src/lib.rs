@@ -29,7 +29,7 @@ pub mod voice;
 #[cfg(feature = "voice-asr")]
 pub mod voice_asr;
 // 实时语音输入(录音+全局热键+注入);桌面专属,默认不编译。
-#[cfg(all(feature = "voice-asr", feature = "desktop"))]
+#[cfg(feature = "voice-live")]
 pub mod voice_live;
 pub mod wecom;
 // 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。

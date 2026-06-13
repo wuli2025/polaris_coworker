@@ -58,3 +58,6 @@ __pycache__/
 # 本地运行日志 / 临时脚本草稿（运行时生成,勿提交）
 _scratch/
 src-tauri/*.log
+
+# voice-asr 原生运行时库暂存区(beforeBundleCommand 从 target 重新拷贝,~14MB,勿提交)
+src-tauri/voice-libs/
