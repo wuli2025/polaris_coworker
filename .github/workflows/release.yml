@@ -41,8 +41,11 @@ jobs:
             args: "--bundles nsis --features voice-live"
             rust_targets: ""
           # macOS：universal 通用二进制（一个包同时覆盖 Intel 与 Apple Silicon）
+          # 本版 mac 暂不开 voice-live：universal 需把两架构的 sherpa/onnxruntime dylib lipo
+          # 成通用并配 @rpath,这套无 mac 真机/CI 无法验证;缺 dylib 会导致 app 启动即崩,
+          # 风险太高。mac 本地语音延后到能在 mac CI 验证后再补(Win 已端到端实测,先发 Win)。
           - platform: macos-latest
-            args: "--target universal-apple-darwin --bundles app,dmg --features voice-live"
+            args: "--target universal-apple-darwin --bundles app,dmg"
             rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
     runs-on: ${{ matrix.platform }}
     steps:
