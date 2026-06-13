@@ -295,6 +295,12 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     final_prompt.push_str(script_convention());
     final_prompt.push_str("\n\n---\n\n");
 
+    // 2.22 大文件下载公约 (always-on): >200MB 大文件禁单线 wget, 必须 aria2c 多连接分段并行
+    //      —— 跨境链路按连接限速, 单线几百 KB/s, 16 连接可叠到十几 MB/s(用户的「分布式下载」直觉)。
+    //      详细跨平台配方在 turbo-download 技能, 下载意图命中时自动注入(见 skills::detect_download_intent)。
+    final_prompt.push_str(download_convention());
+    final_prompt.push_str("\n\n---\n\n");
+
     // 2.15 分批长任务: 超长生成(60 页 PPT 这类)拆成有界批次, 每轮只建 ≤K 个 pending 单元,
     //      用 polaris.build.json 清单做 checkpoint, 断线从下一个 pending 续跑 ——
     //      规避单轮输出过长把流式连接拖死(socket closed → 进程坏死)。
@@ -1487,6 +1493,30 @@ Microsoft Store 的 0 字节占位符, 直接调用会报错或「假装成功�
 两套视频/演示技能的 `scripts/find-browser.mjs` 就是现成的本机浏览器探测器, 直接 import 复用。\n\n\
 **优先用内置能力**: 截图 / 出 PPT / 出视频 / TTS 这类已有 `polaris-forge` 或应用内置命令的活, \
 优先调它们; 临时脚本是最后手段。"
+}
+
+/// 大文件下载公约 (Polaris, always-on) —— 默认开启「极速下载」。
+///
+/// 背景(实证): 很多链路(尤其跨境到国外站点)是**按单条连接限速**的 —— 单线 wget/curl 只有
+/// 几百 KB/s(实测群晖直连 govinfo 476KB/s), 但开 16 条并行连接能把总速度叠到十几 MB/s。
+/// 用户的「分布式/共频下载」直觉就是这件事: aria2c 把一个文件切多段、多连接同时拉再拼接,
+/// 是这类提速的标准工具。本公约把「>200MB 大文件必须走多连接分段下载器」写死进每轮 system
+/// 指令, 让拉模型/数据集/镜像/依赖包默认提速; 详细跨平台配方在 turbo-download 技能(下载意图命中
+/// 时自动注入, 见 skills::detect_download_intent)。
+fn download_convention() -> &'static str {
+    "## 大文件下载公约 (Polaris) —— 必须遵守\n\n\
+下载**单文件 > 200MB** 时(模型权重 / 数据集 / 镜像 tar / 依赖包 / 安装器 / 大素材), \
+**禁止**用单线 `wget`/`curl`/`Invoke-WebRequest` 直接拉 —— 那样会被「按连接限速」的链路卡在几百 KB/s。\
+必须用**多连接分段下载器**(aria2c)把文件切多段、多连接并行下载:\n\
+1. **先探大小**: `curl -sIL` 或 `wget --spider -S` 看 content-length, >200MB 才走分段(小文件普通拉即可)。\n\
+2. **多连接分段**: `aria2c -x16 -s16 -k1M --continue=true --all-proxy= --dir=DIR --out=NAME URL` \
+(16 连接、切 16 段、断点续传、直连不走代理)。\n\
+3. **批量小文件**(成千上万个小文件)改用**并发数**: `aria2c -i urls.txt -j16`; \
+但若目标站有每秒请求上限(如 SEC 10 req/s)必须收敛并发 + 加间隔, 否则封 IP。\n\
+4. **aria2c 没装**: 按平台自动装(win=winget/scoop, mac=brew, linux=apt, 群晖=拉静态二进制); \
+都装不了再回退 `curl -r` 分段并行, 最次才单线并明确告诉用户慢。\n\
+5. **断点续传 + 进度可见**: 中断重跑不从头来; 每段/每 5% 输出一行进度(配合长任务铁律防误判挂死)。\n\n\
+完整跨平台配方见 **turbo-download** 技能(下载意图会自动注入)。"
 }
 
 /// 粗估文本 token 数(无需 tokenizer 依赖)。ASCII 约 4 字符/token; 非 ASCII(中日韩等)

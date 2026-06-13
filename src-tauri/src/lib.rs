@@ -21,8 +21,16 @@ pub mod persona;
 pub mod echo;
 pub mod project;
 pub mod provider;
+pub mod scan;
 pub mod sense;
 pub mod skills;
+pub mod voice;
+// 语音识别运行时(本地 SenseVoice via sherpa-rs);默认不编译,保护现有 build。
+#[cfg(feature = "voice-asr")]
+pub mod voice_asr;
+// 实时语音输入(录音+全局热键+注入);桌面专属,默认不编译。
+#[cfg(all(feature = "voice-asr", feature = "desktop"))]
+pub mod voice_live;
 pub mod wecom;
 // 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。
 #[cfg(feature = "desktop")]
@@ -86,6 +94,9 @@ pub fn run() {
             skills::seed_deck_studio_skill();
             // 确保「网站生成」技能落盘（支撑「网站生成」入口）。
             skills::seed_web_studio_skill();
+            // 确保「极速下载」技能落盘（含 fast_download.py：跨平台 aria2c 多连接下载器，
+            // spawn 的 claude agent 才能在磁盘上直接 `uv run …/fast_download.py` 跑它）。best-effort。
+            skills::seed_turbo_download_skill();
             // 确保「壹伴排版优化」技能落盘（含 wechat_yiban.py：壹伴样式引擎 + CloakBrowser 驱动，
             // spawn 的 claude agent 才能在磁盘上直接 python 跑它）。best-effort，不阻断启动。
             skills::seed_wechat_typesetter_skill();
@@ -101,6 +112,8 @@ pub fn run() {
             feishu::auto_start_if_enabled(h);
             // 寓言计划:感官 API 坞(注册表合并 + 落盘)与回声层「每日做梦」调度。
             sense::init();
+            // 语音输入「极速说」:配置 + 个人词表(首启种子)就位,供防污染秒达档使用。
+            voice::init();
             echo::start_scheduler(h.clone());
             // 寓言计划:检索枢纽(fable.db 表结构就位;盘点/索引由用户在设置页触发)。
             fable::init();
@@ -129,6 +142,9 @@ pub fn run() {
             kb::kb_pack_list,
             kb::kb_pack_install,
             kb::kb_pack_remove,
+            // 全盘资源归集（扫描 C/D 盘 → 多维表格 → 归档资源库 / 摄入核心层）
+            scan::scan_roots,
+            scan::scan_resources,
             // Sandbox (板块⑤ 已抽离为 polaris-sandbox crate, 命令名不变)
             polaris_sandbox::commands::sandbox_status,
             polaris_sandbox::commands::sandbox_build_image,
@@ -245,6 +261,22 @@ pub fn run() {
             sense::sense_test,
             sense::sense_pack_install,
             sense::sense_pack_remove,
+            // 语音输入「极速说」:配置 / 个人词表 / 防污染(秒达档)/ 词表自学
+            voice::voice_config_get,
+            voice::voice_config_set,
+            voice::voice_lexicon_get,
+            voice::voice_hotword_add,
+            voice::voice_hotword_remove,
+            voice::voice_correction_add,
+            voice::voice_correction_remove,
+            voice::voice_anti_pollute,
+            voice::voice_learn_correction,
+            voice::voice_lexicon_learn,
+            voice::voice_transcribe_file,
+            voice::voice_listen_start,
+            voice::voice_listen_stop,
+            voice::voice_dictate_start,
+            voice::voice_dictate_stop,
             // 寓言计划 · 回声层(对话归档 + 每日做梦蒸馏)
             conv::conv_archive_conversation,
             echo::echo_status,
@@ -263,6 +295,9 @@ pub fn run() {
             fable::files::file_gist,
             fable::files::file_cluster_build,
             fable::files::file_warm_thumbs,
+            fable::files::file_cluster_llm,
+            fable::files::file_cluster_model_get,
+            fable::files::file_cluster_model_set,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Polaris application")

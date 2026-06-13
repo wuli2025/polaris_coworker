@@ -448,6 +448,50 @@ export const kb = {
 };
 
 // ──────────────────────────────────────────────────────────────
+// 全盘资源归集 (Scan) — 扫描 C/D 盘/桌面 → 多维表格 → 归档资源库 / 摄入核心层
+// 归档复用 kb.uploadFiles;摄入核心层 = uploadFiles 后接 kb.compile。
+// ──────────────────────────────────────────────────────────────
+export interface ScanRoot {
+  id: string;
+  label: string;
+  path: string;
+  /** desktop | drive | home | volume | mounted */
+  kind: string;
+  defaultOn: boolean;
+}
+export interface ScanRow {
+  id: string;
+  path: string;
+  name: string;
+  ext: string;
+  /** doc | sheet | slide | data | image | audio | video | archive | code | text | other */
+  kind: string;
+  /** 大概内容(启发式) */
+  preview: string;
+  size: number;
+  sizeH: string;
+  mtime: number;
+  /** 价值 1-5 */
+  score: number;
+  /** 建议去向: resource | resource+core | skip */
+  suggest: string;
+}
+export interface ScanReport {
+  rows: ScanRow[];
+  totalSeen: number;
+  hit: number;
+  skipped: number;
+  truncated: boolean;
+}
+export const scan = {
+  /** 平台自适应的扫描根(Win 盘符 / mac 家目录+卷 / Docker 挂载卷) */
+  roots: () => invoke<ScanRoot[]>("scan_roots"),
+  /** 扫描给定根下的有用资源,返回多维表格行。只读。 */
+  resources: (roots: string[], max?: number) =>
+    invoke<ScanReport>("scan_resources", { roots, max }),
+};
+
+// ──────────────────────────────────────────────────────────────
 // 文件中心 (File Center) — 可视化文件库:类型/语义聚类/缩略图/速览
 // 复用检索枢纽 fable.db(盘点表 + 已存向量),不另起数据源。
 // ──────────────────────────────────────────────────────────────
@@ -508,6 +552,12 @@ export interface ClusterBuildSummary {
   seconds: number;
   note: string;
 }
+export interface ClusterModelView {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  keySet: boolean;
+}
 export interface FileGridParams {
   root?: string | null;
   clusterId?: number | null;
@@ -542,12 +592,27 @@ export const files = {
   /** 重建语义聚类(复用已存向量,纯数学;同步返回汇总) */
   clusterBuild: (root?: string | null) =>
     invoke<ClusterBuildSummary>("file_cluster_build", { root: root ?? null }),
+  /** 用已连接的大模型按语义归类(免嵌入 key)+ 桌面生成 HTML 报告;进度走 file:cluster_llm 事件 */
+  clusterLlm: (root?: string | null) =>
+    invoke<void>("file_cluster_llm", { root: root ?? null }),
+  /** 读「归类专用模型」配置(独立于对话供应商,可指便宜模型;key 只回是否已配) */
+  clusterModelGet: () => invoke<ClusterModelView>("file_cluster_model_get"),
+  /** 存「归类专用模型」配置(apiKey 传空=保留旧 key) */
+  clusterModelSet: (p: {
+    enabled?: boolean;
+    baseUrl?: string;
+    model?: string;
+    apiKey?: string;
+  }) => invoke<ClusterModelView>("file_cluster_model_set", p),
   /** 批量预热缩略图缓存(进入网格时后台调,滚动更顺);返回成功数 */
   warmThumbs: (paths: string[], max = 360) =>
     invoke<number>("file_warm_thumbs", { paths, max }),
   /** 开始盘点磁盘根(缺省=知识库根),进度走 fable:inventory 事件 */
   inventoryStart: (root?: string | null) =>
     invoke<void>("fable_inventory_start", { root: root ?? null }),
+  /** 构建/续建向量索引(文本 chunk → 硅基 BGE-M3 嵌入),进度走 fable:index 事件 */
+  indexStart: (maxChunks?: number) =>
+    invoke<void>("fable_index_start", { maxChunks: maxChunks ?? null }),
   /** 检索枢纽混合检索(grep ∥ 向量 RRF) */
   search: (query: string, topK = 24, mode: "hybrid" | "grep" | "vector" = "hybrid") =>
     invoke<FableSearchResult>("fable_search", { query, topK, mode }),

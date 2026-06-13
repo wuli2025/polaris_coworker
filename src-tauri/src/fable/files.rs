@@ -11,12 +11,19 @@
 //! 全部命令同步、无 AppHandle 依赖 → 桌面 / Docker / CLI 三壳共用同一份。
 
 use super::{open_db, worker_count};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
+
+#[cfg(feature = "desktop")]
+use tauri::{AppHandle, Emitter};
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 
 // ───────────────────────── 簇配色(与星河主题同源的高级色) ─────────────────────────
 
@@ -641,8 +648,66 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
+/// 词法归类的哈希特征维度(稀疏 token → 固定维,余弦可比)。
+const LEX_DIM: usize = 128;
+
+fn hash_token(s: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// 文件的词法特征向量:文件夹段(权重 1.5)+ 文件名分词(1.0)+ 扩展名(0.8)哈希进 LEX_DIM 维。
+/// 共享同一目录/相近命名/同类型的文件在余弦下自然靠拢。
+fn lexical_vec(relpath: &str, name: &str, ext: &str) -> Vec<f32> {
+    let mut v = vec![0f32; LEX_DIM];
+    let segs: Vec<&str> = relpath.split('/').collect();
+    for seg in segs.iter().take(segs.len().saturating_sub(1)) {
+        let low = seg.trim().to_lowercase();
+        if low.is_empty() || GENERIC_DIRS.contains(&low.as_str()) {
+            continue;
+        }
+        v[(hash_token(&low) % LEX_DIM as u64) as usize] += 1.5;
+    }
+    for tok in tokenize(name) {
+        v[(hash_token(&tok) % LEX_DIM as u64) as usize] += 1.0;
+    }
+    if !ext.is_empty() {
+        v[(hash_token(&ext.to_lowercase()) % LEX_DIM as u64) as usize] += 0.8;
+    }
+    v
+}
+
+/// 词法兜底:加载范围内全部文件(上限 6000,mtime 倒序)→ 归一化词法向量。
+fn load_lexical_files(conn: &rusqlite::Connection, filter: &str) -> Result<Vec<FileVec>, String> {
+    let sql = format!(
+        "SELECT f.id, f.root_id, f.relpath, f.name, f.ext FROM files f
+         WHERE 1=1{filter} ORDER BY f.mtime DESC LIMIT 6000"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for (id, root_id, relpath, name, ext) in rows.flatten() {
+        let mut v = lexical_vec(&relpath, &name, &ext);
+        normalize(&mut v);
+        out.push(FileVec { file_id: id, root_id, relpath, name, vec: v });
+    }
+    Ok(out)
+}
+
 /// 单根/全库重建语义聚类:每文件 = 其 chunk 向量均值池化 → 球面 k-means(余弦) →
 /// 写回 files.cluster_id + clusters 表。纯数学,不调嵌入 API。
+/// 无嵌入向量时自动退化为词法归类(见 [`load_lexical_files`]),保证永远可用。
 pub fn cluster_build(root: Option<String>) -> Result<ClusterBuildSummary, String> {
     let started = std::time::Instant::now();
     let conn = open_db()?;
@@ -695,13 +760,22 @@ pub fn cluster_build(root: Option<String>) -> Result<ClusterBuildSummary, String
         })
         .collect();
 
+    let mut mode = "semantic";
     if files.len() < 2 {
-        return Ok(ClusterBuildSummary {
-            clusters: 0,
-            files: files.len(),
-            seconds: started.elapsed().as_secs_f64(),
-            note: "已嵌入文本不足(<2),先在「设置 › 检索枢纽」构建向量索引再聚类".into(),
-        });
+        // 没有(足够的)嵌入向量 → 退化为「结构/词法」归类:对全部文件用
+        // 文件夹 + 文件名分词 + 扩展名的哈希特征向量,跑同一套球面 k-means。
+        // 无需任何 key、离线即可用 —— 保证「智能归类」永远点得动、永远能把相似文件放一起;
+        // 配了硅基 key 并建好向量索引后,本函数自动走上面的语义路(更准)。
+        mode = "lexical";
+        files = load_lexical_files(&conn, &filter)?;
+        if files.len() < 2 {
+            return Ok(ClusterBuildSummary {
+                clusters: 0,
+                files: files.len(),
+                seconds: started.elapsed().as_secs_f64(),
+                note: "可归类的文件不足(<2),先点「盘点」扫描磁盘文件再归类".into(),
+            });
+        }
     }
     // 稳定顺序(file_id 升序),让确定性初始化可复现
     files.sort_by_key(|f| f.file_id);
@@ -826,7 +900,13 @@ pub fn cluster_build(root: Option<String>) -> Result<ClusterBuildSummary, String
         clusters: new_clusters,
         files: n,
         seconds: started.elapsed().as_secs_f64(),
-        note: format!("已把 {n} 个已嵌入文本归成 {new_clusters} 簇"),
+        note: if mode == "semantic" {
+            format!("已按语义把 {n} 个已嵌入文本归成 {new_clusters} 簇")
+        } else {
+            format!(
+                "已按文件夹/名称把 {n} 个文件归成 {new_clusters} 簇 · 配硅基 key 并建向量索引后可升级为语义归类"
+            )
+        },
     })
 }
 
@@ -939,6 +1019,399 @@ pub fn warm_thumbs(paths: Vec<String>, max: u32) -> usize {
     done.load(Ordering::Relaxed)
 }
 
+// ───────────────────────── 大模型语义归类(免嵌入 key) ─────────────────────────
+//
+// 用户没有硅基嵌入 key,但聊天大模型(claude/配置的供应商)已经接通 → 直接让它读
+// 文件清单、按主题归类,Rust 写回 cluster_id + clusters 表,并在桌面生成 HTML 报告。
+// 复用回声层「做梦」同一套:run_claude_readonly(无头跑已连接模型)+ extract_balanced_json。
+
+// ── 归类专用模型(可选):独立于「对话供应商」,可指向便宜/免费的 OpenAI 兼容端点 ──
+// 不配 → AI 归类沿用你聊天那个大模型;配了 → 走这个(例:硅基流动免费对话模型,省钱)。
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ClusterModelCfg {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    model: String,
+}
+
+fn cluster_model_path() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("cluster_model.json"))
+}
+fn load_cluster_model() -> ClusterModelCfg {
+    cluster_model_path()
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+fn save_cluster_model(cfg: &ClusterModelCfg) -> Result<(), String> {
+    let path = cluster_model_path().ok_or("无法定位数据目录")?;
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let txt = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, txt).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+/// 生效的归类模型:enabled + key + base_url + model 四件齐才算。
+fn active_cluster_model() -> Option<ClusterModelCfg> {
+    let c = load_cluster_model();
+    let ok = c.enabled
+        && !c.api_key.trim().is_empty()
+        && !c.base_url.trim().is_empty()
+        && !c.model.trim().is_empty();
+    ok.then_some(c)
+}
+/// OpenAI 兼容 chat completion(硅基流动 / 任意兼容端点)。
+fn chat_complete(cfg: &ClusterModelCfg, prompt: &str) -> Result<String, String> {
+    let url = format!("{}/v1/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let http = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(15))
+        .timeout_read(Duration::from_secs(180))
+        .build();
+    let resp = http
+        .post(&url)
+        .set("authorization", &format!("Bearer {}", cfg.api_key.trim()))
+        .send_json(json!({
+            "model": cfg.model,
+            "messages": [{ "role": "user", "content": prompt }],
+            "temperature": 0.2,
+            "stream": false,
+        }));
+    match resp {
+        Ok(r) => {
+            let v: Value = r.into_json().map_err(|e| format!("归类模型响应解析失败: {e}"))?;
+            v.get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| "归类模型响应里没有 content".to_string())
+        }
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            let brief: String = body.chars().take(220).collect();
+            Err(format!("归类模型 HTTP {code}: {brief}"))
+        }
+        Err(e) => Err(format!("归类模型网络错误: {e}")),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterModelView {
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    pub key_set: bool,
+}
+fn cluster_model_view(c: &ClusterModelCfg) -> ClusterModelView {
+    ClusterModelView {
+        enabled: c.enabled,
+        base_url: c.base_url.clone(),
+        model: c.model.clone(),
+        key_set: !c.api_key.trim().is_empty(),
+    }
+}
+
+static LLM_CLUSTERING: AtomicBool = AtomicBool::new(false);
+
+/// 喂给大模型的文件清单上限(控上下文;超出按 mtime 倒序取最近的)。
+const LLM_FILE_CAP: usize = 240;
+
+struct FileLite {
+    id: i64,
+    relpath: String,
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LlmGroup {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    files: Vec<Value>,
+}
+
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn emit_llm(app: &AppHandle, payload: Value) {
+    let _ = app.emit("file:cluster_llm", payload);
+}
+
+/// 加载范围内文件(mtime 倒序,上限 LLM_FILE_CAP)给大模型归类。
+fn load_files_for_llm(conn: &rusqlite::Connection, filter: &str) -> Result<Vec<FileLite>, String> {
+    let sql = format!(
+        "SELECT f.id, f.relpath, f.name, f.kind FROM files f
+         WHERE 1=1{filter} ORDER BY f.mtime DESC LIMIT {LLM_FILE_CAP}"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(FileLite {
+                id: r.get(0)?,
+                relpath: r.get(1)?,
+                name: r.get(2)?,
+                kind: r.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+fn llm_cluster_directive(files: &[FileLite]) -> String {
+    let mut list = String::new();
+    for (i, f) in files.iter().enumerate() {
+        list.push_str(&format!("[{i}] {} ({})\n", f.relpath, f.kind));
+    }
+    format!(
+        r#"你是文件库的「语义归类员」。下面是用户文件库里的文件清单(每行:[序号] 相对路径 (类型))。
+请按**内容主题 / 用途**把它们归成若干有意义的组——把相似、相关、同主题的文件放进同一组,
+给每组起一个简短贴切的中文标签(4~10 字)。
+
+要求:
+- 组数控制在 3~16 之间;每组尽量有 ≥2 个文件;
+- 用文件名、目录、扩展名推断主题;同一系列/同一项目/同一话题的归一起;
+- 每个文件最多归一组;实在归不进任何主题的文件可以不出现在结果里;
+- 标签要能概括该组内容,别用「其它/杂项」这种空标签,除非确实无主题。
+
+**只输出一个 JSON 数组,不要任何额外文字、不要 markdown 代码围栏**:
+[{{"label":"组标签","files":[序号,序号,...]}}, ...]
+
+文件清单({} 个):
+{list}"#,
+        files.len()
+    )
+}
+
+/// 把序号/路径字符串解析回文件下标。
+fn resolve_index(v: &Value, files: &[FileLite]) -> Option<usize> {
+    if let Some(n) = v.as_u64() {
+        let i = n as usize;
+        return (i < files.len()).then_some(i);
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(i) = s.trim().parse::<usize>() {
+            return (i < files.len()).then_some(i);
+        }
+        // 退化:按相对路径 / 文件名匹配
+        return files
+            .iter()
+            .position(|f| f.relpath == s || f.name == s || f.relpath.ends_with(s));
+    }
+    None
+}
+
+fn cluster_llm_run(app: &AppHandle, root: Option<String>) -> Result<(usize, usize, String), String> {
+    emit_llm(app, json!({ "kind": "phase", "text": "收集文件清单…" }));
+    let conn = open_db()?;
+    let ids = resolve_root_ids(&conn, &root);
+    let filter = if ids.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+        format!(" AND f.root_id IN ({})", list.join(","))
+    };
+    let files = load_files_for_llm(&conn, &filter)?;
+    if files.len() < 2 {
+        return Err("可归类的文件不足(<2),先点「盘点」扫描磁盘文件".into());
+    }
+
+    let prompt = llm_cluster_directive(&files);
+    // 配了独立归类模型 → 直连它(省钱);否则用聊天那个大模型(run_claude_readonly)。
+    let collected = if let Some(cfg) = active_cluster_model() {
+        emit_llm(
+            app,
+            json!({ "kind": "phase", "text": format!("用独立归类模型「{}」给 {} 个文件归类…", cfg.model, files.len()) }),
+        );
+        chat_complete(&cfg, &prompt)?
+    } else {
+        emit_llm(
+            app,
+            json!({ "kind": "phase", "text": format!("用已连接的对话大模型给 {} 个文件归类…", files.len()) }),
+        );
+        let kb_root = PathBuf::from(crate::kb::kb_root());
+        let cwd = if kb_root.exists() { kb_root } else { std::env::temp_dir() };
+        crate::kb::run_claude_readonly(&cwd, &prompt, |kind, _text| {
+            if kind == "delta" {
+                emit_llm(app, json!({ "kind": "tick" })); // 心跳,不外泄正文
+            }
+        })?
+    };
+    let raw = crate::kb::extract_balanced_json(&collected)
+        .ok_or("大模型没有返回可解析的 JSON(可换更强的模型,或稍后重试)")?;
+    let groups: Vec<LlmGroup> =
+        serde_json::from_str(&raw).map_err(|e| format!("归类 JSON 解析失败: {e}"))?;
+
+    emit_llm(app, json!({ "kind": "phase", "text": "写回归类 + 生成桌面报告…" }));
+
+    // 清旧簇(范围内)
+    if ids.is_empty() {
+        conn.execute("DELETE FROM clusters", []).ok();
+        conn.execute("UPDATE files SET cluster_id=0", []).ok();
+    } else {
+        let inlist: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+        let inlist = inlist.join(",");
+        conn.execute(&format!("DELETE FROM clusters WHERE root_id IN ({inlist})"), []).ok();
+        conn.execute(&format!("UPDATE files SET cluster_id=0 WHERE root_id IN ({inlist})"), []).ok();
+    }
+
+    let built_at = chrono::Local::now().timestamp_millis();
+    let mut report_groups: Vec<(String, String, Vec<usize>)> = Vec::new();
+    let mut assigned = 0usize;
+    let mut n_clusters = 0usize;
+    conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+    for g in &groups {
+        // 解析成员下标,去重
+        let mut members: Vec<usize> = Vec::new();
+        for v in &g.files {
+            if let Some(i) = resolve_index(v, &files) {
+                if !members.contains(&i) {
+                    members.push(i);
+                }
+            }
+        }
+        if members.is_empty() {
+            continue;
+        }
+        let label = if g.label.trim().is_empty() { "未命名".to_string() } else { g.label.trim().to_string() };
+        let color = CLUSTER_PALETTE[n_clusters % CLUSTER_PALETTE.len()].to_string();
+        // 代表根 = 成员里最多的 root_id 不必算,这里直接取第一成员所在文件的 root(简化)
+        let root_id: i64 = conn
+            .query_row(
+                "SELECT root_id FROM files WHERE id=?1",
+                [files[members[0]].id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT INTO clusters(root_id,label,color,keywords,size,built_at) VALUES(?1,?2,?3,'',?4,?5)",
+            rusqlite::params![root_id, label, color, members.len() as i64, built_at],
+        )
+        .map_err(|e| e.to_string())?;
+        let cluster_id = conn.last_insert_rowid();
+        {
+            let mut stmt = conn
+                .prepare_cached("UPDATE files SET cluster_id=?1 WHERE id=?2")
+                .map_err(|e| e.to_string())?;
+            for &i in &members {
+                stmt.execute(rusqlite::params![cluster_id, files[i].id]).map_err(|e| e.to_string())?;
+            }
+        }
+        assigned += members.len();
+        report_groups.push((label, color, members));
+        n_clusters += 1;
+    }
+    conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+
+    let report_path = write_report_html(&files, &report_groups, assigned)?;
+    Ok((n_clusters, assigned, report_path))
+}
+
+/// 生成自包含 HTML 报告 → 桌面,返回文件路径。
+fn write_report_html(
+    files: &[FileLite],
+    groups: &[(String, String, Vec<usize>)],
+    assigned: usize,
+) -> Result<String, String> {
+    let now = chrono::Local::now();
+    let stamp = now.format("%Y%m%d-%H%M%S").to_string();
+    let human = now.format("%Y-%m-%d %H:%M").to_string();
+
+    let mut cards = String::new();
+    for (label, color, members) in groups {
+        let mut items = String::new();
+        for &i in members {
+            let f = &files[i];
+            items.push_str(&format!(
+                r#"<li><span class="dot" style="background:{c}"></span><span class="fn">{name}</span><span class="fp">{path}</span><span class="fk">{kind}</span></li>"#,
+                c = esc(color),
+                name = esc(&f.name),
+                path = esc(&f.relpath),
+                kind = esc(&f.kind),
+            ));
+        }
+        cards.push_str(&format!(
+            r#"<section class="cluster"><header style="--c:{c}"><span class="badge">{n}</span><h2>{label}</h2></header><ul>{items}</ul></section>"#,
+            c = esc(color),
+            n = members.len(),
+            label = esc(label),
+            items = items,
+        ));
+    }
+
+    let html = format!(
+        r##"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>文件中心 · AI 语义归类报告</title>
+<style>
+:root{{--bg:#0f1115;--panel:#171a21;--line:#252a33;--ink:#e8e8e6;--mut:#9aa0ab;--gold:#d4b06a}}
+*{{box-sizing:border-box}}
+body{{margin:0;background:linear-gradient(180deg,#0f1115,#13161c);color:var(--ink);
+font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.6}}
+.wrap{{max-width:1040px;margin:0 auto;padding:48px 32px 100px}}
+h1{{font-size:26px;margin:0 0 4px;letter-spacing:.5px}}
+.sub{{color:var(--mut);font-size:13px}}
+.stats{{display:flex;gap:28px;margin:24px 0 32px;padding:18px 22px;background:var(--panel);
+border:1px solid var(--line);border-radius:14px}}
+.stat .v{{font-size:24px;font-weight:650}}.stat .l{{color:var(--mut);font-size:12px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}}
+.cluster{{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}}
+.cluster header{{display:flex;align-items:center;gap:10px;padding:14px 18px;
+background:color-mix(in srgb,var(--c) 14%,transparent);border-bottom:1px solid var(--line)}}
+.cluster header::before{{content:"";width:10px;height:10px;border-radius:50%;background:var(--c);
+box-shadow:0 0 10px var(--c)}}
+.cluster h2{{font-size:15px;margin:0;flex:1}}
+.badge{{font-size:12px;color:#0f1115;background:var(--c);padding:1px 9px;border-radius:99px;font-weight:700}}
+.cluster ul{{list-style:none;margin:0;padding:8px 0;max-height:420px;overflow:auto}}
+.cluster li{{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;
+padding:6px 18px;font-size:12.5px;border-bottom:1px solid rgba(255,255,255,.03)}}
+.cluster li:hover{{background:rgba(255,255,255,.03)}}
+.dot{{width:6px;height:6px;border-radius:50%}}
+.fn{{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.fp{{grid-column:2;color:var(--mut);font-size:10.5px;font-family:ui-monospace,Consolas,monospace;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.fk{{color:var(--gold);font-size:10px;text-transform:uppercase}}
+.foot{{margin-top:40px;color:#5a606b;font-size:12px;text-align:center}}
+</style></head><body><div class="wrap">
+<h1>文件中心 · AI 语义归类报告</h1>
+<div class="sub">由已连接的大模型按主题归类 · 生成于 {human}</div>
+<div class="stats">
+<div class="stat"><div class="v">{ng}</div><div class="l">主题簇</div></div>
+<div class="stat"><div class="v">{na}</div><div class="l">已归类文件</div></div>
+<div class="stat"><div class="v">{nt}</div><div class="l">参与归类</div></div>
+</div>
+<div class="grid">{cards}</div>
+<div class="foot">Polaris 文件中心 · AI 语义归类 · 大模型语义分组,非嵌入向量</div>
+</div></body></html>"##,
+        human = esc(&human),
+        ng = groups.len(),
+        na = assigned,
+        nt = files.len(),
+        cards = cards,
+    );
+
+    let desktop = directories::UserDirs::new()
+        .and_then(|u| u.desktop_dir().map(|d| d.to_path_buf()))
+        .or_else(|| directories::UserDirs::new().map(|u| u.home_dir().to_path_buf()))
+        .ok_or("找不到桌面目录")?;
+    let path = desktop.join(format!("文件中心-AI归类报告-{stamp}.html"));
+    std::fs::write(&path, html).map_err(|e| format!("写报告失败: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 // ───────────────────────── 命令(薄包装;三壳共用) ─────────────────────────
 
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -986,6 +1459,67 @@ pub fn file_cluster_build(root: Option<String>) -> Result<ClusterBuildSummary, S
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn file_warm_thumbs(paths: Vec<String>, max: Option<u32>) -> Result<usize, String> {
     Ok(warm_thumbs(paths, max.unwrap_or(360)))
+}
+
+/// 用已连接的大模型按语义归类(免嵌入 key)+ 桌面生成 HTML 报告。
+/// 后台线程跑,进度走 `file:cluster_llm` 事件(phase/tick/done/error)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn file_cluster_llm(app: AppHandle, root: Option<String>) -> Result<(), String> {
+    if LLM_CLUSTERING.swap(true, Ordering::SeqCst) {
+        return Err("AI 归类正在进行中".into());
+    }
+    std::thread::spawn(move || {
+        let res = cluster_llm_run(&app, root);
+        LLM_CLUSTERING.store(false, Ordering::SeqCst);
+        match res {
+            Ok((clusters, assigned, report)) => emit_llm(
+                &app,
+                json!({ "kind": "done", "clusters": clusters, "assigned": assigned, "report": report }),
+            ),
+            Err(e) => emit_llm(&app, json!({ "kind": "error", "message": e })),
+        }
+    });
+    Ok(())
+}
+
+/// 读「归类专用模型」配置(key 只回 key_set,不回明文)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn file_cluster_model_get() -> ClusterModelView {
+    cluster_model_view(&load_cluster_model())
+}
+
+/// 存「归类专用模型」配置。api_key 传空字符串=保留旧 key(方便只改模型不重填 key)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn file_cluster_model_set(
+    enabled: Option<bool>,
+    base_url: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+) -> Result<ClusterModelView, String> {
+    let mut c = load_cluster_model();
+    if let Some(e) = enabled {
+        c.enabled = e;
+    }
+    if let Some(b) = base_url {
+        if !b.trim().is_empty() {
+            c.base_url = b.trim().to_string();
+        }
+    }
+    if let Some(m) = model {
+        if !m.trim().is_empty() {
+            c.model = m.trim().to_string();
+        }
+    }
+    if let Some(k) = api_key {
+        if !k.trim().is_empty() {
+            c.api_key = k.trim().to_string(); // 空=保留旧 key
+        }
+    }
+    if c.base_url.trim().is_empty() {
+        c.base_url = "https://api.siliconflow.cn".into();
+    }
+    save_cluster_model(&c)?;
+    Ok(cluster_model_view(&c))
 }
 
 #[cfg(test)]
