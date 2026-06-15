@@ -1,0 +1,91 @@
+{
+  "grep_hits": 0,
+  "grep_truncated": false,
+  "hits": [
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0001.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0001.srt",
+      "score": 0.2974088490009308,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n门店每天上午九点开门,下午六点关门,法定节假日不休息。\n\n2\n00:00:05,000 --> 00:00:09,000\n索引规模倒排日志记录盘点重排并行。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0033.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0033.srt",
+      "score": 0.2230929732322693,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n门店每天上午九点开门,下午六点关门,法定节假日不休息。\n\n2\n00:00:05,000 --> 00:00:09,000\n日志倒排参数测试重排分块知识库并行。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0017.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0017.srt",
+      "score": 0.1306704580783844,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n门店每天上午九点开门,下午六点关门,法定节假日不休息。\n\n2\n00:00:05,000 --> 00:00:09,000\n记录盘点参数融合转写配置规模文件。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0032.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0032.srt",
+      "score": 0.0067106266506016254,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n本店支持七天无理由退款,生鲜类除外,退款将在三个工作日内原路返回。\n\n2\n00:00:05,000 --> 00:00:09,000\n测试分块汉明检索倒排向量排序知识库。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0029.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0029.srt",
+      "score": 0.005007299594581127,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n京沪高铁最快约四个半小时,二等座票价五百多元,每天有数十趟车次。\n\n2\n00:00:05,000 --> 00:00:09,000\n召回索引日志余弦融合字幕检索系统。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0013.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0013.srt",
+      "score": 0.003401207271963358,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n京沪高铁最快约四个半小时,二等座票价五百多元,每天有数十趟车次。\n\n2\n00:00:05,000 --> 00:00:09,000\n数据向量磁盘重排性能嵌入字幕线程。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0016.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0016.srt",
+      "score": 0.0015931982779875398,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n本店支持七天无理由退款,生鲜类除外,退款将在三个工作日内原路返回。\n\n2\n00:00:05,000 --> 00:00:09,000\n缓存量化报告车道知识库索引性能测试。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0000.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0000.srt",
+      "score": 0.0013062279904261231,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n本店支持七天无理由退款,生鲜类除外,退款将在三个工作日内原路返回。\n\n2\n00:00:05,000 --> 00:00:09,000\n检索缓存内存参数数据配置并行文件。"
+    }
+  ],
+  "mode": "hybrid",
+  "ms": 1430,
+  "query": "营业时间",
+  "reranked": true,
+  "vector_hits": 16
+}

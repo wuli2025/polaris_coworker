@@ -543,6 +543,8 @@ export interface FileCard {
   mtime: number;
   clusterId: number;
   thumbable: boolean;
+  /** 来源徽标:下载 / 微信 / QQ / 企业微信 / ""(普通文件,不显示) */
+  source: string;
 }
 export interface FileGridPage {
   items: FileCard[];
@@ -1150,6 +1152,15 @@ export interface CodexProxyInfo {
   port: number;
   lastError: string;
 }
+export interface ClaudeAuthStatus {
+  loggedIn: boolean;
+  credPath: string;
+}
+export interface ClaudeLoginStart {
+  authorizeUrl: string;
+  verifier: string;
+  state: string;
+}
 
 export const provider = {
   list: () => invoke<ProviderListResult>("provider_list"),
@@ -1165,6 +1176,11 @@ export const provider = {
   codexPollLogin: (deviceCode: string, userCode: string) =>
     invoke<CodexPollResult>("codex_poll_login", { deviceCode, userCode }),
   codexProxyInfo: () => invoke<CodexProxyInfo>("codex_proxy_info"),
+  // Claude 官方订阅 OAuth(PKCE):start 开浏览器并回 verifier/state;finish 回贴授权码换 token
+  claudeAuthStatus: () => invoke<ClaudeAuthStatus>("claude_oauth_status"),
+  claudeStartLogin: () => invoke<ClaudeLoginStart>("claude_start_login"),
+  claudeFinishLogin: (pasted: string, verifier: string, state: string) =>
+    invoke<ClaudeAuthStatus>("claude_finish_login", { pasted, verifier, state }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -1532,6 +1548,16 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       };
     case "codex_poll_login":
       return { status: "ok" };
+    case "claude_oauth_status":
+      return { loggedIn: false, credPath: "(browser-only)" };
+    case "claude_start_login":
+      return {
+        authorizeUrl: "https://claude.ai/oauth/authorize?code=true",
+        verifier: "stub-verifier",
+        state: "stub-state",
+      };
+    case "claude_finish_login":
+      return { loggedIn: true, credPath: "(browser stub) ~/.claude/.credentials.json" };
     case "codex_proxy_info":
       return { running: false, port: 0, lastError: "" };
     case "env_check": {

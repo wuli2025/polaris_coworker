@@ -487,6 +487,7 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "fable_index_start" => {
             ok(fable::index::fable_index_start(app, opt_usize(a, "maxChunks"))?)
         }
+        "fable_index_optimize" => ok(fable::index::fable_index_optimize()?),
         "fable_search" => ok(fable::retrieve::fable_search(
             req_str(a, "query")?,
             opt_usize(a, "topK"),
@@ -636,6 +637,13 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "codex_poll_login" => ok(provider::codex_poll_login(
             req_str(a, "deviceCode")?,
             req_str(a, "userCode")?,
+        )?),
+        "claude_oauth_status" => ok(provider::claude_oauth_status()?),
+        "claude_start_login" => ok(provider::claude_start_login()?),
+        "claude_finish_login" => ok(provider::claude_finish_login(
+            req_str(a, "pasted")?,
+            req_str(a, "verifier")?,
+            req_str(a, "state")?,
         )?),
         "codex_proxy_info" => ok(codex_proxy::codex_proxy_info()),
 

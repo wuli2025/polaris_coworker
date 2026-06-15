@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "polaris-app"
-version = "1.2.0"
+version = "1.2.1"
 description = "Polaris - 本地优先 AI 工作台 (MVP)"
 authors = ["winner3388"]
 edition = "2021"
@@ -71,6 +71,11 @@ pdf-extract = "0.10.0" # pdf 文本抽取（纯 Rust，panic 由 convert::guard 
 # Codex(ChatGPT) OAuth Device Code 流程 —— 同步阻塞 HTTP 客户端 (rustls, 无 tokio)。
 # 只用于授权三步: 取设备码 / 轮询 / code 换 token。比 cc-switch 的 reqwest+tokio 轻得多。
 ureq = { version = "2", features = ["json"] }
+# Claude 官方订阅 OAuth(PKCE):code_challenge = base64url(sha256(verifier))。
+# sha2 纯 Rust 哈希、getrandom 取 OS 加密安全随机(verifier/state),两者均无系统依赖、
+# 三平台(Win/mac/Linux musl+gnu)同构编译;桌面与 server feature 都要,故无条件依赖。
+sha2 = "0.10"
+getrandom = "0.2"
 # 「聊天机器人」板块「扫码创建机器人」: 把飞书开放平台建应用 URL 编码成二维码 (SVG)。
 # default-features=false → 不拉重型 image crate, 只保留纯 Rust 的 svg 渲染。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

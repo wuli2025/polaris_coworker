@@ -8,6 +8,8 @@ import {
   type CodexStatus,
   type CodexDeviceLogin,
   type CodexProxyInfo,
+  type ClaudeAuthStatus,
+  type ClaudeLoginStart,
 } from "../tauri";
 
 export const useProvidersStore = defineStore("providers", () => {
@@ -18,6 +20,7 @@ export const useProvidersStore = defineStore("providers", () => {
   const usage = ref<UsageSummary | null>(null);
   const codex = ref<CodexStatus | null>(null);
   const codexProxy = ref<CodexProxyInfo | null>(null);
+  const claudeAuth = ref<ClaudeAuthStatus | null>(null);
   const loading = ref(false);
   const switching = ref<string | null>(null);
   const error = ref<string | null>(null);
@@ -106,6 +109,36 @@ export const useProvidersStore = defineStore("providers", () => {
     return r.status;
   }
 
+  async function refreshClaudeAuth() {
+    try {
+      claudeAuth.value = await providerApi.claudeAuthStatus();
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+
+  /** ① 发起 Claude 官方订阅 OAuth:后端开浏览器,返回授权 URL + PKCE verifier/state */
+  async function claudeStartLogin(): Promise<ClaudeLoginStart | null> {
+    error.value = null;
+    try {
+      return await providerApi.claudeStartLogin();
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  /** ② 回贴授权码换 token 落盘;成功后刷新登录态。抛错交调用方处理 */
+  async function claudeFinishLogin(
+    pasted: string,
+    verifier: string,
+    state: string
+  ): Promise<boolean> {
+    const st = await providerApi.claudeFinishLogin(pasted, verifier, state);
+    claudeAuth.value = st;
+    return st.loggedIn;
+  }
+
   /** 切换「联动系统 CLI / 隔离」模式;开联动会把当前供应商写入全局 settings.json,
    *  关联动会把全局清回官方(终端 CLI 立刻恢复干净)、Polaris 内选择不变 */
   async function setLinkMode(link: boolean): Promise<boolean> {
@@ -164,6 +197,7 @@ export const useProvidersStore = defineStore("providers", () => {
     usage,
     codex,
     codexProxy,
+    claudeAuth,
     loading,
     switching,
     error,
@@ -179,8 +213,11 @@ export const useProvidersStore = defineStore("providers", () => {
     refreshUsage,
     refreshCodex,
     refreshCodexProxy,
+    refreshClaudeAuth,
     codexStartLogin,
     codexPollLogin,
+    claudeStartLogin,
+    claudeFinishLogin,
     setLinkMode,
     switchTo,
     save,

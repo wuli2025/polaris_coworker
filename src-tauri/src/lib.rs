@@ -97,6 +97,9 @@ pub fn run() {
             // 确保「极速下载」技能落盘（含 fast_download.py：跨平台 aria2c 多连接下载器，
             // spawn 的 claude agent 才能在磁盘上直接 `uv run …/fast_download.py` 跑它）。best-effort。
             skills::seed_turbo_download_skill();
+            // 确保「浏览器智能体 browser-use」技能落盘（含 browser_use_runner.py：browser-use
+            // 经 CDP 驱动 CloakBrowser，spawn 的 claude agent 才能直接 `uv run …` 跑它）。best-effort。
+            skills::seed_browser_use_skill();
             // 确保「壹伴排版优化」技能落盘（含 wechat_yiban.py：壹伴样式引擎 + CloakBrowser 驱动，
             // spawn 的 claude agent 才能在磁盘上直接 python 跑它）。best-effort，不阻断启动。
             skills::seed_wechat_typesetter_skill();
@@ -224,6 +227,9 @@ pub fn run() {
             provider::codex_status,
             provider::codex_start_login,
             provider::codex_poll_login,
+            provider::claude_oauth_status,
+            provider::claude_start_login,
+            provider::claude_finish_login,
             codex_proxy::codex_proxy_info,
             // Forge 跨平台渲染能力 preflight（能出 PPT/视频吗、缺啥降级，三平台各报各的阶梯）
             forge::forge_preflight,
@@ -291,6 +297,7 @@ pub fn run() {
             fable::inventory::fable_scan_folder_children,
             fable::inventory::fable_folder_size,
             fable::index::fable_index_start,
+            fable::index::fable_index_optimize,
             fable::retrieve::fable_search,
             fable::eval::fable_eval,
             fable::eval::fable_eval_template,

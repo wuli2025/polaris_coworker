@@ -1,0 +1,93 @@
+{
+  "grep_hits": 12,
+  "grep_truncated": false,
+  "hits": [
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00079.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00079.md",
+      "score": 0.5155035853385925,
+      "snippet": "如何判断西瓜熟没熟?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00063.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00063.md",
+      "score": 0.5113423466682434,
+      "snippet": "如何判断西瓜熟没熟?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00047.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00047.md",
+      "score": 0.4646638035774231,
+      "snippet": "如何判断西瓜熟没熟?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00015.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00015.md",
+      "score": 0.4086228311061859,
+      "snippet": "如何判断西瓜熟没熟?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00031.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00031.md",
+      "score": 0.3471345603466034,
+      "snippet": "如何判断西瓜熟没熟?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0031.srt",
+      "lanes": [
+        "grep",
+        "vector"
+      ],
+      "location": "L3",
+      "path": "media/videos/clip_0031.srt",
+      "score": 0.1265583038330078,
+      "snippet": "拍打声音清脆回响、瓜脐内凹、瓜藤卷曲发黄的西瓜通常成熟度高、甜度好。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0015.srt",
+      "lanes": [
+        "grep",
+        "vector"
+      ],
+      "location": "L3",
+      "path": "media/videos/clip_0015.srt",
+      "score": 0.10458358377218246,
+      "snippet": "拍打声音清脆回响、瓜脐内凹、瓜藤卷曲发黄的西瓜通常成熟度高、甜度好。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0025.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0025.srt",
+      "score": 0.0033182604238390923,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n先焯水去腥,炒糖色后小火慢炖一小时,加入少量山楂或茶叶可解腻增香。\n\n2\n00:00:05,000 --> 00:00:09,000\n报告视频知识库延迟文件模型融合日志。"
+    }
+  ],
+  "mode": "hybrid",
+  "ms": 1569,
+  "query": "西瓜",
+  "reranked": true,
+  "vector_hits": 16
+}

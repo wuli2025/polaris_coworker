@@ -1,0 +1,2504 @@
+{
+  "details": [
+    {
+      "expected": [
+        "docs/needles/needle_00000.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00000-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00000.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00000.md"
+      ],
+      "hit_rank": 5,
+      "query": "公司的退款政策是怎样的",
+      "top_paths": [
+        "docs/needles/needle_00032.md",
+        "docs/needles/needle_00016.md",
+        "docs/needles/needle_00064.md",
+        "docs/needles/needle_00048.md",
+        "docs/needles/needle_00000.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00001.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00001-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00001.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00001.md"
+      ],
+      "hit_rank": 4,
+      "query": "营业时间是几点到几点",
+      "top_paths": [
+        "docs/needles/needle_00065.md",
+        "docs/needles/needle_00049.md",
+        "docs/needles/needle_00033.md",
+        "docs/needles/needle_00001.md",
+        "docs/needles/needle_00017.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00002.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00002-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00002.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00002.md"
+      ],
+      "hit_rank": 4,
+      "query": "如何重置我的账户密码",
+      "top_paths": [
+        "docs/needles/needle_00066.md",
+        "docs/needles/needle_00050.md",
+        "docs/needles/needle_00018.md",
+        "docs/needles/needle_00002.md",
+        "docs/needles/needle_00034.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00003.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00003-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00003.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00003.md"
+      ],
+      "hit_rank": 5,
+      "query": "数据库连接池应该配多大",
+      "top_paths": [
+        "docs/needles/needle_00067.md",
+        "docs/needles/needle_00051.md",
+        "docs/needles/needle_00035.md",
+        "docs/needles/needle_00019.md",
+        "docs/needles/needle_00003.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00004.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00004-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00004.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00004.md"
+      ],
+      "hit_rank": 5,
+      "query": "向量检索为什么要做归一化",
+      "top_paths": [
+        "docs/needles/needle_00036.md",
+        "docs/needles/needle_00052.md",
+        "docs/needles/needle_00068.md",
+        "docs/needles/needle_00020.md",
+        "docs/needles/needle_00004.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00005.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00005-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00005.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00005.md"
+      ],
+      "hit_rank": 5,
+      "query": "二值量化粗筛的原理是什么",
+      "top_paths": [
+        "docs/needles/needle_00069.md",
+        "docs/needles/needle_00053.md",
+        "docs/needles/needle_00037.md",
+        "docs/needles/needle_00021.md",
+        "docs/needles/needle_00005.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00006.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00006-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00006.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00006.md"
+      ],
+      "hit_rank": 5,
+      "query": "RRF 融合是怎么把两路结果合并的",
+      "top_paths": [
+        "docs/needles/needle_00070.md",
+        "docs/needles/needle_00038.md",
+        "docs/needles/needle_00054.md",
+        "docs/needles/needle_00022.md",
+        "docs/needles/needle_00006.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00007.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00007-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00007.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00007.md"
+      ],
+      "hit_rank": 5,
+      "query": "重排闸门什么时候才会触发",
+      "top_paths": [
+        "docs/needles/needle_00071.md",
+        "docs/needles/needle_00055.md",
+        "docs/needles/needle_00039.md",
+        "docs/needles/needle_00023.md",
+        "docs/needles/needle_00007.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00008.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00008-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00008.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00008.md"
+      ],
+      "hit_rank": 5,
+      "query": "猫咪半夜频繁叫唤怎么办",
+      "top_paths": [
+        "docs/needles/needle_00040.md",
+        "docs/needles/needle_00056.md",
+        "docs/needles/needle_00024.md",
+        "docs/needles/needle_00072.md",
+        "docs/needles/needle_00008.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00009.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00009-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00009.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00009.md"
+      ],
+      "hit_rank": 5,
+      "query": "红烧肉怎么做才能不腻",
+      "top_paths": [
+        "docs/needles/needle_00057.md",
+        "docs/needles/needle_00073.md",
+        "docs/needles/needle_00041.md",
+        "docs/needles/needle_00025.md",
+        "docs/needles/needle_00009.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00010.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00010-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00010.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00010.md"
+      ],
+      "hit_rank": 3,
+      "query": "高血压患者饮食要注意什么",
+      "top_paths": [
+        "docs/needles/needle_00026.md",
+        "docs/needles/needle_00074.md",
+        "docs/needles/needle_00010.md",
+        "docs/needles/needle_00058.md",
+        "docs/needles/needle_00042.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00011.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00011-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00011.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00011.md"
+      ],
+      "hit_rank": 1,
+      "query": "Python 里如何并行处理大量文件",
+      "top_paths": [
+        "docs/needles/needle_00011.md",
+        "docs/needles/needle_00059.md",
+        "docs/needles/needle_00075.md",
+        "docs/needles/needle_00043.md",
+        "docs/needles/needle_00027.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00012.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00012-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00012.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00012.md"
+      ],
+      "hit_rank": 4,
+      "query": "git 误删分支怎么找回",
+      "top_paths": [
+        "docs/needles/needle_00060.md",
+        "docs/needles/needle_00044.md",
+        "docs/needles/needle_00028.md",
+        "docs/needles/needle_00012.md",
+        "docs/needles/needle_00076.md",
+        "media/videos/clip_0028.srt",
+        "media/videos/clip_0012.srt"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00013.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00013-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00013.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00013.md"
+      ],
+      "hit_rank": 3,
+      "query": "北京到上海高铁要多久",
+      "top_paths": [
+        "docs/needles/needle_00061.md",
+        "docs/needles/needle_00029.md",
+        "docs/needles/needle_00013.md",
+        "docs/needles/needle_00077.md",
+        "docs/needles/needle_00045.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00014.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00014-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00014.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00014.md"
+      ],
+      "hit_rank": 5,
+      "query": "婴儿几个月可以添加辅食",
+      "top_paths": [
+        "docs/needles/needle_00078.md",
+        "docs/needles/needle_00062.md",
+        "docs/needles/needle_00030.md",
+        "docs/needles/needle_00046.md",
+        "docs/needles/needle_00014.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00015.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00015-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00015.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00015.md"
+      ],
+      "hit_rank": 2,
+      "query": "如何判断西瓜熟没熟",
+      "top_paths": [
+        "docs/needles/needle_00079.md",
+        "docs/needles/needle_00015.md",
+        "docs/needles/needle_00063.md",
+        "docs/needles/needle_00047.md",
+        "docs/needles/needle_00031.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00016.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00016-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00016.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00016.md"
+      ],
+      "hit_rank": 3,
+      "query": "公司的退款政策是怎样的",
+      "top_paths": [
+        "docs/needles/needle_00032.md",
+        "docs/needles/needle_00064.md",
+        "docs/needles/needle_00016.md",
+        "docs/needles/needle_00000.md",
+        "docs/needles/needle_00048.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00017.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00017-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00017.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00017.md"
+      ],
+      "hit_rank": 3,
+      "query": "营业时间是几点到几点",
+      "top_paths": [
+        "docs/needles/needle_00065.md",
+        "docs/needles/needle_00049.md",
+        "docs/needles/needle_00017.md",
+        "docs/needles/needle_00033.md",
+        "docs/needles/needle_00001.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00018.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00018-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00018.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00018.md"
+      ],
+      "hit_rank": 3,
+      "query": "如何重置我的账户密码",
+      "top_paths": [
+        "docs/needles/needle_00066.md",
+        "docs/needles/needle_00050.md",
+        "docs/needles/needle_00018.md",
+        "docs/needles/needle_00034.md",
+        "docs/needles/needle_00002.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00019.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00019-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00019.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00019.md"
+      ],
+      "hit_rank": 1,
+      "query": "数据库连接池应该配多大",
+      "top_paths": [
+        "docs/needles/needle_00019.md",
+        "docs/needles/needle_00067.md",
+        "docs/needles/needle_00051.md",
+        "docs/needles/needle_00035.md",
+        "docs/needles/needle_00003.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00020.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00020-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00020.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00020.md"
+      ],
+      "hit_rank": 4,
+      "query": "向量检索为什么要做归一化",
+      "top_paths": [
+        "docs/needles/needle_00052.md",
+        "docs/needles/needle_00036.md",
+        "docs/needles/needle_00068.md",
+        "docs/needles/needle_00020.md",
+        "docs/needles/needle_00004.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00021.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00021-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00021.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00021.md"
+      ],
+      "hit_rank": 5,
+      "query": "二值量化粗筛的原理是什么",
+      "top_paths": [
+        "docs/needles/needle_00053.md",
+        "docs/needles/needle_00069.md",
+        "docs/needles/needle_00037.md",
+        "docs/needles/needle_00005.md",
+        "docs/needles/needle_00021.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00022.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00022-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00022.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00022.md"
+      ],
+      "hit_rank": 4,
+      "query": "RRF 融合是怎么把两路结果合并的",
+      "top_paths": [
+        "docs/needles/needle_00070.md",
+        "docs/needles/needle_00038.md",
+        "docs/needles/needle_00006.md",
+        "docs/needles/needle_00022.md",
+        "docs/needles/needle_00054.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00023.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00023-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00023.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00023.md"
+      ],
+      "hit_rank": 4,
+      "query": "重排闸门什么时候才会触发",
+      "top_paths": [
+        "docs/needles/needle_00071.md",
+        "docs/needles/needle_00055.md",
+        "docs/needles/needle_00039.md",
+        "docs/needles/needle_00023.md",
+        "docs/needles/needle_00007.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00024.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00024-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00024.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00024.md"
+      ],
+      "hit_rank": 4,
+      "query": "猫咪半夜频繁叫唤怎么办",
+      "top_paths": [
+        "docs/needles/needle_00056.md",
+        "docs/needles/needle_00072.md",
+        "docs/needles/needle_00040.md",
+        "docs/needles/needle_00024.md",
+        "docs/needles/needle_00008.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00025.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00025-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00025.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00025.md"
+      ],
+      "hit_rank": 3,
+      "query": "红烧肉怎么做才能不腻",
+      "top_paths": [
+        "docs/needles/needle_00057.md",
+        "docs/needles/needle_00041.md",
+        "docs/needles/needle_00025.md",
+        "docs/needles/needle_00073.md",
+        "docs/needles/needle_00009.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00026.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00026-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00026.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00026.md"
+      ],
+      "hit_rank": 1,
+      "query": "高血压患者饮食要注意什么",
+      "top_paths": [
+        "docs/needles/needle_00026.md",
+        "docs/needles/needle_00074.md",
+        "docs/needles/needle_00010.md",
+        "docs/needles/needle_00042.md",
+        "docs/needles/needle_00058.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00027.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00027-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00027.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00027.md"
+      ],
+      "hit_rank": 5,
+      "query": "Python 里如何并行处理大量文件",
+      "top_paths": [
+        "docs/needles/needle_00059.md",
+        "docs/needles/needle_00011.md",
+        "docs/needles/needle_00075.md",
+        "docs/needles/needle_00043.md",
+        "docs/needles/needle_00027.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00028.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00028-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00028.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00028.md"
+      ],
+      "hit_rank": 4,
+      "query": "git 误删分支怎么找回",
+      "top_paths": [
+        "docs/needles/needle_00060.md",
+        "docs/needles/needle_00044.md",
+        "docs/needles/needle_00076.md",
+        "docs/needles/needle_00028.md",
+        "docs/needles/needle_00012.md",
+        "media/videos/clip_0012.srt",
+        "media/videos/clip_0028.srt"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00029.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00029-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00029.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00029.md"
+      ],
+      "hit_rank": 2,
+      "query": "北京到上海高铁要多久",
+      "top_paths": [
+        "docs/needles/needle_00061.md",
+        "docs/needles/needle_00029.md",
+        "docs/needles/needle_00013.md",
+        "docs/needles/needle_00077.md",
+        "docs/needles/needle_00045.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00030.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00030-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00030.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00030.md"
+      ],
+      "hit_rank": 3,
+      "query": "婴儿几个月可以添加辅食",
+      "top_paths": [
+        "docs/needles/needle_00078.md",
+        "docs/needles/needle_00062.md",
+        "docs/needles/needle_00030.md",
+        "docs/needles/needle_00046.md",
+        "docs/needles/needle_00014.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00031.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00031-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00031.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00031.md"
+      ],
+      "hit_rank": 5,
+      "query": "如何判断西瓜熟没熟",
+      "top_paths": [
+        "docs/needles/needle_00079.md",
+        "docs/needles/needle_00063.md",
+        "docs/needles/needle_00015.md",
+        "docs/needles/needle_00047.md",
+        "docs/needles/needle_00031.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00032.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00032-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00032.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00032.md"
+      ],
+      "hit_rank": 1,
+      "query": "公司的退款政策是怎样的",
+      "top_paths": [
+        "docs/needles/needle_00032.md",
+        "docs/needles/needle_00016.md",
+        "docs/needles/needle_00064.md",
+        "docs/needles/needle_00000.md",
+        "docs/needles/needle_00048.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00033.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00033-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00033.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00033.md"
+      ],
+      "hit_rank": 2,
+      "query": "营业时间是几点到几点",
+      "top_paths": [
+        "docs/needles/needle_00065.md",
+        "docs/needles/needle_00033.md",
+        "docs/needles/needle_00017.md",
+        "docs/needles/needle_00049.md",
+        "docs/needles/needle_00001.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00034.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00034-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00034.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00034.md"
+      ],
+      "hit_rank": 2,
+      "query": "如何重置我的账户密码",
+      "top_paths": [
+        "docs/needles/needle_00066.md",
+        "docs/needles/needle_00034.md",
+        "docs/needles/needle_00018.md",
+        "docs/needles/needle_00050.md",
+        "docs/needles/needle_00002.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00035.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00035-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00035.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00035.md"
+      ],
+      "hit_rank": 4,
+      "query": "数据库连接池应该配多大",
+      "top_paths": [
+        "docs/needles/needle_00019.md",
+        "docs/needles/needle_00067.md",
+        "docs/needles/needle_00051.md",
+        "docs/needles/needle_00035.md",
+        "docs/needles/needle_00003.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00036.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00036-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00036.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00036.md"
+      ],
+      "hit_rank": 3,
+      "query": "向量检索为什么要做归一化",
+      "top_paths": [
+        "docs/needles/needle_00052.md",
+        "docs/needles/needle_00068.md",
+        "docs/needles/needle_00036.md",
+        "docs/needles/needle_00020.md",
+        "docs/needles/needle_00004.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00037.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00037-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00037.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00037.md"
+      ],
+      "hit_rank": 3,
+      "query": "二值量化粗筛的原理是什么",
+      "top_paths": [
+        "docs/needles/needle_00053.md",
+        "docs/needles/needle_00069.md",
+        "docs/needles/needle_00037.md",
+        "docs/needles/needle_00021.md",
+        "docs/needles/needle_00005.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00038.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00038-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00038.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00038.md"
+      ],
+      "hit_rank": 1,
+      "query": "RRF 融合是怎么把两路结果合并的",
+      "top_paths": [
+        "docs/needles/needle_00038.md",
+        "docs/needles/needle_00070.md",
+        "docs/needles/needle_00022.md",
+        "docs/needles/needle_00054.md",
+        "docs/needles/needle_00006.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00039.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00039-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00039.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00039.md"
+      ],
+      "hit_rank": 3,
+      "query": "重排闸门什么时候才会触发",
+      "top_paths": [
+        "docs/needles/needle_00055.md",
+        "docs/needles/needle_00071.md",
+        "docs/needles/needle_00039.md",
+        "docs/needles/needle_00007.md",
+        "docs/needles/needle_00023.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00040.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00040-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00040.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00040.md"
+      ],
+      "hit_rank": 4,
+      "query": "猫咪半夜频繁叫唤怎么办",
+      "top_paths": [
+        "docs/needles/needle_00056.md",
+        "docs/needles/needle_00072.md",
+        "docs/needles/needle_00024.md",
+        "docs/needles/needle_00040.md",
+        "docs/needles/needle_00008.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00041.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00041-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00041.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00041.md"
+      ],
+      "hit_rank": 3,
+      "query": "红烧肉怎么做才能不腻",
+      "top_paths": [
+        "docs/needles/needle_00057.md",
+        "docs/needles/needle_00073.md",
+        "docs/needles/needle_00041.md",
+        "docs/needles/needle_00025.md",
+        "docs/needles/needle_00009.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00042.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00042-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00042.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00042.md"
+      ],
+      "hit_rank": 4,
+      "query": "高血压患者饮食要注意什么",
+      "top_paths": [
+        "docs/needles/needle_00026.md",
+        "docs/needles/needle_00010.md",
+        "docs/needles/needle_00058.md",
+        "docs/needles/needle_00042.md",
+        "docs/needles/needle_00074.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00043.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00043-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00043.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00043.md"
+      ],
+      "hit_rank": 3,
+      "query": "Python 里如何并行处理大量文件",
+      "top_paths": [
+        "docs/needles/needle_00059.md",
+        "docs/needles/needle_00011.md",
+        "docs/needles/needle_00043.md",
+        "docs/needles/needle_00075.md",
+        "docs/needles/needle_00027.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00044.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00044-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00044.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00044.md"
+      ],
+      "hit_rank": 2,
+      "query": "git 误删分支怎么找回",
+      "top_paths": [
+        "docs/needles/needle_00060.md",
+        "docs/needles/needle_00044.md",
+        "docs/needles/needle_00028.md",
+        "docs/needles/needle_00012.md",
+        "docs/needles/needle_00076.md",
+        "media/videos/clip_0012.srt",
+        "media/videos/clip_0028.srt"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00045.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00045-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00045.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00045.md"
+      ],
+      "hit_rank": 4,
+      "query": "北京到上海高铁要多久",
+      "top_paths": [
+        "docs/needles/needle_00061.md",
+        "docs/needles/needle_00029.md",
+        "docs/needles/needle_00013.md",
+        "docs/needles/needle_00045.md",
+        "docs/needles/needle_00077.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00046.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00046-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00046.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00046.md"
+      ],
+      "hit_rank": 5,
+      "query": "婴儿几个月可以添加辅食",
+      "top_paths": [
+        "docs/needles/needle_00078.md",
+        "docs/needles/needle_00030.md",
+        "docs/needles/needle_00062.md",
+        "docs/needles/needle_00014.md",
+        "docs/needles/needle_00046.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00047.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00047-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00047.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00047.md"
+      ],
+      "hit_rank": 4,
+      "query": "如何判断西瓜熟没熟",
+      "top_paths": [
+        "docs/needles/needle_00079.md",
+        "docs/needles/needle_00063.md",
+        "docs/needles/needle_00015.md",
+        "docs/needles/needle_00047.md",
+        "docs/needles/needle_00031.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00048.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00048-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00048.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00048.md"
+      ],
+      "hit_rank": 4,
+      "query": "公司的退款政策是怎样的",
+      "top_paths": [
+        "docs/needles/needle_00016.md",
+        "docs/needles/needle_00064.md",
+        "docs/needles/needle_00032.md",
+        "docs/needles/needle_00048.md",
+        "docs/needles/needle_00000.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00049.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00049-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00049.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00049.md"
+      ],
+      "hit_rank": 2,
+      "query": "营业时间是几点到几点",
+      "top_paths": [
+        "docs/needles/needle_00065.md",
+        "docs/needles/needle_00049.md",
+        "docs/needles/needle_00017.md",
+        "docs/needles/needle_00033.md",
+        "docs/needles/needle_00001.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00050.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00050-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00050.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00050.md"
+      ],
+      "hit_rank": 1,
+      "query": "如何重置我的账户密码",
+      "top_paths": [
+        "docs/needles/needle_00050.md",
+        "docs/needles/needle_00066.md",
+        "docs/needles/needle_00034.md",
+        "docs/needles/needle_00002.md",
+        "docs/needles/needle_00018.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00051.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00051-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00051.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00051.md"
+      ],
+      "hit_rank": 4,
+      "query": "数据库连接池应该配多大",
+      "top_paths": [
+        "docs/needles/needle_00067.md",
+        "docs/needles/needle_00019.md",
+        "docs/needles/needle_00035.md",
+        "docs/needles/needle_00051.md",
+        "docs/needles/needle_00003.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00052.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00052-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00052.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00052.md"
+      ],
+      "hit_rank": 2,
+      "query": "向量检索为什么要做归一化",
+      "top_paths": [
+        "docs/needles/needle_00036.md",
+        "docs/needles/needle_00052.md",
+        "docs/needles/needle_00068.md",
+        "docs/needles/needle_00020.md",
+        "docs/needles/needle_00004.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00053.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00053-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00053.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00053.md"
+      ],
+      "hit_rank": 4,
+      "query": "二值量化粗筛的原理是什么",
+      "top_paths": [
+        "docs/needles/needle_00069.md",
+        "docs/needles/needle_00037.md",
+        "docs/needles/needle_00021.md",
+        "docs/needles/needle_00053.md",
+        "docs/needles/needle_00005.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00054.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00054-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00054.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00054.md"
+      ],
+      "hit_rank": 5,
+      "query": "RRF 融合是怎么把两路结果合并的",
+      "top_paths": [
+        "docs/needles/needle_00070.md",
+        "docs/needles/needle_00038.md",
+        "docs/needles/needle_00006.md",
+        "docs/needles/needle_00022.md",
+        "docs/needles/needle_00054.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00055.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00055-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00055.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00055.md"
+      ],
+      "hit_rank": 1,
+      "query": "重排闸门什么时候才会触发",
+      "top_paths": [
+        "docs/needles/needle_00055.md",
+        "docs/needles/needle_00071.md",
+        "docs/needles/needle_00039.md",
+        "docs/needles/needle_00007.md",
+        "docs/needles/needle_00023.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00056.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00056-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00056.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00056.md"
+      ],
+      "hit_rank": 1,
+      "query": "猫咪半夜频繁叫唤怎么办",
+      "top_paths": [
+        "docs/needles/needle_00056.md",
+        "docs/needles/needle_00072.md",
+        "docs/needles/needle_00040.md",
+        "docs/needles/needle_00024.md",
+        "docs/needles/needle_00008.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00057.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00057-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00057.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00057.md"
+      ],
+      "hit_rank": 1,
+      "query": "红烧肉怎么做才能不腻",
+      "top_paths": [
+        "docs/needles/needle_00057.md",
+        "docs/needles/needle_00073.md",
+        "docs/needles/needle_00041.md",
+        "docs/needles/needle_00025.md",
+        "docs/needles/needle_00009.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00058.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00058-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00058.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00058.md"
+      ],
+      "hit_rank": 3,
+      "query": "高血压患者饮食要注意什么",
+      "top_paths": [
+        "docs/needles/needle_00026.md",
+        "docs/needles/needle_00074.md",
+        "docs/needles/needle_00058.md",
+        "docs/needles/needle_00010.md",
+        "docs/needles/needle_00042.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00059.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00059-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00059.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00059.md"
+      ],
+      "hit_rank": 2,
+      "query": "Python 里如何并行处理大量文件",
+      "top_paths": [
+        "docs/needles/needle_00011.md",
+        "docs/needles/needle_00059.md",
+        "docs/needles/needle_00075.md",
+        "docs/needles/needle_00043.md",
+        "docs/needles/needle_00027.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00060.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00060-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00060.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00060.md"
+      ],
+      "hit_rank": 1,
+      "query": "git 误删分支怎么找回",
+      "top_paths": [
+        "docs/needles/needle_00060.md",
+        "docs/needles/needle_00044.md",
+        "docs/needles/needle_00028.md",
+        "docs/needles/needle_00012.md",
+        "docs/needles/needle_00076.md",
+        "media/videos/clip_0028.srt",
+        "media/videos/clip_0012.srt"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00061.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00061-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00061.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00061.md"
+      ],
+      "hit_rank": 2,
+      "query": "北京到上海高铁要多久",
+      "top_paths": [
+        "docs/needles/needle_00029.md",
+        "docs/needles/needle_00061.md",
+        "docs/needles/needle_00013.md",
+        "docs/needles/needle_00077.md",
+        "docs/needles/needle_00045.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00062.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00062-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00062.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00062.md"
+      ],
+      "hit_rank": 1,
+      "query": "婴儿几个月可以添加辅食",
+      "top_paths": [
+        "docs/needles/needle_00062.md",
+        "docs/needles/needle_00078.md",
+        "docs/needles/needle_00030.md",
+        "docs/needles/needle_00014.md",
+        "docs/needles/needle_00046.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00063.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00063-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00063.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00063.md"
+      ],
+      "hit_rank": 2,
+      "query": "如何判断西瓜熟没熟",
+      "top_paths": [
+        "docs/needles/needle_00079.md",
+        "docs/needles/needle_00063.md",
+        "docs/needles/needle_00015.md",
+        "docs/needles/needle_00047.md",
+        "docs/needles/needle_00031.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00064.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00064-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00064.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00064.md"
+      ],
+      "hit_rank": 2,
+      "query": "公司的退款政策是怎样的",
+      "top_paths": [
+        "docs/needles/needle_00032.md",
+        "docs/needles/needle_00064.md",
+        "docs/needles/needle_00048.md",
+        "docs/needles/needle_00016.md",
+        "docs/needles/needle_00000.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00065.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00065-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00065.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00065.md"
+      ],
+      "hit_rank": 1,
+      "query": "营业时间是几点到几点",
+      "top_paths": [
+        "docs/needles/needle_00065.md",
+        "docs/needles/needle_00017.md",
+        "docs/needles/needle_00033.md",
+        "docs/needles/needle_00049.md",
+        "docs/needles/needle_00001.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00066.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00066-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00066.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00066.md"
+      ],
+      "hit_rank": 1,
+      "query": "如何重置我的账户密码",
+      "top_paths": [
+        "docs/needles/needle_00066.md",
+        "docs/needles/needle_00050.md",
+        "docs/needles/needle_00018.md",
+        "docs/needles/needle_00002.md",
+        "docs/needles/needle_00034.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00067.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00067-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00067.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00067.md"
+      ],
+      "hit_rank": 1,
+      "query": "数据库连接池应该配多大",
+      "top_paths": [
+        "docs/needles/needle_00067.md",
+        "docs/needles/needle_00019.md",
+        "docs/needles/needle_00051.md",
+        "docs/needles/needle_00003.md",
+        "docs/needles/needle_00035.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00068.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00068-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00068.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00068.md"
+      ],
+      "hit_rank": 1,
+      "query": "向量检索为什么要做归一化",
+      "top_paths": [
+        "docs/needles/needle_00068.md",
+        "docs/needles/needle_00036.md",
+        "docs/needles/needle_00004.md",
+        "docs/needles/needle_00020.md",
+        "docs/needles/needle_00052.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00069.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00069-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00069.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00069.md"
+      ],
+      "hit_rank": 1,
+      "query": "二值量化粗筛的原理是什么",
+      "top_paths": [
+        "docs/needles/needle_00069.md",
+        "docs/needles/needle_00037.md",
+        "docs/needles/needle_00053.md",
+        "docs/needles/needle_00005.md",
+        "docs/needles/needle_00021.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00070.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00070-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00070.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00070.md"
+      ],
+      "hit_rank": 2,
+      "query": "RRF 融合是怎么把两路结果合并的",
+      "top_paths": [
+        "docs/needles/needle_00038.md",
+        "docs/needles/needle_00070.md",
+        "docs/needles/needle_00054.md",
+        "docs/needles/needle_00022.md",
+        "docs/needles/needle_00006.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00071.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00071-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00071.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00071.md"
+      ],
+      "hit_rank": 4,
+      "query": "重排闸门什么时候才会触发",
+      "top_paths": [
+        "docs/needles/needle_00055.md",
+        "docs/needles/needle_00039.md",
+        "docs/needles/needle_00007.md",
+        "docs/needles/needle_00071.md",
+        "docs/needles/needle_00023.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00072.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00072-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00072.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00072.md"
+      ],
+      "hit_rank": 1,
+      "query": "猫咪半夜频繁叫唤怎么办",
+      "top_paths": [
+        "docs/needles/needle_00072.md",
+        "docs/needles/needle_00056.md",
+        "docs/needles/needle_00040.md",
+        "docs/needles/needle_00024.md",
+        "docs/needles/needle_00008.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00073.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00073-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00073.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00073.md"
+      ],
+      "hit_rank": 4,
+      "query": "红烧肉怎么做才能不腻",
+      "top_paths": [
+        "docs/needles/needle_00025.md",
+        "docs/needles/needle_00041.md",
+        "docs/needles/needle_00057.md",
+        "docs/needles/needle_00073.md",
+        "docs/needles/needle_00009.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00074.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00074-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00074.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00074.md"
+      ],
+      "hit_rank": 2,
+      "query": "高血压患者饮食要注意什么",
+      "top_paths": [
+        "docs/needles/needle_00026.md",
+        "docs/needles/needle_00074.md",
+        "docs/needles/needle_00010.md",
+        "docs/needles/needle_00042.md",
+        "docs/needles/needle_00058.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00075.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00075-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00075.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00075.md"
+      ],
+      "hit_rank": 3,
+      "query": "Python 里如何并行处理大量文件",
+      "top_paths": [
+        "docs/needles/needle_00059.md",
+        "docs/needles/needle_00011.md",
+        "docs/needles/needle_00075.md",
+        "docs/needles/needle_00027.md",
+        "docs/needles/needle_00043.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00076.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00076-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00076.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00076.md"
+      ],
+      "hit_rank": 4,
+      "query": "git 误删分支怎么找回",
+      "top_paths": [
+        "docs/needles/needle_00060.md",
+        "docs/needles/needle_00028.md",
+        "docs/needles/needle_00012.md",
+        "docs/needles/needle_00076.md",
+        "docs/needles/needle_00044.md",
+        "media/videos/clip_0012.srt",
+        "media/videos/clip_0028.srt"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00077.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00077-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00077.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00077.md"
+      ],
+      "hit_rank": 5,
+      "query": "北京到上海高铁要多久",
+      "top_paths": [
+        "docs/needles/needle_00061.md",
+        "docs/needles/needle_00013.md",
+        "docs/needles/needle_00029.md",
+        "docs/needles/needle_00045.md",
+        "docs/needles/needle_00077.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00078.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00078-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00078.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00078.md"
+      ],
+      "hit_rank": 2,
+      "query": "婴儿几个月可以添加辅食",
+      "top_paths": [
+        "docs/needles/needle_00062.md",
+        "docs/needles/needle_00078.md",
+        "docs/needles/needle_00030.md",
+        "docs/needles/needle_00014.md",
+        "docs/needles/needle_00046.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00079.md"
+      ],
+      "hit_rank": 1,
+      "query": "NEEDLE-00079-ZARQUON",
+      "top_paths": [
+        "docs/needles/needle_00079.md"
+      ]
+    },
+    {
+      "expected": [
+        "docs/needles/needle_00079.md"
+      ],
+      "hit_rank": 3,
+      "query": "如何判断西瓜熟没熟",
+      "top_paths": [
+        "docs/needles/needle_00063.md",
+        "docs/needles/needle_00015.md",
+        "docs/needles/needle_00079.md",
+        "docs/needles/needle_00031.md",
+        "docs/needles/needle_00047.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0000.srt"
+      ],
+      "hit_rank": null,
+      "query": "公司的退款政策是怎样的",
+      "top_paths": [
+        "docs/needles/needle_00016.md",
+        "docs/needles/needle_00000.md",
+        "docs/needles/needle_00064.md",
+        "docs/needles/needle_00048.md",
+        "docs/needles/needle_00032.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0001.srt"
+      ],
+      "hit_rank": null,
+      "query": "营业时间是几点到几点",
+      "top_paths": [
+        "docs/needles/needle_00065.md",
+        "docs/needles/needle_00017.md",
+        "docs/needles/needle_00049.md",
+        "docs/needles/needle_00033.md",
+        "docs/needles/needle_00001.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0002.srt"
+      ],
+      "hit_rank": null,
+      "query": "如何重置我的账户密码",
+      "top_paths": [
+        "docs/needles/needle_00050.md",
+        "docs/needles/needle_00034.md",
+        "docs/needles/needle_00066.md",
+        "docs/needles/needle_00018.md",
+        "docs/needles/needle_00002.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0003.srt"
+      ],
+      "hit_rank": null,
+      "query": "数据库连接池应该配多大",
+      "top_paths": [
+        "docs/needles/needle_00019.md",
+        "docs/needles/needle_00067.md",
+        "docs/needles/needle_00051.md",
+        "docs/needles/needle_00003.md",
+        "docs/needles/needle_00035.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0004.srt"
+      ],
+      "hit_rank": null,
+      "query": "向量检索为什么要做归一化",
+      "top_paths": [
+        "docs/needles/needle_00036.md",
+        "docs/needles/needle_00052.md",
+        "docs/needles/needle_00068.md",
+        "docs/needles/needle_00020.md",
+        "docs/needles/needle_00004.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0005.srt"
+      ],
+      "hit_rank": null,
+      "query": "二值量化粗筛的原理是什么",
+      "top_paths": [
+        "docs/needles/needle_00069.md",
+        "docs/needles/needle_00053.md",
+        "docs/needles/needle_00037.md",
+        "docs/needles/needle_00021.md",
+        "docs/needles/needle_00005.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0006.srt"
+      ],
+      "hit_rank": null,
+      "query": "RRF 融合是怎么把两路结果合并的",
+      "top_paths": [
+        "docs/needles/needle_00038.md",
+        "docs/needles/needle_00070.md",
+        "docs/needles/needle_00022.md",
+        "docs/needles/needle_00054.md",
+        "docs/needles/needle_00006.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0007.srt"
+      ],
+      "hit_rank": null,
+      "query": "重排闸门什么时候才会触发",
+      "top_paths": [
+        "docs/needles/needle_00071.md",
+        "docs/needles/needle_00023.md",
+        "docs/needles/needle_00055.md",
+        "docs/needles/needle_00039.md",
+        "docs/needles/needle_00007.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0008.srt"
+      ],
+      "hit_rank": null,
+      "query": "猫咪半夜频繁叫唤怎么办",
+      "top_paths": [
+        "docs/needles/needle_00040.md",
+        "docs/needles/needle_00072.md",
+        "docs/needles/needle_00056.md",
+        "docs/needles/needle_00024.md",
+        "docs/needles/needle_00008.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0009.srt"
+      ],
+      "hit_rank": null,
+      "query": "红烧肉怎么做才能不腻",
+      "top_paths": [
+        "docs/needles/needle_00057.md",
+        "docs/needles/needle_00041.md",
+        "docs/needles/needle_00073.md",
+        "docs/needles/needle_00009.md",
+        "docs/needles/needle_00025.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0010.srt"
+      ],
+      "hit_rank": null,
+      "query": "高血压患者饮食要注意什么",
+      "top_paths": [
+        "docs/needles/needle_00074.md",
+        "docs/needles/needle_00010.md",
+        "docs/needles/needle_00026.md",
+        "docs/needles/needle_00042.md",
+        "docs/needles/needle_00058.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0011.srt"
+      ],
+      "hit_rank": null,
+      "query": "Python 里如何并行处理大量文件",
+      "top_paths": [
+        "docs/needles/needle_00011.md",
+        "docs/needles/needle_00059.md",
+        "docs/needles/needle_00075.md",
+        "docs/needles/needle_00027.md",
+        "docs/needles/needle_00043.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0012.srt"
+      ],
+      "hit_rank": 7,
+      "query": "git 误删分支怎么找回",
+      "top_paths": [
+        "docs/needles/needle_00060.md",
+        "docs/needles/needle_00028.md",
+        "docs/needles/needle_00044.md",
+        "docs/needles/needle_00076.md",
+        "docs/needles/needle_00012.md",
+        "media/videos/clip_0028.srt",
+        "media/videos/clip_0012.srt"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0013.srt"
+      ],
+      "hit_rank": null,
+      "query": "北京到上海高铁要多久",
+      "top_paths": [
+        "docs/needles/needle_00029.md",
+        "docs/needles/needle_00013.md",
+        "docs/needles/needle_00061.md",
+        "docs/needles/needle_00045.md",
+        "docs/needles/needle_00077.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0014.srt"
+      ],
+      "hit_rank": null,
+      "query": "婴儿几个月可以添加辅食",
+      "top_paths": [
+        "docs/needles/needle_00078.md",
+        "docs/needles/needle_00062.md",
+        "docs/needles/needle_00030.md",
+        "docs/needles/needle_00014.md",
+        "docs/needles/needle_00046.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0015.srt"
+      ],
+      "hit_rank": null,
+      "query": "如何判断西瓜熟没熟",
+      "top_paths": [
+        "docs/needles/needle_00079.md",
+        "docs/needles/needle_00015.md",
+        "docs/needles/needle_00063.md",
+        "docs/needles/needle_00047.md",
+        "docs/needles/needle_00031.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0016.srt"
+      ],
+      "hit_rank": null,
+      "query": "公司的退款政策是怎样的",
+      "top_paths": [
+        "docs/needles/needle_00032.md",
+        "docs/needles/needle_00064.md",
+        "docs/needles/needle_00048.md",
+        "docs/needles/needle_00000.md",
+        "docs/needles/needle_00016.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0017.srt"
+      ],
+      "hit_rank": null,
+      "query": "营业时间是几点到几点",
+      "top_paths": [
+        "docs/needles/needle_00065.md",
+        "docs/needles/needle_00049.md",
+        "docs/needles/needle_00017.md",
+        "docs/needles/needle_00033.md",
+        "docs/needles/needle_00001.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0018.srt"
+      ],
+      "hit_rank": null,
+      "query": "如何重置我的账户密码",
+      "top_paths": [
+        "docs/needles/needle_00018.md",
+        "docs/needles/needle_00002.md",
+        "docs/needles/needle_00066.md",
+        "docs/needles/needle_00034.md",
+        "docs/needles/needle_00050.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0019.srt"
+      ],
+      "hit_rank": null,
+      "query": "数据库连接池应该配多大",
+      "top_paths": [
+        "docs/needles/needle_00019.md",
+        "docs/needles/needle_00067.md",
+        "docs/needles/needle_00051.md",
+        "docs/needles/needle_00003.md",
+        "docs/needles/needle_00035.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0020.srt"
+      ],
+      "hit_rank": null,
+      "query": "向量检索为什么要做归一化",
+      "top_paths": [
+        "docs/needles/needle_00052.md",
+        "docs/needles/needle_00068.md",
+        "docs/needles/needle_00036.md",
+        "docs/needles/needle_00004.md",
+        "docs/needles/needle_00020.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0021.srt"
+      ],
+      "hit_rank": null,
+      "query": "二值量化粗筛的原理是什么",
+      "top_paths": [
+        "docs/needles/needle_00053.md",
+        "docs/needles/needle_00069.md",
+        "docs/needles/needle_00037.md",
+        "docs/needles/needle_00021.md",
+        "docs/needles/needle_00005.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0022.srt"
+      ],
+      "hit_rank": null,
+      "query": "RRF 融合是怎么把两路结果合并的",
+      "top_paths": [
+        "docs/needles/needle_00038.md",
+        "docs/needles/needle_00054.md",
+        "docs/needles/needle_00070.md",
+        "docs/needles/needle_00006.md",
+        "docs/needles/needle_00022.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0023.srt"
+      ],
+      "hit_rank": null,
+      "query": "重排闸门什么时候才会触发",
+      "top_paths": [
+        "docs/needles/needle_00071.md",
+        "docs/needles/needle_00055.md",
+        "docs/needles/needle_00039.md",
+        "docs/needles/needle_00023.md",
+        "docs/needles/needle_00007.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0024.srt"
+      ],
+      "hit_rank": null,
+      "query": "猫咪半夜频繁叫唤怎么办",
+      "top_paths": [
+        "docs/needles/needle_00072.md",
+        "docs/needles/needle_00056.md",
+        "docs/needles/needle_00008.md",
+        "docs/needles/needle_00040.md",
+        "docs/needles/needle_00024.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0025.srt"
+      ],
+      "hit_rank": null,
+      "query": "红烧肉怎么做才能不腻",
+      "top_paths": [
+        "docs/needles/needle_00057.md",
+        "docs/needles/needle_00073.md",
+        "docs/needles/needle_00025.md",
+        "docs/needles/needle_00041.md",
+        "docs/needles/needle_00009.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0026.srt"
+      ],
+      "hit_rank": null,
+      "query": "高血压患者饮食要注意什么",
+      "top_paths": [
+        "docs/needles/needle_00026.md",
+        "docs/needles/needle_00074.md",
+        "docs/needles/needle_00058.md",
+        "docs/needles/needle_00010.md",
+        "docs/needles/needle_00042.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0027.srt"
+      ],
+      "hit_rank": null,
+      "query": "Python 里如何并行处理大量文件",
+      "top_paths": [
+        "docs/needles/needle_00059.md",
+        "docs/needles/needle_00011.md",
+        "docs/needles/needle_00043.md",
+        "docs/needles/needle_00075.md",
+        "docs/needles/needle_00027.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0028.srt"
+      ],
+      "hit_rank": 7,
+      "query": "git 误删分支怎么找回",
+      "top_paths": [
+        "docs/needles/needle_00060.md",
+        "docs/needles/needle_00044.md",
+        "docs/needles/needle_00076.md",
+        "docs/needles/needle_00028.md",
+        "docs/needles/needle_00012.md",
+        "media/videos/clip_0012.srt",
+        "media/videos/clip_0028.srt"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0029.srt"
+      ],
+      "hit_rank": null,
+      "query": "北京到上海高铁要多久",
+      "top_paths": [
+        "docs/needles/needle_00029.md",
+        "docs/needles/needle_00061.md",
+        "docs/needles/needle_00013.md",
+        "docs/needles/needle_00045.md",
+        "docs/needles/needle_00077.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0030.srt"
+      ],
+      "hit_rank": null,
+      "query": "婴儿几个月可以添加辅食",
+      "top_paths": [
+        "docs/needles/needle_00062.md",
+        "docs/needles/needle_00078.md",
+        "docs/needles/needle_00030.md",
+        "docs/needles/needle_00046.md",
+        "docs/needles/needle_00014.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0031.srt"
+      ],
+      "hit_rank": null,
+      "query": "如何判断西瓜熟没熟",
+      "top_paths": [
+        "docs/needles/needle_00079.md",
+        "docs/needles/needle_00063.md",
+        "docs/needles/needle_00015.md",
+        "docs/needles/needle_00047.md",
+        "docs/needles/needle_00031.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0032.srt"
+      ],
+      "hit_rank": null,
+      "query": "公司的退款政策是怎样的",
+      "top_paths": [
+        "docs/needles/needle_00016.md",
+        "docs/needles/needle_00032.md",
+        "docs/needles/needle_00064.md",
+        "docs/needles/needle_00048.md",
+        "docs/needles/needle_00000.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0033.srt"
+      ],
+      "hit_rank": null,
+      "query": "营业时间是几点到几点",
+      "top_paths": [
+        "docs/needles/needle_00065.md",
+        "docs/needles/needle_00049.md",
+        "docs/needles/needle_00017.md",
+        "docs/needles/needle_00033.md",
+        "docs/needles/needle_00001.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0034.srt"
+      ],
+      "hit_rank": null,
+      "query": "如何重置我的账户密码",
+      "top_paths": [
+        "docs/needles/needle_00066.md",
+        "docs/needles/needle_00034.md",
+        "docs/needles/needle_00050.md",
+        "docs/needles/needle_00002.md",
+        "docs/needles/needle_00018.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0035.srt"
+      ],
+      "hit_rank": null,
+      "query": "数据库连接池应该配多大",
+      "top_paths": [
+        "docs/needles/needle_00067.md",
+        "docs/needles/needle_00019.md",
+        "docs/needles/needle_00051.md",
+        "docs/needles/needle_00035.md",
+        "docs/needles/needle_00003.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0036.srt"
+      ],
+      "hit_rank": null,
+      "query": "向量检索为什么要做归一化",
+      "top_paths": [
+        "docs/needles/needle_00036.md",
+        "docs/needles/needle_00052.md",
+        "docs/needles/needle_00068.md",
+        "docs/needles/needle_00020.md",
+        "docs/needles/needle_00004.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0037.srt"
+      ],
+      "hit_rank": null,
+      "query": "二值量化粗筛的原理是什么",
+      "top_paths": [
+        "docs/needles/needle_00037.md",
+        "docs/needles/needle_00053.md",
+        "docs/needles/needle_00069.md",
+        "docs/needles/needle_00021.md",
+        "docs/needles/needle_00005.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0038.srt"
+      ],
+      "hit_rank": null,
+      "query": "RRF 融合是怎么把两路结果合并的",
+      "top_paths": [
+        "docs/needles/needle_00038.md",
+        "docs/needles/needle_00054.md",
+        "docs/needles/needle_00070.md",
+        "docs/needles/needle_00006.md",
+        "docs/needles/needle_00022.md"
+      ]
+    },
+    {
+      "expected": [
+        "clip_0039.srt"
+      ],
+      "hit_rank": null,
+      "query": "重排闸门什么时候才会触发",
+      "top_paths": [
+        "docs/needles/needle_00071.md",
+        "docs/needles/needle_00039.md",
+        "docs/needles/needle_00055.md",
+        "docs/needles/needle_00023.md",
+        "docs/needles/needle_00007.md"
+      ]
+    }
+  ],
+  "evaluated": 200,
+  "k": 10,
+  "mode": "grep",
+  "mrr": 0.585178554058075,
+  "recall_at_k": 0.8100000023841858,
+  "total_cases": 200
+}

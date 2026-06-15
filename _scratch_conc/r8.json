@@ -1,0 +1,91 @@
+{
+  "grep_hits": 5,
+  "grep_truncated": false,
+  "hits": [
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00024.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00024.md",
+      "score": 0.014517593197524548,
+      "snippet": "猫咪半夜频繁叫唤怎么办?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00056.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00056.md",
+      "score": 0.014256687834858894,
+      "snippet": "猫咪半夜频繁叫唤怎么办?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00040.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00040.md",
+      "score": 0.014256687834858894,
+      "snippet": "猫咪半夜频繁叫唤怎么办?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00072.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00072.md",
+      "score": 0.014256687834858894,
+      "snippet": "猫咪半夜频繁叫唤怎么办?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00008.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00008.md",
+      "score": 0.014256687834858894,
+      "snippet": "猫咪半夜频繁叫唤怎么办?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0008.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0008.srt",
+      "score": 0.008660922758281231,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n猫在夜间活跃属天性,可在睡前增加互动消耗精力,并保证食盆有粮,必要时咨询宠物医生。\n\n2\n00:00:05,000 --> 00:00:09,000\n内存盘点延迟并行缓存嵌入召回倒排。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0024.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0024.srt",
+      "score": 0.008453217335045338,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n猫在夜间活跃属天性,可在睡前增加互动消耗精力,并保证食盆有粮,必要时咨询宠物医生。\n\n2\n00:00:05,000 --> 00:00:09,000\n并行索引延迟融合模型参数向量转写。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0025.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0025.srt",
+      "score": 0.00009735982894198969,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n先焯水去腥,炒糖色后小火慢炖一小时,加入少量山楂或茶叶可解腻增香。\n\n2\n00:00:05,000 --> 00:00:09,000\n报告视频知识库延迟文件模型融合日志。"
+    }
+  ],
+  "mode": "hybrid",
+  "ms": 1535,
+  "query": "猫咪",
+  "reranked": true,
+  "vector_hits": 16
+}

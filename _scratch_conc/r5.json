@@ -1,0 +1,94 @@
+{
+  "grep_hits": 3,
+  "grep_truncated": false,
+  "hits": [
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0003.srt",
+      "lanes": [
+        "grep",
+        "vector"
+      ],
+      "location": "L3",
+      "path": "media/videos/clip_0003.srt",
+      "score": 0.6199307441711426,
+      "snippet": "连接池大小建议设为 CPU 核数的两到四倍,过大反而会因上下文切换降低吞吐。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0019.srt",
+      "lanes": [
+        "grep",
+        "vector"
+      ],
+      "location": "L3",
+      "path": "media/videos/clip_0019.srt",
+      "score": 0.5860810875892639,
+      "snippet": "连接池大小建议设为 CPU 核数的两到四倍,过大反而会因上下文切换降低吞吐。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0035.srt",
+      "lanes": [
+        "grep",
+        "vector"
+      ],
+      "location": "L3",
+      "path": "media/videos/clip_0035.srt",
+      "score": 0.537874698638916,
+      "snippet": "连接池大小建议设为 CPU 核数的两到四倍,过大反而会因上下文切换降低吞吐。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0011.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0011.srt",
+      "score": 0.003538464428856969,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\nIO 密集用线程池,CPU 密集用进程池绕过全局解释器锁。\n\n2\n00:00:05,000 --> 00:00:09,000\n融合参数线程知识库召回视频盘点字幕。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0027.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0027.srt",
+      "score": 0.002582129556685686,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\nIO 密集用线程池,CPU 密集用进程池绕过全局解释器锁。\n\n2\n00:00:05,000 --> 00:00:09,000\n系统召回内存磁盘索引语义日志配置。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0036.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0036.srt",
+      "score": 0.0003778357931878418,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n入库时做一次 L2 归一化后,余弦相似度退化成纯点积,查询时省掉每个向量现算模长的开销。\n\n2\n00:00:05,000 --> 00:00:09,000\n融合基准规模字幕内存检索线程文件。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\noise/n_0874.md",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "noise/n_0874.md",
+      "score": 0.00004200985858915374,
+      "snippet": "﻿# 噪音文档 874\n\n性能融合汉明语义视频车道缓存系统。文件余弦内存量化延迟吞吐召回盘点。语义融合系统盘点延迟排序分块车道。视频量化延迟磁盘语义余弦检索转写。量化倒排转写融合延迟向量缓存磁盘。量化视频缓存盘点延迟重排文件向量。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\noise/n_0843.md",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "noise/n_0843.md",
+      "score": 0.00003115392610197887,
+      "snippet": "﻿# 噪音文档 843\n\n倒排吞吐嵌入系统汉明余弦语义检索。融合车道吞吐召回索引字幕分块检索。融合内存余弦模型向量语义嵌入延迟。缓存召回检索并行融合文件吞吐字幕。文件分块排序量化延迟磁盘融合缓存。磁盘模型余弦缓存系统文件向量延迟。"
+    }
+  ],
+  "mode": "hybrid",
+  "ms": 1392,
+  "query": "连接池",
+  "reranked": true,
+  "vector_hits": 16
+}

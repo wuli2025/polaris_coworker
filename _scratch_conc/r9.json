@@ -1,0 +1,91 @@
+{
+  "grep_hits": 0,
+  "grep_truncated": false,
+  "hits": [
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0025.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0025.srt",
+      "score": 0.14169785380363464,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n先焯水去腥,炒糖色后小火慢炖一小时,加入少量山楂或茶叶可解腻增香。\n\n2\n00:00:05,000 --> 00:00:09,000\n报告视频知识库延迟文件模型融合日志。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0009.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0009.srt",
+      "score": 0.12039423733949661,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n先焯水去腥,炒糖色后小火慢炖一小时,加入少量山楂或茶叶可解腻增香。\n\n2\n00:00:05,000 --> 00:00:09,000\n模型基准语义文件测试向量数据内存。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0017.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0017.srt",
+      "score": 0.005330129526555538,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n门店每天上午九点开门,下午六点关门,法定节假日不休息。\n\n2\n00:00:05,000 --> 00:00:09,000\n记录盘点参数融合转写配置规模文件。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0033.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0033.srt",
+      "score": 0.0044410075061023235,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n门店每天上午九点开门,下午六点关门,法定节假日不休息。\n\n2\n00:00:05,000 --> 00:00:09,000\n日志倒排参数测试重排分块知识库并行。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0001.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0001.srt",
+      "score": 0.0035954811610281467,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n门店每天上午九点开门,下午六点关门,法定节假日不休息。\n\n2\n00:00:05,000 --> 00:00:09,000\n索引规模倒排日志记录盘点重排并行。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0038.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0038.srt",
+      "score": 0.001040401286445558,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n倒数排名融合按 1 除以 60 加排名给每路打分再相加,同一文件被多路命中时分数自然叠加顶上去。\n\n2\n00:00:05,000 --> 00:00:09,000\n并行分块磁盘内存性能测试字幕缓存。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0023.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0023.srt",
+      "score": 0.001011331332847476,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n只有候选不少于三个且前两名分数咬得很紧时才请重排专家,一骑绝尘或候选太少就直接保持融合序。\n\n2\n00:00:05,000 --> 00:00:09,000\n系统字幕参数量化余弦测试缓存嵌入。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0031.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0031.srt",
+      "score": 0.0003257158095948398,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n拍打声音清脆回响、瓜脐内凹、瓜藤卷曲发黄的西瓜通常成熟度高、甜度好。\n\n2\n00:00:05,000 --> 00:00:09,000\n吞吐文件数据召回车道缓存索引嵌入。"
+    }
+  ],
+  "mode": "hybrid",
+  "ms": 1448,
+  "query": "红烧肉",
+  "reranked": true,
+  "vector_hits": 16
+}

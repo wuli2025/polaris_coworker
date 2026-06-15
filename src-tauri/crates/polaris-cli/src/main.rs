@@ -179,6 +179,11 @@ fn run(cmd: &str, args: &[String]) -> Result<Value, String> {
                     serde_json::to_value(app::fable::retrieve::search(&q, top, &mode)?)
                         .map_err(|e| e.to_string())
                 }
+                "optimize" => {
+                    // 重建向量 IVF 倒排单元(20TB 级 ANN「建索引」;大批入库后/巡夜跑)。
+                    serde_json::to_value(app::fable::index::optimize_vectors()?)
+                        .map_err(|e| e.to_string())
+                }
                 "eval" => {
                     // --init 先写一份评测集样例;否则跑考卷出 recall@k + MRR。
                     if has(rest, "init") {

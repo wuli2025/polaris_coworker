@@ -1,0 +1,93 @@
+{
+  "grep_hits": 12,
+  "grep_truncated": false,
+  "hits": [
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00013.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00013.md",
+      "score": 0.322314977645874,
+      "snippet": "北京到上海高铁要多久?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00061.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00061.md",
+      "score": 0.29825201630592346,
+      "snippet": "北京到上海高铁要多久?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00029.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00029.md",
+      "score": 0.2960217595100403,
+      "snippet": "北京到上海高铁要多久?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0029.srt",
+      "lanes": [
+        "grep",
+        "vector"
+      ],
+      "location": "L3",
+      "path": "media/videos/clip_0029.srt",
+      "score": 0.2664470076560974,
+      "snippet": "京沪高铁最快约四个半小时,二等座票价五百多元,每天有数十趟车次。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00045.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00045.md",
+      "score": 0.18922169506549835,
+      "snippet": "北京到上海高铁要多久?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\docs/needles/needle_00077.md",
+      "lanes": [
+        "grep"
+      ],
+      "location": "L6",
+      "path": "docs/needles/needle_00077.md",
+      "score": 0.18879373371601105,
+      "snippet": "北京到上海高铁要多久?"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0013.srt",
+      "lanes": [
+        "grep",
+        "vector"
+      ],
+      "location": "L3",
+      "path": "media/videos/clip_0013.srt",
+      "score": 0.13881179690361023,
+      "snippet": "京沪高铁最快约四个半小时,二等座票价五百多元,每天有数十趟车次。"
+    },
+    {
+      "abspath": "D:\\_ragtest\\focus\\media/videos/clip_0037.srt",
+      "lanes": [
+        "vector"
+      ],
+      "location": "C0",
+      "path": "media/videos/clip_0037.srt",
+      "score": 0.0028775751125067472,
+      "snippet": "﻿1\n00:00:01,000 --> 00:00:05,000\n把浮点向量按符号位打包成二值码,先用汉明距离粗筛候选,读量只有原始浮点的三十二分之一。\n\n2\n00:00:05,000 --> 00:00:09,000\n索引基准车道语义记录嵌入模型数据。"
+    }
+  ],
+  "mode": "hybrid",
+  "ms": 1583,
+  "query": "高铁",
+  "reranked": true,
+  "vector_hits": 16
+}
