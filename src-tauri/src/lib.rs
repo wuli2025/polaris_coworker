@@ -182,6 +182,8 @@ pub fn run() {
             expert::expert_match_auto,
             expert::expert_apply,
             expert::expert_avatar,
+            expert::expert_team_spawn,
+            expert::expert_agents_status,
             // 飞书网关 (板块⑭ 阶段 A)
             feishu::feishu_get_config,
             feishu::feishu_set_config,

@@ -147,6 +147,10 @@ pub struct ChatSendArgs {
     /// 每批最多构建几个单元(页/章/文件)。None 时用默认值。
     #[serde(default)]
     pub batch_size: Option<usize>,
+    /// 智能体模式: "single" | "expert-team" | "auto-match"
+    /// 专家团模式下自动检测任务复杂度，必要时注入多专家召集信息。
+    #[serde(default)]
+    pub agent_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -326,6 +330,30 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     if args.dynamic_workflow {
         final_prompt.push_str(&dynamic_workflow_directive());
         final_prompt.push_str("\n\n---\n\n");
+    }
+
+    // 2.68 专家团模式: 检测任务是否需要多专家，必要时注入召集信息
+    if args.agent_mode.as_deref() == Some("expert-team") {
+        if crate::expert::detect_multi_expert_task(&args.prompt) {
+            if let Some(project_id) = current_project_id.clone() {
+                let matches = crate::expert::expert_team_spawn(
+                    project_id,
+                    args.prompt.clone(),
+                );
+                if !matches.is_empty() {
+                    let names: Vec<_> = matches.iter().map(|m| m.expert.name.as_str()).collect();
+                    let complements: Vec<_> = matches
+                        .iter()
+                        .map(|m| format!("{}负责{}", m.expert.name, m.complements))
+                        .collect();
+                    final_prompt.push_str("【专家团召集】当前任务建议召集以下专家：");
+                    final_prompt.push_str(&names.join("、"));
+                    final_prompt.push_str("，他们分别负责：");
+                    final_prompt.push_str(&complements.join("；"));
+                    final_prompt.push_str("。\n\n---\n\n");
+                }
+            }
+        }
     }
 
     // 2.7 生图能力检测: 用户想生成图片, 但供应商坞里全是文本/代码大模型, 没有一个能真生图。

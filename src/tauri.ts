@@ -1105,6 +1105,13 @@ export interface ExpertMatch {
   isPrimary: boolean;
 }
 
+export interface ExpertAgentStatus {
+  expertId: string;
+  name: string;
+  status: string;
+  lastActive: string;
+}
+
 export interface ExpertGroup {
   id: string;
   name: string;
@@ -1130,6 +1137,12 @@ export const expert = {
     invoke<void>("expert_apply", { projectId, expertId, overwrite }),
   /** 取专家头像 base64 data URL（失败返回 null，前端落 gradient 占位） */
   getAvatar: (id: string) => invoke<string | null>("expert_avatar", { id }),
+  /** 召集专家团：分析任务并返回推荐的专家列表（最多5个） */
+  teamSpawn: (projectId: string, task: string) =>
+    invoke<ExpertMatch[]>("expert_team_spawn", { projectId, taskDescription: task }),
+  /** 查询项目当前专家团各专家的状态（idle|working|done） */
+  agentsStatus: (projectId: string) =>
+    invoke<ExpertAgentStatus[]>("expert_agents_status", { projectId }),
 };
 
 // ──────────────────────────────────────────────────────────────

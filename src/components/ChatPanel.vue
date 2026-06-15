@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
 import ExpertTeam from "./ExpertTeam.vue";
+import ExpertTeamStudio from "./ExpertTeamStudio.vue";
 import {
   Puzzle,
   ChevronDown,
@@ -54,6 +55,7 @@ import {
   type Skill,
   type AttachedFile,
   type Message,
+  type ExpertAgentStatus,
 } from "../tauri";
 import { WebVoiceRecorder } from "../lib/webVoice";
 import { renderMarkdown, mdVersion } from "../lib/markdown";
@@ -498,6 +500,43 @@ const expertModeLabels: Record<AgentMode, string> = {
 function setAgentMode(m: AgentMode) {
   agentMode.value = m;
 }
+
+// ─────────── 专家团实时状态轮询 ──────────
+const teamAgentsStatus = ref<ExpertAgentStatus[]>([]);
+let agentsPollInterval: ReturnType<typeof setInterval> | null = null;
+
+async function pollAgentsStatus() {
+  const pid = app.currentProjectId;
+  if (!pid) return;
+  try {
+    teamAgentsStatus.value = await expert.agentsStatus(pid);
+  } catch {
+    /* ignore */
+  }
+}
+
+function startAgentsPoll() {
+  if (agentsPollInterval) return;
+  pollAgentsStatus();
+  agentsPollInterval = setInterval(pollAgentsStatus, 3000);
+}
+
+function stopAgentsPoll() {
+  if (agentsPollInterval) {
+    clearInterval(agentsPollInterval);
+    agentsPollInterval = null;
+  }
+}
+
+// 当切换到专家团模式时启动轮询，切换走时停止
+watch(agentMode, (m) => {
+  if (m === "expert-team") {
+    startAgentsPoll();
+  } else {
+    stopAgentsPoll();
+    teamAgentsStatus.value = [];
+  }
+});
 
 // ─────────── 「模式」合并键 ───────────
 // 把 目标 / 动态编排 / 知识库 / 分批长任务 四个开关收进一枚「模式」键的弹出面板，
@@ -1177,6 +1216,14 @@ async function deleteCurrentConv() {
             </div>
           </details>
         </template>
+      </div>
+
+      <!-- 专家团工作台：agentMode === 'expert-team' 时显示在消息区下方 -->
+      <div v-if="agentMode === 'expert-team' && app.currentProjectId" class="expert-team-studio-wrap">
+        <ExpertTeamStudio
+          :project-id="app.currentProjectId"
+          :agents-status="teamAgentsStatus"
+        />
       </div>
 
       <!-- 历史折叠:更早的回合不渲染,点击逐段放开 -->

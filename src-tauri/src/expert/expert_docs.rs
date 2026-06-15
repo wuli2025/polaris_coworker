@@ -1,6 +1,4 @@
-//! 专家 CLAUDE.md 文档 — 编译期内嵌模板 + 运行时变量替换
-//!
-//! 目前只有 GENERIC.md 一个模板，运行时通过变量替换生成具体专家的 CLAUDE.md 正文。
+//! 专家 CLAUDE.md 文档 — 运行时从 GENERIC.md 模板变量替换生成具体专家正文
 //!
 //! 变量: {{NAME}} · {{ID}} · {{ROLE}} · {{DESCRIPTION}} · {{KEYWORDS}} ·
 //!       {{CAPABILITIES}} · {{TRIGGER_SIGNALS}} · {{COMPLEMENTS}} ·
@@ -8,33 +6,6 @@
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-/// 读取专家 CLAUDE.md 模板正文。
-/// `claude_md_ref` 是 ExpertCard.claude_md_ref，如 `experts/orchestration/chief-strategist.md`。
-///
-/// 策略:
-/// 1. 优先读运行时文件（允许开发期热更新模板）
-/// 2. 若文件含 {{}} 占位符，做变量替换
-/// 3. 若文件不存在，用 GENERIC.md 做变量替换生成
-pub fn get_expert_doc(claude_md_ref: &str) -> Option<String> {
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .join("src")
-        .join("templates")
-        .join(claude_md_ref);
-
-    if base.exists() {
-        if let Ok(content) = std::fs::read_to_string(&base) {
-            if content.contains("{{") {
-                return substitute_template(&content, claude_md_ref);
-            }
-            return Some(content);
-        }
-    }
-
-    let template = GENERIC_TEMPLATE;
-    substitute_template(template, claude_md_ref)
-}
 
 /// 用专家元数据对 GENERIC.md 模板做变量替换，
 /// 供 expert_apply 在写入 CLAUDE.md 前填充完整内容。
@@ -75,38 +46,6 @@ pub fn build_expert_doc(
     result = result.replace("{{EXCLUSIVE_WITH}}", &exclusive_with.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("、"));
     result = result.replace("{{COST_TIER}}", &cost_tier.to_string());
     result = result.replace("{{TIMESTAMP}}", &timestamp);
-    Some(result)
-}
-
-fn substitute_template(content: &str, ref_path: &str) -> Option<String> {
-    let timestamp = current_date();
-
-    let parts: Vec<&str> = ref_path
-        .trim_start_matches("experts/")
-        .trim_end_matches(".md")
-        .split('/')
-        .collect();
-    let id = parts.last().unwrap_or(&"unknown").to_string();
-    let group = parts.get(parts.len().saturating_sub(2)).unwrap_or(&"unknown");
-
-    let mut vars: std::collections::HashMap<&str, String> = HashMap::new();
-    vars.insert("{{NAME}}", id_to_display_name(&id));
-    vars.insert("{{ID}}", id.to_string());
-    vars.insert("{{GROUP}}", group.to_string());
-    vars.insert("{{ROLE}}", "专家".to_string());
-    vars.insert("{{DESCRIPTION}}", "专业领域专家".to_string());
-    vars.insert("{{KEYWORDS}}", String::new());
-    vars.insert("{{CAPABILITIES}}", String::new());
-    vars.insert("{{TRIGGER_SIGNALS}}", String::new());
-    vars.insert("{{COMPLEMENTS}}", String::new());
-    vars.insert("{{EXCLUSIVE_WITH}}", "无".to_string());
-    vars.insert("{{COST_TIER}}", "2".to_string());
-    vars.insert("{{TIMESTAMP}}", timestamp);
-
-    let mut result = content.to_string();
-    for (key, val) in vars {
-        result = result.replace(key, &val);
-    }
     Some(result)
 }
 
