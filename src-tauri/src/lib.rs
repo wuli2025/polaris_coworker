@@ -282,12 +282,18 @@ pub fn run() {
             echo::echo_status,
             echo::echo_set,
             echo::echo_dream_now,
+            echo::echo_distill_conversation,
             // 寓言计划 · 检索枢纽(盘点 L1a + 向量索引 + 塌平混检)
             fable::fable_status,
             fable::fable_cancel,
             fable::inventory::fable_inventory_start,
+            fable::inventory::fable_scan_folders,
+            fable::inventory::fable_scan_folder_children,
+            fable::inventory::fable_folder_size,
             fable::index::fable_index_start,
             fable::retrieve::fable_search,
+            fable::eval::fable_eval,
+            fable::eval::fable_eval_template,
             // 文件中心(知识库内的可视化文件库:类型/语义聚类/缩略图/速览)
             fable::files::file_overview,
             fable::files::file_grid,
@@ -296,6 +302,8 @@ pub fn run() {
             fable::files::file_cluster_build,
             fable::files::file_warm_thumbs,
             fable::files::file_cluster_llm,
+            fable::files::file_titles_llm,
+            fable::files::file_titles_clear,
             fable::files::file_cluster_model_get,
             fable::files::file_cluster_model_set,
         ])

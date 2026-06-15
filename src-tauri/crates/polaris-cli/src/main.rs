@@ -51,7 +51,11 @@ const HELP: &str = r#"polaris-forge — Polaris Forge 渲染引擎 CLI
       构建(或继续)向量索引:文本 chunk → 嵌入(感官坞服务商)→ 落库;幂等续跑。
 
   polaris-forge fable search --q=<查询> [--top=12] [--mode=hybrid|grep|vector]
-      塌平混检:grep 多核车道 ∥ RAG 向量车道并行 → RRF 融合 → 重排,JSON 命中。
+      塌平混检:认字腿(FTS5 倒排,不漏文件)∥ 认意思腿(向量两段式 ANN)并行
+      → 文件级 RRF 融合 → 闸门重排,JSON 命中。
+
+  polaris-forge fable eval [--set=<考卷.json>] [--top=12] [--mode=hybrid] [--init]
+      跑评测集(考卷)→ recall@k + MRR,把「准不准」变成数字;--init 先写一份样例。
 
 约定:成功 → JSON 到 stdout,退出码 0;失败 → {"ok":false,"error":…} 到 stderr,退出码 1。
 "#;
@@ -152,9 +156,11 @@ fn run(cmd: &str, args: &[String]) -> Result<Value, String> {
                 "status" => serde_json::to_value(app::fable::status()?).map_err(|e| e.to_string()),
                 "inventory" => {
                     let root = req(rest, "root")?;
-                    let summary = app::fable::inventory::scan_root(&root, &|files, bytes| {
-                        eprintln!("[fable] 已盘点 {files} 个文件 / {:.1} GB", bytes as f64 / 1e9);
-                    })?;
+                    let exclude = std::collections::HashSet::new();
+                    let summary =
+                        app::fable::inventory::scan_root(&root, &exclude, &|files, bytes| {
+                            eprintln!("[fable] 已盘点 {files} 个文件 / {:.1} GB", bytes as f64 / 1e9);
+                        })?;
                     serde_json::to_value(summary).map_err(|e| e.to_string())
                 }
                 "index" => {
@@ -172,6 +178,23 @@ fn run(cmd: &str, args: &[String]) -> Result<Value, String> {
                     let mode = flag(rest, "mode").unwrap_or_else(|| "hybrid".into());
                     serde_json::to_value(app::fable::retrieve::search(&q, top, &mode)?)
                         .map_err(|e| e.to_string())
+                }
+                "eval" => {
+                    // --init 先写一份评测集样例;否则跑考卷出 recall@k + MRR。
+                    if has(rest, "init") {
+                        let p = app::fable::eval::write_template(flag(rest, "set"))?;
+                        serde_json::to_value(serde_json::json!({ "template": p }))
+                            .map_err(|e| e.to_string())
+                    } else {
+                        let top = flag(rest, "top").and_then(|v| v.parse().ok()).unwrap_or(12);
+                        let mode = flag(rest, "mode").unwrap_or_else(|| "hybrid".into());
+                        serde_json::to_value(app::fable::eval::run_eval(
+                            flag(rest, "set"),
+                            top,
+                            &mode,
+                        )?)
+                        .map_err(|e| e.to_string())
+                    }
                 }
                 other => Err(format!("未知 fable 子命令 {other}(--help 看用法)")),
             }

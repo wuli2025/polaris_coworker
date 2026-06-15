@@ -302,7 +302,7 @@ export interface KbNode {
   title: string;
   category: string;
   /** "doc" 文档 | "folder" 目录中枢 | "root" 知识库根 */
-  kind: "doc" | "folder" | "root";
+  kind: "doc" | "folder" | "root" | "feedback";
 }
 export interface KbEdge {
   source: string;
@@ -511,6 +511,8 @@ export interface FcCluster {
   color: string;
   keywords: string;
   size: number;
+  /** 0 = 顶层主题文件夹;否则为所属父主题簇 id(语义两级归类) */
+  parent: number;
 }
 export interface FileOverview {
   roots: FcRoot[];
@@ -531,6 +533,8 @@ export interface FileCard {
   path: string;
   abspath: string;
   name: string;
+  /** 智能显示标题:AI 起的名(若有)否则本地清洗文件名;卡片主标题用它,name 做副标题/悬停 */
+  title: string;
   ext: string;
   /** text | doc | image | audio | video | archive | other */
   kind: string;
@@ -557,6 +561,29 @@ export interface ClusterModelView {
   baseUrl: string;
   model: string;
   keySet: boolean;
+}
+export interface ScanRootInfo {
+  path: string;
+  label: string;
+  defaultOn: boolean;
+}
+export interface FolderNode {
+  path: string;
+  parent: string;
+  name: string;
+  root: string;
+  depth: number;
+  files: number;
+  hasChildren: boolean;
+}
+export interface FolderScan {
+  roots: ScanRootInfo[];
+  folders: FolderNode[];
+  truncated: boolean;
+}
+export interface FolderSize {
+  files: number;
+  bytes: number;
 }
 export interface FileGridParams {
   root?: string | null;
@@ -595,6 +622,11 @@ export const files = {
   /** 用已连接的大模型按语义归类(免嵌入 key)+ 桌面生成 HTML 报告;进度走 file:cluster_llm 事件 */
   clusterLlm: (root?: string | null) =>
     invoke<void>("file_cluster_llm", { root: root ?? null }),
+  /** AI 智能命名:给乱码/杂乱文件名起可读中文标题(只覆盖显示,不改磁盘);进度走 file:title_llm 事件 */
+  titlesLlm: (root?: string | null) =>
+    invoke<void>("file_titles_llm", { root: root ?? null }),
+  /** 清空 AI 标题 → 回落本地清洗名 */
+  titlesClear: () => invoke<number>("file_titles_clear"),
   /** 读「归类专用模型」配置(独立于对话供应商,可指便宜模型;key 只回是否已配) */
   clusterModelGet: () => invoke<ClusterModelView>("file_cluster_model_get"),
   /** 存「归类专用模型」配置(apiKey 传空=保留旧 key) */
@@ -607,9 +639,17 @@ export const files = {
   /** 批量预热缩略图缓存(进入网格时后台调,滚动更顺);返回成功数 */
   warmThumbs: (paths: string[], max = 360) =>
     invoke<number>("file_warm_thumbs", { paths, max }),
-  /** 开始盘点磁盘根(缺省=知识库根),进度走 fable:inventory 事件 */
-  inventoryStart: (root?: string | null) =>
-    invoke<void>("fable_inventory_start", { root: root ?? null }),
+  /** 盘点前先扫一眼文件夹结构(根 + 第一层);列知识库+盘符/桌面等可选根 */
+  scanFolders: (root?: string | null) =>
+    invoke<FolderScan>("fable_scan_folders", { root: root ?? null }),
+  /** 懒加载:点开某文件夹时取它的直属子文件夹(支持往下钻到任意深度) */
+  scanFolderChildren: (root: string, path: string) =>
+    invoke<FolderNode[]>("fable_scan_folder_children", { root, path }),
+  /** 某文件夹的递归总量(文件数 + 字节);选择器里按需限并发调用显示大小 */
+  folderSize: (path: string) => invoke<FolderSize>("fable_folder_size", { path }),
+  /** 开始盘点:roots=勾选要盘点的文件夹/盘符(空=默认知识库+NAS);exclude=范围内取消的子文件夹。进度走 fable:inventory 事件 */
+  inventoryStart: (roots?: string[], exclude?: string[]) =>
+    invoke<void>("fable_inventory_start", { roots: roots ?? [], exclude: exclude ?? [] }),
   /** 构建/续建向量索引(文本 chunk → 硅基 BGE-M3 嵌入),进度走 fable:index 事件 */
   indexStart: (maxChunks?: number) =>
     invoke<void>("fable_index_start", { maxChunks: maxChunks ?? null }),
@@ -995,6 +1035,12 @@ export const convApi = {
     c(await invoke<RawConv>("conv_create_conversation", { projectId })),
   deleteConversation: (conversationId: string) =>
     invoke<void>("conv_delete_conversation", { conversationId }),
+  /** 回声层:归档/取消归档对话(纯状态位,移出列表但保留消息,可逆) */
+  archiveConversation: (id: string, archived = true) =>
+    invoke<void>("conv_archive_conversation", { id, archived }),
+  /** 回声层:把单条对话立刻沉淀为记忆(后台跑,进度走 echo:dream 事件) */
+  distillConversation: (convId: string) =>
+    invoke<void>("echo_distill_conversation", { convId }),
   renameConversation: (conversationId: string, title: string) =>
     invoke<void>("conv_rename_conversation", { conversationId, title }),
   getMessages: async (conversationId: string) =>
@@ -1016,6 +1062,8 @@ export interface PersonaPreset {
   kbScope: string;
   /** 人格正文（写入项目 CLAUDE.md 的内容） */
   body: string;
+  /** 种类: "single"=单专家 | "team"=专家团（战略师领衔的编排型 CLAUDE.md） */
+  kind: string;
 }
 
 export const persona = {
@@ -1432,13 +1480,16 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return undefined;
     case "persona_list":
       return [
-        { id: "stock-expert", name: "股票助手", icon: "📈", description: "A 股深度分析 / 公告监控 / 行情查询。", kbScope: "raw/股票", body: "(browser stub)" },
-        { id: "content-writer", name: "内容创作", icon: "✍️", description: "公众号/自媒体写手：选题、撰写、5 种风格。", kbScope: "raw/创作", body: "(browser stub)" },
-        { id: "lesson-planner", name: "备课出卷", icon: "📚", description: "K12 教案/试卷/答案解析。", kbScope: "raw/教学", body: "(browser stub)" },
-        { id: "content-summarizer", name: "内容总结", icon: "📋", description: "网页/文档/会议纪要结构化摘要。", kbScope: "", body: "(browser stub)" },
-        { id: "health-interpreter", name: "医疗健康解读", icon: "🏥", description: "体检报告/化验单通俗解读。", kbScope: "raw/健康", body: "(browser stub)" },
-        { id: "pet-care", name: "萌宠管家", icon: "🐾", description: "猫狗行为/健康/营养。", kbScope: "raw/萌宠", body: "(browser stub)" },
-        { id: "mao", name: "毛主席", icon: "☭", description: "毛选式客观分析。", kbScope: "raw/毛主席", body: "(browser stub)" },
+        { id: "stock-expert", name: "股票助手", icon: "📈", description: "A 股深度分析 / 公告监控 / 行情查询。", kbScope: "raw/股票", body: "(browser stub)", kind: "single" },
+        { id: "content-writer", name: "内容创作", icon: "✍️", description: "公众号/自媒体写手：选题、撰写、5 种风格。", kbScope: "raw/创作", body: "(browser stub)", kind: "single" },
+        { id: "lesson-planner", name: "备课出卷", icon: "📚", description: "K12 教案/试卷/答案解析。", kbScope: "raw/教学", body: "(browser stub)", kind: "single" },
+        { id: "content-summarizer", name: "内容总结", icon: "📋", description: "网页/文档/会议纪要结构化摘要。", kbScope: "", body: "(browser stub)", kind: "single" },
+        { id: "health-interpreter", name: "医疗健康解读", icon: "🏥", description: "体检报告/化验单通俗解读。", kbScope: "raw/健康", body: "(browser stub)", kind: "single" },
+        { id: "pet-care", name: "萌宠管家", icon: "🐾", description: "猫狗行为/健康/营养。", kbScope: "raw/萌宠", body: "(browser stub)", kind: "single" },
+        { id: "mao", name: "毛主席", icon: "☭", description: "毛选式客观分析。", kbScope: "raw/毛主席", body: "(browser stub)", kind: "single" },
+        { id: "team-general", name: "全能专家团", icon: "🧭", description: "战略师领衔，按情况临时组阵；默认单 agent。", kbScope: "", body: "(browser stub)", kind: "team" },
+        { id: "team-creative", name: "创作专家团", icon: "🎨", description: "成品要美、动人、能交付。", kbScope: "raw/创作", body: "(browser stub)", kind: "team" },
+        { id: "team-research", name: "研究专家团", icon: "🔬", description: "多源检索×对抗校验×收口。", kbScope: "", body: "(browser stub)", kind: "team" },
       ];
     case "provider_list": {
       const mk = (id: string, name: string, baseUrl: string, category: string, color: string, kind: string, hasKey: boolean, authToken = "") => ({

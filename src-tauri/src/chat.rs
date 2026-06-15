@@ -355,6 +355,17 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         final_prompt.push_str("\n\n---\n\n");
     }
 
+    // 3.4 回声层记忆地图: 「每日做梦」从历史对话蒸馏出的、关于主人本人的记忆(偏好/规则/
+    //     纠正过的做法)。跨项目全局, 注地图不注全文(PRD v5 §6.3③) —— 让灵魂不仅记得盘里的
+    //     往事, 也记得与主人相处的方式。memory/ 为空时返回空串、零开销。
+    {
+        let mmap = memory_map_block(MEMORY_MAP_BUDGET);
+        if !mmap.is_empty() {
+            final_prompt.push_str(&mmap);
+            final_prompt.push_str("\n\n---\n\n");
+        }
+    }
+
     // 3.5 跨对话产物地图: 本项目其它对话生成过、仍在磁盘上的文件(绝对路径)。
     //     让模型可直接 Read「上次那个文件」, 用户不用重新拖拽。当前对话排除(它的文件
     //     已在下面的对话历史里出现)。
@@ -1115,6 +1126,9 @@ const HISTORY_CTX_BUDGET: usize = 8000;
 const HISTORY_MSG_CAP: usize = 1500;
 /// 跨对话产物地图预算(字符)。
 const ARTIFACT_MAP_BUDGET: usize = 4000;
+/// 回声层记忆地图预算(字符)。PRD v5 §6.3③「注地图不注全文」: 只塞 memory/index.md,
+/// 正文按需 Read,硬顶 ~1k token ≈ 2000 字符,防臃肿。
+const MEMORY_MAP_BUDGET: usize = 2000;
 
 /// 按字符(非字节)截断, 中文安全; 超长加省略标记。
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -1261,6 +1275,58 @@ fn project_artifacts_block(project_id: &str, exclude_conv: Option<&str>, budget:
 当用户说「上次那个 / 之前生成的 X / 接着改那个文件」时, **直接用 `Read` 打开对应路径即可, \
 不需要用户重新拖拽文件**; 路径对不上再问用户。\n\n{}",
         lines.join("\n")
+    )
+}
+
+/// ③ 回声层记忆地图: 注入 `PolarisKB/memory/index.md` —— 由「每日做梦」(echo.rs)从历史
+/// 对话蒸馏出的 feedback-episode / 稳定事实的一行一条索引。PRD v5 §6.3③「注地图不注全文」:
+/// 只给地图(≤MEMORY_MAP_BUDGET), 正文让模型按需 Read。跨项目全局(记的是「与主人相处之道」,
+/// 不挂在某个项目下)。memory/ 还没建或 index 为空时返回空串。
+fn memory_map_block(budget: usize) -> String {
+    let root = crate::kb::kb_root();
+    if root.is_empty() {
+        return String::new();
+    }
+    let mem_dir = Path::new(&root).join("memory");
+    let index = mem_dir.join("index.md");
+    let raw = match std::fs::read_to_string(&index) {
+        Ok(t) => t,
+        Err(_) => return String::new(),
+    };
+    let mem_abs = mem_dir.to_string_lossy().replace('\\', "/");
+    format_memory_map(&raw, &mem_abs, budget)
+}
+
+/// memory_map_block 的纯函数核心(可单测): 从 index.md 全文里挑出条目行、按预算截断、套壳。
+/// 没有条目行则返回空串。
+fn format_memory_map(index_text: &str, mem_abs: &str, budget: usize) -> String {
+    // 只留「- [slug](rel) — hook」条目行; 标题/注释/空行都丢。
+    let entries: Vec<&str> = index_text
+        .lines()
+        .map(|l| l.trim_end())
+        .filter(|l| l.trim_start().starts_with("- ["))
+        .collect();
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut used = 0usize;
+    let mut picked: Vec<&str> = Vec::new();
+    for line in entries {
+        let cost = line.chars().count() + 1;
+        if used + cost > budget && !picked.is_empty() {
+            break;
+        }
+        used += cost;
+        picked.push(line);
+    }
+    format!(
+        "## 与主人相处的记忆 (回声层)\n\n\
+下面是从过去的对话里沉淀下来的**关于主人本人**的记忆 —— 偏好、工作习惯、定下的规则, 以及\
+「主人怎么纠正/否决过某种做法」(feedback-episode)。这是一张地图, 每条都对应 `{mem_abs}/` 下\
+一个文件。\n\
+**作答前**: 当本轮问题与某条记忆相关时, 用 `Read` 打开对应文件取全文再据此行动; 尤其\
+**遵守里面记下的规则与主人的纠正**, 别重蹈被否决过的做法。无关的条目不必展开。\n\n{}",
+        picked.join("\n")
     )
 }
 
@@ -2463,6 +2529,38 @@ mod tests {
         let (clean, paths) = split_artifacts("  普通回答  ");
         assert_eq!(clean, "普通回答");
         assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn format_memory_map_keeps_only_entry_lines_and_wraps() {
+        let idx = "# 记忆索引(回声层)\n\n<!-- 注释 -->\n\n\
+            - [pref-flat](facts/pref-flat.md) — 回复要扁平砍废话\n\
+            - [no-tdd](feedback/2026-06-15-no-tdd.md) — 否决强上 TDD\n";
+        let out = format_memory_map(idx, "D:/kb/memory", 2000);
+        assert!(out.contains("## 与主人相处的记忆"));
+        assert!(out.contains("`D:/kb/memory/`"));
+        assert!(out.contains("- [pref-flat](facts/pref-flat.md) — 回复要扁平砍废话"));
+        assert!(out.contains("- [no-tdd](feedback/2026-06-15-no-tdd.md)"));
+        // 标题/注释行不进正文
+        assert!(!out.contains("记忆索引"));
+        assert!(!out.contains("<!--"));
+    }
+
+    #[test]
+    fn format_memory_map_empty_when_no_entries() {
+        assert_eq!(format_memory_map("# 标题\n\n<!-- 空 -->\n", "D:/kb/memory", 2000), "");
+        assert_eq!(format_memory_map("", "D:/kb/memory", 2000), "");
+    }
+
+    #[test]
+    fn format_memory_map_respects_budget_but_keeps_at_least_one() {
+        let idx = "- [a](facts/a.md) — 第一条记忆内容比较长一些\n\
+            - [b](facts/b.md) — 第二条\n\
+            - [c](facts/c.md) — 第三条\n";
+        // 预算极小: 至少保留第一条, 不会因为超预算而全空。
+        let out = format_memory_map(idx, "D:/kb/memory", 5);
+        assert!(out.contains("- [a](facts/a.md)"));
+        assert!(!out.contains("- [c](facts/c.md)"));
     }
 
     #[test]
