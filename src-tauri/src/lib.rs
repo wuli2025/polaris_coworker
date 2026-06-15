@@ -18,6 +18,7 @@ pub mod fable;
 pub mod infer;
 pub mod kb;
 pub mod persona;
+pub mod expert;
 pub mod echo;
 pub mod project;
 pub mod provider;
@@ -172,6 +173,15 @@ pub fn run() {
             // 人格模块 (板块⑫)
             persona::persona_list,
             persona::persona_apply,
+            // 百人专家团
+            expert::expert_list,
+            expert::expert_list_by_group,
+            expert::expert_groups,
+            expert::expert_route,
+            expert::expert_get,
+            expert::expert_match_auto,
+            expert::expert_apply,
+            expert::expert_avatar,
             // 飞书网关 (板块⑭ 阶段 A)
             feishu::feishu_get_config,
             feishu::feishu_set_config,

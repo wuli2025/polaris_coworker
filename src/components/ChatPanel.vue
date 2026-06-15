@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
+import ExpertTeam from "./ExpertTeam.vue";
 import {
   Puzzle,
   ChevronDown,
@@ -44,6 +45,7 @@ import {
   chat,
   convApi,
   skills as skillsApi,
+  expert,
   invoke,
   listen,
   isTauri,
@@ -482,16 +484,33 @@ function toggleBatch() {
   if (batchMode.value) nextTick(() => inputEl.value?.focus());
 }
 
+// ─────────── 百人专家团模式 ──────────
+// 单 agent / 单专家 / 专家团 / 智能匹配（默认），这四个是互斥的，只选一个
+type AgentMode = "single-agent" | "single-expert" | "expert-team" | "auto-match";
+const agentMode = ref<AgentMode>("auto-match");
+const expertModeLabels: Record<AgentMode, string> = {
+  "single-agent": "单Agent",
+  "single-expert": "单专家",
+  "expert-team": "专家团",
+  "auto-match": "智能匹配",
+};
+
+function setAgentMode(m: AgentMode) {
+  agentMode.value = m;
+}
+
 // ─────────── 「模式」合并键 ───────────
 // 把 目标 / 动态编排 / 知识库 / 分批长任务 四个开关收进一枚「模式」键的弹出面板，
 // 减少工具栏拥挤。底层 4 个 ref 与发送逻辑保持不变，这里只是统一的开关入口。
 const showModePanel = ref(false);
+const showExpertTeam = ref(false); // 百人专家团画廊浮层
 const activeModeCount = computed(
   () =>
     (goalMode.value ? 1 : 0) +
     (orchestrateMode.value ? 1 : 0) +
     (kbMode.value ? 1 : 0) +
-    (batchMode.value ? 1 : 0)
+    (batchMode.value ? 1 : 0) +
+    (agentMode.value !== "auto-match" ? 1 : 0)
 );
 const activeModeSummary = computed(() => {
   const on: string[] = [];
@@ -499,6 +518,7 @@ const activeModeSummary = computed(() => {
   if (orchestrateMode.value) on.push("编排");
   if (kbMode.value) on.push("知识库");
   if (batchMode.value) on.push("分批");
+  if (agentMode.value !== "auto-match") on.push(expertModeLabels[agentMode.value]);
   return on.join(" · ");
 });
 
@@ -1389,7 +1409,79 @@ async function deleteCurrentConv() {
             </span>
             <span class="mr-sw" :class="{ on: batchMode }"></span>
           </button>
+
+          <!-- 分隔线 -->
+          <div class="mode-sep">— 专家模式（互斥，选一项）—</div>
+
+          <!-- 单Agent -->
+          <button class="mode-row agent-mode" :class="{ on: agentMode === 'single-agent' }" @click="setAgentMode('single-agent')">
+            <span class="mr-ic">🤖</span>
+            <span class="mr-tx">
+              <span class="mr-nm">单 Agent</span>
+              <span class="mr-ds">无专家加成，最便宜</span>
+            </span>
+            <span class="mr-sw" :class="{ on: agentMode === 'single-agent' }"></span>
+          </button>
+
+          <!-- 单专家 -->
+          <button class="mode-row agent-mode" :class="{ on: agentMode === 'single-expert' }" @click="showExpertTeam = true; showModePanel = false">
+            <span class="mr-ic">👤</span>
+            <span class="mr-tx">
+              <span class="mr-nm">单专家</span>
+              <span class="mr-ds">从百人专家团选一个入驻</span>
+            </span>
+            <span class="mr-sw" :class="{ on: agentMode === 'single-expert' }"></span>
+          </button>
+
+          <!-- 专家团 -->
+          <button class="mode-row agent-mode" :class="{ on: agentMode === 'expert-team' }" @click="showExpertTeam = true; showModePanel = false">
+            <span class="mr-ic">🧭</span>
+            <span class="mr-tx">
+              <span class="mr-nm">专家团</span>
+              <span class="mr-ds">战略师领衔，按需召集专家阵</span>
+            </span>
+            <span class="mr-sw" :class="{ on: agentMode === 'expert-team' }"></span>
+          </button>
+
+          <!-- 智能匹配（默认） -->
+          <button class="mode-row agent-mode" :class="{ on: agentMode === 'auto-match' }" @click="setAgentMode('auto-match')">
+            <span class="mr-ic">✨</span>
+            <span class="mr-tx">
+              <span class="mr-nm">智能匹配</span>
+              <span class="mr-ds">描述需求，自动路由最合适的专家</span>
+            </span>
+            <span class="mr-sw" :class="{ on: agentMode === 'auto-match' }"></span>
+          </button>
         </div>
+      </div>
+
+      <!-- 百人专家团浮层 -->
+      <div v-if="showExpertTeam" class="expert-team-panel">
+        <div class="skill-panel-head">
+          <span class="skill-panel-title">🧭 专家团</span>
+          <button class="skill-panel-close" @click="showExpertTeam = false">
+            <X :size="14" :stroke-width="2" />
+          </button>
+        </div>
+        <ExpertTeam
+          @select="async (id: string) => {
+            const pid = app.currentProjectId;
+            if (!pid) { showExpertTeam = false; return; }
+            // 团队预设 or 单专家，都走 expert_apply 写入项目 CLAUDE.md
+            try {
+              await expert.apply(pid, id, true);
+            } catch (e) {
+              console.error('expert.apply 失败', e);
+            }
+            if (id === 'team-general' || id === 'team-creative' || id === 'team-research') {
+              setAgentMode('expert-team');
+            } else {
+              setAgentMode('single-expert');
+            }
+            showExpertTeam = false;
+          }"
+          @mode-change="(m: string) => { setAgentMode(m as any); showExpertTeam = false; }"
+        />
       </div>
 
       <!-- 输入卡片 -->
@@ -2621,6 +2713,24 @@ async function deleteCurrentConv() {
 }
 .mr-sw.on::after {
   transform: translateX(13px);
+}
+
+/* 专家模式分隔线 */
+.mode-sep {
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 8px;
+  letter-spacing: 0.5px;
+  opacity: 0.7;
+}
+.mode-row.agent-mode { gap: 8px; }
+
+/* 百人专家团浮层 */
+.expert-team-panel {
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+  padding-top: 8px;
 }
 
 /* 输入卡片 —— 宽度仿豆包（输入多了高度自动撑大）；

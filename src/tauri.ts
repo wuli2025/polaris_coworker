@@ -1076,6 +1076,63 @@ export const persona = {
 };
 
 // ──────────────────────────────────────────────────────────────
+// 百人专家团 module — 运行时动态召集 + 可解释路由
+// ──────────────────────────────────────────────────────────────
+export interface ExpertCard {
+  id: string;
+  name: string;
+  icon: string;
+  role: string;
+  description: string;
+  triggerSignals: string[];
+  complements: string;
+  keywords: string[];
+  capabilities: string[];
+  claudeMdRef: string;
+  modelHint: string;
+  costTier: number;
+  exclusiveWith: string[];
+  source: string;
+  license: string;
+  group: string;
+}
+
+export interface ExpertMatch {
+  expert: ExpertCard;
+  hitSignals: string[];
+  similarity: number;
+  complements: string;
+  isPrimary: boolean;
+}
+
+export interface ExpertGroup {
+  id: string;
+  name: string;
+  icon: string;
+  count: number;
+}
+
+export interface RouteRequest {
+  query: string;
+  limit?: number;
+  groupFilter?: string;
+}
+
+export const expert = {
+  list: () => invoke<ExpertCard[]>("expert_list"),
+  listByGroup: (group: string) => invoke<ExpertCard[]>("expert_list_by_group", { group }),
+  groups: () => invoke<ExpertGroup[]>("expert_groups"),
+  route: (req: RouteRequest) => invoke<ExpertMatch[]>("expert_route", { req }),
+  get: (id: string) => invoke<ExpertCard | null>("expert_get", { id }),
+  matchAuto: (query: string) => invoke<ExpertMatch[]>("expert_match_auto", { query }),
+  /** 把专家的 CLAUDE.md 模板应用到项目（写 CLAUDE.md + 记录 persona_id）；已有内容需 overwrite=true */
+  apply: (projectId: string, expertId: string, overwrite = false) =>
+    invoke<void>("expert_apply", { projectId, expertId, overwrite }),
+  /** 取专家头像 base64 data URL（失败返回 null，前端落 gradient 占位） */
+  getAvatar: (id: string) => invoke<string | null>("expert_avatar", { id }),
+};
+
+// ──────────────────────────────────────────────────────────────
 // API 供应商坞 + 用量看板 module
 // ──────────────────────────────────────────────────────────────
 export interface ProviderView {
@@ -1628,6 +1685,12 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         daily,
       };
     }
+    case "expert_list":
+      return [];
+    case "expert_match_auto":
+      return [];
+    case "expert_avatar":
+      return null;
     default:
       return null;
   }
