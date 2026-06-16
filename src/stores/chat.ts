@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import {
   chat as chatApi,
   convApi,
@@ -111,6 +111,11 @@ export const useChatStore = defineStore("chatRuntime", () => {
   function isSending(convId: string | null): boolean {
     return !!(convId && sendingByConv.value[convId]);
   }
+  /** 当前所有「正在生成」的对话 id —— 全局任务中心据此把 AI 的后台生成
+   *  (切走仍在跑的 PPT / 长任务等)挂到右下角浮层。 */
+  const runningConvIds = computed(() =>
+    Object.keys(sendingByConv.value).filter((id) => sendingByConv.value[id]),
+  );
   function activityAt(convId: string | null): number {
     if (!convId) return 0;
     return activeAtByConv.value[convId] ?? 0;
@@ -301,6 +306,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
     byConv,
     bubblesFor,
     isSending,
+    runningConvIds,
     activityAt,
     pushBubble,
     loadHistory,
