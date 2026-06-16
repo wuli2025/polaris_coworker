@@ -171,6 +171,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
       useKb?: boolean;
       batchBuild?: boolean;
       batchSize?: number;
+      agentMode?: string;
     }
   ) {
     // 关键: 先确保流式监听已挂上, 否则本轮的 delta 可能早于监听器注册而丢失
@@ -198,6 +199,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
         useKb: opts.useKb,
         batchBuild: opts.batchBuild,
         batchSize: opts.batchSize,
+        agentMode: opts.agentMode,
         conversationId: convId,
       });
       reqByConv.value[convId] = reqId;

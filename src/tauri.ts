@@ -618,12 +618,18 @@ export const files = {
     invoke<string | null>("file_thumb", { abspath, max }),
   /** 按需内容速览(抽取式,零 token,带缓存) */
   gist: (abspath: string) => invoke<string>("file_gist", { abspath }),
-  /** 重建语义聚类(复用已存向量,纯数学;同步返回汇总) */
+  /** 重建语义聚类(复用已存向量,纯数学)。后台线程跑,进度走 file:cluster 事件(phase/done/error) */
   clusterBuild: (root?: string | null) =>
-    invoke<ClusterBuildSummary>("file_cluster_build", { root: root ?? null }),
+    invoke<void>("file_cluster_build", { root: root ?? null }),
   /** 用已连接的大模型按语义归类(免嵌入 key)+ 桌面生成 HTML 报告;进度走 file:cluster_llm 事件 */
   clusterLlm: (root?: string | null) =>
     invoke<void>("file_cluster_llm", { root: root ?? null }),
+  /** 「让 AI 更懂你」:据盘点统计确定性生成知识画像 HTML → 桌面,返回文件路径(同步,不调大模型) */
+  profileHtml: (root?: string | null) =>
+    invoke<string>("file_profile_html", { root: root ?? null }),
+  /** 文件中心「星图」:语义簇 + 抽样文件 → 与知识图谱同构的 KbGraph(供星河渲染复用) */
+  graph: (root?: string | null) =>
+    invoke<KbGraph>("file_graph", { root: root ?? null }),
   /** AI 智能命名:给乱码/杂乱文件名起可读中文标题(只覆盖显示,不改磁盘);进度走 file:title_llm 事件 */
   titlesLlm: (root?: string | null) =>
     invoke<void>("file_titles_llm", { root: root ?? null }),
@@ -711,6 +717,8 @@ export interface ChatSendArgs {
   batchBuild?: boolean;
   /** 每批最多构建几个单元（页/章/文件）。 */
   batchSize?: number;
+  /** 智能体模式："auto-match"(默认智能匹配) | "expert-team" | "single-expert" | "single-agent"。 */
+  agentMode?: string;
 }
 
 export interface ChatStreamEvent {
@@ -1125,6 +1133,37 @@ export interface RouteRequest {
   groupFilter?: string;
 }
 
+/** 业务专家团：领衔者 + 成员的成建制队伍 */
+export interface ExpertTeam {
+  id: string;
+  name: string;
+  icon: string;
+  tagline: string;
+  description: string;
+  leadId: string;
+  memberIds: string[];
+  tags: string[];
+}
+
+/** 路由调试一行：每个候选专家的命中明细 */
+export interface ExpertDebugRow {
+  id: string;
+  name: string;
+  group: string;
+  hitSignals: string[];
+  similarity: number;
+  wouldSelect: boolean;
+}
+
+/** 按知识库反推的专家团推荐 */
+export interface KbRecommendation {
+  team: ExpertTeam | null;
+  reason: string;
+  topExperts: ExpertCard[];
+  matchedTopics: string[];
+  corpusSize: number;
+}
+
 export const expert = {
   list: () => invoke<ExpertCard[]>("expert_list"),
   listByGroup: (group: string) => invoke<ExpertCard[]>("expert_list_by_group", { group }),
@@ -1135,15 +1174,48 @@ export const expert = {
   /** 把专家的 CLAUDE.md 模板应用到项目（写 CLAUDE.md + 记录 persona_id）；已有内容需 overwrite=true */
   apply: (projectId: string, expertId: string, overwrite = false) =>
     invoke<void>("expert_apply", { projectId, expertId, overwrite }),
-  /** 取专家头像 base64 data URL（失败返回 null，前端落 gradient 占位） */
+  /** 取专家/专家团头像 base64 data URL（失败返回 null，前端落 gradient 占位） */
   getAvatar: (id: string) => invoke<string | null>("expert_avatar", { id }),
+  /** 一次性取全部 9 张头像（按槽位），配合 avatarSlot(id) 本地映射，避免逐卡 IPC 卡顿 */
+  avatarSlots: () => invoke<string[]>("expert_avatar_slots"),
   /** 召集专家团：分析任务并返回推荐的专家列表（最多5个） */
   teamSpawn: (projectId: string, task: string) =>
     invoke<ExpertMatch[]>("expert_team_spawn", { projectId, taskDescription: task }),
   /** 查询项目当前专家团各专家的状态（idle|working|done） */
   agentsStatus: (projectId: string) =>
     invoke<ExpertAgentStatus[]>("expert_agents_status", { projectId }),
+  /** 全部业务专家团 */
+  teams: () => invoke<ExpertTeam[]>("expert_teams"),
+  /** 取单个业务团 */
+  teamGet: (id: string) => invoke<ExpertTeam | null>("expert_team_get", { id }),
+  /** 把业务团应用到项目（组装战略师领衔的编排型 CLAUDE.md）；已有内容需 overwrite=true */
+  teamApply: (projectId: string, teamId: string, overwrite = false) =>
+    invoke<void>("team_apply", { projectId, teamId, overwrite }),
+  /** 「下载」专家：返回其完整 CLAUDE.md 文本 */
+  exportExpert: (id: string) => invoke<string>("expert_export", { id }),
+  /** 「下载」业务团：返回其完整编排型 CLAUDE.md 文本 */
+  exportTeam: (id: string) => invoke<string>("team_export", { id }),
+  /** 调试某条查询的智能匹配，返回全部命中专家的打分明细 */
+  routeDebug: (query: string) => invoke<ExpertDebugRow[]>("expert_route_debug", { query }),
+  /** 按知识库反推该配哪支专家团（scope 可限定子目录，空=全库） */
+  recommendFromKb: (scope?: string) =>
+    invoke<KbRecommendation>("expert_recommend_from_kb", { scope: scope ?? null }),
 };
+
+/**
+ * 头像槽位：与后端 avatars.rs 的 FNV-1a 一致，把任意 expert/team id 映射到 0..9。
+ * 专家/团 id 都是 ASCII，charCodeAt 即字节，结果与 Rust 一致。
+ * 用法：拉一次 expert.avatarSlots() 得到 9 张 dataURL，再用 slots[avatarSlot(id)] 取图，
+ * 100+ 张卡片零额外 IPC。
+ */
+export function avatarSlot(id: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < id.length; i++) {
+    h = (h ^ id.charCodeAt(i)) >>> 0;
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h % 9;
+}
 
 // ──────────────────────────────────────────────────────────────
 // API 供应商坞 + 用量看板 module
@@ -1699,11 +1771,26 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       };
     }
     case "expert_list":
-      return [];
+    case "expert_groups":
     case "expert_match_auto":
+    case "expert_route":
+    case "expert_list_by_group":
+    case "expert_team_spawn":
+    case "expert_agents_status":
+    case "expert_teams":
+    case "expert_route_debug":
+      return [];
+    case "expert_avatar_slots":
       return [];
     case "expert_avatar":
+    case "expert_get":
+    case "expert_team_get":
       return null;
+    case "expert_export":
+    case "team_export":
+      return "";
+    case "expert_recommend_from_kb":
+      return { team: null, reason: "(browser stub)", topExperts: [], matchedTopics: [], corpusSize: 0 };
     default:
       return null;
   }

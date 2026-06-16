@@ -4,12 +4,10 @@
 //!       {{CAPABILITIES}} · {{TRIGGER_SIGNALS}} · {{COMPLEMENTS}} ·
 //!       {{EXCLUSIVE_WITH}} · {{COST_TIER}} · {{TIMESTAMP}}
 
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 用专家元数据对 GENERIC.md 模板做变量替换，
-/// 供 expert_apply 在写入 CLAUDE.md 前填充完整内容。
-#[allow(dead_code)]
+/// 供 expert_apply / expert_export 在写入 CLAUDE.md 前填充完整内容。
 pub fn build_expert_doc(
     ref_path: &str,
     name: &str,
@@ -58,128 +56,6 @@ fn current_date() -> String {
         .unwrap_or_else(|| String::new())
 }
 
-fn id_to_display_name(id: &str) -> String {
-    let display: HashMap<&str, &str> = HashMap::from([
-        ("chief-strategist", "首席战略师"),
-        ("multi-agent-coordinator", "多Agent协调员"),
-        ("knowledge-synthesizer", "知识综合器"),
-        ("strategy-planner", "OKR/战略规划"),
-        ("context-manager", "上下文管理器"),
-        ("backend-architect", "后端架构师"),
-        ("frontend-architect", "前端架构师"),
-        ("architecture-advisor", "系统架构权衡"),
-        ("api-contract-designer", "API契约设计"),
-        ("cloud-architect", "云架构师"),
-        ("kubernetes-architect", "云原生/K8s架构师"),
-        ("microservices-architect", "微服务架构师"),
-        ("graphql-architect", "GraphQL架构师"),
-        ("event-sourcing-architect", "事件溯源架构师"),
-        ("platform-engineer-arch", "平台工程师"),
-        ("python-pro", "Python专家"),
-        ("typescript-pro", "TypeScript/Node专家"),
-        ("golang-pro", "Go专家"),
-        ("rust-pro", "Rust专家"),
-        ("java-pro", "Java专家"),
-        ("cpp-pro", "C/C++专家"),
-        ("csharp-pro", "C#专家"),
-        ("sql-pro", "SQL专家"),
-        ("ios-developer", "Swift/iOS专家"),
-        ("kotlin-specialist", "Kotlin/Android专家"),
-        ("blockchain-developer", "Solidity/区块链"),
-        ("embedded-systems", "嵌入式/IoT"),
-        ("react-specialist", "React专家"),
-        ("vue-expert", "Vue专家"),
-        ("nextjs-developer", "Next.js专家"),
-        ("flutter-expert", "Flutter专家"),
-        ("accessibility-tester", "无障碍审计员"),
-        ("mobile-developer", "移动端专家"),
-        ("devops-engineer", "DevOps工程师"),
-        ("deployment-engineer", "CICD部署工程师"),
-        ("terraform-specialist", "Terraform/IaC专家"),
-        ("docker-expert", "Docker专家"),
-        ("sre-engineer", "SRE/可观测性"),
-        ("network-engineer", "网络工程师"),
-        ("incident-responder", "事故响应官"),
-        ("ops-engineer", "运维工程师"),
-        ("platform-engineer-devops", "平台工程师"),
-        ("data-scientist", "数据科学家"),
-        ("data-engineer", "数据工程师"),
-        ("data-analyst", "数据分析师"),
-        ("database-architect", "数据库架构师"),
-        ("database-optimizer", "数据库优化师"),
-        ("vector-db-engineer", "向量数据库工程师"),
-        ("data-contract-engineer", "数据契约/质量"),
-        ("dataviz-storyteller", "数据可视化叙事"),
-        ("ai-engineer", "AI工程师"),
-        ("ml-engineer", "ML工程师"),
-        ("mlops-engineer", "MLOps工程师"),
-        ("llm-architect", "LLM架构师"),
-        ("nlp-engineer", "NLP工程师"),
-        ("prompt-engineer", "提示词工程师"),
-        ("rl-engineer", "强化学习工程师"),
-        ("security-auditor", "安全审计员"),
-        ("penetration-tester", "渗透测试员"),
-        ("threat-modeling-expert", "威胁建模专家"),
-        ("appsec-coder", "应用安全工程师"),
-        ("compliance-privacy", "合规/隐私"),
-        ("license-counsel", "法务/许可证"),
-        ("privacy-engineer", "密码学/数据隐私"),
-        ("code-reviewer", "代码评审员"),
-        ("test-automator", "测试自动化工程师"),
-        ("qa-expert", "QA专家"),
-        ("performance-engineer", "性能工程师"),
-        ("debugger", "调试专家"),
-        ("refactoring-specialist", "重构专家"),
-        ("tech-debt-strategist", "技术债治理"),
-        ("payment-integration", "支付集成专家"),
-        ("game-developer", "游戏开发者"),
-        ("legacy-modernizer", "遗留系统现代化"),
-        ("browser-automation", "浏览器自动化"),
-        ("fintech-engineer", "金融科技工程"),
-        ("technical-writer-pro", "技术写作者"),
-        ("docs-architect", "文档架构师"),
-        ("api-documenter", "API文档师"),
-        ("tutorial-engineer", "教程工程师"),
-        ("mermaid-expert", "图表专家"),
-        ("technical-writer", "技术写作"),
-        ("product-manager", "产品经理"),
-        ("delivery-manager", "项目交付管理"),
-        ("scrum-master", "Scrum Master"),
-        ("business-analyst", "业务分析师"),
-        ("ux-researcher", "用户研究"),
-        ("growth-experimenter", "增长实验设计"),
-        ("financial-modeler", "财务建模"),
-        ("pricing-strategist", "定价策略"),
-        ("deep-research", "深度研究"),
-        ("competitive-analyst", "竞品分析"),
-        ("market-researcher", "市场研究"),
-        ("trend-analyst", "趋势分析"),
-        ("scientific-researcher", "科学文献研究"),
-        ("osint-analyst", "OSINT情报分析"),
-        ("research-analyst", "研究分析师"),
-        ("content-marketer", "内容营销策略"),
-        ("seo-specialist", "SEO专家"),
-        ("growth-hacker", "增长黑客"),
-        ("social-media-manager", "社媒运营"),
-        ("brand-storyteller", "叙事官/品牌故事"),
-        ("visual-designer", "视觉设计"),
-        ("pitch-coach", "路演/演讲教练"),
-        ("copywriter", "文案/口播"),
-    ]);
-
-    display.get(id).map(|s| s.to_string()).unwrap_or_else(|| {
-        id.split('-')
-            .map(|word| {
-                let mut w = word.to_string();
-                if let Some(first) = w.get(0..1) {
-                    w = format!("{}{}", first.to_uppercase(), &w[1..]);
-                }
-                w
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    })
-}
 
 /// GENERIC.md 模板（编译期内嵌）
 const GENERIC_TEMPLATE: &str = include_str!("../templates/experts/GENERIC.md");

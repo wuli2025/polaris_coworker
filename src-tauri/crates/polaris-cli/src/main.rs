@@ -50,7 +50,7 @@ const HELP: &str = r#"polaris-forge — Polaris Forge 渲染引擎 CLI
   polaris-forge fable index [--max-chunks=4000]
       构建(或继续)向量索引:文本 chunk → 嵌入(感官坞服务商)→ 落库;幂等续跑。
 
-  polaris-forge fable search --q=<查询> [--top=12] [--mode=hybrid|grep|vector]
+  polaris-forge fable search --q=<查询> [--top=12] [--mode=hybrid|grep|vector] [--scope=wiki|!wiki]
       塌平混检:认字腿(FTS5 倒排,不漏文件)∥ 认意思腿(向量两段式 ANN)并行
       → 文件级 RRF 融合 → 闸门重排,JSON 命中。
 
@@ -176,8 +176,14 @@ fn run(cmd: &str, args: &[String]) -> Result<Value, String> {
                     let q = req(rest, "q")?;
                     let top = flag(rest, "top").and_then(|v| v.parse().ok()).unwrap_or(12);
                     let mode = flag(rest, "mode").unwrap_or_else(|| "hybrid".into());
-                    serde_json::to_value(app::fable::retrieve::search(&q, top, &mode)?)
-                        .map_err(|e| e.to_string())
+                    let scope = flag(rest, "scope");
+                    serde_json::to_value(app::fable::retrieve::search(
+                        &q,
+                        top,
+                        &mode,
+                        scope.as_deref(),
+                    )?)
+                    .map_err(|e| e.to_string())
                 }
                 "optimize" => {
                     // 重建向量 IVF 倒排单元(20TB 级 ANN「建索引」;大批入库后/巡夜跑)。

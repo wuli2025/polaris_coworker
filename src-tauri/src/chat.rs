@@ -332,28 +332,44 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         final_prompt.push_str("\n\n---\n\n");
     }
 
-    // 2.68 专家团模式: 检测任务是否需要多专家，必要时注入召集信息
-    if args.agent_mode.as_deref() == Some("expert-team") {
-        if crate::expert::detect_multi_expert_task(&args.prompt) {
-            if let Some(project_id) = current_project_id.clone() {
-                let matches = crate::expert::expert_team_spawn(
-                    project_id,
-                    args.prompt.clone(),
-                );
-                if !matches.is_empty() {
-                    let names: Vec<_> = matches.iter().map(|m| m.expert.name.as_str()).collect();
-                    let complements: Vec<_> = matches
-                        .iter()
-                        .map(|m| format!("{}负责{}", m.expert.name, m.complements))
-                        .collect();
-                    final_prompt.push_str("【专家团召集】当前任务建议召集以下专家：");
-                    final_prompt.push_str(&names.join("、"));
-                    final_prompt.push_str("，他们分别负责：");
-                    final_prompt.push_str(&complements.join("；"));
-                    final_prompt.push_str("。\n\n---\n\n");
+    // 2.68 专家团 / 智能匹配
+    //   - auto-match（默认）: 每轮自动路由最合适的 1~3 位专家，注入「智能匹配·专家团」视角块。
+    //     这是默认对话体验——一上来就用智能匹配专家团，无命中信号则不注入（闲聊不被套专家）。
+    //   - expert-team: 显式专家团；检测到多专家任务时召集成队并注入分工。
+    match args.agent_mode.as_deref() {
+        Some("expert-team") => {
+            if crate::expert::detect_multi_expert_task(&args.prompt) {
+                if let Some(project_id) = current_project_id.clone() {
+                    let matches =
+                        crate::expert::expert_team_spawn(project_id, args.prompt.clone());
+                    if !matches.is_empty() {
+                        let names: Vec<_> =
+                            matches.iter().map(|m| m.expert.name.as_str()).collect();
+                        let complements: Vec<_> = matches
+                            .iter()
+                            .map(|m| format!("{}负责{}", m.expert.name, m.complements))
+                            .collect();
+                        final_prompt.push_str("【专家团召集】当前任务建议召集以下专家：");
+                        final_prompt.push_str(&names.join("、"));
+                        final_prompt.push_str("，他们分别负责：");
+                        final_prompt.push_str(&complements.join("；"));
+                        final_prompt.push_str("。\n\n---\n\n");
+                    }
                 }
+            } else if let Some(block) = crate::expert::route_block(&args.prompt) {
+                // 单专家任务也给个智能匹配视角，不必非要凑成多人团
+                final_prompt.push_str(&block);
+                final_prompt.push_str("\n\n---\n\n");
             }
         }
+        // 默认（None 或 "auto-match"）走智能匹配；"single-agent" / "single-expert" 不在此注入。
+        Some("auto-match") | None => {
+            if let Some(block) = crate::expert::route_block(&args.prompt) {
+                final_prompt.push_str(&block);
+                final_prompt.push_str("\n\n---\n\n");
+            }
+        }
+        _ => {}
     }
 
     // 2.7 生图能力检测: 用户想生成图片, 但供应商坞里全是文本/代码大模型, 没有一个能真生图。
@@ -381,6 +397,27 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     if !cm_ctx.is_empty() {
         final_prompt.push_str(&cm_ctx);
         final_prompt.push_str("\n\n---\n\n");
+    }
+
+    // 3.15 知识库家底概览(始终注入, 便宜): 让模型一开口就答得清「你的库在哪 / 有什么」,
+    //      报全四层(妈妈库 wiki / raw / output / memory)家底, 不再只会复述 wiki 结构。
+    {
+        let ov = kb_overview_block();
+        if !ov.is_empty() {
+            final_prompt.push_str(&ov);
+            final_prompt.push_str("\n\n---\n\n");
+        }
+    }
+
+    // 3.2 双库强制召回(开知识库 + 非创作模式): 后端先替模型查两个库(妈妈库 wiki 权威 +
+    //     外库 raw/output 混检 40→重排取优), 命中片段直接喂进上下文 —— 不再靠模型自觉去检索,
+    //     从根上解决「像只认妈妈库」。创作模式跳过(素材已在 prompt 里, 强制召回只会稀释)。
+    if args.use_kb && !creative {
+        let recall = forced_recall_block(&args.prompt, FORCED_RECALL_BUDGET);
+        if !recall.is_empty() {
+            final_prompt.push_str(&recall);
+            final_prompt.push_str("\n\n---\n\n");
+        }
     }
 
     // 3.4 回声层记忆地图: 「每日做梦」从历史对话蒸馏出的、关于主人本人的记忆(偏好/规则/
@@ -1157,6 +1194,8 @@ const ARTIFACT_MAP_BUDGET: usize = 4000;
 /// 回声层记忆地图预算(字符)。PRD v5 §6.3③「注地图不注全文」: 只塞 memory/index.md,
 /// 正文按需 Read,硬顶 ~1k token ≈ 2000 字符,防臃肿。
 const MEMORY_MAP_BUDGET: usize = 2000;
+/// 双库强制召回块字符预算(妈妈库 + 外库混检命中片段合计上限, 控 token 成本)。
+const FORCED_RECALL_BUDGET: usize = 3600;
 
 /// 按字符(非字节)截断, 中文安全; 超长加省略标记。
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -1356,6 +1395,123 @@ fn format_memory_map(index_text: &str, mem_abs: &str, budget: usize) -> String {
 **遵守里面记下的规则与主人的纠正**, 别重蹈被否决过的做法。无关的条目不必展开。\n\n{}",
         picked.join("\n")
     )
+}
+
+/// 家底概览块(始终注入,便宜):四车道各有多少 + 盘点/向量状态。
+/// 解决「问知识库有什么只答得出妈妈库 wiki」——让模型一开口就报全四层家底,
+/// 并明确「我会跨全部四层检索,不只 wiki」。全部来自内存 INDEX + fable.db 快速 COUNT。
+fn kb_overview_block() -> String {
+    let ov = crate::kb::kb_overview();
+    if ov.root.is_empty() {
+        return String::new();
+    }
+    let root = ov.root.replace('\\', "/");
+    // 盘点/向量状态(fable.db 的快速 COUNT;失败/未盘点则给提示)。
+    let (inv, vec_line) = match crate::fable::status() {
+        Ok(s) if s.files_total > 0 => (
+            format!("{} 个文件已盘点", s.files_total),
+            if s.chunks_total > 0 {
+                format!(" · 向量化 {} chunk(语义检索就绪)", s.chunks_total)
+            } else {
+                " · 尚未向量化(仅关键词/全文检索)".to_string()
+            },
+        ),
+        _ => ("(外部资料尚未盘点,可在「知识库」里盘点以启用全盘语义检索)".to_string(), String::new()),
+    };
+    format!(
+        "## 你的知识库 · 家底\n\n\
+根目录: `{root}`。这是**你本人的**知识库, 共四层; 作答时我会查**全部四层**(不只妈妈库 wiki):\n\
+- **妈妈库 wiki**: {} 篇人工确认的知识(概念/实体/综述, 最可信)\n\
+- **原始 raw**: {} 篇文本资料(你导入的会议/文档/转写等; 非文本资料计入下方盘点)\n\
+- **成品 output**: {} 篇生成的报告/整理\n\
+- **记忆 memory**: {} 条回声层沉淀(你的偏好/习惯/纠正过的做法)\n\
+- **盘点库**: {inv}{vec_line}\n\n\
+用户问「我的知识库在哪 / 有什么」时, 据此如实回答四层家底与各自数量, 并说明你会跨全部四层检索。\n",
+        ov.wiki, ov.raw_md, ov.output, ov.memory
+    )
+}
+
+/// 双库强制召回:开启知识库时, 后端在拼 prompt 时**替模型先查两个库**, 把命中片段
+/// 直接喂进上下文 —— 不再靠模型自觉去检索, 从根上解决「像只认妈妈库」。
+/// - **妈妈库 wiki(权威)**: `kb_search` 命中里 wiki/ 的(关键词加权, 始终可用、零盘点依赖);
+/// - **外面整个库(RAG)**: 优先 fable 混检全盘 40 候选 → 重排打分取最优;没盘点则退化为
+///   `kb_search` 的非 wiki(raw/output)命中 —— 保证「外库」无论如何都被查到。
+/// `budget` 为本块字符预算上限(token 成本可控);两路命中均按 path 去重。
+fn forced_recall_block(query: &str, budget: usize) -> String {
+    let q = query.trim();
+    if q.chars().count() < 2 {
+        return String::new();
+    }
+    // 一次 kb_search 取较多, 再按路拆分(wiki 权威 / 非 wiki 资料)。
+    let kb_hits = crate::kb::kb_search(q.to_string(), Some(40));
+    let mut wiki: Vec<(String, String, String)> = Vec::new(); // (title, path, snippet)
+    let mut raw_kw: Vec<(String, String, String)> = Vec::new();
+    for h in &kb_hits {
+        let seg = h.path.split('/').next().unwrap_or("");
+        if seg == "wiki" {
+            wiki.push((h.title.clone(), h.path.clone(), h.snippet.clone()));
+        } else if seg != "memory" {
+            raw_kw.push((h.title.clone(), h.path.clone(), h.snippet.clone()));
+        }
+    }
+    // 外库 RAG:fable 混检(40 候选 → 重排取优), 限「!wiki」即只搜外面的原始资料库。
+    // **只在索引就绪(向量化过 或 全文倒排建过)时才调 fable** —— 否则它会退化成对全盘文本的
+    // 实时扫描, 在未建索引的大库(数十万文件)上可达 1s+ 阻塞本轮对话; 此时直接用 kb_search 的
+    // 非 wiki(raw/output)关键词命中兜底, 保证「外库」始终被查到且零延迟代价。
+    let fable_ready = matches!(crate::fable::status(), Ok(s) if s.chunks_total > 0 || s.lex_files > 0);
+    let rag: Vec<(String, String, String)> = if fable_ready {
+        match crate::fable::retrieve::search(q, 40, "hybrid", Some("!wiki")) {
+            Ok(r) if !r.hits.is_empty() => r
+                .hits
+                .into_iter()
+                .map(|h| {
+                    let title = h.path.rsplit('/').next().unwrap_or(&h.path).to_string();
+                    (title, h.path, h.snippet)
+                })
+                .collect(),
+            _ => raw_kw,
+        }
+    } else {
+        raw_kw
+    };
+
+    if wiki.is_empty() && rag.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from(
+        "## 本轮知识库召回 (已替你查过两个库)\n\n\
+下面是我**已经**在你的知识库里检索到的、与本轮问题最相关的片段。妈妈库为人工确认的权威知识, \
+资料库为原始资料经混合检索(40 候选 → 重排打分)取优。**片段是线索, 引用前用 `Read` 打开对应文件核对原文**; 引用时报相对路径。\n\n",
+    );
+    let mut used = 0usize;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let push_section = |out: &mut String, used: &mut usize, seen: &mut std::collections::HashSet<String>, title: &str, items: &[(String, String, String)], take: usize| {
+        let mut n = 0;
+        let mut section = String::new();
+        for (t, p, sn) in items {
+            if n >= take || *used >= budget {
+                break;
+            }
+            if !seen.insert(p.clone()) {
+                continue;
+            }
+            let snip: String = sn.chars().take(180).collect();
+            let line = format!("{}. [{}] `{}`\n   {}\n", n + 1, t, p, snip.replace('\n', " "));
+            *used += line.chars().count();
+            section.push_str(&line);
+            n += 1;
+        }
+        if n > 0 {
+            out.push_str(title);
+            out.push('\n');
+            out.push_str(&section);
+            out.push('\n');
+        }
+    };
+    push_section(&mut out, &mut used, &mut seen, "**妈妈库 wiki(权威):**", &wiki, 6);
+    push_section(&mut out, &mut used, &mut seen, "**资料库 raw/output(混检取优):**", &rag, 8);
+    out
 }
 
 /// KB-first 顶层指令 (写死) —— 这一条优先级最高, 任何后续指令都不能凌驾。
