@@ -505,6 +505,12 @@ export interface FcKindCount {
   count: number;
   bytes: number;
 }
+/** 按语言归类的一档:编程语言(Python/Rust…)/ 自然语言(中文/英文)/ 媒体大类(图片/视频…) */
+export interface FcLangCount {
+  lang: string;
+  count: number;
+  bytes: number;
+}
 export interface FcCluster {
   id: number;
   label: string;
@@ -520,6 +526,8 @@ export interface FileOverview {
   totalFiles: number;
   totalBytes: number;
   byKind: FcKindCount[];
+  /** 按语言分布(编程语言 / 自然语言 / 媒体大类) */
+  byLang: FcLangCount[];
   clusters: FcCluster[];
   textFiles: number;
   embeddedFiles: number;
@@ -591,6 +599,8 @@ export interface FileGridParams {
   root?: string | null;
   clusterId?: number | null;
   kind?: string | null;
+  /** 按语言过滤:编程语言(Python/Rust…)、自然语言(中文/英文)、媒体大类(图片/视频…) */
+  lang?: string | null;
   sort?: "recent" | "name" | "size" | "kind";
   query?: string | null;
   page?: number;
@@ -608,11 +618,14 @@ export const files = {
       root: p.root ?? null,
       clusterId: p.clusterId ?? null,
       kind: p.kind ?? null,
+      lang: p.lang ?? null,
       sort: p.sort ?? "recent",
       query: p.query ?? null,
       page: p.page ?? 0,
       pageSize: p.pageSize ?? 60,
     }),
+  /** 给所有文件补「语言」归类标签(代码/媒体零 IO,文稿读头嗅探中文/英文);返回回填条数 */
+  backfillLang: () => invoke<number>("fable_backfill_lang", {}),
   /** 缩略图/首帧 → data URL(失败返回 null,前端落类型图标);磁盘缓存 */
   thumb: (abspath: string, max = 360) =>
     invoke<string | null>("file_thumb", { abspath, max }),
