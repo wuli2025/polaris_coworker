@@ -20,6 +20,8 @@ import ToastHost from "./components/ToastHost.vue";
 import VoiceOverlay from "./components/VoiceOverlay.vue";
 import CommandPalette from "./components/CommandPalette.vue";
 import TaskCenter from "./components/TaskCenter.vue";
+import LibTierBadge from "./components/LibTierBadge.vue";
+import FaultBoundary from "./components/FaultBoundary.vue";
 import { useHotkeys } from "./composables/useHotkeys";
 import { installMarkdownDelegation } from "./lib/markdown";
 import { openUrl, onWsStatus, isTauri, files as fc } from "./tauri";
@@ -116,6 +118,15 @@ function onViewReady(v: ViewKey) {
   if (switchLoader.value === v) switchLoader.value = null;
 }
 
+// 「配好模型就自动深度精读」检查点:离开「感官 API」设置页时,若用户之前武装过深度精读
+// 且现在模型已就绪 → 自动在后台补跑完整深度流程(见 stores/wizard.ts:checkPendingDeep)。
+watch(
+  () => app.view,
+  (next, prev) => {
+    if (prev === "sense_api" && next !== "sense_api") void wiz.checkPendingDeep();
+  },
+);
+
 // 开机续建索引 ——「默认关闭」。
 // 为什么默认不自动跑:后台向量嵌入会长时间持有 SQLite 写事务,期间任何读命令(总览/晨报/
 // 检索)若在 UI 主线程上撞到写锁,会等 busy_timeout(最长 20s),主线程消息泵停摆 → 被
@@ -164,12 +175,20 @@ onMounted(() => {
   });
   // Docker/Web 模式:WS 断线 → 顶部细条提示(自动重连由 tauri.ts 负责)
   if (!isTauri) unWsStatus = onWsStatus((ok) => (wsDown.value = !ok));
+  // 内存治理「最后保险」:App 被切到后台(最小化 / 切窗 / 标签页隐藏)是天然的空闲点,
+  // 此刻主动把对话气泡缓存收回到 LRU 上限。visibilitychange 在 WKWebView(Mac)/
+  // WebView2(Win)/浏览器(Docker)三端都可靠触发,纯回收无副作用(切回时按需重取)。
+  document.addEventListener("visibilitychange", onVisibilityTrim);
 });
+function onVisibilityTrim() {
+  if (document.visibilityState === "hidden") chatStore.trimMemory();
+}
 onBeforeUnmount(() => {
   unMdDelegate?.();
   unWsStatus?.();
   clearTimeout(loaderSafety);
   window.removeEventListener("mousemove", onAuroraPointer);
+  document.removeEventListener("visibilitychange", onVisibilityTrim);
   if (edgeRaf) cancelAnimationFrame(edgeRaf);
 });
 
@@ -247,6 +266,8 @@ function onEnvDone() {
   }
   // splash → onboarding → env 全部完成后，再检查更新（避免弹窗被盖住）
   checkForUpdate();
+  // 老用户若之前武装过深度精读、且模型已配好 → 开机自动补跑(只要配好模型就跑)。
+  void wiz.checkPendingDeep();
 }
 
 // 预览成品文件时把右侧抽屉拓宽；展开模式更宽，让观看更好看
@@ -316,6 +337,10 @@ function startSbDrag(e: MouseEvent) {
            四个工坊也缓存：生成/修改是多轮流程(phase/convId/产物预览都在组件态里)，
            切去对话看进度再切回来必须还能「继续修改」，销毁重建=流程报废。
            mountedView 让重视图冷启时滞后两帧挂载，先把加载条画出来再扛卡顿。 -->
+      <!-- 故障舱壁:任一功能视图在渲染/生命周期抛错时,只把当前视图换成可重试卡片,
+           绝不让异常冒泡到 app 根白屏 → 侧栏/任务中心/右抽屉及其它功能键照常可用。
+           viewKey 让它感知视图切换并在切走时自愈(再切回=自动重试)。 -->
+      <FaultBoundary :view-key="mountedView">
       <KeepAlive :include="['KnowledgeGraph', 'SandboxStatus', 'DeckStudio', 'WebStudio', 'MediaOps', 'VideoCourseStudio']">
         <ChatPanel v-if="mountedView === 'chat'" />
         <WikiBrowse v-else-if="mountedView === 'wiki'" />
@@ -343,6 +368,7 @@ function startSbDrag(e: MouseEvent) {
         <DeckStudio v-else-if="mountedView === 'deck'" />
         <WebStudio v-else-if="mountedView === 'web_studio'" />
       </KeepAlive>
+      </FaultBoundary>
 
       <!-- 点击重视图即刻浮现的快速加载条（盖住挂载/建图卡顿） -->
       <Transition name="vl">
@@ -353,7 +379,10 @@ function startSbDrag(e: MouseEvent) {
         />
       </Transition>
     </main>
-    <RightDrawer />
+    <!-- 右抽屉渲染用户产物预览(HTML/PPT/网页),是常见崩溃源;独立舱壁兜底,崩了不白屏整窗 -->
+    <FaultBoundary>
+      <RightDrawer />
+    </FaultBoundary>
 
     <!-- 自动更新提示条（发现新版本时浮出） -->
     <UpdateBanner />
@@ -365,6 +394,9 @@ function startSbDrag(e: MouseEvent) {
 
     <!-- 全局任务中心:盘点/建索引/智能归类等后台任务,无论切到哪个视图都常驻可见、可点回去 -->
     <TaskCenter />
+
+    <!-- 知识库「速览 / 精读」状态徽标 + 随手可点的「深度精读」升级入口(v2 升级钩子) -->
+    <LibTierBadge />
 
     <!-- Docker/Web 模式断线提示条 -->
     <div v-if="wsDown" class="ws-down">连接已断开,正在自动重连…</div>

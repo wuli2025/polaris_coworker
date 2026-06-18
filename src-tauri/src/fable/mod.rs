@@ -99,14 +99,16 @@ pub(crate) fn open_db() -> Result<Connection, String> {
     conn.pragma_update(None, "journal_mode", "WAL").ok();
     conn.pragma_update(None, "synchronous", "NORMAL").ok();
     conn.busy_timeout(std::time::Duration::from_secs(20)).ok();
-    // ── 20TB 级调优 ──
-    // 大库下(向量 BLOB 可达上百 GB)让 SQLite 内存映射读 + 加大页缓存,显著加速向量车道
-    // 对 bits/vec 列的顺序扫描;临时表放内存;WAL 自动检查点抬高,减少长事务被频繁打断。
-    // cache 取每连接 64 MiB(worker 多连接累加仍可控,弱 NAS 不致 OOM);mmap 取 2 GiB
-    // (虚拟映射,实际占用由 OS 页缓存按需管理,过大会被编译期上限静默 clamp)。
+    // ── 内存预算(随平台缩放)──
+    // 关键:mmap_size / cache_size 是「每连接」状态,而一次 hybrid 检索的向量粗筛会按
+    // worker 数(最高 12)同时开十余个连接 —— 旧值 mmap=2GiB、cache=64MiB「每连接」在桌面
+    // 被乘成 ~24GiB 映射 + ~768MiB 堆,16/32GB 的 Mac/Win 直接被撑爆。
+    // 现按外壳取预算:server(Docker/大内存)沿用大值吃满吞吐;桌面用克制值(总量受控),
+    // 都可经 POLARIS_FABLE_MMAP_MB / POLARIS_FABLE_CACHE_MB 覆写(单位 MiB,mmap=0 关映射)。
+    let (mmap_bytes, cache_kib) = db_mem_budget();
     conn.pragma_update(None, "temp_store", "MEMORY").ok();
-    conn.pragma_update(None, "mmap_size", 2_147_483_648i64).ok(); // 2 GiB
-    conn.pragma_update(None, "cache_size", -65_536i64).ok(); // 64 MiB(负值=KiB)
+    conn.pragma_update(None, "mmap_size", mmap_bytes).ok();
+    conn.pragma_update(None, "cache_size", -cache_kib).ok(); // 负值 = KiB
     conn.pragma_update(None, "wal_autocheckpoint", 20_000i64).ok();
     // 模式迁移每进程只跑一次。migrate 含十余条 CREATE TABLE/INDEX、6 次列探测 SELECT、
     // 以及 FTS5 建虚表 —— 而 open_db 在检索热路径被高频调用(单次 hybrid 查询光向量粗筛就按
@@ -122,6 +124,32 @@ pub(crate) fn open_db() -> Result<Connection, String> {
         }
     }
     Ok(conn)
+}
+
+/// 每连接 SQLite 内存预算 → `(mmap_size 字节, cache_size KiB)`。
+///
+/// 这两个 PRAGMA 是连接级状态,而向量检索按 [`worker_count`](最高 12)并发开连接,
+/// 故必须按「单连接 × 连接数」估总量。默认值:
+/// - **server(Docker / 大内存服务器)**:mmap 2GiB、cache 64MiB —— 吃满大库顺序扫吞吐;
+/// - **桌面(Mac/Win,通常 16/32GB)**:mmap 256MiB、cache 16MiB —— 12 连接累加仍仅
+///   ~3GiB 映射(且映射只在真正触碰页时驻留)+ ~192MiB 堆,远低于撑爆线。
+///
+/// 覆写:`POLARIS_FABLE_MMAP_MB`(MiB,0=关 mmap)、`POLARIS_FABLE_CACHE_MB`(MiB,下限 1)。
+/// 小内存桌面想再省 → 设 `POLARIS_FABLE_MMAP_MB=0 POLARIS_FABLE_CACHE_MB=8`;
+/// Docker 大库想更激进 → 调高二者。
+fn db_mem_budget() -> (i64, i64) {
+    // 平台默认:server feature 给大值,其余(桌面)给克制值。
+    #[cfg(feature = "server")]
+    let (def_mmap_mb, def_cache_mb): (i64, i64) = (2048, 64);
+    #[cfg(not(feature = "server"))]
+    let (def_mmap_mb, def_cache_mb): (i64, i64) = (256, 16);
+
+    let env_mb = |k: &str| -> Option<i64> {
+        std::env::var(k).ok().and_then(|v| v.trim().parse::<i64>().ok()).filter(|n| *n >= 0)
+    };
+    let mmap_mb = env_mb("POLARIS_FABLE_MMAP_MB").unwrap_or(def_mmap_mb).max(0);
+    let cache_mb = env_mb("POLARIS_FABLE_CACHE_MB").unwrap_or(def_cache_mb).max(1);
+    (mmap_mb * 1024 * 1024, cache_mb * 1024)
 }
 
 /// 进程级「fable.db 模式已就绪」闸 + 串行化锁(配合 [`open_db`] 的双检锁,见其注释)。
