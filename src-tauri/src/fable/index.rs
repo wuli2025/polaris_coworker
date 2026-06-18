@@ -46,11 +46,20 @@ fn embeddable(ext: &str, size: i64) -> bool {
 
 // ───────────────────────── 嵌入 / 重排客户端 ─────────────────────────
 
-fn agent_http() -> ureq::Agent {
+/// 进程级共享 HTTP Agent。ureq::Agent 内部是 Arc + 连接池,Clone 廉价、Send+Sync,**复用同一个
+/// 即可在多次请求间保活 TCP/TLS 连接**。此前每次调用都 `build()` 一个全新 Agent → 连接池形同
+/// 虚设,每个嵌入批 / 每次查询嵌入都要重做一次 TLS 握手(对 siliconflow 这类 HTTPS 往返,握手
+/// 本身就是几十~上百 ms)。索引构建会打成千上万批(且 EMBED_CONCURRENCY 路并发共享此池),
+/// 查询冷路也复用暖连接 —— 嵌入吞吐与首字延迟同时受益。
+static HTTP_AGENT: Lazy<ureq::Agent> = Lazy::new(|| {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .timeout_read(Duration::from_secs(120))
         .build()
+});
+
+fn agent_http() -> ureq::Agent {
+    HTTP_AGENT.clone()
 }
 
 /// 批量嵌入。429 退避重试 3 次;其余错误直接报(可读信息,UI 原样展示)。

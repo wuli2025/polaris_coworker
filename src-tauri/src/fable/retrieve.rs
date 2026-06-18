@@ -244,10 +244,15 @@ fn scan_and_score(
                     continue;
                 }
                 let lines: Vec<&str> = text.lines().collect();
+                // 复用整文件的小写副本 `lower`(上面已算)逐行切片做命中判定,免去每行再
+                // `to_lowercase()` 分配一个 String(大文件几千行 × 数百候选 = 数百万次分配)。
+                // `to_lowercase` 不增删换行符,故 `lower.lines()` 与 `text.lines()` 行号对齐;
+                // 仍用 `.get(i)` 防御任何极端不齐。展示/上下文取原文 `lines`(保留大小写)。
+                let lower_lines: Vec<&str> = lower.lines().collect();
                 // 取最多 2 条命中行做摘录(行号按原文);并截一段上下文窗口给重排读全文。
                 let mut snippets = 0;
                 for (i, line) in lines.iter().enumerate() {
-                    let ll = line.to_lowercase();
+                    let ll = lower_lines.get(i).copied().unwrap_or("");
                     let hit_full = ll.contains(*q_full);
                     let hit_tok = tokens.iter().any(|t| ll.contains(t.as_str()));
                     if hit_full || hit_tok {
@@ -633,45 +638,80 @@ fn vector_lane(query: &str, top_k: usize) -> Result<Vec<VecHit>, String> {
     let dim = qv.len() as i64;
     let cand = coarse_candidates(&qbits, &model, dim, cand_n, &probes)?;
 
-    // ── 第二段 · 精排(P1-3):只对候选回读 f32 原始向量算点积(归一化 → 即余弦)──
+    // ── 第二段 · 精排(P1-3):分两步省 IO / 分配 ──
+    //   ① 只读候选的 (id, vec),借用 blob 算点积打分(无 JOIN、不物化全文);
+    //   ② 仅对最终入选的 want(≈top_k·2)条回读 seq/text/路径并拼装。
+    // 此前对全部 cand_n(≥200)条都 JOIN files/roots 且把每条 chunk 全文 String 物化进内存,
+    // 而真正进入融合的只有 want(~24)条 → 白读 ~8 倍全文、白做 ~8 倍 JOIN 行物化。现在重载荷
+    // (全文 + 两段路径 + JOIN)只搬入选条;粗筛已把候选收到几百,二段读 (id,vec) 也是顺序小读。
     let mut top: Vec<VecHit> = Vec::new();
     if !cand.is_empty() {
         let ids: Vec<i64> = cand.iter().map(|x| x.0).collect();
+        // 步骤①:打分(只读 vec,借用算点积)。
+        let mut scored: Vec<(i64, f32)> = Vec::with_capacity(ids.len());
         for group in ids.chunks(500) {
             let placeholders = group.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "SELECT c.vec, c.seq, c.text, f.relpath, r.path FROM chunks c
-                 JOIN files f ON f.id=c.file_id JOIN roots r ON r.id=f.root_id
-                 WHERE c.id IN ({placeholders})"
-            );
+            let sql = format!("SELECT c.id, c.vec FROM chunks c WHERE c.id IN ({placeholders})");
             let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
             let mut rows = stmt
                 .query(rusqlite::params_from_iter(group.iter()))
                 .map_err(|e| e.to_string())?;
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                // 借用 blob 直接算点积,免去 blob_to_vec 的 Vec<f32> 分配;维度不符则跳过。
                 let blob = row
-                    .get_ref(0)
+                    .get_ref(1)
                     .map_err(|e| e.to_string())?
                     .as_blob()
                     .map_err(|e| e.to_string())?;
                 let Some(score) = super::index::dot_blob(&qv, blob) else {
                     continue;
                 };
-                let seq: i64 = row.get(1).map_err(|e| e.to_string())?;
-                let text: String = row.get(2).map_err(|e| e.to_string())?;
-                let rel: String = row.get(3).map_err(|e| e.to_string())?;
-                let root: String = row.get(4).map_err(|e| e.to_string())?;
-                top.push(VecHit {
-                    abspath: std::path::Path::new(&root)
-                        .join(&rel)
-                        .to_string_lossy()
-                        .into_owned(),
-                    path: rel,
-                    seq,
-                    text,
-                    score,
-                });
+                let id: i64 = row.get(0).map_err(|e| e.to_string())?;
+                scored.push((id, score));
+            }
+        }
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(want);
+        // 步骤②:仅回读入选条的 seq/text/路径(JOIN 只跑 want 行),按 id 建 map 再按分数序拼装。
+        if !scored.is_empty() {
+            let win_ids: Vec<i64> = scored.iter().map(|x| x.0).collect();
+            let mut meta: HashMap<i64, (i64, String, String, String)> =
+                HashMap::with_capacity(win_ids.len());
+            for group in win_ids.chunks(500) {
+                let placeholders = group.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!(
+                    "SELECT c.id, c.seq, c.text, f.relpath, r.path FROM chunks c
+                     JOIN files f ON f.id=c.file_id JOIN roots r ON r.id=f.root_id
+                     WHERE c.id IN ({placeholders})"
+                );
+                let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                let mut rows = stmt
+                    .query(rusqlite::params_from_iter(group.iter()))
+                    .map_err(|e| e.to_string())?;
+                while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                    let id: i64 = row.get(0).map_err(|e| e.to_string())?;
+                    let seq: i64 = row.get(1).map_err(|e| e.to_string())?;
+                    let text: String = row.get(2).map_err(|e| e.to_string())?;
+                    let rel: String = row.get(3).map_err(|e| e.to_string())?;
+                    let root: String = row.get(4).map_err(|e| e.to_string())?;
+                    meta.insert(id, (seq, text, rel, root));
+                }
+            }
+            // 按分数序拼装(scored 已降序);缺失项(并发删改的极端情况)跳过。
+            for (id, score) in scored {
+                if let Some((seq, text, rel, root)) = meta.remove(&id) {
+                    top.push(VecHit {
+                        abspath: std::path::Path::new(&root)
+                            .join(&rel)
+                            .to_string_lossy()
+                            .into_owned(),
+                        path: rel,
+                        seq,
+                        text,
+                        score,
+                    });
+                }
             }
         }
     } else {
