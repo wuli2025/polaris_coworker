@@ -303,6 +303,13 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         -- 最近活动序:文件中心默认网格、晨报「最近在动的文件」、recent digest 均 ORDER BY mtime DESC
         -- LIMIT n。无此索引时大库(几十万行)要全表排序;有了它走反向索引扫描,读 ~n 行即停。
         CREATE INDEX IF NOT EXISTS idx_files_mtime         ON files(mtime);
+        -- 文件中心首屏 overview:`GROUP BY kind` 取 COUNT/SUM(size)。把 size 也纳入索引 →
+        -- 覆盖索引,纯走索引算聚合,免在百万行 files 表上整表扫(冷启动后台索引满负荷时,整表
+        -- GROUP BY 单次可达数秒,会把 spawn_blocking 池占满拖垮 UI 取数)。
+        CREATE INDEX IF NOT EXISTS idx_files_kind_size     ON files(kind, size);
+        -- overview「按语言」:`GROUP BY lang, ext, kind` 取 COUNT/SUM(size)。同为覆盖索引,
+        -- 把这条百万行三列聚合从全表扫降为索引扫。
+        CREATE INDEX IF NOT EXISTS idx_files_lang          ON files(lang, ext, kind, size);
         -- 向量车道按 (model, cell) 取候选:IVF 探针命中的 cell 直接走索引。
         CREATE INDEX IF NOT EXISTS idx_chunks_cell         ON chunks(model, cell);
         -- IVF 二值质心:每模型 K 个 cell,bits=按位多数表决得到的二值码,分配/找最近 cell 都用汉明。
@@ -396,7 +403,17 @@ pub(crate) fn reencode_fs_path(display_abspath: &str) -> std::path::PathBuf {
 }
 
 /// 并行度:留一个核给 UI/主循环,封顶 12(NAS 盘 IO 先饱和)。
+///
+/// 限速旋钮:`POLARIS_FABLE_WORKERS` 可显式压低盘点/语言回填/检索粗筛的并发线程数
+/// (clamp 到 [1,64])。百万级大库冷启动时后台盘点/索引会占满全部核心,把 UI 线程的
+/// CPU 时间片挤到几乎为零 → 主线程消息泵错过 5s 窗口被判无响应。想让后台「轻一点、
+/// 别和 UI 抢核」就设小一点(例如 `POLARIS_FABLE_WORKERS=2`),重启 app 生效。
 pub(crate) fn worker_count() -> usize {
+    if let Ok(v) = std::env::var("POLARIS_FABLE_WORKERS") {
+        if let Ok(n) = v.trim().parse::<usize>() {
+            return n.clamp(1, 64);
+        }
+    }
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -523,7 +540,18 @@ pub fn status() -> Result<FableStatus, String> {
 
 // ───────────────────────── 命令(薄包装)─────────────────────────
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+// 桌面端一律 async + spawn_blocking:status() 在百万行 files 表上连打 8 条 COUNT(*)
+// (多为全表/无覆盖索引扫描),后台索引器持写锁或满负荷跑时这一下可达数秒。直接当同步
+// Tauri 命令会在 WebView 主线程上跑 → 阻塞 >5s 被 Windows 判「无响应」强杀(AppHangB1)。
+// server flavor 无 UI 主线程、且 dispatch 本就在 spawn_blocking 中,保持同步直调即可。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn fable_status() -> Result<FableStatus, String> {
+    tauri::async_runtime::spawn_blocking(status)
+        .await
+        .map_err(|e| format!("任务调度失败: {e}"))?
+}
+#[cfg(not(feature = "desktop"))]
 pub fn fable_status() -> Result<FableStatus, String> {
     status()
 }
