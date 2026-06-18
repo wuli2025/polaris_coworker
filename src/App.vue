@@ -20,7 +20,6 @@ import ToastHost from "./components/ToastHost.vue";
 import VoiceOverlay from "./components/VoiceOverlay.vue";
 import CommandPalette from "./components/CommandPalette.vue";
 import TaskCenter from "./components/TaskCenter.vue";
-import LibTierBadge from "./components/LibTierBadge.vue";
 import FaultBoundary from "./components/FaultBoundary.vue";
 import { useHotkeys } from "./composables/useHotkeys";
 import { installMarkdownDelegation } from "./lib/markdown";
@@ -117,15 +116,6 @@ watch(
 function onViewReady(v: ViewKey) {
   if (switchLoader.value === v) switchLoader.value = null;
 }
-
-// 「配好模型就自动深度精读」检查点:离开「感官 API」设置页时,若用户之前武装过深度精读
-// 且现在模型已就绪 → 自动在后台补跑完整深度流程(见 stores/wizard.ts:checkPendingDeep)。
-watch(
-  () => app.view,
-  (next, prev) => {
-    if (prev === "sense_api" && next !== "sense_api") void wiz.checkPendingDeep();
-  },
-);
 
 // 开机续建索引 ——「默认关闭」。
 // 为什么默认不自动跑:后台向量嵌入会长时间持有 SQLite 写事务,期间任何读命令(总览/晨报/
@@ -266,8 +256,6 @@ function onEnvDone() {
   }
   // splash → onboarding → env 全部完成后，再检查更新（避免弹窗被盖住）
   checkForUpdate();
-  // 老用户若之前武装过深度精读、且模型已配好 → 开机自动补跑(只要配好模型就跑)。
-  void wiz.checkPendingDeep();
 }
 
 // 预览成品文件时把右侧抽屉拓宽；展开模式更宽，让观看更好看
@@ -395,8 +383,6 @@ function startSbDrag(e: MouseEvent) {
     <!-- 全局任务中心:盘点/建索引/智能归类等后台任务,无论切到哪个视图都常驻可见、可点回去 -->
     <TaskCenter />
 
-    <!-- 知识库「速览 / 精读」状态徽标 + 随手可点的「深度精读」升级入口(v2 升级钩子) -->
-    <LibTierBadge />
 
     <!-- Docker/Web 模式断线提示条 -->
     <div v-if="wsDown" class="ws-down">连接已断开,正在自动重连…</div>
