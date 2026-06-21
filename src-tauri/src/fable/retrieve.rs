@@ -8,7 +8,7 @@
 //! - 两车道 `thread::scope` 真并行,先到先等,RRF(k=60)塌平融合;
 //! - 有重排服务商时对融合 top-40 精排一次,失败静默保持 RRF 序(可降级)。
 
-use super::{lex_available, open_db, worker_count};
+use super::{lex_available, open_db, open_db_gauged, worker_count};
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -524,7 +524,9 @@ fn coarse_scan_ranged(
                 .map(|&(rlo, rhi)| {
                     let collected = &collected;
                     s.spawn(move || -> Result<(), String> {
-                        let conn = open_db()?;
+                        // 计量连接:这是并发开连接的热点(最多 w≤12 路同时持有),
+                        // 守卫 drop 时自减,超软上限只告警不阻塞 —— 让用户能看见最坏并发度。
+                        let conn = open_db_gauged()?;
                         let sql = format!(
                             "SELECT id, bits FROM chunks \
                              WHERE dim=?1 AND model=?2 AND bits IS NOT NULL \

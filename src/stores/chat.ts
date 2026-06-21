@@ -103,9 +103,13 @@ export const useChatStore = defineStore("chatRuntime", () => {
   function wakeWaiters(convId: string) {
     stopWatchdog(convId);
     const waiters = doneWaiters[convId];
+    // 删键(而非仅清空数组):清空只回收数组元素,键本身仍永久残留 —— 后端崩溃/done 丢失时
+    // 这些键会逐月累积成上百条死条目。先 delete 再调用 resolver,顺带防 resolver 内重入。
     if (waiters && waiters.length) {
-      doneWaiters[convId] = [];
+      delete doneWaiters[convId];
       for (const w of waiters) w();
+    } else {
+      delete doneWaiters[convId];
     }
   }
   /** 启动某对话的无声死亡看门狗(幂等:已存在则不重复挂)。每 15s 巡检一次,
@@ -201,6 +205,11 @@ export const useChatStore = defineStore("chatRuntime", () => {
       loadedByConv.value[id] = false; // 下次切回触发 loadHistory 重取
       delete tokensByConv.value[id];
       delete historyErrorByConv.value[id];
+      // 长跑泄漏收口:这些 per-conv 字典此前漏在 evict 之外 → 只增不减。被淘汰的对话
+      // 必非发送中(ranked 已滤掉发送态),其活跃时间戳/请求 id/等待者均可安全回收。
+      delete activeAtByConv.value[id];
+      delete reqByConv.value[id];
+      delete doneWaiters[id];
     }
   }
 
@@ -284,6 +293,9 @@ export const useChatStore = defineStore("chatRuntime", () => {
       at: Date.now(),
     });
     sendingByConv.value[convId] = true;
+    // 清掉上一轮可能残留的 reqId(若用户在 chat_send resolve 前就取消, send 可能晚于
+    // cancel 删除条目后落地, 留下永不清理的孤儿 reqId)。新一轮开始前先抹掉, 关掉这个活锁竞态。
+    delete reqByConv.value[convId];
     touchActivity(convId);
     sessions.start(convId, displayText.slice(0, 18));
     try {

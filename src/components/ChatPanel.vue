@@ -647,12 +647,16 @@ onMounted(async () => {
   // 做梦/晨报生成完 → 刷新建议,并主动弹出让用户第一时间看到新内容。
   // 桌面走 Tauri 事件、Docker/Web 走 WS,两条路径的 listen 包装都直接回传 payload 本体
   // (见 tauri.ts),所以读 p.kind;旧代码读 p.payload.kind 多包一层、永远取不到。
-  listen("echo:dream", async (p: any) => {
-    if ((p?.kind ?? p?.payload?.kind) === "done") {
-      await loadBriefings();
-      if (briefings.value.length) briefOpen.value = true;
-    }
-  });
+  // 捕获 unlisten 并纳入 voiceUnlisteners(onBeforeUnmount 统一回收):此前未解绑,
+  // KeepAlive 反复挂载会逐月累积上千个 echo:dream 监听器及其闭包 → 内存爬升。
+  voiceUnlisteners.push(
+    await listen("echo:dream", async (p: any) => {
+      if ((p?.kind ?? p?.payload?.kind) === "done") {
+        await loadBriefings();
+        if (briefings.value.length) briefOpen.value = true;
+      }
+    })
+  );
 });
 
 // ─────────── 分批长任务（Batch Build）模式开关 ───────────

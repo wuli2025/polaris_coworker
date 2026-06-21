@@ -149,6 +149,10 @@ async function autoBuildIndexOnStartup() {
 // 这样切走/未挂载 ChatPanel 时后台任务仍持续流式推进、完成有提醒。
 let unMdDelegate: (() => void) | null = null;
 let unWsStatus: (() => void) | null = null;
+// 周期性内存兜底:App 是全程挂载的根组件,WebView 可连开数周。即便用户从不切对话/不切后台
+// (visibilitychange 兜底永远不触发),也每 5 分钟主动收一次 LRU,杜绝长周期内存缓慢爬升。
+// trimMemory 只回收陈旧、非发送中的对话,纯回收无副作用。
+let trimTimer: number | undefined;
 onMounted(() => {
   chatStore.init();
   // 文件中心长任务(盘点/建索引/智能归类/AI 整理名称)的全局事件监听:App 级注册一次,
@@ -169,6 +173,13 @@ onMounted(() => {
   // 此刻主动把对话气泡缓存收回到 LRU 上限。visibilitychange 在 WKWebView(Mac)/
   // WebView2(Win)/浏览器(Docker)三端都可靠触发,纯回收无副作用(切回时按需重取)。
   document.addEventListener("visibilitychange", onVisibilityTrim);
+  trimTimer = window.setInterval(() => {
+    try {
+      chatStore.trimMemory?.();
+    } catch {
+      /* 收回失败不影响应用运行,静默跳过,等下一个周期 */
+    }
+  }, 5 * 60 * 1000);
 });
 function onVisibilityTrim() {
   if (document.visibilityState === "hidden") chatStore.trimMemory();
@@ -176,6 +187,7 @@ function onVisibilityTrim() {
 onBeforeUnmount(() => {
   unMdDelegate?.();
   unWsStatus?.();
+  if (trimTimer !== undefined) clearInterval(trimTimer);
   clearTimeout(loaderSafety);
   window.removeEventListener("mousemove", onAuroraPointer);
   document.removeEventListener("visibilitychange", onVisibilityTrim);

@@ -567,7 +567,11 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     let watchdog_timeout = std::env::var("POLARIS_CHAT_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+        // 桌面此前默认 0=不启用 → 挂死的 claude 子进程(及其 cwd=/ 子代理)永不超时,
+        // 一年长跑里偶发网络故障累积出几十个吊死进程+阻塞线程,耗尽句柄/FD。改为默认常开:
+        // 桌面 600s(留足长任务空间;判据是「连续空闲」非总时长,不误杀几分钟的 ffmpeg)、容器 180s。
+        // 仍可经 POLARIS_CHAT_TIMEOUT_SECS 覆写(设 0 显式关闭)。
+        .unwrap_or(if cfg!(feature = "desktop") { 600 } else { 180 });
     if watchdog_timeout > 0 {
         let wd_req = req_id.clone();
         let wd_activity = last_activity.clone();
@@ -703,8 +707,29 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         // 等子进程退出, 检查 exit code (不能持锁 wait, 否则 chat_cancel 死锁)
         let child_opt = CHILDREN.lock().remove(&req_out);
         let exit_msg: Option<String> = if let Some(mut child) = child_opt {
-            match child.wait() {
-                Ok(status) => {
+            // 有界等待: 卡死的孙进程 (占着管道不退) 绝不能把这个读线程永久钉住,
+            // 否则一年里每次卡死都泄漏一个 ~2MB 栈的线程 → 终将 OOM。
+            // 非阻塞 try_wait 轮询 + 硬死线, 到点强杀回收 (关管道) 再走异常退出路径。
+            // 注意: 这里只补一道兜底, stdout/stderr 的读取与 emit、看门狗、事件载荷全不变。
+            let wait_deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(900);
+            let waited: std::io::Result<Option<std::process::ExitStatus>> = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(Some(status)),
+                    Ok(None) => {
+                        if std::time::Instant::now() >= wait_deadline {
+                            let _ = child.kill(); // 强杀回收: 关掉管道, 不让本线程泄漏
+                            let _ = child.wait(); // 杀后做一次简短最终 reap
+                            // 拿不到真实状态就当超时异常 (走下方 None 分支 → 同款错误事件)
+                            break Ok(child.try_wait().ok().flatten());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            match waited {
+                Ok(Some(status)) => {
                     if !status.success() {
                         let stderr_txt = stderr_buf_for_done.lock().clone();
                         Some(format!(
@@ -719,6 +744,17 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
                     } else {
                         None
                     }
+                }
+                Ok(None) => {
+                    let stderr_txt = stderr_buf_for_done.lock().clone();
+                    Some(format!(
+                        "claude 进程等待超时, 已强制回收\n--- stderr ---\n{}",
+                        if stderr_txt.is_empty() {
+                            "(stderr 为空)".to_string()
+                        } else {
+                            stderr_txt
+                        }
+                    ))
                 }
                 Err(e) => Some(format!("等待 claude 进程失败: {}", e)),
             }
