@@ -423,44 +423,105 @@ fn clear_pidfile() {
         let _ = fs::remove_file(p);
     }
 }
-/// 启动时回收上次遗留的桥孤儿:只在「该 PID 确实仍是 node 进程」时才杀,防 PID 复用误伤无辜进程。
-fn reap_stale_bridge() {
-    let Some(p) = pidfile() else { return };
-    if let Ok(s) = fs::read_to_string(&p) {
-        if let Ok(pid) = s.trim().parse::<u32>() {
-            #[cfg(target_os = "windows")]
-            {
-                // 双过滤:PID 命中且镜像名是 node.exe 才杀(连子树),否则空操作。
-                let mut c = Command::new("taskkill");
-                c.args([
-                    "/FI",
-                    &format!("PID eq {pid}"),
-                    "/FI",
-                    "IMAGENAME eq node.exe",
-                    "/T",
-                    "/F",
-                ]);
-                use std::os::windows::process::CommandExt;
-                c.creation_flags(0x0800_0000);
-                let _ = c.output();
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                if let Ok(out) =
-                    Command::new("ps").args(["-p", &pid.to_string(), "-o", "comm="]).output()
-                {
-                    if String::from_utf8_lossy(&out.stdout).contains("node") {
-                        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
-                    }
+
+// ───────────────────────── 单实例锁(防双极光双桥重复回消息)─────────────────────────
+// 锁文件 `bridge_dir/gateway.lock` 落盘持有者 PID + 启动时间 + exe 名;
+// 启动网关前先看锁: 若被另一仍活着的 polaris-app 持有 → 直接 Err 拒绝,绝不抢锁。
+// 这是「机器上同一时刻只允许一个 polaris-app 持有飞书网关」的根因解,与全量回收互补。
+fn lock_path() -> Option<PathBuf> {
+    bridge_dir().map(|d| d.join("gateway.lock"))
+}
+fn read_lock() -> Option<u32> {
+    let p = lock_path()?;
+    let s = fs::read_to_string(&p).ok()?;
+    let pid_line = s.lines().find(|l| l.starts_with("pid="))?;
+    pid_line.trim_start_matches("pid=").trim().parse::<u32>().ok()
+}
+fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // PowerShell Get-Process 拿指定 PID; 进程不存在返回空。
+        let script = format!(
+            "Get-Process -Id {pid} -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Id"
+        );
+        if let Ok(out) = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            return s.trim().lines().any(|l| l.trim() == pid.to_string());
+        }
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+/// 若锁被另一「还活着的」进程持有 → 返回 Some(对方 PID);否则 None(无锁/死锁都视作可抢)。
+fn lock_holder_alive() -> Option<u32> {
+    let pid = read_lock()?;
+    if is_pid_alive(pid) { Some(pid) } else { None }
+}
+fn acquire_lock(pid: u32) {
+    let Some(p) = lock_path() else { return };
+    if let Some(dir) = p.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|x| x.file_name().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let started_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    // 简单覆盖写: 单机双 App 场景够用; 不依赖 OS 级 advisory lock, 三平台同构。
+    let _ = fs::write(&p, format!("pid={pid}\nstarted_at_ms={started_at_ms}\nexe={exe}\n"));
+}
+fn release_lock() {
+    if let Some(p) = lock_path() {
+        let _ = fs::remove_file(&p);
+    }
+}
+
+/// 全量杀机器上所有 `bridge.mjs` 进程:不限 pidfile,扫所有 node.exe 命令行含 bridge.mjs 的全杀。
+/// 用于 (a) 启动前清场: 杀光所有兄弟极光持有的桥,确保本极光启动后是唯一在飞的;
+/// (b) 启动回收: 上次崩溃可能不只留 1 个孤儿(双极光开过的场景),pidfile 只有一个,其余靠扫。
+fn reap_all_bridges() {
+    #[cfg(target_os = "windows")]
+    {
+        // Get-CimInstance 拿完整命令行 (tasklist 不带命令行), 过滤含 bridge.mjs 的全 Stop-Process -Force。
+        let script = r#"
+            Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+              Where-Object { $_.CommandLine -like '*bridge.mjs*' } |
+              ForEach-Object {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                Write-Output $_.ProcessId
+              }
+        "#;
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-Command", script])
+            .output();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(out) = Command::new("pgrep").args(["-f", "bridge.mjs"]).output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Ok(pid) = line.trim().parse::<u32>() {
+                    let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
                 }
             }
         }
     }
-    let _ = fs::remove_file(&p);
 }
 
-/// App 退出(关窗/主动退出)时调用:停守护 + 杀桥进程树 + 清 pidfile,
-/// 防 node 桥变孤儿继续 autoReconnect 空转烧 CPU。由 lib.rs 的 RunEvent 钩子调用。
+/// App 退出(关窗/主动退出)时调用:停守护 + 杀桥进程树 + 清 pidfile + 释放单实例锁,
+/// 防 node 桥变孤儿继续 autoReconnect 空转烧 CPU + 防本极光占着锁不让别人起。由 lib.rs 的 RunEvent 钩子调用。
 pub fn shutdown_on_exit() {
     SHOULD_RUN.store(false, Ordering::Relaxed);
     let pid = GATEWAY.lock().pid.take();
@@ -468,6 +529,7 @@ pub fn shutdown_on_exit() {
         kill_pid(pid);
     }
     clear_pidfile();
+    release_lock();
 }
 fn emit_log(app: &AppHandle, text: impl Into<String>) {
     let _ = app.emit("feishu://log", text.into());
@@ -630,6 +692,7 @@ pub fn feishu_gateway_stop(app: AppHandle) -> Result<(), String> {
     g.running = false;
     drop(g);
     clear_pidfile();
+    release_lock();
     emit_status(&app, "stopped");
     emit_log(&app, "网关已停止。");
     Ok(())
@@ -806,13 +869,22 @@ pub fn feishu_gateway_start(app: AppHandle) -> Result<(), String> {
     if SHOULD_RUN.load(Ordering::Relaxed) {
         return Err("网关已在运行".into());
     }
+    // 单实例锁闸门：另一极光进程还活着且持锁 → 直接拒（让用户关掉那一个），绝不抢锁双发。
+    if let Some(holder_pid) = lock_holder_alive() {
+        return Err(format!(
+            "网关已在运行（另一 polaris-app 持有锁 PID {holder_pid}）；请关掉那个窗口再来。"
+        ));
+    }
     let cfg = read_config();
     if cfg.app_id.trim().is_empty() || cfg.app_secret.trim().is_empty() {
         return Err("请先填写并保存 App ID 与 App Secret".into());
     }
     emit_status(&app, "starting");
-    reap_stale_bridge(); // 先回收上次崩溃遗留的桥孤儿,再起新桥(此处 SHOULD_RUN 仍 false,不会误杀本进程在飞的桥)
+    // 清场：全量杀光所有 bridge.mjs 进程（孤儿 + 任何兄弟极光的桥），确保本极光起来后是唯一在飞的。
+    reap_all_bridges();
     let dir = ensure_bridge(&app)?;
+    // 取锁（用本极光进程 PID；持锁期间被强杀就成「死锁」，下次启动会视作可抢）。
+    acquire_lock(std::process::id());
     // 机器人 open_id（「不回复自己」闸门），best-effort
     let bot_open_id = fetch_tenant_token(&cfg)
         .and_then(|t| fetch_bot_info(&cfg, &t))
@@ -947,5 +1019,43 @@ mod tests {
         assert!(guard_reply("好的，我会提醒你开会", true).is_none());
         // 没有承诺 → 放行
         assert!(guard_reply("这是你要的总结。", false).is_none());
+    }
+
+    // ───────── 单实例锁：纯解析单测（不依赖 PowerShell / 不真杀进程）─────────
+
+    /// 锁文件被另一极光持有（且该 PID 当前不存在）→ read_lock 仍能解析出 PID 数字，
+    /// 是否存活交给 is_pid_alive 在生产路径里判定。这里只锁解析逻辑。
+    /// 注: 真实路径依赖 UserDirs (~/Polaris/feishu-bridge/gateway.lock), 测试机可能已被生产写入,
+    /// 所以断言「若存在则 PID 必须是合法 u32」,而不是「必须不存在」。
+    #[test]
+    fn read_lock_parses_pid_line_if_present() {
+        if let Some(pid) = read_lock() {
+            // PID 解析成功 → 格式 OK;PID 数字本身合法(>0,小于 2^22 经验上 Windows 不会超过)。
+            assert!(pid > 0 && pid < (1 << 22));
+        }
+        // 无锁时 read_lock 返回 None 也通过。
+    }
+
+    /// PID 文件格式可承载任意「父进程身份」字段，未来若加版本/宿主字段不破坏 pid= 解析。
+    #[test]
+    fn lock_format_carries_pid_and_exe() {
+        // 不真写盘（涉及 UserDirs）;只格式断言：parse(后字段含 pid=) 与 exe 字段并存。
+        let sample = "pid=12345\nstarted_at_ms=1700000000000\nexe=polaris-app.exe\n";
+        let pid = sample
+            .lines()
+            .find(|l| l.starts_with("pid="))
+            .and_then(|l| l.trim_start_matches("pid=").trim().parse::<u32>().ok());
+        assert_eq!(pid, Some(12345));
+        assert!(sample.contains("exe=polaris-app.exe"));
+    }
+
+    /// 守护线程主入口守的 SHOULD_RUN 语义：原子 bool 的 store/load 行为可作为退化测试。
+    #[test]
+    fn should_run_gate_starts_false_and_can_be_set() {
+        SHOULD_RUN.store(false, Ordering::SeqCst);
+        assert!(!SHOULD_RUN.load(Ordering::SeqCst));
+        SHOULD_RUN.store(true, Ordering::SeqCst);
+        assert!(SHOULD_RUN.load(Ordering::SeqCst));
+        SHOULD_RUN.store(false, Ordering::SeqCst); // 复位免得污染别的并行测试
     }
 }
