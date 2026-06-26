@@ -28,8 +28,18 @@ const MAX_LEX_FILE_BYTES: i64 = 4_000_000;
 /// 抬到 2000 段——在 2MB 嵌入上限内任何文件都能整篇入向量,不再悄悄丢内容;真超大文件由
 /// FTS 倒排覆盖,二者合起来保证「该召回的都召回」)。
 const MAX_CHUNKS_PER_FILE: usize = 2000;
-/// 每请求批量条数(硅基免费档友好值)。
-const EMBED_BATCH: usize = 16;
+/// 每请求批量条数默认值。原 16 偏保守;调高 = 同样的 chunk 数**更少的网络往返**,直接抬云
+/// 嵌入吞吐(报告痛点:35/秒、61.9 万要 6-28h)。32 对硅基 BGE-M3 仍在安全区,故默认上调到 32。
+const EMBED_BATCH_DEFAULT: usize = 32;
+/// 实际每请求批量条数:`POLARIS_EMBED_BATCH` 可覆盖(clamp 到 [1,64])。云档可调大减往返;
+/// 遇到 413/请求体过大再调小。本地档无网络往返,此值影响甚微。
+fn embed_batch() -> usize {
+    std::env::var("POLARIS_EMBED_BATCH")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(1, 64))
+        .unwrap_or(EMBED_BATCH_DEFAULT)
+}
 /// 单文件多个 chunk 批的并发嵌入度。嵌入是网络往返(每批可达数百 ms~数秒),长文档会切成
 /// 几十上百批,旧实现严格串行 → 总耗时 ≈ 批数 × 单批延迟。embed_texts 是纯网络调用、无共享
 /// 态 → 可并发;限到 3 路兼顾吞吐与免费档限速(每批内部仍有 429 指数退避兜底)。
@@ -478,7 +488,8 @@ pub fn build_index(
                         // 重嵌入前清旧 chunk(mtime 变更后 chunked 被重置的场景)
                         conn.execute("DELETE FROM chunks WHERE file_id=?1", [file_id])
                             .map_err(|e| e.to_string())?;
-                        let groups: Vec<&[String]> = chunks.chunks(EMBED_BATCH).collect();
+                        let batch = embed_batch();
+                        let groups: Vec<&[String]> = chunks.chunks(batch).collect();
                         // ── 并发嵌入各批 ──
                         // embed_texts 纯网络调用、无共享态 → 多批可并发取证。长文档(几十上百批)
                         // 由「批数 × 单批延迟」降到「批数/并发 × 单批延迟」;小文档单批时退化为原行为。
@@ -540,7 +551,7 @@ pub fn build_index(
                                 for (i, (t, v)) in group.iter().zip(vecs.iter()).enumerate() {
                                     stmt.execute(rusqlite::params![
                                         file_id,
-                                        (batch_i * EMBED_BATCH + i) as i64,
+                                        (batch_i * batch + i) as i64,
                                         t,
                                         v.len() as i64,
                                         vec_to_blob(v),
@@ -630,6 +641,128 @@ pub fn build_index_full(progress: &dyn Fn(u64, u64, u64)) -> Result<IndexSummary
         files_done: total_files,
         chunks_added: total_chunks,
         files_pending: 0,
+        seconds: started.elapsed().as_secs_f64(),
+        stopped,
+    })
+}
+
+// ───────────────────────── 词法专扫腿(P0②:覆盖率快赢)─────────────────────────
+//
+// 头号问题诊断(2026-06-25 真机实测):72.9 万文本只有 ~15% 进了索引,85% 是检索盲区。
+// 根因不是「没在跑」,而是**向量与词法被绑在同一个 build_index pass 里、被同一个 chunk 预算
+// 闸门掐着**——嵌入吞吐(云 API 35/秒、限速后 8/秒)追不上文件增长,且任一嵌入错误 `break
+// 'outer` 会把后续文件的 FTS 也一起停掉。于是「零网络、纯本地、分钟级」的 FTS5 倒排也只建到 15%。
+//
+// 这条专扫腿把**词法覆盖率与嵌入彻底解耦**:只扫 FTS、绝不碰嵌入、绝不因网络 abort。跑一遍就让
+// 关键词搜索覆盖整个硬盘(召回地板从 15% 抬到 ~100%),实时 grep 兜底不再承重(摆脱 2 万文件上限);
+// 向量可在之后的几小时里慢慢回填。这是投入最小、体感最直接的一条。
+
+/// 词法覆盖率上限护栏:单次 build 处理的文件数上限(防一轮跑太久占着 INDEXING 闸,幂等续跑)。
+const MAX_LEX_FILES_PER_BUILD: u64 = 200_000;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LexSummary {
+    pub files_done: u64,
+    pub files_pending: u64,
+    pub seconds: f64,
+    pub stopped: String,
+}
+
+/// 词法专扫:把所有还没进 FTS 倒排(ftsed=0)的文本文件**只写倒排、不嵌入**,直到 pending 清零 /
+/// 取消 / 文件预算耗尽。与向量构建解耦 —— 零网络、不因嵌入失败中断。`progress(files_done, pending)`。
+pub fn build_lexical_index(progress: &dyn Fn(u64, u64)) -> Result<LexSummary, String> {
+    let started = std::time::Instant::now();
+    let conn = open_db()?;
+    if !lex_available(&conn) {
+        return Err("FTS5 全文倒排未就绪(数据库未启用 fts5):无法做词法专扫,请重建数据库。".into());
+    }
+    let mut files_done = 0u64;
+    let mut stopped = "全部完成".to_string();
+
+    // recency 优先(报告 P0③):最近动过的文件先进倒排,大库下用户最可能搜的先可搜。
+    // mtime 列自盘点起即有;按它 DESC 排序走 idx_files_lex_pending 仍是范围扫,代价可接受。
+    const PENDING_SQL: &str = "SELECT f.id, r.path, f.relpath
+         FROM files f JOIN roots r ON r.id=f.root_id
+         WHERE f.kind='text' AND f.size<=?1 AND f.ftsed=0
+         ORDER BY f.mtime DESC LIMIT 256";
+
+    loop {
+        if cancelled() {
+            stopped = "已取消".into();
+            break;
+        }
+        if files_done >= MAX_LEX_FILES_PER_BUILD {
+            stopped = format!("本轮文件预算({MAX_LEX_FILES_PER_BUILD} 文件)耗尽,可再点继续");
+            break;
+        }
+        let batch: Vec<(i64, String, String)> = {
+            let mut stmt = conn.prepare(PENDING_SQL).map_err(|e| e.to_string())?;
+            let rows: Vec<(i64, String, String)> = stmt
+                .query_map([MAX_LEX_FILE_BYTES], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                })
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .collect();
+            rows
+        };
+        if batch.is_empty() {
+            break;
+        }
+        // 整批单事务:几万小文件逐条提交会被 fsync 拖死,批量提交把吞吐拉满。
+        conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+        for (file_id, root, rel) in &batch {
+            if cancelled() {
+                break;
+            }
+            let abs = std::path::Path::new(root).join(rel);
+            let text = match std::fs::read(&abs) {
+                Ok(bytes) => {
+                    if bytes.iter().take(4096).any(|&b| b == 0) {
+                        String::new() // 伪文本(二进制改名),跳过正文但仍标记完成
+                    } else {
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    }
+                }
+                Err(_) => String::new(), // 文件已消失/不可读:标记完成,下轮重扫会清
+            };
+            conn.execute("DELETE FROM lex WHERE rowid=?1", [file_id]).map_err(|e| e.to_string())?;
+            if !text.is_empty() {
+                conn.execute(
+                    "INSERT INTO lex(rowid, body) VALUES(?1, ?2)",
+                    rusqlite::params![file_id, text],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            conn.execute("UPDATE files SET ftsed=1 WHERE id=?1", [file_id])
+                .map_err(|e| e.to_string())?;
+            files_done += 1;
+        }
+        conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE kind='text' AND size<=?1 AND ftsed=0",
+                [MAX_LEX_FILE_BYTES],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        progress(files_done, pending as u64);
+        if cancelled() {
+            stopped = "已取消".into();
+            break;
+        }
+    }
+
+    let files_pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE kind='text' AND size<=?1 AND ftsed=0",
+            [MAX_LEX_FILE_BYTES],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(LexSummary {
+        files_done,
+        files_pending: files_pending as u64,
         seconds: started.elapsed().as_secs_f64(),
         stopped,
     })
@@ -837,6 +970,19 @@ pub fn optimize_vectors() -> Result<OptimizeSummary, String> {
         assigned += batch.len() as u64;
     }
 
+    // 回填每个 cell 的成员计数 n(P1⑤ 修):此前 INSERT 时写死 n=0、分配后从不更新 → vec_cells.n
+    // 永远是 0。虽然检索探针目前不读 n(只按质心汉明距离选 cell),但「全是 0」让任何按密度做
+    // nprobe 自适应 / 监控 cell 倾斜的逻辑失效,也是「索引是坏的」的直接证据。分配完一次性回填。
+    if !cancelled() {
+        conn.execute(
+            "UPDATE vec_cells SET n=COALESCE(
+                 (SELECT COUNT(*) FROM chunks WHERE chunks.cell=vec_cells.id AND chunks.model=vec_cells.model), 0)
+             WHERE model=?1",
+            [&model],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     Ok(OptimizeSummary {
         model,
         chunks: n as u64,
@@ -844,6 +990,161 @@ pub fn optimize_vectors() -> Result<OptimizeSummary, String> {
         assigned,
         seconds: started.elapsed().as_secs_f64(),
         note: if cancelled() { "已取消(部分分配)".into() } else { "完成".into() },
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepairSummary {
+    pub model: String,
+    /// 清掉的陈旧向量数(model='' / 无 bits 的旧版本迁移残留)
+    pub purged_stale: u64,
+    /// 因陈旧向量清空而重置 chunked=0、待重嵌的文件数
+    pub reset_files: u64,
+    /// 增量重分配进现有 cell 的「未分配(cell=-1)」向量数
+    pub reassigned: u64,
+    pub cells: u64,
+    pub seconds: f64,
+    pub note: String,
+}
+
+/// IVF / 向量健康修复(P1⑤,不重训、廉价、可巡夜常跑):
+///  ① 清陈旧向量:`model=''` 或无 `bits` 的旧迁移残留进不了二值粗筛车道、会被静默漏召回或错误打分;
+///     删掉并把「因此再无当前模型向量」的文件标 `chunked=0`,等增量构建按当前模型重嵌。
+///  ② 增量重分配:已建 cell 后新入库的 `cell=-1` 向量,**不重训质心**、只就近指派到现有 cell —— 把
+///     「每查询对这些增量全表扫」收敛回 ANN 探针。比 `optimize_vectors` 全量重训便宜得多。
+///  ③ 回填 `vec_cells.n` 成员计数。
+/// 与构建/盘点共用 INDEXING 闸由命令层把守;此函数纯算可被取消。
+pub fn repair_vectors() -> Result<RepairSummary, String> {
+    let started = std::time::Instant::now();
+    let conn = open_db()?;
+    let model = active_embed_model()
+        .ok_or("没有可用的嵌入服务商,无法确定向量模型")?;
+
+    // ── ① 清陈旧向量 + 重置受影响文件 ──
+    let stale_files: Vec<i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT file_id FROM chunks \
+                 WHERE model='' OR model IS NULL OR bits IS NULL",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<i64> = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .collect();
+        rows
+    };
+    let purged_stale = conn
+        .execute("DELETE FROM chunks WHERE model='' OR model IS NULL OR bits IS NULL", [])
+        .map_err(|e| e.to_string())? as u64;
+    let mut reset_files = 0u64;
+    for fid in &stale_files {
+        // 仅当该文件已无「当前模型」向量时才重置 chunked,避免给本就有好向量的文件做无谓重嵌。
+        let remain: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE file_id=?1 AND model=?2",
+                rusqlite::params![fid, model],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if remain == 0 {
+            reset_files += conn
+                .execute("UPDATE files SET chunked=0 WHERE id=?1 AND chunked=1", [fid])
+                .map_err(|e| e.to_string())? as u64;
+        }
+    }
+
+    // ── ② 增量重分配 cell=-1 → 现有质心(不重训)──
+    let centroids: Vec<Vec<u8>> = {
+        let mut stmt = conn
+            .prepare("SELECT id, bits FROM vec_cells WHERE model=?1 ORDER BY id")
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<Vec<u8>> = stmt
+            .query_map([&model], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|(_, b)| b)
+            .collect();
+        rows
+    };
+    let cell_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM vec_cells WHERE model=?1 ORDER BY id")
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<i64> = stmt
+            .query_map([&model], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .collect();
+        rows
+    };
+    let mut reassigned = 0u64;
+    if !centroids.is_empty() {
+        let mut last_id = 0i64;
+        loop {
+            if cancelled() {
+                break;
+            }
+            let batch: Vec<(i64, Vec<u8>)> = {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT id, bits FROM chunks
+                         WHERE model=?1 AND bits IS NOT NULL AND cell=-1 AND id>?2
+                         ORDER BY id LIMIT 10000",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows: Vec<(i64, Vec<u8>)> = stmt
+                    .query_map(rusqlite::params![model, last_id], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(|e| e.to_string())?
+                    .flatten()
+                    .collect();
+                rows
+            };
+            if batch.is_empty() {
+                break;
+            }
+            last_id = batch.last().map(|x| x.0).unwrap_or(last_id);
+            conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+            {
+                let mut up = conn
+                    .prepare_cached("UPDATE chunks SET cell=?2 WHERE id=?1")
+                    .map_err(|e| e.to_string())?;
+                for (id, bits) in &batch {
+                    let ci = nearest_centroid(bits, &centroids);
+                    up.execute(rusqlite::params![id, cell_ids[ci]]).map_err(|e| e.to_string())?;
+                }
+            }
+            conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+            reassigned += batch.len() as u64;
+        }
+    }
+
+    // ── ③ 回填成员计数 ──
+    conn.execute(
+        "UPDATE vec_cells SET n=COALESCE(
+             (SELECT COUNT(*) FROM chunks WHERE chunks.cell=vec_cells.id AND chunks.model=vec_cells.model), 0)
+         WHERE model=?1",
+        [&model],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(RepairSummary {
+        model,
+        purged_stale,
+        reset_files,
+        reassigned,
+        cells: cell_ids.len() as u64,
+        seconds: started.elapsed().as_secs_f64(),
+        note: if cancelled() {
+            "已取消(部分修复)".into()
+        } else if centroids.is_empty() {
+            "已清陈旧+回填计数;尚无 cell(规模未到门槛,向量走全扫)".into()
+        } else {
+            "完成".into()
+        },
     })
 }
 
@@ -866,6 +1167,20 @@ fn maybe_optimize(conn: &rusqlite::Connection, model: &str) {
         .unwrap_or(0);
     if cells == 0 {
         let _ = optimize_vectors(); // 首次自动建;失败不影响构建结果(检索退回全扫)
+        return;
+    }
+    // 已建 cell:增量数据(cell=-1)堆积过多时,廉价地就近折进现有 cell(不重训),
+    // 避免向量车道对这批新数据退化成全表扫。门槛设保守值,免每轮构建尾都做无谓扫描。
+    const REASSIGN_TRIGGER: i64 = 20_000;
+    let unassigned: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE model=?1 AND bits IS NOT NULL AND cell=-1",
+            [model],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if unassigned >= REASSIGN_TRIGGER {
+        let _ = repair_vectors(); // 含增量重分配+回填 n;失败不影响构建结果
     }
 }
 
@@ -907,6 +1222,41 @@ pub fn fable_index_start(app: AppHandle, max_chunks: Option<usize>) -> Result<()
     Ok(())
 }
 
+/// 开始(或继续)**词法专扫**:只把全盘文本写进 FTS 倒排、不嵌入(P0②覆盖率快赢)。立即返回,
+/// 进度走 `fable:lex` 事件。与索引/盘点共用 INDEXING 闸(进行中则拒绝),RAII 守卫保证 panic 也释放。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn fable_lex_build_start(app: AppHandle) -> Result<(), String> {
+    let Some(index_guard) = FlagGuard::acquire(&INDEXING) else {
+        return Err("索引/盘点任务进行中,稍后再做词法专扫".into());
+    };
+    CANCEL.store(false, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let _index_guard = index_guard;
+        let app2 = app.clone();
+        let result = build_lexical_index(&move |files, pending| {
+            let _ = app2.emit(
+                "fable:lex",
+                json!({ "kind": "progress", "files": files, "pending": pending }),
+            );
+        });
+        match result {
+            Ok(s) => {
+                let _ = app.emit(
+                    "fable:lex",
+                    json!({
+                        "kind": "done", "files": s.files_done, "pending": s.files_pending,
+                        "seconds": s.seconds, "stopped": s.stopped,
+                    }),
+                );
+            }
+            Err(e) => {
+                let _ = app.emit("fable:lex", json!({ "kind": "error", "message": e }));
+            }
+        }
+    });
+    Ok(())
+}
+
 /// 重建向量 IVF 倒排单元(20TB 级 ANN 的「优化/建索引」步)。返回汇总;
 /// 与构建/盘点共用 INDEXING 闸(进行中则拒绝),用 RAII 守卫确保 panic 也释放闸。
 ///
@@ -934,6 +1284,133 @@ pub fn fable_index_optimize() -> Result<OptimizeSummary, String> {
     };
     CANCEL.store(false, Ordering::SeqCst);
     optimize_vectors()
+}
+
+/// IVF/向量健康修复(P1⑤:清陈旧向量 + 增量重分配 cell=-1 + 回填 n 计数)。返回汇总。
+/// 与索引/盘点共用 INDEXING 闸;桌面端 async + spawn_blocking 防主线程阻塞(全表分批 UPDATE)。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn fable_index_repair() -> Result<RepairSummary, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(_guard) = FlagGuard::acquire(&INDEXING) else {
+            return Err("索引任务进行中,稍后再修复".into());
+        };
+        CANCEL.store(false, Ordering::SeqCst);
+        repair_vectors()
+    })
+    .await
+    .map_err(|e| format!("任务调度失败: {e}"))?
+}
+#[cfg(not(feature = "desktop"))]
+pub fn fable_index_repair() -> Result<RepairSummary, String> {
+    let Some(_guard) = FlagGuard::acquire(&INDEXING) else {
+        return Err("索引任务进行中,稍后再修复".into());
+    };
+    CANCEL.store(false, Ordering::SeqCst);
+    repair_vectors()
+}
+
+// ───────────────────── 本地嵌入引擎(寓言计划「本地模型下载」)─────────────────────
+//
+// 报告点名的头号提速杠杆 = 启用本地 ONNX 嵌入/重排,绕开云 API 限速(35/秒 → 受本地核数限,
+// 无限速天花板)+ 查询不走网络(延迟 3.2s → ~0.3s)。这三条命令把它接成 UI 一键可下/可启:
+//  · status  — 此构建有没有编进本地引擎、模型下没下、开没开;
+//  · download — 一键拉权重(国内走 hf-mirror);
+//  · set_enabled — 持久化「启用本地嵌入」开关(重启仍生效)。
+// **平台说明**:本地引擎(fastembed 的 onnxruntime)与桌面语音(sherpa 的 onnxruntime)互斥,
+// 故 Windows 桌面发版(带 voice-live)不编入本引擎 → 该构建 status.compiled=false、下载返回可读
+// 提示;Docker/NAS 版(不带语音)与 `--features local-embed` 构建则全功能可用。
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalEmbedStatus {
+    /// 本构建是否编入了本地嵌入引擎(local-embed feature)。
+    pub compiled: bool,
+    /// 模型权重是否已下载就位。
+    pub ready: bool,
+    /// 是否已启用本地路径(env 或 UI 落盘标记)。
+    pub enabled: bool,
+    /// 模型缓存目录(展示用)。
+    pub dir: String,
+}
+
+/// 本地嵌入引擎状态(三壳共用,任何构建都能查 —— 没编进时如实回 compiled=false)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn fable_local_embed_status() -> Result<LocalEmbedStatus, String> {
+    #[cfg(feature = "local-embed")]
+    {
+        Ok(LocalEmbedStatus {
+            compiled: true,
+            ready: crate::fable::embed_local::ready(),
+            enabled: crate::fable::embed_local::enabled(),
+            dir: crate::fable::embed_local::cache_dir().to_string_lossy().into_owned(),
+        })
+    }
+    #[cfg(not(feature = "local-embed"))]
+    {
+        Ok(LocalEmbedStatus {
+            compiled: false,
+            ready: false,
+            enabled: false,
+            dir: String::new(),
+        })
+    }
+}
+
+/// 一键下载本地模型权重。立即返回,进度走 `fable:localembed` 事件(phase/done/error)。
+/// 未编入本地引擎的构建直接返回可读提示(不静默)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+#[allow(unused_variables)]
+pub fn fable_local_embed_download(app: AppHandle) -> Result<(), String> {
+    #[cfg(feature = "local-embed")]
+    {
+        if crate::fable::embed_local::ready() {
+            let _ = app.emit("fable:localembed", json!({ "kind": "done", "message": "模型已就位" }));
+            return Ok(());
+        }
+        std::thread::spawn(move || {
+            let _ = app.emit(
+                "fable:localembed",
+                json!({ "kind": "phase", "message": "正在下载本地模型(BGE-M3 + 重排,约 1.2GB,国内走 hf-mirror)…" }),
+            );
+            match crate::fable::embed_local::download() {
+                Ok(dir) => {
+                    let _ = app.emit(
+                        "fable:localembed",
+                        json!({ "kind": "done", "message": format!("本地模型已就位:{dir}") }),
+                    );
+                }
+                Err(e) => {
+                    let _ = app.emit("fable:localembed", json!({ "kind": "error", "message": e }));
+                }
+            }
+        });
+        Ok(())
+    }
+    #[cfg(not(feature = "local-embed"))]
+    {
+        Err("此版本未编入本地嵌入引擎(桌面版与本机语音引擎互斥)。本地嵌入请用 Docker/NAS 版,或用 `--features local-embed` 构建的桌面版。".into())
+    }
+}
+
+/// 持久化「启用本地嵌入」开关(重启仍生效)。未编入引擎时,开启会给出可读提示。
+#[cfg_attr(feature = "desktop", tauri::command)]
+#[allow(unused_variables)]
+pub fn fable_local_embed_set_enabled(on: bool) -> Result<LocalEmbedStatus, String> {
+    #[cfg(feature = "local-embed")]
+    {
+        if on && !crate::fable::embed_local::ready() {
+            return Err("本地模型还没下载,请先点「下载本地引擎」。".into());
+        }
+        crate::fable::embed_local::set_enabled(on)?;
+        return fable_local_embed_status();
+    }
+    #[cfg(not(feature = "local-embed"))]
+    {
+        if on {
+            return Err("此版本未编入本地嵌入引擎,无法启用(详见状态说明)。".into());
+        }
+        fable_local_embed_status()
+    }
 }
 
 #[cfg(test)]
@@ -1023,6 +1500,38 @@ mod tests {
         // 空输入 / k=0 安全返回空。
         assert!(train_binary_centroids(&[], 4, 4).is_empty());
         assert!(train_binary_centroids(&sample, 0, 4).is_empty());
+    }
+
+    #[test]
+    fn ivf_n_backfill_counts_members_per_cell() {
+        // P1⑤ 修:vec_cells.n 此前恒为 0;回填 SQL 必须把每个 cell 的实际成员数算对,
+        // 且只算「同模型」成员(跨模型不串)。用 in-memory 库最小复刻 chunks/vec_cells。
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks(id INTEGER PRIMARY KEY, model TEXT, cell INTEGER);
+             CREATE TABLE vec_cells(id INTEGER PRIMARY KEY, model TEXT, n INTEGER DEFAULT 0);
+             INSERT INTO vec_cells(id,model,n) VALUES (10,'m',0),(11,'m',0),(12,'m',0),(20,'other',0);
+             -- m 模型:cell 10 三个、cell 11 一个、cell 12 零个、未分配(-1)两个
+             INSERT INTO chunks(model,cell) VALUES
+               ('m',10),('m',10),('m',10),('m',11),('m',-1),('m',-1),
+               -- 另一模型的成员落在同号 cell 上,绝不能被算进 m 的计数
+               ('other',10),('other',10);",
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE vec_cells SET n=COALESCE(
+                 (SELECT COUNT(*) FROM chunks WHERE chunks.cell=vec_cells.id AND chunks.model=vec_cells.model), 0)
+             WHERE model=?1",
+            ["m"],
+        )
+        .unwrap();
+        let n = |id: i64| -> i64 {
+            conn.query_row("SELECT n FROM vec_cells WHERE id=?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(n(10), 3, "cell 10 应有 3 个 m 成员(不含 other 的同号干扰)");
+        assert_eq!(n(11), 1);
+        assert_eq!(n(12), 0, "空 cell 计数为 0,而非保留旧值");
+        assert_eq!(n(20), 0, "other 模型未被本次回填触碰");
     }
 
     #[test]

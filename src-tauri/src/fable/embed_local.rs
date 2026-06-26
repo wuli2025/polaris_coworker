@@ -10,26 +10,99 @@
 //!
 //! 并发：fastembed 推理对象用 `Mutex` 单例守护（ONNX 内部已多线程，外层串行无碍且省内存）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use fastembed::{
     EmbeddingModel, RerankInitOptions, RerankerModel, TextEmbedding, TextInitOptions, TextRerank,
 };
 
-/// 运行时开关：编进了本地能力，但默认仍走云；置 `POLARIS_LOCAL_EMBED=1` 切到本地。
-pub fn enabled() -> bool {
-    std::env::var("POLARIS_LOCAL_EMBED").map(|v| v == "1").unwrap_or(false)
+/// 启用标记文件:UI「启用本地嵌入」开关落盘于此 → 重启仍生效(不必每次设环境变量)。
+fn enable_marker() -> Option<PathBuf> {
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().join("Polaris").join("data").join("local_embed.on"))
 }
 
-/// 模型缓存目录：落数据根，避免每次重下；FASTEMBED_CACHE_DIR / HF_HOME 可覆盖。
+/// 运行时开关:置 `POLARIS_LOCAL_EMBED=1` **或** UI 勾了「启用本地嵌入」(落盘标记)即切到本地;
+/// 否则仍走云 API(便于灰度/回退)。环境变量优先(可被运维强制)。
+pub fn enabled() -> bool {
+    if std::env::var("POLARIS_LOCAL_EMBED").map(|v| v == "1").unwrap_or(false) {
+        return true;
+    }
+    enable_marker().map(|p| p.exists()).unwrap_or(false)
+}
+
+/// 持久化「启用本地嵌入」开关(供 UI 切换)。写/删标记文件。
+pub fn set_enabled(on: bool) -> Result<(), String> {
+    let p = enable_marker().ok_or("无法定位数据目录")?;
+    if on {
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).map_err(|e| format!("建目录失败: {e}"))?;
+        }
+        std::fs::write(&p, b"1").map_err(|e| format!("写启用标记失败: {e}"))?;
+    } else if p.exists() {
+        std::fs::remove_file(&p).map_err(|e| format!("清启用标记失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 模型缓存目录(绝对路径,UI 展示用)。
+pub fn cache_dir() -> PathBuf {
+    if let Some(v) = std::env::var_os("FASTEMBED_CACHE_DIR") {
+        return PathBuf::from(v);
+    }
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().join("Polaris").join("models").join("fastembed"))
+        .unwrap_or_else(|| PathBuf::from("/root/Polaris/models/fastembed"))
+}
+
+/// 模型是否已下载就位:缓存目录里有非空内容(fastembed 首次 init 会把 onnx+tokenizer 落于此)。
+pub fn ready() -> bool {
+    let dir = cache_dir();
+    std::fs::read_dir(&dir)
+        .map(|rd| rd.flatten().any(|e| {
+            // 任一子项里有体量像样的文件即视为已下过(onnx 动辄数百 MB)
+            walk_has_big_file(&e.path())
+        }))
+        .unwrap_or(false)
+}
+
+fn walk_has_big_file(p: &Path) -> bool {
+    if let Ok(meta) = std::fs::metadata(p) {
+        if meta.is_file() {
+            return meta.len() > 5 * 1024 * 1024; // >5MB 视为模型权重
+        }
+        if meta.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(p) {
+                return rd.flatten().any(|e| walk_has_big_file(&e.path()));
+            }
+        }
+    }
+    false
+}
+
+/// 强制下载/就位本地模型(嵌入 + 重排)。首次会从 HuggingFace(国内走 hf-mirror)拉权重到
+/// [`cache_dir`];已就位则秒回。供 UI「下载本地引擎」按钮调用 —— 把「报告里的头号提速杠杆」
+/// (绕开云限速)变成一键可下。返回就位后的缓存目录。
+pub fn download() -> Result<String, String> {
+    ensure_cache_env();
+    // 触发两个模型的 OnceLock 初始化 = 触发下载(fastembed 内部带断点续/校验)。
+    embedder()?;
+    reranker()?;
+    Ok(cache_dir().to_string_lossy().into_owned())
+}
+
+/// 模型缓存目录:落数据根,避免每次重下;FASTEMBED_CACHE_DIR / HF_HOME 可覆盖。
 fn ensure_cache_env() {
     if std::env::var_os("FASTEMBED_CACHE_DIR").is_none() {
-        let dir = directories::UserDirs::new()
-            .map(|u| u.home_dir().join("Polaris").join("models").join("fastembed"))
-            .unwrap_or_else(|| PathBuf::from("/root/Polaris/models/fastembed"));
+        let dir = cache_dir();
         let _ = std::fs::create_dir_all(&dir);
         std::env::set_var("FASTEMBED_CACHE_DIR", dir);
+    }
+    // 国内直连 HuggingFace 常被墙 → 默认走 hf-mirror(已显式设过则尊重)。fastembed/hf-hub
+    // 读 HF_ENDPOINT 选下载源;这一行让「下载本地模型」在国内也能拉得动。
+    if std::env::var_os("HF_ENDPOINT").is_none() {
+        std::env::set_var("HF_ENDPOINT", "https://hf-mirror.com");
     }
     cap_onnx_threads();
 }

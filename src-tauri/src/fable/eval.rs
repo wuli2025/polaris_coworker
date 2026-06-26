@@ -49,6 +49,11 @@ pub struct EvalReport {
     pub recall_at_k: f32,
     /// 平均倒数排名。
     pub mrr: f32,
+    /// nDCG@k(归一化折损累积增益):业界检索通用指标,可与公开榜单横向比
+    /// (如 bge-m3 MIRACL nDCG@10≈0.678)。单期望文件的二值相关下 IDCG=1,
+    /// 故 nDCG = 1/log2(rank+1)(命中)或 0(未命中)的均值——比 MRR 的惩罚更平缓,
+    /// 更贴近「排第 3 和排第 5 体感差不多」的真实检索观感。
+    pub ndcg_at_k: f32,
     pub details: Vec<EvalCaseResult>,
 }
 
@@ -74,15 +79,21 @@ pub fn first_hit_rank(top_paths: &[String], expect: &[String]) -> Option<usize> 
     None
 }
 
-/// 从每题的命中排名聚合出 (recall@k, mrr)。空集合 → (0,0)。
-pub fn aggregate(ranks: &[Option<usize>]) -> (f32, f32) {
+/// 从每题的命中排名聚合出 (recall@k, mrr, ndcg@k)。空集合 → (0,0,0)。
+/// nDCG(二值相关、单期望文件):命中排名 r 的折损增益 = 1/log2(r+1),理想 IDCG=1(命中第 1),
+/// 故每题 nDCG 即该折损增益、未命中为 0;再取题均。
+pub fn aggregate(ranks: &[Option<usize>]) -> (f32, f32, f32) {
     if ranks.is_empty() {
-        return (0.0, 0.0);
+        return (0.0, 0.0, 0.0);
     }
     let n = ranks.len() as f32;
     let hit = ranks.iter().filter(|r| r.is_some()).count() as f32;
     let mrr: f32 = ranks.iter().map(|r| r.map(|x| 1.0 / x as f32).unwrap_or(0.0)).sum();
-    (hit / n, mrr / n)
+    let ndcg: f32 = ranks
+        .iter()
+        .map(|r| r.map(|x| 1.0 / ((x as f32 + 1.0).log2())).unwrap_or(0.0))
+        .sum();
+    (hit / n, mrr / n, ndcg / n)
 }
 
 // ───────────────────────── 运行 ─────────────────────────
@@ -127,7 +138,7 @@ pub fn run_eval(custom: Option<String>, top_k: usize, mode: &str) -> Result<Eval
             top_paths,
         });
     }
-    let (recall_at_k, mrr) = aggregate(&ranks);
+    let (recall_at_k, mrr, ndcg_at_k) = aggregate(&ranks);
     Ok(EvalReport {
         total_cases: set.cases.len(),
         evaluated: ranks.len(),
@@ -135,6 +146,7 @@ pub fn run_eval(custom: Option<String>, top_k: usize, mode: &str) -> Result<Eval
         mode: mode.to_string(),
         recall_at_k,
         mrr,
+        ndcg_at_k,
         details,
     })
 }
@@ -204,11 +216,14 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_recall_and_mrr() {
+    fn aggregate_recall_mrr_ndcg() {
         // 三题:命中第1、命中第2、没命中 → recall=2/3,mrr=(1 + 0.5 + 0)/3
-        let (recall, mrr) = aggregate(&[Some(1), Some(2), None]);
+        // nDCG:第1→1/log2(2)=1,第2→1/log2(3)≈0.6309,未命中→0;题均=(1+0.6309+0)/3
+        let (recall, mrr, ndcg) = aggregate(&[Some(1), Some(2), None]);
         assert!((recall - 2.0 / 3.0).abs() < 1e-6);
         assert!((mrr - (1.0 + 0.5) / 3.0).abs() < 1e-6);
-        assert_eq!(aggregate(&[]), (0.0, 0.0));
+        let exp_ndcg = (1.0 + 1.0 / 3.0_f32.log2()) / 3.0;
+        assert!((ndcg - exp_ndcg).abs() < 1e-6, "ndcg={ndcg} exp={exp_ndcg}");
+        assert_eq!(aggregate(&[]), (0.0, 0.0, 0.0));
     }
 }

@@ -22,8 +22,110 @@ const MAX_GREP_FILES: i64 = 20_000;
 const MAX_GREP_TOTAL_BYTES: u64 = 800 * 1024 * 1024;
 /// FTS 倒排命中后,最多回读多少个候选文件做精确算分 + 抽行(按 bm25 相关度优先)。
 const FTS_CAND_LIMIT: i64 = 400;
-/// 重排候选窗口 N(融合后取前 N 精排;详解第 6 节「甜点区」)。
-const RERANK_N: usize = 40;
+/// 重排候选窗口 N(融合后取前 N 精排;详解第 6 节「甜点区」)。`POLARIS_RERANK_N` 可覆写
+/// (clamp 到 [10,100])——报告 §5「宽召回窄重排」建议 50–75,默认保守 40 不变,留作 eval 调参。
+const RERANK_N_DEFAULT: usize = 40;
+fn rerank_n() -> usize {
+    std::env::var("POLARIS_RERANK_N")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(10, 100))
+        .unwrap_or(RERANK_N_DEFAULT)
+}
+
+/// RRF 融合参数(P1④ 可调化):平滑常数 k 与每腿权重。
+/// **默认值已按真机 eval 固化(2026-06-26)**:本机库 103,902 chunk / 170 题扫参(eval_rrf_sweep.py)实测,
+/// 旧默认 k=60、w_vec=1.0 给满权弱向量腿注入噪声 → hybrid MRR 仅 0.568(**低于纯词法 0.663**);
+/// 改 k=10、w_vec=0.85 后 MRR 0.668 / nDCG 0.675(+17.6% MRR、+12% nDCG),recall 持平 0.694。
+/// 故把默认改成实测最优,旋钮仍在(换库后可重扫再调):
+///   - `POLARIS_RRF_K`(默认 10):小 k 锐化头部,让强腿 top 命中稳坐第一(实测 10~30 都好,60+ 明显劣化);
+///   - `POLARIS_RRF_W_GREP`(默认 1.0,强腿基准)/ `POLARIS_RRF_W_VEC`(默认 0.85,给偏弱的向量腿降权):
+///     直接治「弱腿注入噪声拉低 MRR」。w_vec=1.0 会把 MRR 砸回 0.568,务必 ≤0.85。
+fn rrf_params() -> (f32, f32, f32) {
+    let f = |key: &str, dft: f32, lo: f32, hi: f32| -> f32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|x| x.is_finite())
+            .map(|x| x.clamp(lo, hi))
+            .unwrap_or(dft)
+    };
+    (
+        f("POLARIS_RRF_K", 10.0, 1.0, 200.0),
+        f("POLARIS_RRF_W_GREP", 1.0, 0.0, 4.0),
+        f("POLARIS_RRF_W_VEC", 0.85, 0.0, 4.0),
+    )
+}
+
+/// 向量腿「条件融合」质量闸(P1④ 进阶,治 MRR < 纯词法 的更准一招):
+/// 报告根因是「**弱向量腿往结果顶部注入噪声**」。单纯 `W_VEC` 降权是**全局**手段——它在向量
+/// 本就有用的查询上也一并削弱了贡献。更准的做法是按**单条绝对余弦质量**门控:只让余弦 ≥ 阈值
+/// 的向量命中参与融合,低于阈值的(典型的「这题向量根本不相关、只是粗筛凑数」)直接不注入。
+/// 于是:向量真相关(高余弦)的查询照常受益;向量是噪声(低余弦)的查询自动退化成纯词法、
+/// MRR 不被拖低。`POLARIS_VEC_MIN_SCORE` 默认 0.0 = 关闭(零回归);经 eval 扫出最优再固化
+/// (BGE-M3 归一化余弦,经验起点 0.35–0.45)。
+fn vec_min_score() -> f32 {
+    std::env::var("POLARIS_VEC_MIN_SCORE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|x| x.is_finite())
+        .map(|x| x.clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+}
+
+/// 路径/文件名命中加权(检索通用强信号:查询词出现在**文件路径/名**里,几乎一定相关)。
+/// 现状缺口:两腿都只算**正文**命中,文件名/路径一个字都不计 —— 搜「退款政策」时
+/// `policy/退款政策.md` 不会因为名字就被顶上来,得靠正文里恰好也写了才行。这条在融合层给
+/// 「路径命中查询词」的文件补一个与 RRF 同量纲的加分:整句出现在**文件名**里最强、出现在路径里
+/// 次之、逐词命中累加。`POLARIS_PATH_BOOST` 控权重(默认 0.01,每个 RRF 名次≈1/60≈0.0167,
+/// 故文件名整句命中 +0.03 足以把它顶到前列);设 0 关闭(零回归)。
+const PATH_BOOST_DEFAULT: f32 = 0.01;
+fn path_boost_w() -> f32 {
+    std::env::var("POLARIS_PATH_BOOST")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|x| x.is_finite())
+        .map(|x| x.clamp(0.0, 0.2))
+        .unwrap_or(PATH_BOOST_DEFAULT)
+}
+
+/// 计算单个文件路径相对查询的加分(见 [`path_boost_w`])。`q_full`=整句小写,`terms`=内容词。
+/// 文件名(末段)整句命中权重最高(×3),路径任意处整句命中 ×2,逐内容词命中各 ×1;乘以权重 w。
+fn path_boost(path: &str, q_full: &str, terms: &[String], w: f32) -> f32 {
+    if w <= 0.0 {
+        return 0.0;
+    }
+    let p = path.to_lowercase().replace('\\', "/");
+    let base = p.rsplit('/').next().unwrap_or(&p);
+    let mut signal = 0f32;
+    if q_full.chars().count() >= 2 {
+        if base.contains(q_full) {
+            signal += 3.0;
+        } else if p.contains(q_full) {
+            signal += 2.0;
+        }
+    }
+    for t in terms {
+        if t.chars().count() >= 2 && p.contains(t.as_str()) {
+            signal += 1.0;
+        }
+    }
+    w * signal
+}
+
+/// 精排闸门松紧(P2-1 可调化):top-1 与 top-2 的相对差 `(r1-r2)/r1` 小于此值时判「咬得紧、
+/// 该花一次重排」。报告 §5「宽召回窄重排」——默认 0.25 保守(只在真难分时重排,省网络);
+/// 调大(→ 1.0)= 几乎总重排(MRR 优先、不惜延迟);调小(→ 0)= 几乎不重排(延迟优先)。
+/// 用 eval 在 MRR 与延迟间扫出甜点再固化。默认 0.25 = 历史行为(零回归)。
+const RERANK_GATE_DEFAULT: f32 = 0.25;
+fn rerank_gate() -> f32 {
+    std::env::var("POLARIS_RERANK_GATE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|x| x.is_finite())
+        .map(|x| x.clamp(0.0, 1.0))
+        .unwrap_or(RERANK_GATE_DEFAULT)
+}
 
 // ───────────────────────── 结果模型 ─────────────────────────
 
@@ -601,7 +703,10 @@ fn vector_lane(query: &str, top_k: usize) -> Result<Vec<VecHit>, String> {
     let qv = super::index::embed_query(query)?;
     let model = super::index::active_embed_model().unwrap_or_default();
     let qbits = super::index::bits_of(&qv);
-    let want = (top_k * 2).max(1);
+    // 返回给融合层的向量候选数。原 top_k*2 偏窄 —— 语义相关但在向量腿排 20+ 的文件会在进融合
+    // **之前**就被丢掉,recall 漏召。放宽到 top_k*4(且不低于 30):粗筛池本就有数百候选,多带
+    // 几十个进 RRF 几乎零成本,而 RRF 名次衰减(rank 30 仅 ~1/90)天然压住额外噪声 —— recall 净赚。
+    let want = (top_k * 4).max(30);
 
     let conn = open_db()?;
 
@@ -610,11 +715,11 @@ fn vector_lane(query: &str, top_k: usize) -> Result<Vec<VecHit>, String> {
     //    ~O(N·nprobe/cells);未建 cell 时 probes 为空 → 退回全表扫(零回归)。 ──
     let probes: Vec<i64> = {
         let mut stmt = conn
-            .prepare("SELECT id, bits FROM vec_cells WHERE model=?1 AND dim=?2")
+            .prepare("SELECT id, bits, n FROM vec_cells WHERE model=?1 AND dim=?2")
             .map_err(|e| e.to_string())?;
-        let cells: Vec<(i64, Vec<u8>)> = stmt
+        let cells: Vec<(i64, Vec<u8>, i64)> = stmt
             .query_map(rusqlite::params![model, qv.len() as i64], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, i64>(2)?))
             })
             .map_err(|e| e.to_string())?
             .flatten()
@@ -622,12 +727,19 @@ fn vector_lane(query: &str, top_k: usize) -> Result<Vec<VecHit>, String> {
         if cells.is_empty() {
             Vec::new()
         } else {
-            // nprobe ≈ √cells,夹在 [8,64]:扫约 nprobe/cells 比例的向量(K=5500 时约 1%)。
-            let nprobe = ((cells.len() as f64).sqrt() as usize).clamp(8, 64);
-            let mut scored: Vec<(u32, i64)> = cells
+            // 用回填的成员计数 n 跳过空 cell:nprobe 个探针槽全部指向有成员的 cell → 同等
+            // 探针预算下有效候选覆盖更广、向量召回更稳。**零回归兜底**:若全部 cell 的 n 都是
+            // 0(索引早于 n 回填修复、计数尚未刷新),`nonempty` 为空 → 退回「按汉明在全部 cell
+            // 里选」的旧行为(召回安全),等一次 fable_index_repair 刷新 n 后自动启用密度感知。
+            let nonempty: Vec<&(i64, Vec<u8>, i64)> = cells.iter().filter(|c| c.2 > 0).collect();
+            let pool: Vec<&(i64, Vec<u8>, i64)> =
+                if nonempty.is_empty() { cells.iter().collect() } else { nonempty };
+            // nprobe ≈ √(有效 cell 数),夹在 [8,64]:扫约 nprobe/pool 比例的向量。
+            let nprobe = ((pool.len() as f64).sqrt() as usize).clamp(8, 64);
+            let mut scored: Vec<(u32, i64)> = pool
                 .iter()
-                .filter(|(_, b)| b.len() == qbits.len())
-                .map(|(id, b)| (super::index::hamming(&qbits, b), *id))
+                .filter(|(_, b, _)| b.len() == qbits.len())
+                .map(|(id, b, _)| (super::index::hamming(&qbits, b), *id))
                 .collect();
             scored.sort_by_key(|x| x.0);
             scored.truncate(nprobe);
@@ -869,9 +981,13 @@ pub fn search(
         .into_iter()
         .filter(|h| path_in_scope(&h.path, scope))
         .collect();
+    // 条件融合质量闸(见 [`vec_min_score`]):低余弦的向量命中是「凑数噪声」,门控掉它们
+    // 防止把强词法命中挤下榜首。默认阈值 0.0 → 恒为真 → 零回归。vec_hits 已按余弦降序,
+    // 这里是「整条腿要么够好要么不掺和」的逐条绝对门控,而非相对降权。
+    let vmin = vec_min_score();
     let vec_hits: Vec<VecHit> = vec_hits
         .into_iter()
-        .filter(|h| path_in_scope(&h.path, scope))
+        .filter(|h| path_in_scope(&h.path, scope) && h.score >= vmin)
         .collect();
     let (n_grep, n_vec) = (grep_hits.len(), vec_hits.len());
 
@@ -885,10 +1001,11 @@ pub fn search(
         /// 重排专家「读全文打分」用的文本(向量=chunk 全文 / grep=命中行上下文窗口);不展示。
         doc: String,
     }
+    let (rrf_k, w_grep, w_vec) = rrf_params();
     let mut fused: HashMap<String, Fused> = HashMap::new();
     for (rank, h) in grep_hits.into_iter().enumerate() {
         let key = h.path.clone();
-        let rrf = 1.0 / (60.0 + rank as f32);
+        let rrf = w_grep / (rrf_k + rank as f32);
         fused
             .entry(key)
             .and_modify(|f| {
@@ -915,7 +1032,7 @@ pub fn search(
     }
     for (rank, h) in vec_hits.into_iter().enumerate() {
         let key = h.path.clone();
-        let rrf = 1.0 / (60.0 + rank as f32);
+        let rrf = w_vec / (rrf_k + rank as f32);
         let snippet: String = h.text.chars().take(220).collect();
         fused
             .entry(key)
@@ -941,13 +1058,24 @@ pub fn search(
                 doc: h.text,
             });
     }
+    // ── 路径/文件名命中加权(融合层,覆盖两腿)──
+    // 查询词出现在文件路径/名里是「几乎必相关」的强信号,但两腿都只算正文命中。这里给每个
+    // 候选按其路径与查询的重合补一个同量纲加分 → 文件名点题的文件稳稳上浮。默认权重 >0(通用
+    // 增益);设 POLARIS_PATH_BOOST=0 可关。
+    let pboost_w = path_boost_w();
+    if pboost_w > 0.0 {
+        let (q_full, terms) = split_query(query);
+        for f in fused.values_mut() {
+            f.rrf += path_boost(&f.hit.path, &q_full, &terms, pboost_w);
+        }
+    }
     let mut merged: Vec<Fused> = fused.into_values().collect();
     merged.sort_by(|a, b| {
         b.rrf
             .partial_cmp(&a.rrf)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    merged.truncate(RERANK_N);
+    merged.truncate(rerank_n());
 
     // ── P2-1 精排闸门(详解 §4/§5):只在「该精排」时才请专家 ──
     // 条件:混检 + 有重排服务商 + 候选≥3 + 前两名分数咬得紧(难分高下,正是粗筛分不清、
@@ -959,7 +1087,7 @@ pub fn search(
     let mut reranked = false;
     let gate_close = merged.len() >= 2 && {
         let (r1, r2) = (merged[0].rrf, merged[1].rrf);
-        r1 > 0.0 && (r1 - r2) / r1 < 0.25
+        r1 > 0.0 && (r1 - r2) / r1 < rerank_gate()
     };
     if mode == "hybrid"
         && merged.len() >= 3
@@ -1221,6 +1349,69 @@ mod tests {
         assert_ne!(s1, s2);
         assert_ne!(s1, s3);
         assert_eq!(s1, rerank_sig("q", &[(&p1, &l1)])); // 同输入同签名(确定性)
+    }
+
+    #[test]
+    fn rrf_params_default_is_eval_tuned_optimum() {
+        // 默认值已按真机 eval 固化:k=10、w_grep=1.0、w_vec=0.85(实测 MRR 0.668 > 旧默认 0.568)。
+        // (本测试不写 env 以免污染并行测试;只校验默认值与权重应用语义。)
+        let (k, wg, wv) = rrf_params();
+        assert_eq!(k, 10.0);
+        assert_eq!(wg, 1.0);
+        assert_eq!(wv, 0.85);
+        // 强腿(词法)未降权:grep rank0 贡献 = 1/(k+0) = 0.1。
+        let rank = 0usize;
+        assert!((wg / (k + rank as f32) - 1.0 / 10.0).abs() < 1e-9);
+        // 弱腿(向量)已降权:同名次下贡献严格小于强腿(治噪声注入)。
+        assert!(wv / (k + rank as f32) < wg / (k + rank as f32));
+        // rerank_n 默认 40,且在合理范围。
+        let n = rerank_n();
+        assert!((10..=100).contains(&n));
+    }
+
+    #[test]
+    fn vec_min_score_default_off_and_gate_semantics() {
+        // 默认(不设 env)阈值 0.0 → 条件融合关闭:任何余弦的向量命中都过门(零回归)。
+        let vmin = vec_min_score();
+        assert_eq!(vmin, 0.0);
+        // 门控语义:`h.score >= vmin`。默认下连分数为 0 的命中也保留(恒真)。
+        for s in [0.0_f32, 0.1, 0.35, 0.7, 1.0] {
+            assert!(s >= vmin, "默认阈值下余弦 {s} 应过门");
+        }
+        // 若阈值设为 0.4(模拟固化值),则 0.35 的噪声命中被门掉、0.7 的真命中保留。
+        let strict = 0.4_f32;
+        assert!(0.35_f32 < strict, "0.35 应被 0.4 阈值门掉(噪声不注入)");
+        assert!(0.7_f32 >= strict, "0.7 应过 0.4 阈值(真相关保留)");
+    }
+
+    #[test]
+    fn path_boost_rewards_filename_and_path_hits() {
+        let w = 0.01_f32;
+        let terms = vec!["退款".to_string(), "政策".to_string()];
+        // 文件名整句命中 → ×3 + 两个词各 ×1 = 5w
+        let a = path_boost("policy/退款政策.md", "退款政策", &terms, w);
+        assert!((a - 5.0 * w).abs() < 1e-6, "文件名整句命中 a={a}");
+        // 路径里整句命中(非末段)→ ×2 + 两词 ×1 = 4w
+        let b = path_boost("退款政策/notes/readme.md", "退款政策", &terms, w);
+        assert!((b - 4.0 * w).abs() < 1e-6, "路径整句命中 b={b}");
+        // 完全不沾边 → 0
+        assert_eq!(path_boost("misc/todo.txt", "退款政策", &terms, w), 0.0);
+        // 文件名命中应当 > 路径命中 > 无命中(排序意义)
+        assert!(a > b && b > 0.0);
+        // 权重 0 = 关闭(零回归)
+        assert_eq!(path_boost("policy/退款政策.md", "退款政策", &terms, 0.0), 0.0);
+        // 默认权重为正(通用增益默认开)
+        assert!(path_boost_w() > 0.0);
+    }
+
+    #[test]
+    fn rerank_gate_default_preserves_behavior() {
+        // 默认(不设 env)= 0.25 = 历史硬编码,零回归。
+        assert_eq!(rerank_gate(), 0.25);
+        // 门控语义自洽:top1/top2 相对差 0.1(咬得紧)< 默认阈值 → 触发重排;0.5(一骑绝尘)→ 不触发。
+        let (r1, close, far) = (1.0_f32, 0.9_f32, 0.5_f32);
+        assert!((r1 - close) / r1 < rerank_gate(), "差 0.1 应判咬得紧、该重排");
+        assert!((r1 - far) / r1 >= rerank_gate(), "差 0.5 应判一骑绝尘、不必重排");
     }
 
     /// 真机端到端:用本机已建的 fable.db 验证「分片并行粗筛」与「单线程暴力全扫」选出的

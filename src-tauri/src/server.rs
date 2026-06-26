@@ -508,7 +508,14 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "fable_index_start" => {
             ok(fable::index::fable_index_start(app, opt_usize(a, "maxChunks"))?)
         }
+        "fable_lex_build_start" => ok(fable::index::fable_lex_build_start(app)?),
         "fable_index_optimize" => ok(fable::index::fable_index_optimize()?),
+        "fable_index_repair" => ok(fable::index::fable_index_repair()?),
+        "fable_local_embed_status" => ok(fable::index::fable_local_embed_status()?),
+        "fable_local_embed_download" => ok(fable::index::fable_local_embed_download(app)?),
+        "fable_local_embed_set_enabled" => {
+            ok(fable::index::fable_local_embed_set_enabled(bool_def(a, "on", false))?)
+        }
         "fable_search" => ok(fable::retrieve::fable_search(
             req_str(a, "query")?,
             opt_usize(a, "topK"),
