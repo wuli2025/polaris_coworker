@@ -1,21 +1,41 @@
-//! 本地开源嵌入 / 重排（fastembed-rs · ONNX）—— 绕开硅基流动 API 的限速与网络往返。
+//! 本地开源嵌入(fastembed-rs · ONNX)—— 绕开硅基流动 API 的限速与网络往返(治吞吐 35/秒天花板)。
 //!
-//! 模型与硅基流动**同源**：嵌入 `BAAI/bge-m3`(dense 1024 维)、重排 `bge-reranker-v2-m3`，
-//! 故本地产出的向量与既有索引「同空间、兼容」——无需重嵌全库，存量 5309 条照用，
-//! 新文件本地灌、查询本地算。
+//! 嵌入模型 = **BGE-M3 INT8 单文件 ONNX**(`gpahal/bge-m3-onnx-int8` 的 `model_quantized.onnx`,
+//! ~543MB),与硅基 `BAAI/bge-m3` 同源 → dense 1024 维、同空间兼容既有索引,无需重嵌全库。
+//! 用 INT8 单文件而非 fp32(`BAAI/bge-m3` 的 `onnx/model.onnx`+2.2GB 外置 `model.onnx_data`):
+//!  ① 体积砍半、下载快;② **单文件无外置权重** → 可纯内存加载(`commit_from_memory`)。
 //!
-//! 仅 `feature = "local-embed"` 时编译；运行时还需 `POLARIS_LOCAL_EMBED=1` 才真正启用
-//! （否则即便编进也走云 API，便于灰度/回退）。首次用时模型下载到 `FASTEMBED_CACHE_DIR`
-//! （默认 ~/Polaris/models/fastembed），之后离线加载。
+//! **下载为何自己来、不交给 fastembed**:fastembed 内部用 hf-hub(Rust)拉模型,而 hf-hub 对
+//! HuggingFace 专有响应头(x-linked-etag / x-repo-commit)有强依赖,**国内镜像 hf-mirror 不回这些头
+//! → hf-hub 秒失败、一个字节都下不到**(实测 2026-06-26)。故这里改成自己用 ureq 直连
+//! `resolve/main/<file>` 流式下载(镜像就是普通文件服务,直连必中),落地后用 fastembed 的
+//! `try_new_from_user_defined` 从文件字节加载 —— 彻底绕开 hf-hub 那套头依赖。
 //!
-//! 并发：fastembed 推理对象用 `Mutex` 单例守护（ONNX 内部已多线程，外层串行无碍且省内存）。
+//! 仅 `feature = "local-embed"` 时编译;运行时还需 `POLARIS_LOCAL_EMBED=1` 或 UI 勾「启用本地嵌入」
+//! 才真正启用(否则即便编进也走云 API,便于灰度/回退)。重排暂仍走云(本地重排未接,见 `rerank_ready`)。
+//!
+//! 平台:本地引擎(fastembed 的 onnxruntime)与桌面语音(sherpa 的 onnxruntime)互斥,故带 voice 的
+//! Windows 桌面发版不编入;Docker/NAS 与 `--features local-embed` 构建全功能。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use fastembed::{
-    EmbeddingModel, RerankInitOptions, RerankerModel, TextEmbedding, TextInitOptions, TextRerank,
+    Bgem3Embedding, InitOptionsUserDefined, TokenizerFiles, UserDefinedBgem3Model,
 };
+
+/// 嵌入模型仓库与文件清单(INT8 单文件 + 分词器四件套)。镜像在前、官方兜底。
+const HF_REPO: &str = "gpahal/bge-m3-onnx-int8";
+const HF_BASES: &[&str] = &["https://hf-mirror.com", "https://huggingface.co"];
+/// (文件名, 约定大小 MB):大小用于半截校验(下到的字节远小于约定 → 判镜像错误页)。
+const MODEL_FILES: &[(&str, f64)] = &[
+    ("model_quantized.onnx", 543.0),
+    ("tokenizer.json", 16.0),
+    ("config.json", 0.0),
+    ("special_tokens_map.json", 0.0),
+    ("tokenizer_config.json", 0.0),
+];
 
 /// 启用标记文件:UI「启用本地嵌入」开关落盘于此 → 重启仍生效(不必每次设环境变量)。
 fn enable_marker() -> Option<PathBuf> {
@@ -46,7 +66,7 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// 模型缓存目录(绝对路径,UI 展示用)。
+/// 模型根目录:`FASTEMBED_CACHE_DIR` 覆盖,默认 `~/Polaris/models/fastembed`。
 pub fn cache_dir() -> PathBuf {
     if let Some(v) = std::env::var_os("FASTEMBED_CACHE_DIR") {
         return PathBuf::from(v);
@@ -56,121 +76,144 @@ pub fn cache_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/root/Polaris/models/fastembed"))
 }
 
-/// 模型是否已下载就位:缓存目录里有非空内容(fastembed 首次 init 会把 onnx+tokenizer 落于此)。
-pub fn ready() -> bool {
-    let dir = cache_dir();
-    std::fs::read_dir(&dir)
-        .map(|rd| rd.flatten().any(|e| {
-            // 任一子项里有体量像样的文件即视为已下过(onnx 动辄数百 MB)
-            walk_has_big_file(&e.path())
-        }))
-        .unwrap_or(false)
+/// 嵌入模型落地子目录。
+fn model_dir() -> PathBuf {
+    cache_dir().join("bge-m3-int8")
 }
 
-fn walk_has_big_file(p: &Path) -> bool {
-    if let Ok(meta) = std::fs::metadata(p) {
-        if meta.is_file() {
-            return meta.len() > 5 * 1024 * 1024; // >5MB 视为模型权重
-        }
-        if meta.is_dir() {
-            if let Ok(rd) = std::fs::read_dir(p) {
-                return rd.flatten().any(|e| walk_has_big_file(&e.path()));
-            }
-        }
-    }
+/// 嵌入模型是否已下载就位:清单里每个文件都存在且非空。
+pub fn ready() -> bool {
+    let dir = model_dir();
+    MODEL_FILES
+        .iter()
+        .all(|(f, _)| dir.join(f).metadata().map(|m| m.len() > 0).unwrap_or(false))
+}
+
+/// 本地**重排**是否就位。当前未接本地重排模型 → 恒 false,重排继续走云(保排序质量);
+/// 这样「启用本地嵌入」只切嵌入、不连累重排。后续要接本地重排时在此返回真实就位状态即可。
+pub fn rerank_ready() -> bool {
     false
 }
 
-/// 强制下载/就位本地模型(嵌入 + 重排)。首次会从 HuggingFace(国内走 hf-mirror)拉权重到
-/// [`cache_dir`];已就位则秒回。供 UI「下载本地引擎」按钮调用 —— 把「报告里的头号提速杠杆」
-/// (绕开云限速)变成一键可下。返回就位后的缓存目录。
+/// ONNX 推理 intra-op 线程数(`POLARIS_EMBED_THREADS`,0/未设 = 用满核)。给 UI 留头寸防 AppHang。
+fn embed_threads() -> Option<usize> {
+    std::env::var("POLARIS_EMBED_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// 流式下载单文件到 `dst`(先写 .part 再改名)。镜像在前、官方兜底;半截/错误页判废试下一源。
+fn fetch_file(file: &str, dst: &std::path::Path, approx_mb: f64) -> Result<(), String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(20))
+        .timeout_read(Duration::from_secs(300))
+        .build();
+    let part = dst.with_extension("part");
+    let mut last_err = String::new();
+    for base in HF_BASES {
+        let url = format!("{base}/{HF_REPO}/resolve/main/{file}");
+        let resp = match agent.get(&url).call() {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("{url}: {e}");
+                continue;
+            }
+        };
+        let total: u64 = resp
+            .header("content-length")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut reader = resp.into_reader();
+        let mut out = match std::fs::File::create(&part) {
+            Ok(f) => f,
+            Err(e) => return Err(format!("创建临时文件失败: {e}")),
+        };
+        let copied = std::io::copy(&mut reader, &mut out);
+        drop(out);
+        match copied {
+            Ok(received) => {
+                // 半截校验:有 content-length 且没下满,或体量远小于约定大小 → 判镜像错误页,试下一源。
+                if (total > 0 && received < total)
+                    || (approx_mb > 1.0 && (received as f64) < approx_mb * 1_048_576.0 * 0.5)
+                {
+                    last_err = format!("{url}: 下载不完整/疑似错误页({received} 字节)");
+                    let _ = std::fs::remove_file(&part);
+                    continue;
+                }
+                std::fs::rename(&part, dst).map_err(|e| format!("落位失败: {e}"))?;
+                return Ok(());
+            }
+            Err(e) => {
+                last_err = format!("{url}: 读取中断 {e}");
+                let _ = std::fs::remove_file(&part);
+                continue;
+            }
+        }
+    }
+    Err(if last_err.is_empty() { "全部下载源不可达".into() } else { last_err })
+}
+
+/// 强制下载/就位本地嵌入模型(INT8 单文件 + 分词器四件套,~560MB)。幂等:已有文件跳过。
+/// 供 UI「下载本地引擎」按钮调用 —— 把「报告头号提速杠杆(绕开云限速)」变成一键可下。返回模型目录。
 pub fn download() -> Result<String, String> {
-    ensure_cache_env();
-    // 触发两个模型的 OnceLock 初始化 = 触发下载(fastembed 内部带断点续/校验)。
-    embedder()?;
-    reranker()?;
-    Ok(cache_dir().to_string_lossy().into_owned())
+    let dir = model_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建模型目录失败: {e}"))?;
+    for (file, approx_mb) in MODEL_FILES {
+        let dst = dir.join(file);
+        if dst.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            continue; // 幂等续下
+        }
+        fetch_file(file, &dst, *approx_mb)?;
+    }
+    Ok(dir.to_string_lossy().into_owned())
 }
 
-/// 模型缓存目录:落数据根,避免每次重下;FASTEMBED_CACHE_DIR / HF_HOME 可覆盖。
-fn ensure_cache_env() {
-    if std::env::var_os("FASTEMBED_CACHE_DIR").is_none() {
-        let dir = cache_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("FASTEMBED_CACHE_DIR", dir);
-    }
-    // 国内直连 HuggingFace 常被墙 → 默认走 hf-mirror(已显式设过则尊重)。fastembed/hf-hub
-    // 读 HF_ENDPOINT 选下载源;这一行让「下载本地模型」在国内也能拉得动。
-    if std::env::var_os("HF_ENDPOINT").is_none() {
-        std::env::set_var("HF_ENDPOINT", "https://hf-mirror.com");
-    }
-    cap_onnx_threads();
-}
+static EMBED: OnceLock<Result<Mutex<Bgem3Embedding>, String>> = OnceLock::new();
 
-/// 限速旋钮：`POLARIS_EMBED_THREADS` 限制 ONNX Runtime 的推理线程数。本地 bge-m3 嵌入/重排是
-/// CPU 密集，ORT 默认会吃满全部逻辑核 → 百万级大库后台索引连续跑时，UI 线程几乎拿不到 CPU
-/// 时间片，消息泵错过 5s 窗口被 Windows 判无响应(AppHangB1)。把它设成「核数 - 2」之类给 UI
-/// 留头寸。必须在模型(ORT session)创建**之前**设进环境；OpenMP 构建的 onnxruntime 读
-/// `OMP_NUM_THREADS`，故同时写入这两个变量(已被显式设过则尊重用户值，不覆盖)。
-fn cap_onnx_threads() {
-    let Ok(v) = std::env::var("POLARIS_EMBED_THREADS") else { return };
-    let Ok(n) = v.trim().parse::<usize>() else { return };
-    if n == 0 {
-        return;
-    }
-    let n = n.to_string();
-    if std::env::var_os("OMP_NUM_THREADS").is_none() {
-        std::env::set_var("OMP_NUM_THREADS", &n);
-    }
-    if std::env::var_os("ORT_INTRA_OP_NUM_THREADS").is_none() {
-        std::env::set_var("ORT_INTRA_OP_NUM_THREADS", &n);
-    }
-}
-
-static EMBED: OnceLock<Result<Mutex<TextEmbedding>, String>> = OnceLock::new();
-static RERANK: OnceLock<Result<Mutex<TextRerank>, String>> = OnceLock::new();
-
-fn embedder() -> Result<&'static Mutex<TextEmbedding>, String> {
+fn embedder() -> Result<&'static Mutex<Bgem3Embedding>, String> {
     EMBED
         .get_or_init(|| {
-            ensure_cache_env();
-            TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::BGEM3))
+            let dir = model_dir();
+            let read = |f: &str| -> Result<Vec<u8>, String> {
+                std::fs::read(dir.join(f)).map_err(|e| {
+                    format!("读本地模型 {f} 失败(请先在「寓言计划」点「下载本地引擎」): {e}")
+                })
+            };
+            let onnx = read("model_quantized.onnx")?;
+            let tokenizer_files = TokenizerFiles {
+                tokenizer_file: read("tokenizer.json")?,
+                config_file: read("config.json")?,
+                special_tokens_map_file: read("special_tokens_map.json")?,
+                tokenizer_config_file: read("tokenizer_config.json")?,
+            };
+            let model = UserDefinedBgem3Model::new(onnx, tokenizer_files);
+            let mut opts = InitOptionsUserDefined::new();
+            // 检索用 512 token 足矣(chunk ~1600 字符≈500-800 token);**不要设 8192**——
+            // 该 ONNX 导出按 max_length 定形,设大会把每条短文档撑到满长度,colbert 输出
+            // [batch,seq,1024] 爆炸式增大 → 推理实质卡死(实测 8192 时 0 CPU 挂住)。
+            opts.max_length = 512;
+            opts.intra_threads = embed_threads();
+            Bgem3Embedding::try_new_from_user_defined(model, opts)
                 .map(Mutex::new)
-                .map_err(|e| format!("本地嵌入模型加载失败(BAAI/bge-m3): {e}"))
+                .map_err(|e| format!("本地嵌入模型加载失败(bge-m3-int8): {e}"))
         })
         .as_ref()
         .map_err(|e| e.clone())
 }
 
-fn reranker() -> Result<&'static Mutex<TextRerank>, String> {
-    RERANK
-        .get_or_init(|| {
-            ensure_cache_env();
-            TextRerank::try_new(RerankInitOptions::new(RerankerModel::BGERerankerV2M3))
-                .map(Mutex::new)
-                .map_err(|e| format!("本地重排模型加载失败(bge-reranker-v2-m3): {e}"))
-        })
-        .as_ref()
-        .map_err(|e| e.clone())
-}
-
-/// 批量本地嵌入 → 与 `index::embed_texts` 同形(Vec<Vec<f32>>，dense 1024)。
+/// 批量本地嵌入 → 与 `index::embed_texts` 同形(Vec<Vec<f32>>,dense 1024)。
+/// 取 BGE-M3 联合输出里的 dense 腿(sparse/colbert 暂不入库)。
 pub fn embed(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     let m = embedder()?;
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
     let mut g = m.lock().map_err(|_| "本地嵌入锁中毒".to_string())?;
-    g.embed(refs, None).map_err(|e| format!("本地嵌入失败: {e}"))
+    let out = g.embed(refs, Some(32)).map_err(|e| format!("本地嵌入失败: {e}"))?;
+    Ok(out.dense)
 }
 
-/// 本地重排 → 与 `index::rerank` 同形((原 index, 分数) 降序,截到 top_n)。
-pub fn rerank(query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>, String> {
-    let m = reranker()?;
-    let refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
-    let mut g = m.lock().map_err(|_| "本地重排锁中毒".to_string())?;
-    let res = g
-        .rerank(query, refs, false, None)
-        .map_err(|e| format!("本地重排失败: {e}"))?;
-    let mut out: Vec<(usize, f32)> = res.iter().map(|r| (r.index, r.score)).collect();
-    out.truncate(top_n);
-    Ok(out)
+/// 本地重排:当前未接(`rerank_ready` 恒 false,调用方不会路由到这里),保留签名占位。
+/// 接本地重排模型时在此实现并让 `rerank_ready` 反映就位状态即可。
+pub fn rerank(_query: &str, _docs: &[String], _top_n: usize) -> Result<Vec<(usize, f32)>, String> {
+    Err("本地重排未接入(重排走云)".into())
 }

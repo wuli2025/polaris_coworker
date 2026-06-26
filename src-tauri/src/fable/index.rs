@@ -140,9 +140,10 @@ pub fn embed_texts(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
 
 /// 重排:返回按相关度降序的 (原 index, 分数)。失败属可降级(调用方保持原序)。
 pub fn rerank(query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>, String> {
-    // 本地开源重排(POLARIS_LOCAL_EMBED=1):本地 bge-reranker-v2-m3,省 ~600ms API 往返。
+    // 本地开源重排:仅当本地重排模型**真就位**(rerank_ready)才走本地;否则即便启用了本地嵌入,
+    // 重排仍走云 —— 这样「启用本地嵌入」只切换嵌入(治吞吐),不连累重排的排序质量。
     #[cfg(feature = "local-embed")]
-    if crate::fable::embed_local::enabled() {
+    if crate::fable::embed_local::rerank_ready() {
         return crate::fable::embed_local::rerank(query, docs, top_n);
     }
     let p = crate::sense::active_provider("rerank").ok_or("没有可用的重排服务商")?;
