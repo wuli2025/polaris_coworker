@@ -108,9 +108,12 @@ enigo = { version = "0.3", optional = true }   # 把终稿「敲」进当前焦�
 # 与硅基流动**同源** → 向量同空间、兼容既有索引,无需重嵌全库;绕开 API 限速与网络延迟(治覆盖率+查询延迟)。
 # optional + 专属 feature → 默认 build 不拉(保护编译+体积);Docker 发版显式开 `--features local-embed`。
 # 经 ort 拉 onnxruntime,**勿与 voice-asr(sherpa 自带 onnxruntime)同时开**,避免两份运行时冲突。
-# load-dynamic:onnxruntime 运行时 dlopen(ORT_DYLIB_PATH 指向 .so),缺库不影响启动(只本地嵌入才报错),
-# 比 link 模式安全得多;hf-hub-rustls-tls 避免 Docker 拉 openssl。
-fastembed = { version = "5", optional = true, default-features = false, features = ["ort-load-dynamic", "hf-hub-rustls-tls"] }
+# **ort-download-binaries**(非 load-dynamic):构建期由 ort 拉「与 ort-sys 2.0.0-rc.12 严格匹配的
+# onnxruntime 1.24.2」并链接进二进制 —— 自包含、版本必对。改用它的根因(2026-06-26 实测):
+# load-dynamic 会在运行时 dlopen 系统里**任意**一个 onnxruntime.dll(本机 C:\WINDOWS\system32 就有
+# 一个旧版),ABI 不匹配 → 推理首次前向 0-CPU 卡死。download-binaries 一劳永逸消掉这类「抓错 DLL」。
+# rustls 变体避免 Docker 拉 openssl;hf-hub-rustls-tls 同理。
+fastembed = { version = "5", optional = true, default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 # 寓言计划 · 检索枢纽(fable/):盘点/chunk/向量统一落 SQLite(PRD v5 P0「SQLite 落盘」)。
 # bundled = 静态编译 sqlite3,三平台(Win/mac/Docker musl 之外的 gnu)零系统依赖。
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -217,3 +217,32 @@ pub fn embed(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
 pub fn rerank(_query: &str, _docs: &[String], _top_n: usize) -> Result<Vec<(usize, f32)>, String> {
     Err("本地重排未接入(重排走云)".into())
 }
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::time::Instant;
+
+    /// 本地嵌入「一键下载 + 吞吐」端到端基准(opt-in:仅 `POLARIS_BENCH_LOCAL=1` 真跑)。
+    #[test]
+    fn local_embed_download_and_throughput() {
+        if std::env::var("POLARIS_BENCH_LOCAL").as_deref() != Ok("1") {
+            return;
+        }
+        let t0 = Instant::now();
+        let dir = download().expect("下载本地模型失败");
+        eprintln!("[本地嵌入] 模型就位 {:.1}s @ {dir}", t0.elapsed().as_secs_f64());
+        assert!(ready());
+        let n = 96usize;
+        let docs: Vec<String> = (0..n)
+            .map(|i| ("北极星知识库混合检索把关键词与向量两腿并行编排取证 ".to_string() + &i.to_string()).repeat(3))
+            .collect();
+        let _ = embed(&docs[..16]).expect("预热失败");
+        let t1 = Instant::now();
+        let v = embed(&docs).expect("嵌入失败");
+        let dt = t1.elapsed().as_secs_f64();
+        assert_eq!(v.len(), n);
+        assert_eq!(v[0].len(), 1024);
+        eprintln!("[本地嵌入] {n} 条 / {dt:.2}s = {:.1} chunk/s(本地 CPU,无云限速)", n as f64 / dt);
+    }
+}
