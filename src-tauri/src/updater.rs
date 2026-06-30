@@ -165,6 +165,21 @@ pub fn resolve_check(current: &str, found: Option<(String, String)>) -> UpdaterS
     }
 }
 
+/// 纯函数：检查失败时的落点。**关键**：磁盘上若还留着「可装版本」(≠当前)，宁可退回
+/// `Available`，也绝不用 `Error` 把它盖掉——这样冷启动网络没就绪 / 离线时，中央弹窗
+/// （只在「有更新」时浮出）照样能弹，而不是「开机那一下网络抖一下就再也不提示、得手动去更新页才看到」。
+/// 只有连落盘标记都没有(或已等于当前=已装上)时，才如实报 `Error`。
+pub fn resolve_check_error(
+    current: &str,
+    persisted: Option<(String, String)>,
+    message: String,
+) -> UpdaterState {
+    match persisted {
+        Some((version, notes)) if version != current => UpdaterState::Available { version, notes },
+        _ => UpdaterState::Error { message },
+    }
+}
+
 // ───────────────────────── 核心动作 ─────────────────────────
 
 async fn run_check(app: &AppHandle) -> UpdaterState {
@@ -188,8 +203,13 @@ async fn run_check(app: &AppHandle) -> UpdaterState {
             }
             transition(app, mapped)
         }
-        // 检查失败不清落盘标记（之前发现的「可装版本」仍有效，离线时照样能续提示）。
-        Err(e) => transition(app, UpdaterState::Error { message: format!("检查更新失败: {e}") }),
+        // 检查失败不清落盘标记（之前发现的「可装版本」仍有效，离线时照样能续提示）；
+        // 且若磁盘上仍有可装版本(≠当前) → 退回 Available 而非 Error，保证中央弹窗照常浮出。
+        Err(e) => {
+            let path = { UPDATER.lock().persist_path.clone() };
+            let persisted = load_persisted(&path).map(|p| (p.version, p.notes));
+            transition(app, resolve_check_error(&current, persisted, format!("检查更新失败: {e}")))
+        }
     }
 }
 
@@ -407,6 +427,38 @@ mod tests {
     #[test]
     fn check_resolves_up_to_date_when_no_update() {
         assert_eq!(resolve_check("0.2.17", None), UpdaterState::UpToDate);
+    }
+
+    #[test]
+    fn check_error_falls_back_to_persisted_available() {
+        // 网络复检失败，但磁盘上还留着「可装版本」(≠当前) → 退回 Available，弹窗照常弹。
+        let s = resolve_check_error(
+            "0.2.17",
+            Some(("0.2.18".into(), "新特性".into())),
+            "检查更新失败: 网络超时".into(),
+        );
+        assert_eq!(
+            s,
+            UpdaterState::Available { version: "0.2.18".into(), notes: "新特性".into() }
+        );
+    }
+
+    #[test]
+    fn check_error_reports_error_when_no_persisted() {
+        // 没有落盘标记 → 如实报错（panel 引导手动检查）。
+        let s = resolve_check_error("0.2.17", None, "检查更新失败: 网络超时".into());
+        assert_eq!(s, UpdaterState::Error { message: "检查更新失败: 网络超时".into() });
+    }
+
+    #[test]
+    fn check_error_reports_error_when_persisted_already_current() {
+        // 落盘版本已等于当前(说明已装上) → 不该再当「有更新」，如实报错。
+        let s = resolve_check_error(
+            "0.2.18",
+            Some(("0.2.18".into(), String::new())),
+            "检查更新失败: 网络超时".into(),
+        );
+        assert!(matches!(s, UpdaterState::Error { .. }));
     }
 
     #[test]

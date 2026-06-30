@@ -70,8 +70,8 @@ pub async fn serve() -> anyhow::Result<()> {
     crate::skills::seed_web_studio_skill();
     crate::skills::seed_wechat_typesetter_skill();
     crate::skills::seed_wechat_tasks_skill();
-    // 老用户迁移：早期版本首启播种过毛主席资料库的，补装 consult-mao 技能。
-    crate::skills::migrate_consult_mao_for_seeded_kb();
+    // 注：「请教毛主席」默认隐藏 —— 仅在用户主动安装「毛主席」资料包时装 consult-mao 技能，
+    // 启动时不再自动补装（盘上已有数据保留，不删）。
     // 飞书网关「开机自动启动」（若用户开了 auto_start 且凭证齐全）。
     crate::feishu::auto_start_if_enabled(&app);
     // 寓言计划:感官 API 坞 + 回声层「每日做梦」调度 + 检索枢纽(与桌面 setup 等价)。

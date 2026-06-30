@@ -1300,25 +1300,9 @@ fn write_video_studio_files(dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 老用户迁移：早期版本首启会自动播种毛主席资料库、且 consult-mao 的前身(对话框开关 /
-/// 预装技能)开箱即用；改版后 skill 随「毛主席」名人资料包安装。已被播种过资料
-/// (`<KB>/raw/毛主席` 在盘上)但技能目录里没有 consult-mao 的老用户，启动时补装一次，
-/// 避免升级后「请教毛主席」失效。资料不在(从未播种/已移除)则不动。best-effort。
-pub fn migrate_consult_mao_for_seeded_kb() {
-    let kb_raw_mao = std::path::PathBuf::from(crate::kb::kb_root())
-        .join("raw")
-        .join("毛主席");
-    if !kb_raw_mao.exists() {
-        return;
-    }
-    let Some(root) = skills_dir() else {
-        return;
-    };
-    if root.join("consult-mao").join("skill.md").exists() {
-        return;
-    }
-    let _ = install_skill("consult-mao".to_string());
-}
+// 注：原 `migrate_consult_mao_for_seeded_kb`（为早期播种过毛主席资料库的老用户启动时
+// 自动补装 consult-mao 技能）已移除。现「请教毛主席」默认隐藏，只在用户主动安装
+// 「毛主席」名人资料包（kb_pack_install）时才装该技能，启动时不再自动补装。
 
 /// 启动时确保「壹伴排版优化」技能在 ~/Polaris/skills 落盘（多文件，含 wechat_yiban.py 可执行脚本）。
 ///

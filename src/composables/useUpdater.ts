@@ -88,17 +88,31 @@ async function ensureSubscribed(): Promise<void> {
   }
 }
 
-/** 启动时调用一次：订阅 + 触发一次后端检查（失败由状态机记为 error，不弹中央对话框）。 */
+/**
+ * 启动时调用一次：订阅 + 触发后端检查，发现新版即由 UpdateBanner 自动弹出。
+ *
+ * **冷启动重试**：开机那一刻网络常还没就绪 → 首次检查直接失败(error)，中央弹窗就不弹了，
+ * 用户只能手动去「更新」页才看到。这里改成「渐进退避重试」——只要还没拿到确定结论
+ * （发现新版 / 已最新），就隔几秒再试，直到网络恢复，保证「点开 app 就会弹」。
+ */
 export async function checkForUpdate(): Promise<void> {
   if (autoChecked) return;
   autoChecked = true;
   await ensureCurrentVersion();
   await ensureSubscribed();
-  try {
-    await invoke("updater_check");
-    lastCheckedAt.value = Date.now();
-  } catch (e) {
-    console.warn("[updater] auto check failed:", e);
+  // 0s 立即一次，随后 4s/12s/30s 退避重试（覆盖冷启动到网络就绪的常见窗口）。
+  const delays = [0, 4000, 12000, 30000];
+  for (const wait of delays) {
+    if (wait) await new Promise((r) => setTimeout(r, wait));
+    try {
+      const st = await invoke<UpdaterState>("updater_check");
+      lastCheckedAt.value = Date.now();
+      // 已有确定结论(available=有更新会触发弹窗 / up-to-date=已最新)即收手；
+      // 仅「检查失败」才继续退避重试。downloading/installing 也视为已在推进、收手。
+      if (st.status !== "error") return;
+    } catch (e) {
+      console.warn("[updater] auto check failed, will retry:", e);
+    }
   }
 }
 

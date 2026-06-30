@@ -131,9 +131,9 @@ pub fn run() {
             // 确保「微信聊天 · 每日待办」技能落盘（含 wx_daily.py / wx_setup.py：本地解密微信→挖待办→
             // 写晨报，配套每日自动化流程触发）。best-effort，不阻断启动；不覆盖用户的 wx_config.json。
             skills::seed_wechat_tasks_skill();
-            // 老用户迁移：早期版本首启播种过毛主席资料库的，补装 consult-mao 技能
-            //（改版后该技能随「毛主席」名人资料包一起装，老用户没装过会失效）。
-            skills::migrate_consult_mao_for_seeded_kb();
+            // 注：此前这里会为「早期播种过毛主席资料库」的老用户补装 consult-mao 技能。
+            // 现「请教毛主席」默认隐藏 —— 只在用户主动安装「毛主席」名人资料包时才装该技能，
+            // 启动时不再自动补装（盘上已有的 raw/毛主席、技能、项目均保留，不删用户数据）。
             // 环境预热: 后台把 claude / pwsh 目录塞进进程 PATH + 设 Git Bash 路径,
             // 让之后 spawn 的 claude CLI 直接「找得到、有 shell」, 无需重启 (见 doctor.rs)。
             doctor::prime_path_for_claude();
