@@ -24,12 +24,6 @@ pub mod scan;
 pub mod sense;
 pub mod skills;
 pub mod voice;
-// 语音识别运行时(本地 SenseVoice via sherpa-rs);默认不编译,保护现有 build。
-#[cfg(feature = "voice-asr")]
-pub mod voice_asr;
-// 实时语音输入(录音+全局热键+注入);桌面专属,默认不编译。
-#[cfg(feature = "voice-live")]
-pub mod voice_live;
 pub mod wecom;
 // 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。
 #[cfg(feature = "desktop")]
@@ -442,7 +436,7 @@ pub fn run() {
                 // 释放全局键盘热键监听:置 ENABLED=false,退出时不再处理热键事件
                 //(rdev::listen 无法干净中止是已知限制,置闸 + 进程退出即可接受的清理)。
                 #[cfg(feature = "voice-live")]
-                voice_live::stop();
+                voice::live::stop();
             }
         });
 }

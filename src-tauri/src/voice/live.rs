@@ -32,7 +32,7 @@ static CTRL_TX: Lazy<Mutex<Option<Sender<Ctrl>>>> = Lazy::new(|| Mutex::new(None
 /// 启用实时语音输入:首次调用拉起热键线程 + 采集/识别管理线程(之后幂等,仅置 ENABLED)。
 pub fn start(app: AppHandle) -> Result<(), String> {
     // 模型未就位先给清晰错误(别等按下热键才闷声失败)。
-    crate::voice_asr::ensure_recognizer()?;
+    crate::voice::asr::ensure_recognizer()?;
     ENABLED.store(true, Ordering::SeqCst);
     if STARTED.swap(true, Ordering::SeqCst) {
         return Ok(()); // 线程已在,仅重新启用
@@ -58,7 +58,7 @@ static DICTATING: AtomicBool = AtomicBool::new(false);
 
 /// 开始听写(幂等):录音 → 每 350ms emit `voice:partial` → 直到 stop。
 pub fn dictate_start(app: AppHandle) -> Result<(), String> {
-    crate::voice_asr::ensure_recognizer()?;
+    crate::voice::asr::ensure_recognizer()?;
     if DICTATING.swap(true, Ordering::SeqCst) {
         return Ok(()); // 已在听写
     }
@@ -95,7 +95,7 @@ fn dictate_session(app: AppHandle) {
         std::thread::sleep(Duration::from_millis(350));
         let samples = snapshot_16k(&buf, in_sr);
         if samples.len() > (16000.0 * 0.3) as usize {
-            if let Ok(r) = crate::voice_asr::transcribe_samples(16000, &samples) {
+            if let Ok(r) = crate::voice::asr::transcribe_samples(16000, &samples) {
                 let _ = app.emit("voice:partial", json!({ "text": r.raw }));
             }
         }
@@ -107,7 +107,7 @@ fn dictate_session(app: AppHandle) {
         let _ = app.emit("voice:dictation", json!({ "text": "", "cancelled": true }));
         return;
     }
-    match crate::voice_asr::transcribe_samples(16000, &samples) {
+    match crate::voice::asr::transcribe_samples(16000, &samples) {
         Ok(r) => {
             let _ = app.emit("voice:dictation", json!({ "text": r.text, "raw": r.raw }));
         }
@@ -189,7 +189,7 @@ fn record_and_recognize(app: &AppHandle, rx: &Receiver<Ctrl>) {
             Err(RecvTimeoutError::Timeout) => {
                 let samples = snapshot_16k(&buf, in_sr);
                 if samples.len() > (16000.0 * 0.3) as usize {
-                    if let Ok(r) = crate::voice_asr::transcribe_samples(16000, &samples) {
+                    if let Ok(r) = crate::voice::asr::transcribe_samples(16000, &samples) {
                         let _ = app.emit("voice:partial", json!({ "text": r.raw }));
                     }
                 }
@@ -207,7 +207,7 @@ fn record_and_recognize(app: &AppHandle, rx: &Receiver<Ctrl>) {
         let _ = app.emit("voice:final", json!({ "text": "", "raw": "", "cancelled": true }));
         return;
     }
-    match crate::voice_asr::transcribe_samples(16000, &samples) {
+    match crate::voice::asr::transcribe_samples(16000, &samples) {
         Ok(r) => {
             let _ = app.emit("voice:final", &r);
             inject_text(&r.text);

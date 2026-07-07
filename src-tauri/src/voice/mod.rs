@@ -15,6 +15,13 @@
 //! 录音(cpal)/全局热键(rdev)/注入(enigo)/推理(sherpa-rs)等重型原生件是另一阶段,
 //! 本文件不引入,以免破坏现有 build。与 sense.rs 同构:JSON 落盘、原子写、内置种子。
 
+// 语音识别运行时(本地 SenseVoice via sherpa-rs);默认不编译,保护现有 build。
+#[cfg(feature = "voice-asr")]
+pub mod asr;
+// 实时语音输入(录音+全局热键+注入);桌面专属,默认不编译。
+#[cfg(feature = "voice-live")]
+pub mod live;
+
 use directories::UserDirs;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -535,7 +542,7 @@ pub fn voice_anti_pollute(text: String) -> AntiPolluteResult {
 pub fn voice_transcribe_file(path: String) -> Result<TranscribeResult, String> {
     #[cfg(feature = "voice-asr")]
     {
-        crate::voice_asr::transcribe_file(&path)
+        crate::voice::asr::transcribe_file(&path)
     }
     #[cfg(not(feature = "voice-asr"))]
     {
@@ -550,7 +557,7 @@ pub fn voice_transcribe_file(path: String) -> Result<TranscribeResult, String> {
 pub fn voice_listen_start(app: AppHandle) -> Result<(), String> {
     #[cfg(feature = "voice-live")]
     {
-        crate::voice_live::start(app)
+        crate::voice::live::start(app)
     }
     #[cfg(not(feature = "voice-live"))]
     {
@@ -564,7 +571,7 @@ pub fn voice_listen_start(app: AppHandle) -> Result<(), String> {
 pub fn voice_listen_stop() -> Result<(), String> {
     #[cfg(feature = "voice-live")]
     {
-        crate::voice_live::stop();
+        crate::voice::live::stop();
     }
     Ok(())
 }
@@ -574,7 +581,7 @@ pub fn voice_listen_stop() -> Result<(), String> {
 pub fn voice_dictate_start(app: AppHandle) -> Result<(), String> {
     #[cfg(feature = "voice-live")]
     {
-        crate::voice_live::dictate_start(app)
+        crate::voice::live::dictate_start(app)
     }
     #[cfg(not(feature = "voice-live"))]
     {
@@ -588,7 +595,7 @@ pub fn voice_dictate_start(app: AppHandle) -> Result<(), String> {
 pub fn voice_dictate_stop() -> Result<(), String> {
     #[cfg(feature = "voice-live")]
     {
-        crate::voice_live::dictate_stop();
+        crate::voice::live::dictate_stop();
     }
     Ok(())
 }
