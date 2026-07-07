@@ -197,6 +197,20 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             v TEXT NOT NULL
         );
 
+        -- 任务卡检查工作流(GitHub status checks 式):每轮提交跑一组检查。
+        -- status: pass|fail|skipped|running。output 只留尾部(防爆库)。
+        CREATE TABLE IF NOT EXISTS check_runs(
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            round      INTEGER NOT NULL,
+            name       TEXT NOT NULL,
+            status     TEXT NOT NULL,
+            output     TEXT NOT NULL DEFAULT '',
+            started_at INTEGER NOT NULL,
+            ended_at   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_checks_task ON check_runs(task_id, round);
+
         CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, state);
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_devices_node ON devices(node_id);
@@ -217,6 +231,19 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if !has_team_id {
         conn.execute("ALTER TABLE projects ADD COLUMN team_id INTEGER", [])
             .map_err(|e| format!("补 team_id 列失败: {e}"))?;
+    }
+
+    // 增量列:projects.check_profile —— 检查档位 code(全套)/creative(视频游戏放宽)/off。
+    let has_profile: bool = conn
+        .prepare("PRAGMA table_info(projects)")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(1))
+                .map(|rows| rows.flatten().any(|c| c == "check_profile"))
+        })
+        .unwrap_or(false);
+    if !has_profile {
+        conn.execute("ALTER TABLE projects ADD COLUMN check_profile TEXT NOT NULL DEFAULT 'code'", [])
+            .map_err(|e| format!("补 check_profile 列失败: {e}"))?;
     }
     Ok(())
 }

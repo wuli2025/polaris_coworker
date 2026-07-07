@@ -11,6 +11,8 @@ pub mod http;
 #[cfg(feature = "desktop")]
 pub mod hosting;
 pub mod auth;
+/// 任务卡检查工作流(CI-lite):worktree 跑开源工具链+密钥扫描+大文件闸。
+pub mod checks;
 pub mod db;
 pub mod gitea;
 pub mod identity;

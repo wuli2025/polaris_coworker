@@ -623,8 +623,27 @@ task_op!(task_claim, |tid, ctx, _v, st| {
 task_op!(task_submit, |tid, ctx, v, st| {
     let card = crate::collab::tasks::submit(tid, i_of(v, "prId"), &ctx.username)?;
     emit_task(st, &card);
+    // 触发本轮检查(后台线程,不阻塞提交响应;结果经 collab:check 推送)。
+    spawn_checks(st, &card);
     ok(card)
 });
+
+/// 后台线程跑一轮检查(提交触发/手动重跑共用):结果落 check_runs,进度经 collab:check 推送。
+fn spawn_checks(st: &CollabState, card: &crate::collab::tasks::TaskCard) {
+    let card2 = card.clone();
+    let app2 = st.app.clone();
+    std::thread::spawn(move || {
+        let profile = crate::collab::checks::project_profile(card2.project_id);
+        let repo = match project_repo_path(card2.project_id) {
+            Ok(r) => r,
+            Err(_) => return, // 项目没配仓库 → 无从检查,静默跳过
+        };
+        let emit = || {
+            let _ = app2.emit("collab:check", serde_json::json!({"taskId": card2.id, "round": card2.round}));
+        };
+        let _ = crate::collab::checks::run_for_task(&repo, &card2.branch, card2.id, card2.round, &profile, &emit);
+    });
+}
 
 task_op!(task_review, |tid, ctx, v, st| {
     // 验收权=项目/团队管理者(协作者不能给自己验收)。asLead 也只能由管理者触发——
@@ -693,6 +712,62 @@ async fn collab_activity(
     if let Err(r) = ensure_member(&ctx, pid) { return r; }
     let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30).clamp(1, 100);
     let out = tokio::task::spawn_blocking(move || crate::collab::tasks::activity(pid, limit).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+// ── 检查工作流(CI-lite,GitHub status checks 式)──
+
+/// GET /api/collab/checks?taskId= → {profile, round, runs}(round 取卡当前轮)。
+async fn checks_get(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(tid) = q.get("taskId").and_then(|s| s.parse::<i64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 taskId"}))).into_response();
+    };
+    let pid = match tokio::task::spawn_blocking(move || crate::collab::tasks::get(tid).map(|c| c.project_id)).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+        Err(e) => return err_resp(e.to_string()),
+    };
+    if let Err(r) = ensure_member(&ctx, pid) { return r; }
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let card = crate::collab::tasks::get(tid)?;
+        let profile = crate::collab::checks::project_profile(card.project_id);
+        let runs = crate::collab::checks::list(tid, card.round)?;
+        Ok(json!({"profile": profile, "round": card.round, "runs": runs}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+// 手动重跑本轮检查(成员即可;复用提交触发的后台线程逻辑)。
+task_op!(checks_rerun, |tid, _ctx, _v, st| {
+    let card = crate::collab::tasks::get(tid)?;
+    if card.branch.is_empty() {
+        return Err("任务尚未开分支,无从检查".into());
+    }
+    spawn_checks(st, &card);
+    ok(json!({"ok": true}))
+});
+
+/// 检查档位设置(code/creative/off)——项目/团队管理者专属。
+async fn checks_profile_set(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let global_owner = role_rank(&ctx.role) >= 3;
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let pid = i_of(&v, "projectId").ok_or("缺 projectId")?;
+        if !crate::collab::projects::can_admin(pid, ctx.user_id, global_owner) {
+            return Err("只有项目/团队管理者能改检查档位".into());
+        }
+        let profile = s_of(&v, "profile");
+        crate::collab::checks::set_project_profile(pid, &profile)?;
+        crate::collab::db::audit(&ctx.username, "checks.profile", &pid.to_string(), &profile);
+        Ok(json!({"ok": true}))
+    })
+    .await;
     unwrap_api(out)
 }
 
@@ -895,7 +970,7 @@ async fn lead_ai_fuse(State(state): State<CollabState>, headers: HeaderMap, Json
 // 最新一轮 verdict=pass;③ 放行闸=owner 亲点,或主 Agent 有 can_merge 位。
 
 /// 项目仓库的本地路径(v1:projects.repo 存主机侧权威仓库路径)。
-fn project_repo_path(project_id: i64) -> Result<std::path::PathBuf, String> {
+pub fn project_repo_path(project_id: i64) -> Result<std::path::PathBuf, String> {
     let p = crate::collab::projects::get(project_id)?;
     if p.repo.trim().is_empty() {
         return Err("项目未配置仓库路径".into());
@@ -997,6 +1072,21 @@ async fn merge_squash_api(State(state): State<CollabState>, headers: HeaderMap, 
         }
         if card.state != "review" {
             return Err("任务不在待验收状态".into());
+        }
+        // 检查闸(GitHub required checks 式):最新一轮检查须全绿。
+        // profile=off 或项目没配仓库(跑不了)不拦;owner 可 force 强推(留痕审计)。
+        // force 只认 can_admin 分支——as_lead 路径不许 force(主 Agent 无权跳检查)。
+        let force = can_admin && !as_lead && v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
+        let profile = crate::collab::checks::project_profile(card.project_id);
+        if profile != "off" && !force {
+            match crate::collab::checks::all_green(tid, card.round) {
+                Ok(true) => {}
+                Ok(false) => return Err("检查闸未过:本轮检查未全绿(或未跑完)。owner 可带 force 强推".into()),
+                Err(_) => {}
+            }
+        }
+        if force {
+            crate::collab::db::audit(&ctx.username, "merge.force", &tid.to_string(), "跳过检查闸强推");
         }
         // 机器闸 + 执行(squash_merge 内部会重跑试算,不干净即拒)。
         let repo = project_repo_path(card.project_id)?;
@@ -1238,6 +1328,10 @@ pub async fn ws_loop(socket: WebSocket, mut rx: broadcast::Receiver<Event>, ctx:
             _ = &mut closed => break,
         }
     }
+    // 读探测任务必须显式收尸:tokio 的 JoinHandle 被 drop 只是「分离」不是「中止」,
+    // 发送侧出错/频道关闭 break 后若不 abort,每断一条 WS 就残留一个永久挂在
+    // receiver.next() 上的任务,7×24 下缓慢泄漏。(对已完成的任务 abort 是无害 no-op。)
+    closed.abort();
 }
 
 /// 桌面 hosting 专用 /ws:走 collab 严格鉴权(会话 token / 全局口令 / 未启用时的
@@ -1293,6 +1387,10 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/collab/task/archive", post(task_archive))
         .route("/api/collab/task/cancel", post(task_cancel))
         .route("/api/collab/activity", get(collab_activity))
+        // 检查工作流(CI-lite):按轮读结果 / 手动重跑 / 项目档位
+        .route("/api/collab/checks", get(checks_get))
+        .route("/api/collab/checks/rerun", post(checks_rerun))
+        .route("/api/collab/checks/profile", post(checks_profile_set))
         // 主 Agent:授权位 / 晨会 / 改派 / 催办 / 模型配置 / AI 拆卡·验收·融合
         .route("/api/collab/lead/grants", get(lead_grants_get).post(lead_grants_set))
         .route("/api/collab/lead/morning", get(lead_morning))
