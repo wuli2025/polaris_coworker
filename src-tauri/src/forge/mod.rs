@@ -8,6 +8,13 @@
 //! 这是 Forge 工程的**第一块落地件**:在写任何重后端之前,先有一个诚实的能力地图,让用户
 //! 一眼看清「我这环境出 PPT/视频走哪条路、要不要补东西」,而不是跑到一半报错。
 
+pub mod capture;     // 工业级化:持久 CDP + 5 档 fallback 链(替 video 的 per-frame CLI)
+pub mod fx_safe;     // 工业级化:动效错误隔离 + spring 闭式解(任务 c §C.2 §C.3)
+pub mod pptx;
+pub mod pptx_native; // 路线 B:spec JSON → 原生可编辑 .pptx(零浏览器,Docker slim 可用)
+pub mod tts;
+pub mod video;
+
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
@@ -366,7 +373,7 @@ pub fn forge_preflight() -> Value {
 
 /// 把一组幻灯图打成 .pptx 的同步内核。server 命令路由(本就在阻塞线程池里)直调这里。
 pub fn build_pptx_sync(images: Vec<String>, out: String) -> Result<Value, String> {
-    crate::forge_pptx::build_pptx(&images, &out)
+    crate::forge::pptx::build_pptx(&images, &out)
 }
 
 /// 把一组幻灯图打成 .pptx(纯 Rust OOXML,替 pptxgenjs)。三平台字节级一致。
@@ -388,7 +395,7 @@ pub fn deck_to_pptx_sync(
     searchable: Option<bool>,
     slides: Option<usize>,
 ) -> Result<Value, String> {
-    crate::forge_pptx::render_deck_to_pptx(
+    crate::forge::pptx::render_deck_to_pptx(
         &deck,
         &out,
         width.unwrap_or(1920),
@@ -427,7 +434,7 @@ pub fn spec_to_pptx_sync(spec: String, out: String) -> Result<Value, String> {
     } else {
         std::fs::read_to_string(&spec).map_err(|e| format!("读 spec 文件 {spec} 失败: {e}"))?
     };
-    crate::forge_pptx_native::build_pptx_from_spec(json.trim_start_matches('\u{feff}'), &out)
+    crate::forge::pptx_native::build_pptx_from_spec(json.trim_start_matches('\u{feff}'), &out)
 }
 
 /// spec JSON → 原生可编辑 .pptx。async + spawn_blocking 防大 spec 冻 UI(与 deck 导出同策略)。
@@ -454,7 +461,7 @@ pub fn deck_to_video_sync(
     transition: Option<f64>,
     motion: Option<bool>,
 ) -> Result<Value, String> {
-    crate::forge_video::render_deck_to_video(
+    crate::forge::video::render_deck_to_video(
         &deck,
         &out,
         seconds_per_slide.unwrap_or(3.0),
@@ -507,7 +514,7 @@ pub fn deck_fx_video_sync(
     height: Option<u32>,
     slide: Option<usize>,
 ) -> Result<Value, String> {
-    crate::forge_video::render_deck_fx_video(
+    crate::forge::video::render_deck_fx_video(
         &deck,
         &out,
         fps.unwrap_or(15),
@@ -545,7 +552,7 @@ pub fn forge_tts_sync(
     voice: Option<String>,
     language_boost: Option<String>,
 ) -> Result<Value, String> {
-    crate::forge_tts::synth(&text, &out, voice.as_deref(), language_boost.as_deref())
+    crate::forge::tts::synth(&text, &out, voice.as_deref(), language_boost.as_deref())
 }
 
 /// 文本 → mp3 配音(MiniMax T2A,纯 Rust)。无 key 时返回明确错误。
@@ -572,7 +579,7 @@ pub fn forge_screenshot(
     height: Option<u32>,
     scale: Option<u32>,
 ) -> Result<Value, String> {
-    crate::forge_pptx::screenshot(
+    crate::forge::pptx::screenshot(
         &url,
         &out,
         width.unwrap_or(1920),

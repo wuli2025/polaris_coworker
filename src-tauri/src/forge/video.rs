@@ -151,7 +151,7 @@ pub fn render_deck_to_video(
     }
     // 视频用 1x(帧分辨率 = 目标 width×height,不膨胀编码量);高清交给分辨率参数控制。
     let (frames, pngs) =
-        crate::forge_pptx::capture_slides(deck, width, height, 1, slides_override)?;
+        crate::forge::pptx::capture_slides(deck, width, height, 1, slides_override)?;
     let n = pngs.len();
 
     // 配音解析:现成音频 > narration 文本走 TTS > 无。
@@ -161,7 +161,7 @@ pub fn render_deck_to_video(
         Some(a)
     } else if let Some(text) = narration.filter(|s| !s.trim().is_empty()) {
         let mp3 = frames.join("narration.mp3");
-        match crate::forge_tts::synth(&text, &mp3.to_string_lossy(), None, None) {
+        match crate::forge::tts::synth(&text, &mp3.to_string_lossy(), None, None) {
             Ok(res) => {
                 // 实际音频路径以返回为准(macOS say 会落 .m4a 而非 .mp3)。
                 let actual = res

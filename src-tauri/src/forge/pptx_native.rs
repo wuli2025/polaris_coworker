@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use zip::write::SimpleFileOptions;
 
-use crate::forge_pptx::{
+use crate::forge::pptx::{
     slide_layout_xml, slide_master_xml, theme_xml, xml_decl, xml_escape, NS_A, NS_CT, NS_P, NS_R,
     NS_REL,
 };
@@ -594,7 +594,7 @@ pub fn build_pptx_from_spec(spec_json: &str, out_path: &str) -> Result<Value, St
     }
     // 原子写:先写 .tmp 再 rename —— 半路失败不毁旧文件;目标被 PowerPoint 占用时给明确提示。
     let tmp_path = format!("{out_path}.tmp");
-    let mut tmp_guard = crate::forge_pptx::TmpGuard(std::path::PathBuf::from(&tmp_path), true);
+    let mut tmp_guard = crate::forge::pptx::TmpGuard(std::path::PathBuf::from(&tmp_path), true);
     let file =
         std::fs::File::create(&tmp_path).map_err(|e| format!("创建 {tmp_path} 失败: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(r["notes_pages"], 1);
         assert_eq!(r["warnings"].as_array().unwrap().len(), 0);
         // 自写校验器吃得下(共用图片版的 part 骨架)。
-        let v = crate::forge_pptx::validate_pptx(&out.to_string_lossy()).unwrap();
+        let v = crate::forge::pptx::validate_pptx(&out.to_string_lossy()).unwrap();
         assert!(v.ok, "校验失败: {:?}", v.errors);
         assert_eq!(v.slides_found, 6);
         // slide1: 真文本(非图片、非隐形),带主题色。
@@ -859,7 +859,7 @@ mod tests {
         let r = build_pptx_from_spec(spec, &out.to_string_lossy()).expect("应成功");
         assert_eq!(r["slides"], 2);
         assert_eq!(r["warnings"].as_array().unwrap().len(), 0);
-        let v = crate::forge_pptx::validate_pptx(&out.to_string_lossy()).unwrap();
+        let v = crate::forge::pptx::validate_pptx(&out.to_string_lossy()).unwrap();
         assert!(v.ok, "校验失败: {:?}", v.errors);
         // stats 页: 卡片 + 强调色大数字。
         let s1 = read_part(&out, "ppt/slides/slide1.xml");
