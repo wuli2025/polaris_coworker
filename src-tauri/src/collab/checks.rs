@@ -21,8 +21,9 @@ const OUTPUT_TAIL: usize = 16 * 1024;
 static RUN_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// 僵尸清理:上一次进程被杀/主机重启时卡在 running 的行,超过 30 分钟判「被中断」,
-/// 否则那张卡的检查永远显示转圈、闸门永远不放行。每次开跑前顺手清一遍(全局)。
-fn sweep_stale_running() {
+/// 否则那张卡的检查永远显示转圈、闸门永远不放行。开跑前 + 合并闸/查询前都清一遍(全局),
+/// 免得「进程崩了没人再触发新检查」的卡片永久卡在 running。
+pub fn sweep_stale_running() {
     if let Ok(conn) = open_db() {
         let _ = conn.execute(
             "UPDATE check_runs SET status='skipped', output='检查被中断(主机重启或进程被杀),请重跑', ended_at=?1
@@ -182,14 +183,17 @@ pub fn run_for_task(
 /// 分支相对 main 的改动文件表(GitHub 语义:只审「这个分支引入了什么」)。
 /// 拿不到(如仓库没有 main)→ None = 回退全树扫描。
 fn changed_files(wt: &Path) -> Option<Vec<String>> {
-    let (ok, out) = run_cmd(wt, &["diff", "--name-only", "main...HEAD"], STEP_TIMEOUT).ok()?;
+    // 必须用 -z(NUL 分隔、原始路径)!默认 `--name-only` 会把非 ASCII 路径 C-quote 成
+    // "\347\247\230.txt" 这种转义串,wt.join() 找不到真实文件 → 中文名文件里的密钥/大文件
+    // 全逃过扫描(独立审计实测的高危绕过)。-z 输出 UTF-8 原始字节,中文名原样保留。
+    let (ok, out) = run_cmd(wt, &["diff", "-z", "--name-only", "main...HEAD"], STEP_TIMEOUT).ok()?;
     if !ok {
         return None;
     }
     Some(
-        out.lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
+        out.split('\0')
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
             .collect(),
     )
 }
@@ -267,10 +271,11 @@ fn shell_step(cwd: &Path, prog: &str, args: &[&str]) -> (String, String) {
     match run_prog(cwd, prog, args, STEP_TIMEOUT) {
         Ok((true, out)) => ("pass".into(), tail(&out)),
         Ok((false, out)) => ("fail".into(), tail(&out)),
-        Err(e) if e.contains("not found") || e.contains("找不到") || e.contains("cannot find") => {
-            ("skipped".into(), format!("工具缺失,跳过: {e}"))
-        }
-        Err(e) if e.contains("timeout") => ("skipped".into(), format!("超时({STEP_TIMEOUT}s),跳过判定: {e}")),
+        // 超时 = fail,不是 skipped!工具已 tool_present 预检存在,却跑不完 —— 恶意/坏分支可
+        // 把 `npm build` 改成死循环,超时若判 skipped 会被 all_green 当绿放行(实测绕过)。
+        // 安全闸的默认必须是「拦」,真需要超长构建的项目走 owner force。
+        Err(e) if e.contains("timeout") => ("fail".into(), format!("超时({STEP_TIMEOUT}s)未跑完,判失败(防卡死绕过)")),
+        // 走到这里的 Err 基本是 spawn 失败(tool_present 已挡住缺失);属环境瞬时问题,跳过不误伤。
         Err(e) => ("skipped".into(), format!("无法执行,跳过: {e}")),
     }
 }
@@ -397,8 +402,13 @@ fn scan_targets(wt: &Path, diff: Option<&[String]>) -> Vec<(std::path::PathBuf, 
     out
 }
 
+/// 密钥扫描单文件上限:16MB。原来 2MB 太小 —— 密钥可藏进 3MB config.json 逃扫(实测)。
+/// 16-50MB 的残余缝隙由大文件闸兜(>50MB 直接拦);对 16MB 内的文件全扫。
+const SECRET_SCAN_CAP: u64 = 16 * 1024 * 1024;
+
 /// 密钥扫描:轻量正则内置(开源 gitleaks 的常见模式子集,不引外部依赖)。
-/// 只扫文本文件、单文件≤2MB;命中即 fail 并指出文件。diff 模式只审分支改动。
+/// ≤16MB 的文件全扫;非 UTF-8 也按 lossy 转 ASCII 扫(密钥都是 ASCII token,一个坏字节
+/// 不该让整个 .env 逃扫)。diff 模式只审分支改动。命中即 fail 并指出文件。
 fn secret_scan(wt: &Path, diff: Option<&[String]>) -> (String, String) {
     let pats: &[(&str, &str)] = &[
         ("AWS AccessKey", r"AKIA[0-9A-Z]{16}"),
@@ -411,10 +421,13 @@ fn secret_scan(wt: &Path, diff: Option<&[String]>) -> (String, String) {
     let mut hits = Vec::new();
     'files: for (path, rel) in scan_targets(wt, diff) {
         let Ok(md) = path.metadata() else { continue };
-        if md.len() > 2 * 1024 * 1024 {
+        if md.len() > SECRET_SCAN_CAP {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else { continue }; // 非 UTF-8(二进制)自动跳过
+        // 读字节后 lossy 转字符串:非 UTF-8 文件(.env 混一个坏字节)不再整体跳过,
+        // ASCII 密钥 token 在 lossy 转换后原样保留,仍能被正则命中。
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let text = String::from_utf8_lossy(&bytes);
         for (i, re) in res.iter().enumerate() {
             if re.is_match(&text) {
                 hits.push(format!("{} → {}", pats[i].0, rel));
@@ -467,6 +480,25 @@ mod tests {
 
     /// code 档:密钥扫描抓到假 AWS key=fail,大文件闸 pass,all_green=false;
     /// creative 档:只剩密钥扫描+大文件闸两项。
+    /// 超时机制:短超时跑一个会睡很久的命令,应在 deadline 附近返回 Err(timeout),
+    /// 且不会挂到 sleep 结束(证明 kill 生效)。shell_step 会把这个 Err 映射成 fail。
+    #[test]
+    fn run_prog_kills_on_timeout() {
+        let dir = std::env::temp_dir();
+        let t0 = std::time::Instant::now();
+        // 跨平台睡 30s;超时设 2s。
+        let r = if cfg!(windows) {
+            // ping -n 31 ≈ 睡 30s(比 timeout.exe 在无 TTY 下更稳)
+            super::run_prog(&dir, "ping", &["-n", "31", "127.0.0.1"], 2)
+        } else {
+            super::run_prog(&dir, "sleep", &["30"], 2)
+        };
+        let elapsed = t0.elapsed().as_secs();
+        assert!(r.is_err(), "应超时返回 Err,实际 {r:?}");
+        assert!(r.unwrap_err().contains("timeout"), "Err 应含 timeout");
+        assert!(elapsed < 15, "应在 ~2s 超时附近返回,而非等满 30s(实际 {elapsed}s)");
+    }
+
     #[test]
     fn checks_run_for_task_profiles() {
         let _g = TEST_LOCK.lock().unwrap();

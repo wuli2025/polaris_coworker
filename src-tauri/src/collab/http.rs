@@ -734,6 +734,7 @@ async fn checks_get(
     };
     if let Err(r) = ensure_member(&ctx, pid) { return r; }
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        crate::collab::checks::sweep_stale_running(); // 崩溃残留的 running 行超时清掉,前端不永久转圈
         let card = crate::collab::tasks::get(tid)?;
         let profile = crate::collab::checks::project_profile(card.project_id);
         // 用检查实际落库的最大轮次,而非 card.round(review 通过会 +1 令其漂移;见
@@ -1085,6 +1086,8 @@ async fn merge_squash_api(State(state): State<CollabState>, headers: HeaderMap, 
         let force = can_admin && !as_lead && v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
         let profile = crate::collab::checks::project_profile(card.project_id);
         if profile != "off" && !force {
+            // 先扫僵尸 running(进程崩过留下的),否则那张卡永远卡在「未跑完」合不了。
+            crate::collab::checks::sweep_stale_running();
             // 按「检查实际落库的最大轮次」判定,而非 card.round —— review 通过会 +1 使 card.round
             // 漂到检查记录之上(见 checks::latest_round 注释)。None=从没跑过检查 → 视为未过。
             let crnd = match crate::collab::checks::latest_round(tid) {
