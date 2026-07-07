@@ -87,6 +87,21 @@ pub fn all_green(task_id: i64, round: i64) -> Result<bool, String> {
     Ok(runs.iter().all(|r| r.status == "pass" || r.status == "skipped"))
 }
 
+/// 最近一次跑检查的轮次(=最后一次 submit 的 round)。**关键**:review 通过会把
+/// tasks.round +1(见 tasks::review),使 card.round 漂移到检查记录之上;合并闸/前端
+/// 若按 card.round 查就会落空(空=未全绿)→ 干净卡永远合不进。故一律按「检查实际落库
+/// 的最大轮次」判定,天然跨 reject→重提 周期正确(旧轮记录留着,max 恒为最后一次提交)。
+pub fn latest_round(task_id: i64) -> Option<i64> {
+    let conn = open_db().ok()?;
+    conn.query_row(
+        "SELECT MAX(round) FROM check_runs WHERE task_id=?1",
+        params![task_id],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
 /// 该轮检查针对的分支提交(SHA)。合并闸用它对比当前分支头:检查过了之后又推
 /// 新提交(GitHub 是按 commit 查,我们按轮查,这里补上防陈旧)→ 要求重跑。
 pub fn round_sha(task_id: i64, round: i64) -> Option<String> {
@@ -226,8 +241,29 @@ fn step(task_id: i64, round: i64, name: &str, emit: &dyn Fn(), f: impl FnOnce() 
     emit();
 }
 
+/// 工具是否可用。Windows 走 `where`(定位 .cmd/.exe,locale 无关、精确);其它平台交给
+/// run_prog 的 spawn 失败路径识别(Command::new 直调,缺失即 Err)。
+/// 为什么不靠退出码/输出串:实测 `cmd /C <缺失>` 退 1(非 9009),且 not-found 文案随系统
+/// 语言变化;而真失败(如 rust "cannot find value")也退 1 —— 靠串匹配会把真失败误判成
+/// 跳过=假放行(比误伤更危险)。`where` 是唯一可靠信号。
+fn tool_present(prog: &str) -> bool {
+    if !cfg!(windows) {
+        return true; // Unix:run_prog 直调 Command::new(prog),缺失走 spawn Err 分支
+    }
+    Command::new("where")
+        .arg(prog)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// (status, output)。工具不存在 → skipped。
 fn shell_step(cwd: &Path, prog: &str, args: &[&str]) -> (String, String) {
+    if !tool_present(prog) {
+        return ("skipped".into(), format!("工具缺失(未安装 {prog}),跳过判定"));
+    }
     match run_prog(cwd, prog, args, STEP_TIMEOUT) {
         Ok((true, out)) => ("pass".into(), tail(&out)),
         Ok((false, out)) => ("fail".into(), tail(&out)),
@@ -265,7 +301,9 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<St
 
 /// 跨平台起进程 + 超时 kill。Windows 上 npm/npx/ruff 多为 .cmd/.exe,统一走 cmd /C。
 fn run_prog(cwd: &Path, prog: &str, args: &[&str], timeout: u64) -> Result<(bool, String), String> {
-    let mut cmd = if cfg!(windows) && prog != "git" && prog != "cargo" {
+    // Windows 上 npm/npx/ruff 多为 .cmd,须走 cmd /C 才找得到;git/cargo 是真 .exe 直调。
+    let used_cmd = cfg!(windows) && prog != "git" && prog != "cargo";
+    let mut cmd = if used_cmd {
         let mut c = Command::new("cmd");
         c.arg("/C").arg(prog).args(args);
         c
@@ -290,6 +328,12 @@ fn run_prog(cwd: &Path, prog: &str, args: &[&str], timeout: u64) -> Result<(bool
             Some(status) => {
                 let mut out = out_h.join().unwrap_or_default();
                 out.push_str(&err_h.join().unwrap_or_default());
+                // cmd /C 找不到命令 → 退出码 9009(命令不存在),判「工具缺失」而非 fail。
+                // **只认 9009 这个精确码**,绝不匹配输出串:真 Rust 编译错误常含
+                // "cannot find value/function",按串匹配会把真失败误判成跳过 → 假放行(更危险)。
+                if used_cmd && status.code() == Some(9009) {
+                    return Err(format!("{prog} not found (exit 9009)"));
+                }
                 return Ok((status.success(), out));
             }
             None => {

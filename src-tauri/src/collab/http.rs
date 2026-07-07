@@ -736,8 +736,11 @@ async fn checks_get(
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let card = crate::collab::tasks::get(tid)?;
         let profile = crate::collab::checks::project_profile(card.project_id);
-        let runs = crate::collab::checks::list(tid, card.round)?;
-        Ok(json!({"profile": profile, "round": card.round, "runs": runs}))
+        // 用检查实际落库的最大轮次,而非 card.round(review 通过会 +1 令其漂移;见
+        // checks::latest_round)。没跑过检查则回落 card.round(runs 为空,前端不显示徽章)。
+        let rnd = crate::collab::checks::latest_round(tid).unwrap_or(card.round);
+        let runs = crate::collab::checks::list(tid, rnd)?;
+        Ok(json!({"profile": profile, "round": rnd, "runs": runs}))
     })
     .await;
     unwrap_api(out)
@@ -1082,10 +1085,16 @@ async fn merge_squash_api(State(state): State<CollabState>, headers: HeaderMap, 
         let force = can_admin && !as_lead && v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
         let profile = crate::collab::checks::project_profile(card.project_id);
         if profile != "off" && !force {
-            match crate::collab::checks::all_green(tid, card.round) {
+            // 按「检查实际落库的最大轮次」判定,而非 card.round —— review 通过会 +1 使 card.round
+            // 漂到检查记录之上(见 checks::latest_round 注释)。None=从没跑过检查 → 视为未过。
+            let crnd = match crate::collab::checks::latest_round(tid) {
+                Some(r) => r,
+                None => return Err("检查闸未过:尚未跑过检查,请提交送验触发检查".into()),
+            };
+            match crate::collab::checks::all_green(tid, crnd) {
                 Ok(true) => {
                     // SHA 陈旧比对:记录为空(老数据)放行兼容;比对不上要求重跑。
-                    if let Some(checked_sha) = crate::collab::checks::round_sha(tid, card.round) {
+                    if let Some(checked_sha) = crate::collab::checks::round_sha(tid, crnd) {
                         let head = std::process::Command::new("git")
                             .arg("-C").arg(&repo)
                             .args(["rev-parse", &card.branch])
