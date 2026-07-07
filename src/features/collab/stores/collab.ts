@@ -19,6 +19,7 @@ import {
   parseShareCode,
   probeHost,
   type ActivityItem,
+  type CheckRun,
   type CollabProject,
   type CollabTeam,
   type CollabUser,
@@ -237,6 +238,8 @@ export const useCollabStore = defineStore("collab", () => {
     members.value = [];
     teams.value = [];
     teamMembers.value = [];
+    checksByTask.value = {};
+    checkProfile.value = "";
     currentProjectId.value = null;
     teardownWs();
   }
@@ -379,7 +382,31 @@ export const useCollabStore = defineStore("collab", () => {
 
   async function selectProject(id: number) {
     currentProjectId.value = id;
+    // 检查缓存/档位是按项目的,切项目即失效(懒加载,打开抽屉/收到事件再拉)
+    checksByTask.value = {};
+    checkProfile.value = "";
     await Promise.all([refreshTasks(), refreshMembers(), refreshActivity()]);
+  }
+
+  // ── 检查工作流(CI-lite status checks) ──
+  /** 卡 id → 本轮检查结果(懒加载:抽屉打开/collab:check 事件才拉) */
+  const checksByTask = ref<Record<number, CheckRun[]>>({});
+  /** 当前项目检查档位(code/creative/off;空 = 尚未从任何 checks 响应取到) */
+  const checkProfile = ref<string>("");
+  async function refreshChecks(taskId: number) {
+    try {
+      const r = await collabApi.checks(taskId);
+      checksByTask.value = { ...checksByTask.value, [taskId]: r.runs };
+      if (r.profile) checkProfile.value = r.profile;
+    } catch {
+      /* 主机旧版无此端点/网络抖动 → 静默,不打扰看板 */
+    }
+  }
+  async function setCheckProfile(profile: string) {
+    const pid = currentProjectId.value;
+    if (!pid) throw new Error("请先选择项目");
+    await collabApi.checksSetProfile(pid, profile);
+    checkProfile.value = profile;
   }
 
   // ── 项目动态时间线(项目主页概览 tab) ──
@@ -453,14 +480,22 @@ export const useCollabStore = defineStore("collab", () => {
   let unTask: (() => void) | null = null;
   let unEsc: (() => void) | null = null;
   let unMorning: (() => void) | null = null;
+  let unCheck: (() => void) | null = null;
   let directWs: WebSocket | null = null;
   let directWsTimer: ReturnType<typeof setTimeout> | null = null;
   let subscribed = false;
 
+  /** collab:task 去抖定时器 —— 服务端 AI 拆卡是紧循环逐卡 emit,N 张卡若不去抖
+   *  就是 N×(refreshTasks+refreshActivity) 共 2N 次全量网络往返打向主机。 */
+  let taskRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   function onTaskEvent() {
-    // 卡片变更 → 拉一次当前项目的最新看板(轻请求,合并去抖不必要)+ 动态时间线
-    void refreshTasks();
-    void refreshActivity();
+    // 卡片变更 → 300ms trailing 去抖:窗口内多条事件只在最后重拉一次看板 + 动态时间线
+    if (taskRefreshTimer) clearTimeout(taskRefreshTimer);
+    taskRefreshTimer = setTimeout(() => {
+      taskRefreshTimer = null;
+      void refreshTasks();
+      void refreshActivity();
+    }, 300);
   }
   function onMorning(p: unknown) {
     const r = p as MorningReport | null;
@@ -472,6 +507,11 @@ export const useCollabStore = defineStore("collab", () => {
     const id = currentProjectId.value;
     if (!id) return;
     morning.value = await collabApi.morning(id);
+  }
+  function onCheckEvent(p: unknown) {
+    // 检查进度/结果推送({taskId, round})→ 只刷这张卡的检查数据
+    const tid = (p as { taskId?: number } | null)?.taskId;
+    if (typeof tid === "number") void refreshChecks(tid);
   }
   function onEscalate(p: unknown) {
     const msg =
@@ -491,6 +531,7 @@ export const useCollabStore = defineStore("collab", () => {
     unTask = await listen("collab:task", onTaskEvent);
     unEsc = await listen("collab:escalate", onEscalate);
     unMorning = await listen("collab:morning", onMorning);
+    unCheck = await listen("collab:check", onCheckEvent);
   }
 
   /** 桌面模式直连远端主机 /ws(带 token),断线 2s 自动重连 */
@@ -513,6 +554,7 @@ export const useCollabStore = defineStore("collab", () => {
           if (topic === "collab:task") onTaskEvent();
           else if (topic === "collab:escalate") onEscalate(payload);
           else if (topic === "collab:morning") onMorning(payload);
+          else if (topic === "collab:check") onCheckEvent(payload);
         } catch {
           /* 忽略坏帧 */
         }
@@ -541,7 +583,13 @@ export const useCollabStore = defineStore("collab", () => {
     unTask?.();
     unEsc?.();
     unMorning?.();
-    unTask = unEsc = unMorning = null;
+    unCheck?.();
+    unTask = unEsc = unMorning = unCheck = null;
+    // 登出/卸载时清掉挂起的去抖定时器,防 teardown 后仍触发一轮无主刷新
+    if (taskRefreshTimer) {
+      clearTimeout(taskRefreshTimer);
+      taskRefreshTimer = null;
+    }
     if (directWsTimer) clearTimeout(directWsTimer);
     try {
       directWs?.close();
@@ -604,6 +652,11 @@ export const useCollabStore = defineStore("collab", () => {
     refreshTasks,
     activity,
     refreshActivity,
+    // 检查工作流
+    checksByTask,
+    checkProfile,
+    refreshChecks,
+    setCheckProfile,
     createTask,
     claim,
     submit,

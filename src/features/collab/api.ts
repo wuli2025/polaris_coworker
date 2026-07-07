@@ -110,6 +110,22 @@ export interface ReviewComment {
   note: string;
 }
 
+/** 检查工作流(CI-lite,GitHub status checks 式)单项结果 */
+export interface CheckRun {
+  name: string;
+  status: "pass" | "fail" | "skipped" | "running";
+  output: string;
+  started_at: number;
+  ended_at: number;
+}
+
+/** GET /api/collab/checks 响应:项目档位 + 该卡当前轮次 + 各项结果 */
+export interface ChecksResp {
+  profile: string;
+  round: number;
+  runs: CheckRun[];
+}
+
 export interface Ticket {
   code: string;
   role: string;
@@ -498,6 +514,21 @@ export const collabApi = {
     return get(`/api/collab/task/rounds?taskId=${String(taskId)}`);
   },
 
+  // ── 检查工作流(CI-lite:提交送验自动跑,结果亮在卡上) ──
+  checks(taskId: number): Promise<ChecksResp> {
+    return get(`/api/collab/checks?taskId=${String(taskId)}`);
+  },
+  checksRerun(taskId: number): Promise<{ ok: boolean }> {
+    return post("/api/collab/checks/rerun", { taskId });
+  },
+  /** 设项目检查档位 code(全套)/creative(视频·游戏放宽)/off(管理者) */
+  checksSetProfile(
+    projectId: number,
+    profile: string
+  ): Promise<{ ok: boolean }> {
+    return post("/api/collab/checks/profile", { projectId, profile });
+  },
+
   // ── 合并闸门(冲突裁决台) ──
   mergeTrial(taskId: number): Promise<MergeTrial> {
     return post("/api/collab/merge/trial", { taskId });
@@ -509,10 +540,15 @@ export const collabApi = {
   ): Promise<{ ok: boolean; commit: string }> {
     return post("/api/collab/merge/resolve", { taskId, resolutions });
   },
+  /** squash 放行;force=true 跳过检查闸强推(仅 owner,服务端留审计痕) */
   mergeSquash(
-    taskId: number
+    taskId: number,
+    force = false
   ): Promise<{ ok: boolean; commit: string; card: TaskCard }> {
-    return post("/api/collab/merge/squash", { taskId });
+    return post(
+      "/api/collab/merge/squash",
+      force ? { taskId, force: true } : { taskId }
+    );
   },
   mergeRevert(
     projectId: number,

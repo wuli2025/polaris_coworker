@@ -5,7 +5,7 @@
  * - 任务:直嵌 TaskBoard(无 props,纯读 collab store)
  * - 讨论:绑定的本地 conv 项目下的对话(首次「开新讨论」自动建同名项目并绑定,git clone 式)
  */
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import {
   ArrowLeft,
   CircleDot,
@@ -15,6 +15,7 @@ import {
   LoaderCircle,
   MessageSquarePlus,
   MessagesSquare,
+  ShieldCheck,
   Users,
 } from "@lucide/vue";
 import { useAppStore } from "../../stores/app";
@@ -53,6 +54,42 @@ const stat = computed(() => {
   for (const t of collab.tasks) by[t.state] = (by[t.state] ?? 0) + 1;
   return by;
 });
+
+// ── 检查档位(CI-lite:code 全套 / creative 放宽 / off 关闭) ──
+const PROFILE_OPTS: { value: string; label: string }[] = [
+  { value: "code", label: "代码(全套)" },
+  { value: "creative", label: "创作(视频·游戏,放宽)" },
+  { value: "off", label: "关闭" },
+];
+const profileLabel = computed(
+  () => PROFILE_OPTS.find((o) => o.value === collab.checkProfile)?.label ?? "—"
+);
+const profileBusy = ref(false);
+async function changeProfile(e: Event) {
+  const el = e.target as HTMLSelectElement;
+  const v = el.value;
+  if (!v || v === collab.checkProfile) return;
+  profileBusy.value = true;
+  try {
+    await collab.setCheckProfile(v);
+    toast.info(`检查档位已改为「${PROFILE_OPTS.find((o) => o.value === v)?.label ?? v}」`);
+  } catch (err) {
+    toast.error((err as Error).message);
+    el.value = collab.checkProfile || ""; // 失败回弹到原值
+  } finally {
+    profileBusy.value = false;
+  }
+}
+// 档位初值:GET /checks 要 taskId,又不想加后端接口 —— 项目里有卡就借第一张卡的
+// checks 响应把 profile 顺带带回来(懒且只在没值时发一次;没卡就显示「—」)。
+watch(
+  () => [collab.currentProjectId, collab.tasks.length] as const,
+  () => {
+    const first = collab.tasks[0];
+    if (!collab.checkProfile && first) void collab.refreshChecks(first.id);
+  },
+  { immediate: true }
+);
 
 // ── 讨论(绑定的本地项目) ──
 const bound = computed(() =>
@@ -198,6 +235,28 @@ onMounted(() => {
             <span v-if="!collab.members.length" class="ph-dim">暂无成员</span>
           </div>
         </section>
+
+        <section class="ov-sec">
+          <h3><ShieldCheck :size="14" /> 检查档位</h3>
+          <div class="ov-profile">
+            <select
+              v-if="collab.canManage"
+              class="ov-sel"
+              :value="collab.checkProfile || ''"
+              :disabled="profileBusy"
+              @change="changeProfile"
+            >
+              <option value="" disabled>—(尚未加载)</option>
+              <option v-for="o in PROFILE_OPTS" :key="o.value" :value="o.value">
+                {{ o.label }}
+              </option>
+            </select>
+            <span v-else class="ov-profile-ro">{{ profileLabel }}</span>
+            <p class="ph-dim">
+              提交送验时自动在临时 worktree 跑检查;创作档只保留密钥扫描与 500MB 大文件闸,关闭则不跑不拦。
+            </p>
+          </div>
+        </section>
       </div>
 
       <!-- ── 任务(直嵌看板) ── -->
@@ -308,6 +367,19 @@ onMounted(() => {
 .feed-text { flex: 1; min-width: 0; }
 .feed-text em { font-style: normal; color: var(--ink); }
 .feed-time { font-size: 11px; color: var(--dim); white-space: nowrap; }
+
+.ov-profile { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.ov-sel {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); color: var(--ink);
+  font-size: 12.5px; padding: 6px 10px; cursor: pointer;
+}
+.ov-sel:disabled { opacity: 0.6; cursor: default; }
+.ov-profile-ro {
+  font-size: 12.5px; color: var(--text);
+  border: 1px solid var(--border-soft); border-radius: 8px;
+  padding: 5px 11px; background: var(--panel);
+}
 
 .ov-members { display: flex; flex-wrap: wrap; gap: 8px; }
 .ov-chip {
