@@ -187,6 +187,20 @@ async fn collab_bootstrap(Json(v): Json<Value>) -> Response {
         }
         let u = crate::collab::auth::create_user(&s_of(&v, "username"), &s_of(&v, "password"), "owner", &s_of(&v, "displayName"))?;
         let (_, token) = crate::collab::auth::login(&u.username, &s_of(&v, "password"), &s_of(&v, "deviceId"))?;
+        // 「把这台电脑设为主机」流程:主机自己的前端在 bootstrap 时自报 hostSelf,
+        // 顺手把本机登记进设备白名单并落 meta,设备页据此点亮「主机」徽标。
+        // (NAS/远程 bootstrap 不带 hostSelf → 行为与旧版完全一致。)
+        if v.get("hostSelf").and_then(|x| x.as_bool()).unwrap_or(false) {
+            let node = s_of(&v, "deviceId");
+            if !node.is_empty() {
+                let name = std::env::var("COMPUTERNAME")
+                    .or_else(|_| std::env::var("HOSTNAME"))
+                    .map(|h| format!("{h}(主机)"))
+                    .unwrap_or_else(|_| "主机".into());
+                let _ = crate::collab::identity::add_device(u.id, &name, &node);
+                let _ = crate::collab::db::meta_set("host_node_id", &node);
+            }
+        }
         Ok(json!({"user": u, "token": token}))
     })
     .await;
@@ -265,7 +279,24 @@ async fn collab_user_disable(State(state): State<CollabState>, headers: HeaderMa
 async fn collab_devices(State(state): State<CollabState>, headers: HeaderMap) -> Response {
     let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
     if role_rank(&ctx.role) < 3 { return forbid(); }
-    let out = tokio::task::spawn_blocking(|| crate::collab::identity::list_devices().and_then(ok)).await;
+    let out = tokio::task::spawn_blocking(|| -> Result<Value, String> {
+        // 附 is_host:node_id 命中 meta.host_node_id 的那台就是主机(设备页徽标)。
+        let host_node = crate::collab::db::meta_get("host_node_id").unwrap_or_default();
+        let list = crate::collab::identity::list_devices()?;
+        let out: Vec<Value> = list
+            .into_iter()
+            .map(|d| {
+                let is_host = !host_node.is_empty() && d.node_id == host_node;
+                let mut j = serde_json::to_value(&d).unwrap_or_else(|_| json!({}));
+                if is_host {
+                    j["is_host"] = json!(true);
+                }
+                j
+            })
+            .collect();
+        ok(out)
+    })
+    .await;
     unwrap_api(out)
 }
 
