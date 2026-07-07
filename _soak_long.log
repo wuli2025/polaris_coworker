@@ -1,1 +1,0 @@
-{"concurrency": 20, "wall_s": 360.4, "requests": 30950, "ok": 30950, "err": 0, "zero_hits": 0, "qps": 85.9, "lat_p50": 129.8, "lat_p95": 701.8, "lat_p99": 1051.0, "lat_max": 1918.7, "errs": []}

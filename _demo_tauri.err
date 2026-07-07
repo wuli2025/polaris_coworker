@@ -1,1759 +1,0 @@
-     Running BeforeDevCommand (`npm run dev`)
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-        Info Watching D:\polaris\polaris-app\src-tauri for changes...
-        Info Watching D:\polaris\polaris-app\src-tauri\crates\polaris-core for changes...
-        Info Watching D:\polaris\polaris-app\src-tauri\crates\forge-codec for changes...
-        Info Watching D:\polaris\polaris-app\src-tauri\crates\polaris-sandbox for changes...
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[96m    Building[0m [=======================> ] 662/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\monograph-serif.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[96m    Building[0m [=======================> ] 662/666: polaris…[1m[96m    Building[0m [=======================> ] 663/666: polaris…[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\terminal-mono.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-        Info File src-tauri\src\templates\experts\frontend\frontend-engineer.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\vitrine-photo.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\experts\frontend\frontend-engineer.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\void-luxe.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\glass-frost.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\punk-broadside.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[92m    Blocking[0m waiting for file lock on artifact directory
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\catalogue-quiet.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\parchment-lab.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\sticker-riso.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\observatory-deep.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\observatory-deep.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\aurora-sweep.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\salon-hang.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\aurora-sweep.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\noir-runway.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\arcade-phosphor.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\quiet-luxury.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m: `polaris-app` (lib) generated 8 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
-[1m[96m    Building[0m [=======================> ] 665/666: polaris…                                                            [1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 51.09s
-[1m[92m     Running[0m `target\debug\polaris-app.exe`
-        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero\INDEX.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-        Info File src-tauri\src\templates\skills\polaris-deck-studio\designers-refero changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[93mwarning[0m: `polaris-app` (lib) generated 8 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
-[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 0.86s
-[1m[92m     Running[0m `target\debug\polaris-app.exe`
-        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[93mwarning[0m: `polaris-app` (lib) generated 8 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
-[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 1.67s
-[1m[92m     Running[0m `target\debug\polaris-app.exe`
-        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[93mwarning[0m: `polaris-app` (lib) generated 8 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
-[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 0.79s
-[1m[92m     Running[0m `target\debug\polaris-app.exe`
-        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[93mwarning[0m: `polaris-app` (lib) generated 8 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
-[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 0.78s
-[1m[92m     Running[0m `target\debug\polaris-app.exe`
-        Info File src-tauri\src\collab\db.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\collab\db.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m: `polaris-app` (lib) generated 8 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
-[1m[96m    Building[0m [=======================> ] 665/666: polaris…                                                            [1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 35.23s
-[1m[92m     Running[0m `target\debug\polaris-app.exe`
-        Info File src-tauri\src\collab\teams.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-        Info File src-tauri\src\collab\mod.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\collab\projects.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\collab\projects.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\collab\projects.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\server.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m: `polaris-app` (lib) generated 8 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
-[1m[96m    Building[0m [=======================> ] 665/666: polaris…                                                            [1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 46.33s
-[1m[92m     Running[0m `target\debug\polaris-app.exe`
-        Info File src-tauri\src\expert.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[92m    Blocking[0m waiting for file lock on artifact directory
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…        Info File src-tauri\src\expert.rs changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m: `polaris-app` (lib) generated 8 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
-[1m[96m    Building[0m [=======================> ] 665/666: polaris…                                                            [1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 24.59s
-[1m[92m     Running[0m `target\debug\polaris-app.exe`
-        Info File src-tauri\src\templates\experts\security\security-auditor.md changed. Rebuilding application...
-     Running DevCommand (`cargo  run --no-default-features --features desktop --color always --`)
-[1m[93mwarning[0m[1m[97m: unused variable: `cfg`[0m
-  [1m[96m--> [0mcrates\forge-codec\src\encoder.rs:52:16
-   [1m[96m|[0m
-[1m[96m52[0m [1m[96m|[0m     pub fn new(cfg: EncodeConfig) -> Result<Self> {
-   [1m[96m|[0m                [1m[93m^^^[0m [1m[93mhelp: if this is intentional, prefix it with an underscore: `_cfg`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-[1m[93mwarning[0m: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
-[1m[92m   Compiling[0m polaris-app v1.7.1 (D:\polaris\polaris-app\src-tauri)
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\fable\retrieve.rs:1254:9
-     [1m[96m|[0m
-[1m[96m1254[0m [1m[96m|[0m     let mut push = |s: &str, out: &mut Vec<String>| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-     [1m[96m|[0m
-     [1m[96m= [0m[1m[97mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable does not need to be mutable[0m
-    [1m[96m--> [0msrc\kb.rs:2974:9
-     [1m[96m|[0m
-[1m[96m2974[0m [1m[96m|[0m     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
-     [1m[96m|[0m         [1m[96m----[0m[1m[93m^^^^[0m
-     [1m[96m|[0m         [1m[96m|[0m
-     [1m[96m|[0m         [1m[96mhelp: remove this `mut`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: function `synth_windows_sapi` is never used[0m
-   [1m[96m--> [0msrc\forge_tts.rs:257:4
-    [1m[96m|[0m
-[1m[96m257[0m [1m[96m|[0m fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
-    [1m[96m|[0m    [1m[93m^^^^^^^^^^^^^^^^^^[0m
-    [1m[96m|[0m
-    [1m[96m= [0m[1m[97mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m[1m[97m: variable `remoteUrl` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:29
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                             [1m[93m^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `remote_url`[0m
-   [1m[96m|[0m
-   [1m[96m= [0m[1m[97mnote[0m: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
-
-[1m[93mwarning[0m[1m[97m: variable `sparseDirs` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:11:62
-   [1m[96m|[0m
-[1m[96m11[0m [1m[96m|[0m pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
-   [1m[96m|[0m                                                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `sparse_dirs`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `idemKey` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:42:45
-   [1m[96m|[0m
-[1m[96m42[0m [1m[96m|[0m pub fn collab_outbox_mark_sent(dir: String, idemKey: String) -> Result<(), String> {
-   [1m[96m|[0m                                             [1m[93m^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `idem_key`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `hostNodeId` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:30
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                              [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `host_node_id`[0m
-
-[1m[93mwarning[0m[1m[97m: variable `listenPort` should have a snake case name[0m
-  [1m[96m--> [0msrc\collab\commands.rs:59:50
-   [1m[96m|[0m
-[1m[96m59[0m [1m[96m|[0m pub fn collab_tunnel_connect(hostNodeId: String, listenPort: u16) -> Result<(), String> {
-   [1m[96m|[0m                                                  [1m[93m^^^^^^^^^^[0m [1m[93mhelp: convert the identifier to snake case: `listen_port`[0m
-
-[1m[96m    Building[0m [=======================> ] 664/666: polaris…                                                            [1m[93mwarning[0m: `polaris-app` (lib) generated 8 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
-[1m[96m    Building[0m [=======================> ] 665/666: polaris…                                                            [1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 26.02s
-[1m[92m     Running[0m `target\debug\polaris-app.exe`

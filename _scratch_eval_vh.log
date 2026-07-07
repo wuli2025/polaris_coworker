@@ -1,4 +1,0 @@
-start 2026-06-15T17:12:24.3020912+08:00
-vector : exit=0 evaluated=200 recall@10=64.5% MRR=0.237 wall=56.1s litHit=13/80 semHit=116/120
-hybrid : exit=0 evaluated=200 recall@10=99% MRR=0.602 wall=153.5s litHit=80/80 semHit=118/120
-done 2026-06-15T17:15:54.0663913+08:00
