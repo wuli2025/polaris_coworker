@@ -1,0 +1,23 @@
+//! 多人协作模块族（v8 方案第六节）。
+//!
+//! 铁律:主 Agent 裁决内容,永不裁决权限——权限判断全部走 db.rs 的确定性授权表。
+pub mod account_store;
+#[cfg(feature = "desktop")]
+pub mod commands;
+/// 协作 HTTP 路由(axum,双壳共用):server 壳 merge 它;桌面 hosting 内嵌它。
+#[cfg(feature = "collab-host")]
+pub mod http;
+pub mod auth;
+pub mod db;
+pub mod gitea;
+pub mod identity;
+pub mod lead;
+pub mod lead_ai;
+pub mod mergectl;
+pub mod projects;
+pub mod tasks;
+pub mod teams;
+pub mod workset;
+// iroh 组网隧道:依赖树大,只随 collab-net feature 编译。
+#[cfg(feature = "collab-net")]
+pub mod tunnel;

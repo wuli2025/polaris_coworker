@@ -82,6 +82,13 @@ getrandom = "0.2"
 # 专家头像:base64 编码 PNG → data URL，供前端 <img src=""> 直接使用。
 # 纯 Rust 实现，三平台同构，无系统依赖。
 base64 = "0.22"
+# 多人协作(collab):账号密码哈希。argon2id PHC 串,纯 Rust,三平台同构。
+argon2 = "0.5"
+# 多人协作:账号镜像加密(云端双存,零知识——云端只见密文,解密钥=host.key 派生,永不出主机)。
+chacha20poly1305 = "0.10"
+# 多人协作组网隧道(v8 方案):iroh QUIC 打洞 + relay 兜底。编译极重,务必保持
+# optional,只随 collab-net feature 进来,永不进 default。
+iroh = { version = "1", optional = true }
 # 「聊天机器人」板块「扫码创建机器人」: 把飞书开放平台建应用 URL 编码成二维码 (SVG)。
 # default-features=false → 不拉重型 image crate, 只保留纯 Rust 的 svg 渲染。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -135,7 +142,7 @@ headless_chrome = { version = "1.0", default-features = false, optional = true }
 
 # 原生标题栏染色（titlebar.rs）：Win11 DwmSetWindowAttribute 让标题栏随主题与框面同色
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_NetworkManagement_WNet"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_NetworkManagement_WNet", "Win32_System_SystemInformation"] }
 
 [features]
 default = ["desktop"]
@@ -150,10 +157,14 @@ desktop = [
     "dep:polaris-sandbox",
     "dep:headless_chrome",   # forge_capture fallback tier2(可选)
     "custom-protocol",
+    "collab-host",           # 桌面一键当主机:内嵌协作 axum 路由
 ]
 custom-protocol = ["tauri?/custom-protocol"]
 # Docker/Web 构建：axum HTTP/WS 外壳，复用全部 Rust 引擎，不含 Tauri。
-server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util"]
+# collab-host 提供共用的协作路由(collab/http.rs)与全部 axum 依赖。
+server = ["collab-host"]
+# 协作路由双壳共用(collab/http.rs)+ 桌面内嵌主机(collab/hosting.rs)所需 HTTP 依赖。
+collab-host = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util"]
 # 语音识别运行时:本地 SenseVoice(sherpa-onnx),**桌面 / Docker server 皆可**。
 # 只拉 sherpa-rs,不含麦克风/热键/注入 → Docker server 可开它跑「浏览器上传音频→服务端识别」。
 # 默认不开(保护 build + 镜像体积),实测/发版显式开 `--features voice-asr`。
@@ -166,6 +177,9 @@ voice-live = ["voice-asr", "dep:cpal", "dep:rdev", "dep:enigo"]
 # 默认不开(保护 build + 镜像体积);Docker 发版显式开 `--features local-embed`。
 # 运行时 POLARIS_LOCAL_EMBED=1 才真正启用本地路径(否则仍走云 API)。勿与 voice-asr 同开(双 onnxruntime)。
 local-embed = ["dep:fastembed"]
+# 多人协作组网隧道:iroh 打洞直连 + relay 兜底,把成员端 TCP 流量转发到主机 127.0.0.1:8080。
+# iroh 依赖树很大 → 默认不开,发多人协作版显式 `--features collab-net`。
+collab-net = ["dep:iroh"]
 
 # server 二进制：浏览器前端 + REST/WS 后端（替代 Tauri 外壳）。
 # 构建：cargo build --release --bin polaris-server --no-default-features --features server

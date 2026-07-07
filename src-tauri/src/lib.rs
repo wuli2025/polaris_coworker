@@ -1,6 +1,8 @@
 // ── 引擎模块（桌面 + Docker 两种外壳共用同一份源码）──
 pub mod accounts;
 pub mod chat;
+// 多人协作:账号/会话/设备白名单/任务卡/合并闸门(桌面主机与 Docker server 共用)。
+pub mod collab;
 pub mod claude_md;
 pub mod codex_proxy;
 pub mod conv;
@@ -42,9 +44,9 @@ pub mod updater;
 #[cfg(feature = "desktop")]
 pub mod titlebar;
 
-// ── Docker(server) 外壳：shim AppHandle + axum HTTP/WS 服务 ──
-#[cfg(feature = "server")]
+// ── host shim(broadcast 事件壳):server 壳与桌面内嵌协作主机(collab-host)共用 ──
 pub mod host;
+// ── Docker(server) 外壳：axum HTTP/WS 服务 ──
 #[cfg(feature = "server")]
 pub mod server;
 
@@ -112,25 +114,20 @@ pub fn run() {
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             provider::init(h)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-            // 确保「课件视频工坊」技能落盘（支撑「生成课件类视频」UI 的基础设施技能，
-            // 编译期内嵌 → 全新安装即可用、脚本修复随 App 更新下发）。best-effort，不阻断启动。
-            skills::seed_video_studio_skill();
-            // 确保「演示工坊」技能落盘（支撑「PPT 演示」入口）。
-            skills::seed_deck_studio_skill();
-            // 确保「网站生成」技能落盘（支撑「网站生成」入口）。
-            skills::seed_web_studio_skill();
-            // 确保「极速下载」技能落盘（含 fast_download.py：跨平台 aria2c 多连接下载器，
-            // spawn 的 claude agent 才能在磁盘上直接 `uv run …/fast_download.py` 跑它）。best-effort。
-            skills::seed_turbo_download_skill();
-            // 确保「浏览器智能体 browser-use」技能落盘（含 browser_use_runner.py：browser-use
-            // 经 CDP 驱动 CloakBrowser，spawn 的 claude agent 才能直接 `uv run …` 跑它）。best-effort。
-            skills::seed_browser_use_skill();
-            // 确保「壹伴排版优化」技能落盘（含 wechat_yiban.py：壹伴样式引擎 + CloakBrowser 驱动，
-            // spawn 的 claude agent 才能在磁盘上直接 python 跑它）。best-effort，不阻断启动。
-            skills::seed_wechat_typesetter_skill();
-            // 确保「微信聊天 · 每日待办」技能落盘（含 wx_daily.py / wx_setup.py：本地解密微信→挖待办→
-            // 写晨报，配套每日自动化流程触发）。best-effort，不阻断启动；不覆盖用户的 wx_config.json。
-            skills::seed_wechat_tasks_skill();
+            // 7 个内嵌技能落盘（课件视频 / 演示 / 网站生成 / 极速下载 / browser-use /
+            // 壹伴排版 / 微信待办）：全是版本门控的 best-effort 磁盘写，无人 await —— 它们只在
+            // 之后 spawn claude agent 时才被读到（那远在启动之后）。整体挪到后台线程，从「窗口
+            // 首帧前的 setup 主线程」移除：稳态只是几次版本比对、极快，但慢速机械盘 + 版本升级
+            // 那次的多文件写不再计入首帧延迟。各 seed_* 自身仍幂等、不覆盖用户改动。
+            std::thread::spawn(|| {
+                skills::seed_video_studio_skill();
+                skills::seed_deck_studio_skill();
+                skills::seed_web_studio_skill();
+                skills::seed_turbo_download_skill();
+                skills::seed_browser_use_skill();
+                skills::seed_wechat_typesetter_skill();
+                skills::seed_wechat_tasks_skill();
+            });
             // 注：此前这里会为「早期播种过毛主席资料库」的老用户补装 consult-mao 技能。
             // 现「请教毛主席」默认隐藏 —— 只在用户主动安装「毛主席」名人资料包时才装该技能，
             // 启动时不再自动补装（盘上已有的 raw/毛主席、技能、项目均保留，不删用户数据）。
@@ -151,6 +148,17 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // 多人协作:完整端工作集(本机 git)+ 隧道客户端
+            collab::commands::collab_clone_partial,
+            collab::commands::collab_task_setup,
+            collab::commands::collab_sync_main,
+            collab::commands::collab_push_branch,
+            collab::commands::collab_outbox_queue,
+            collab::commands::collab_outbox_pending,
+            collab::commands::collab_outbox_mark_sent,
+            collab::commands::collab_device_node_id,
+            collab::commands::collab_tunnel_connect,
+            collab::commands::collab_tunnel_status,
             // KB
             kb::kb_root,
             kb::kb_default_root,
@@ -361,10 +369,12 @@ pub fn run() {
             fable::index::fable_lex_build_start,
             fable::index::fable_index_optimize,
             fable::index::fable_index_repair,
+            fable::index::fable_dedupe_scan,
             fable::index::fable_local_embed_status,
             fable::index::fable_local_embed_download,
             fable::index::fable_local_embed_set_enabled,
             fable::retrieve::fable_search,
+            fable::retrieve::fable_search_ai,
             fable::eval::fable_eval,
             fable::eval::fable_eval_template,
             // 文件中心(知识库内的可视化文件库:类型/语义聚类/缩略图/速览)
