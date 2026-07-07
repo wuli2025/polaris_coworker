@@ -62,8 +62,15 @@ export function backendFileUrl(
   return `/api/file?${qs.toString()}`;
 }
 
+/** stub 判定不终身缓存：页面加载瞬间后端恰在重启时，一次探测失败曾把整个应用
+ *  永久钉死在「浏览器预览」假数据模式（invoke 全走 stub、listen 全空），只能刷新自救。
+ *  超过 TTL 后允许重探，后端恢复即自动切回 http。 */
+const STUB_RETRY_MS = 8000;
+let stubProbedAt = 0;
+
 async function ensureBackend(): Promise<void> {
-  if (backendMode) return;
+  if (backendMode === "http") return;
+  if (backendMode === "stub" && Date.now() - stubProbedAt < STUB_RETRY_MS) return;
   if (!probePromise) {
     probePromise = (async () => {
       try {
@@ -72,20 +79,144 @@ async function ensureBackend(): Promise<void> {
       } catch {
         backendMode = "stub";
       }
+      if (backendMode !== "http") stubProbedAt = Date.now();
+      // 进入 http（首次探测 null→http，或后端重启后 stub→http）：把此前已登记但尚未连接的
+      // 监听接上 WS——否则 invoke 恢复了、事件却永久哑（气泡不出、转圈不停）。走到这里
+      // backendMode 只可能从非 http 翻上来（函数开头 http 已早退），故无需再比对旧值。
+      else if (wsListeners.size > 0) ensureWs();
+      probePromise = null;
     })();
   }
   await probePromise;
+  // 服务端设了 POLARIS_AUTH_TOKEN 而本浏览器口令缺失/错误时，在这里就弹口令框，
+  // 而不是让页面各处功能各自 401 报错（此前唯一入口是 URL ?token=，没人教就全线报错）。
+  // 注：probePromise 里改写了 backendMode，TS 的窄化跨 await 看不见这次赋值，故显式放宽。
+  const mode = backendMode as BackendMode | null;
+  if (mode === "http" && (await tokenRejected())) await requireToken();
+}
+
+// ── 访问口令引导：探测 401 → 弹输入框 → 校验通过才落盘 ──
+
+/** 用当前口令探一次 /api/invoke：仅 401 视为「需要输入/口令错」，网络错误等不算。 */
+async function tokenRejected(): Promise<boolean> {
+  try {
+    const r = await fetch("/api/invoke", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ cmd: "__auth_probe", args: {} }),
+    });
+    return r.status === 401;
+  } catch {
+    return false;
+  }
+}
+
+let tokenGate: Promise<void> | null = null;
+/** 用户点「稍后」之后的冷静期：期间不再自动弹框，避免连环 401 把弹窗顶回来。 */
+let tokenPromptDismissedAt = 0;
+const TOKEN_PROMPT_COOLDOWN_MS = 15000;
+
+/** 单飞口令引导：并发 401 只弹一个框；输错循环重试；「稍后」放行（后续请求照常 401 报错）。 */
+function requireToken(): Promise<void> {
+  if (tokenGate) return tokenGate;
+  if (Date.now() - tokenPromptDismissedAt < TOKEN_PROMPT_COOLDOWN_MS)
+    return Promise.resolve();
+  tokenGate = (async () => {
+    try {
+      let errMsg: string | undefined;
+      for (;;) {
+        const t = await askTokenOnce(errMsg);
+        if (t === null) {
+          tokenPromptDismissedAt = Date.now();
+          return;
+        }
+        localStorage.setItem("POLARIS_AUTH_TOKEN", t);
+        if (!(await tokenRejected())) {
+          // 口令生效：WS 若正带着旧口令（或没带）连接，掐掉让它带新口令自动重连。
+          try {
+            ws?.close();
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        errMsg = "口令不对，再试一次";
+      }
+    } finally {
+      tokenGate = null;
+    }
+  })();
+  return tokenGate;
+}
+
+/** 弹一次口令输入框（自绘 DOM，不依赖 Vue，双主题下都可读）。resolve(null)=用户点「稍后」。 */
+function askTokenOnce(errMsg?: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const wrap = document.createElement("div");
+    wrap.style.cssText =
+      "position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;" +
+      "background:rgba(15,17,23,.55);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)";
+    const card = document.createElement("div");
+    card.style.cssText =
+      "width:min(340px,86vw);padding:26px 24px;border-radius:18px;background:rgba(28,30,38,.94);" +
+      "border:1px solid rgba(255,255,255,.1);box-shadow:0 24px 64px rgba(0,0,0,.4);" +
+      "font:14px/1.6 system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#f5f6f8";
+    card.innerHTML =
+      '<div style="font-size:17px;font-weight:600;margin-bottom:6px">输入访问口令</div>' +
+      '<div style="opacity:.65;margin-bottom:14px">这台北极星设置了访问口令（POLARIS_AUTH_TOKEN）。输入一次，本浏览器会记住。</div>' +
+      (errMsg
+        ? '<div style="color:#ff8f8f;margin-bottom:10px">' + errMsg + "</div>"
+        : "") +
+      '<input type="password" placeholder="访问口令" autocomplete="current-password" ' +
+      'style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;' +
+      "border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.08);color:inherit;" +
+      'outline:none;font-size:14px" />' +
+      '<div style="display:flex;gap:10px;margin-top:16px">' +
+      '<button data-act="ok" style="flex:1;padding:10px 0;border:none;border-radius:10px;' +
+      'background:#4c7dff;color:#fff;font-size:14px;font-weight:600;cursor:pointer">进入</button>' +
+      '<button data-act="later" style="padding:10px 14px;border:1px solid rgba(255,255,255,.15);' +
+      'border-radius:10px;background:transparent;color:inherit;opacity:.7;cursor:pointer">稍后</button>' +
+      "</div>";
+    wrap.appendChild(card);
+    const input = card.querySelector("input")!;
+    const done = (v: string | null) => {
+      wrap.remove();
+      resolve(v);
+    };
+    card.querySelector('[data-act="ok"]')!.addEventListener("click", () => {
+      const v = input.value.trim();
+      if (v) done(v);
+      else input.focus();
+    });
+    card
+      .querySelector('[data-act="later"]')!
+      .addEventListener("click", () => done(null));
+    input.addEventListener("keydown", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") {
+        const v = input.value.trim();
+        if (v) done(v);
+      }
+    });
+    document.body.appendChild(wrap);
+    input.focus();
+  });
 }
 
 async function httpInvoke<T>(
   cmd: string,
-  args?: Record<string, unknown>
+  args?: Record<string, unknown>,
+  retriedAuth = false
 ): Promise<T> {
   const res = await fetch("/api/invoke", {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeaders() },
     body: JSON.stringify({ cmd, args: args ?? {} }),
   });
+  // 口令没输/输错：引导输入后原样重试一次（requireToken 单飞，并发 401 只弹一个框）。
+  if (res.status === 401 && !retriedAuth) {
+    await requireToken();
+    return httpInvoke<T>(cmd, args, true);
+  }
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
     try {
@@ -188,14 +319,16 @@ export async function listen<T>(
 ): Promise<UnlistenFn> {
   if (isTauri) return rawListen<T>(event, (e) => cb(e.payload));
   await ensureBackend();
-  if (backendMode !== "http") return () => {};
-  ensureWs();
+  // 始终登记监听(即便此刻 stub=后端重启中):不再返回 noop 空函数。连接只在 http 模式建立，
+  // stub→http 翻转时由 ensureBackend 补调 ensureWs()——保证「invoke 恢复」与「事件恢复」同步，
+  // 且纯前端预览(永无后端)不会空转重连刷日志。
   let set = wsListeners.get(event);
   if (!set) {
     set = new Set();
     wsListeners.set(event, set);
   }
   set.add(cb as (p: unknown) => void);
+  if (backendMode === "http") ensureWs();
   return () => {
     set!.delete(cb as (p: unknown) => void);
     if (set!.size === 0) wsListeners.delete(event);
@@ -746,6 +879,10 @@ export const files = {
   /** 检索枢纽混合检索(grep ∥ 向量 RRF) */
   search: (query: string, topK = 24, mode: "hybrid" | "grep" | "vector" = "hybrid") =>
     invoke<FableSearchResult>("fable_search", { query, topK, mode }),
+  /** AI 辅助检索(深度档):claude 把查询多路扩写 → 各变体并行召回 → 多查询融合,提升模糊/关键词
+   *  查询的召回与精度(实测 nDCG +13.6%)。起 headless claude 数秒级,只在用户主动深度搜索时调。 */
+  searchAi: (query: string, topK = 24, scope?: string) =>
+    invoke<FableSearchResult>("fable_search_ai", { query, topK, scope }),
   /** 取消当前盘点/索引任务(协作式:循环轮询 CANCEL,几百毫秒内优雅停;索引可再点继续续建) */
   fableCancel: () => invoke<void>("fable_cancel"),
 };
@@ -1057,6 +1194,10 @@ export interface Project {
   personaId?: string | null;
   /** 该人格绑定的专属知识库 scope（KB 根下相对子目录，null/空=全局） */
   kbScope?: string | null;
+  /** 绑定的协作项目 id(团队项目↔本地对话工作区之桥;null=普通本地项目) */
+  collabProjectId?: number | null;
+  /** 绑定时的协作主机 base(空=未绑) */
+  collabHost?: string;
 }
 
 export interface Conversation {
@@ -1083,6 +1224,8 @@ type RawProject = {
   archived: boolean;
   persona_id?: string | null;
   kb_scope?: string | null;
+  collab_project_id?: number | null;
+  collab_host?: string;
 };
 type RawConv = {
   id: string;
@@ -1106,6 +1249,8 @@ const p = (r: RawProject): Project => ({
   archived: r.archived,
   personaId: r.persona_id ?? null,
   kbScope: r.kb_scope ?? null,
+  collabProjectId: r.collab_project_id ?? null,
+  collabHost: r.collab_host ?? "",
 });
 const c = (r: RawConv): Conversation => ({
   id: r.id,
@@ -1126,6 +1271,19 @@ export const convApi = {
   listProjects: async () => (await invoke<RawProject[]>("conv_list_projects")).map(p),
   createProject: async (name: string) =>
     p(await invoke<RawProject>("conv_create_project", { name })),
+  /** 本地项目 ↔ 协作项目绑定(团队项目主页「开新讨论」时自动调) */
+  bindProjectCollab: async (
+    projectId: string,
+    collabProjectId: number,
+    collabHost: string
+  ) =>
+    p(
+      await invoke<RawProject>("conv_project_bind_collab", {
+        projectId,
+        collabProjectId,
+        collabHost,
+      })
+    ),
   archiveProject: (projectId: string) =>
     invoke<void>("conv_archive_project", { projectId }),
   openProjectDir: (projectId: string) =>

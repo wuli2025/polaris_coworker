@@ -56,6 +56,10 @@ export interface CollabProject {
   charter_path?: string;
   created_at?: number;
   archived?: boolean;
+  /** 进行中任务数(pending+in_progress)——侧栏徽章 */
+  open_count?: number;
+  /** 待验收任务数(review)——侧栏徽章 */
+  review_count?: number;
 }
 
 export interface ProjectMember {
@@ -112,6 +116,17 @@ export interface Ticket {
   expires_at: number;
   /** 分享码 PLRS1-*(裸码+主机地址),对方粘一串即入伙 */
   share?: string;
+}
+
+/** 项目动态时间线条目(GitHub activity feed 式)。kind: review|task */
+export interface ActivityItem {
+  kind: "review" | "task";
+  actor: string;
+  task_id: number;
+  title: string;
+  /** review: "pass/reject · 第N轮";task: 当前 state */
+  detail: string;
+  at: number;
 }
 
 export interface AdminUser {
@@ -560,6 +575,13 @@ export const collabApi = {
   // ── 晨报 ──
   morning(projectId: number): Promise<MorningReport> {
     return get(`/api/collab/lead/morning?projectId=${String(projectId)}`);
+  },
+
+  /** 项目动态时间线(验收轮次+任务状态合成,项目主页概览用) */
+  activity(projectId: number, limit = 30): Promise<ActivityItem[]> {
+    return get(
+      `/api/collab/activity?projectId=${String(projectId)}&limit=${String(limit)}`
+    );
   },
 };
 

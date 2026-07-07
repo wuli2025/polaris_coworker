@@ -18,6 +18,7 @@ import {
   deviceId,
   parseShareCode,
   probeHost,
+  type ActivityItem,
   type CollabProject,
   type CollabTeam,
   type CollabUser,
@@ -378,7 +379,19 @@ export const useCollabStore = defineStore("collab", () => {
 
   async function selectProject(id: number) {
     currentProjectId.value = id;
-    await Promise.all([refreshTasks(), refreshMembers()]);
+    await Promise.all([refreshTasks(), refreshMembers(), refreshActivity()]);
+  }
+
+  // ── 项目动态时间线(项目主页概览 tab) ──
+  const activity = ref<ActivityItem[]>([]);
+  async function refreshActivity() {
+    const id = currentProjectId.value;
+    if (!id) return;
+    try {
+      activity.value = await collabApi.activity(id);
+    } catch {
+      activity.value = [];
+    }
   }
 
   async function refreshMembers() {
@@ -445,8 +458,9 @@ export const useCollabStore = defineStore("collab", () => {
   let subscribed = false;
 
   function onTaskEvent() {
-    // 卡片变更 → 拉一次当前项目的最新看板(轻请求,合并去抖不必要)
+    // 卡片变更 → 拉一次当前项目的最新看板(轻请求,合并去抖不必要)+ 动态时间线
     void refreshTasks();
+    void refreshActivity();
   }
   function onMorning(p: unknown) {
     const r = p as MorningReport | null;
@@ -588,6 +602,8 @@ export const useCollabStore = defineStore("collab", () => {
     memberName,
     refreshMorning,
     refreshTasks,
+    activity,
+    refreshActivity,
     createTask,
     claim,
     submit,
