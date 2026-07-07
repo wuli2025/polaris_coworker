@@ -7,6 +7,9 @@ pub mod commands;
 /// 协作 HTTP 路由(axum,双壳共用):server 壳 merge 它;桌面 hosting 内嵌它。
 #[cfg(feature = "collab-host")]
 pub mod http;
+/// 桌面内嵌协作主机(一键当主机)。
+#[cfg(feature = "desktop")]
+pub mod hosting;
 pub mod auth;
 pub mod db;
 pub mod gitea;

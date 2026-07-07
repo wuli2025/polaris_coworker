@@ -145,6 +145,8 @@ pub fn run() {
             echo::start_scheduler(h.clone());
             // 寓言计划:检索枢纽(fable.db 表结构就位;盘点/索引由用户在设置页触发)。
             fable::init();
+            // 协作主机自启:上次点过「设为主机」就静默续上(不阻塞启动)。
+            collab::hosting::auto_start_if_enabled(h.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -159,6 +161,10 @@ pub fn run() {
             collab::commands::collab_device_node_id,
             collab::commands::collab_tunnel_connect,
             collab::commands::collab_tunnel_status,
+            // 多人协作:一键把本机变成协作主机(内嵌 axum 协作路由)
+            collab::hosting::collab_host_start,
+            collab::hosting::collab_host_status,
+            collab::hosting::collab_host_stop,
             // KB
             kb::kb_root,
             kb::kb_default_root,
@@ -365,6 +371,7 @@ pub fn run() {
             fable::inventory::fable_scan_folder_children,
             fable::inventory::fable_folder_size,
             fable::inventory::fable_backfill_lang,
+            fable::inventory::fable_audit,
             fable::index::fable_index_start,
             fable::index::fable_lex_build_start,
             fable::index::fable_index_optimize,
