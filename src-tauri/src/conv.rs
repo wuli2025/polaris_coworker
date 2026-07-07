@@ -31,6 +31,12 @@ pub struct Project {
     /// 该人格绑定的专属知识库范围（KB 根下相对子目录，None/空=全局 PolarisKB）。
     #[serde(default)]
     pub kb_scope: Option<String>,
+    /// 绑定的协作项目 id(团队项目↔本地对话工作区之桥,git clone 式;None=普通本地项目)。
+    #[serde(default)]
+    pub collab_project_id: Option<i64>,
+    /// 绑定时的协作主机 base(空=同源/未绑;换主机时据此识别失配)。
+    #[serde(default)]
+    pub collab_host: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +119,8 @@ pub fn init(_app: &AppHandle) -> Result<()> {
             archived: false,
             persona_id: None,
             kb_scope: None,
+            collab_project_id: None,
+            collab_host: String::new(),
         });
     }
 
@@ -142,6 +150,8 @@ pub fn ensure_mao_project() {
                         archived: false,
                         persona_id: Some("mao".into()),
                         kb_scope: Some("raw/毛主席".into()),
+                        collab_project_id: None,
+                        collab_host: String::new(),
                     },
                 );
                 pid
@@ -189,7 +199,15 @@ fn atomic_write_state(path: &std::path::Path, contents: &str) -> std::io::Result
     fs::rename(&tmp, path)
 }
 
+/// 落盘互斥锁: persist() 只持 STATE **读**锁, 多线程可同时进入, 而 tmp 文件名固定
+/// (`state.json.polaris.tmp`), 并发写会把 tmp 撕成交错字节再 rename 上位 → state.json
+/// 变坏 JSON, 下次启动回落空状态(历史清零)。rename 原子只防「崩溃写一半」, 防不了
+/// 并发写者 —— 这里把「快照 + 序列化 + 写 tmp + rename」整段串行化。
+static PERSIST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 fn persist() {
+    // 先拿落盘锁再取快照: 保证写入顺序与快照顺序一致, 文件终态不会停留在旧快照上。
+    let _g = PERSIST_LOCK.lock();
     let st = STATE.read();
     let path = STATE_PATH.read().clone();
     if path.as_os_str().is_empty() {
@@ -356,10 +374,34 @@ pub fn conv_create_project(name: String) -> Result<Project, String> {
         archived: false,
         persona_id: None,
         kb_scope: None,
+        collab_project_id: None,
+        collab_host: String::new(),
     };
     STATE.write().projects.push(p.clone());
     persist();
     Ok(p)
+}
+
+/// 把本地项目绑到协作项目(团队项目主页首次「开新讨论」时,前端自动建同名项目并调本命令)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+#[allow(non_snake_case)]
+pub fn conv_project_bind_collab(
+    project_id: String,
+    collabProjectId: i64,
+    collabHost: String,
+) -> Result<Project, String> {
+    let mut st = STATE.write();
+    let p = st
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or("项目不存在")?;
+    p.collab_project_id = Some(collabProjectId);
+    p.collab_host = collabHost;
+    let out = p.clone();
+    drop(st);
+    persist();
+    Ok(out)
 }
 
 /// 手动设置项目的知识库 scope（人格工坊里的下拉）。persona_id 维持不变。

@@ -604,6 +604,10 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         )?),
         "fable_folder_size" => ok(fable::inventory::fable_folder_size(req_str(a, "path")?)?),
         "fable_backfill_lang" => ok(fable::inventory::fable_backfill_lang()?),
+        "fable_audit" => ok(fable::inventory::fable_audit(
+            opt_str(a, "mode"),
+            opt_usize(a, "sample"),
+        )?),
 
         // ── 企业 Schema 知识库(本体)——desktop 走 #[tauri::command],server/Docker 须在此显式接 dispatch ──
         "ontology_schemas" => ok(fable::ontology::ontology_schemas()?),
@@ -688,6 +692,11 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         // ── Conv ──
         "conv_list_projects" => ok(conv::conv_list_projects()),
         "conv_create_project" => ok(conv::conv_create_project(req_str(a, "name")?)?),
+        "conv_project_bind_collab" => ok(conv::conv_project_bind_collab(
+            req_str(a, "projectId")?,
+            a.get("collabProjectId").and_then(|v| v.as_i64()).ok_or("缺 collabProjectId")?,
+            req_str(a, "collabHost").unwrap_or_default(),
+        )?),
         "conv_set_project_kb_scope" => ok(conv::conv_set_project_kb_scope(
             req_str(a, "projectId")?,
             opt_str(a, "kbScope"),

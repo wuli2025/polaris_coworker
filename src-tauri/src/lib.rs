@@ -203,6 +203,7 @@ pub fn run() {
             // Conv (项目 + 对话历史)
             conv::conv_list_projects,
             conv::conv_create_project,
+            conv::conv_project_bind_collab,
             conv::conv_archive_project,
             conv::conv_open_project_dir,
             conv::conv_list_conversations,
