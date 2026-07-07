@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// 企业微信官方浏览器 SDK（UMD，全局 `WecomAIBotSDK`），编译期内嵌、运行时离线可用。
-const SDK_JS: &str = include_str!("../assets/wecom-aibot-sdk.umd.min.js");
+const SDK_JS: &str = include_str!("../../assets/wecom-aibot-sdk.umd.min.js");
 const BASE_PORT: u16 = 52580;
 const PORT_TRIES: u16 = 20;
 const TIMEOUT_SECS: u64 = 300;

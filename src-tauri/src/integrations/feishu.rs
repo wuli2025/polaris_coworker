@@ -388,8 +388,8 @@ pub fn feishu_open_console() -> Result<(), String> {
 // 本模块读 stdout → 去重/权限闸门 → 跑 headless claude 得回复 → 写桥 stdin → 桥发回飞书。
 // 借官方 SDK 的可靠长连接实现，避免 Rust 自撸飞书 protobuf 帧的高复杂度与高出错率。
 
-const BRIDGE_MJS: &str = include_str!("../assets/feishu_bridge.mjs");
-const BRIDGE_PKG: &str = include_str!("../assets/feishu_bridge_package.json");
+const BRIDGE_MJS: &str = include_str!("../../assets/feishu_bridge.mjs");
+const BRIDGE_PKG: &str = include_str!("../../assets/feishu_bridge_package.json");
 
 struct Gateway {
     pid: Option<u32>,

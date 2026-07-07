@@ -74,7 +74,7 @@ pub async fn serve() -> anyhow::Result<()> {
     // 注：「请教毛主席」默认隐藏 —— 仅在用户主动安装「毛主席」资料包时装 consult-mao 技能，
     // 启动时不再自动补装（盘上已有数据保留，不删）。
     // 飞书网关「开机自动启动」（若用户开了 auto_start 且凭证齐全）。
-    crate::feishu::auto_start_if_enabled(&app);
+    crate::integrations::feishu::auto_start_if_enabled(&app);
     // 寓言计划:感官 API 坞 + 回声层「每日做梦」调度 + 检索枢纽(与桌面 setup 等价)。
     crate::sense::init();
     crate::voice::init();
@@ -876,7 +876,7 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             req_str(a, "verifier")?,
             req_str(a, "state")?,
         )?),
-        "codex_proxy_info" => ok(codex_proxy::codex_proxy_info()),
+        "codex_proxy_info" => ok(integrations::codex_proxy::codex_proxy_info()),
 
         // ── 推理后端(R3)：外部 GPU 节点端点状态(含连通性探测)──
         "infer_status" => ok(infer::status_json()),
@@ -942,40 +942,40 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "env_cancel" => ok(doctor::env_cancel(req_str(a, "reqId")?)?),
 
         // ── 飞书 / 企微 / 自媒体账号 ──
-        "feishu_get_config" => ok(feishu::feishu_get_config()),
+        "feishu_get_config" => ok(integrations::feishu::feishu_get_config()),
         "feishu_set_config" => {
-            let cfg: feishu::FeishuConfig =
+            let cfg: integrations::feishu::FeishuConfig =
                 serde_json::from_value(a.get("config").cloned().unwrap_or(Value::Null))
                     .map_err(|e| format!("feishu_set_config 参数解析失败: {e}"))?;
-            ok(feishu::feishu_set_config(cfg)?)
+            ok(integrations::feishu::feishu_set_config(cfg)?)
         }
-        "feishu_test_connection" => ok(feishu::feishu_test_connection()),
-        "feishu_create_qr" => ok(feishu::feishu_create_qr()?),
-        "feishu_open_console" => ok(feishu::feishu_open_console()?),
-        "feishu_gateway_start" => ok(feishu::feishu_gateway_start(app)?),
-        "feishu_gateway_stop" => ok(feishu::feishu_gateway_stop(app)?),
-        "feishu_gateway_status" => ok(feishu::feishu_gateway_status()),
-        "wecom_scan_create" => ok(wecom::wecom_scan_create(req_str(a, "source")?)?),
+        "feishu_test_connection" => ok(integrations::feishu::feishu_test_connection()),
+        "feishu_create_qr" => ok(integrations::feishu::feishu_create_qr()?),
+        "feishu_open_console" => ok(integrations::feishu::feishu_open_console()?),
+        "feishu_gateway_start" => ok(integrations::feishu::feishu_gateway_start(app)?),
+        "feishu_gateway_stop" => ok(integrations::feishu::feishu_gateway_stop(app)?),
+        "feishu_gateway_status" => ok(integrations::feishu::feishu_gateway_status()),
+        "wecom_scan_create" => ok(integrations::wecom::wecom_scan_create(req_str(a, "source")?)?),
         "media_accounts_status" => ok(accounts::media_accounts_status()),
         "media_account_forget" => ok(accounts::media_account_forget(req_str(a, "platform")?)?),
 
         // ── 盘管理(NAS 网络盘记忆 + 映射)──
-        "nas_list" => ok(crate::nas::nas_list()),
+        "nas_list" => ok(crate::integrations::nas::nas_list()),
         "nas_save" => {
             let rec = serde_json::from_value(a.get("record").cloned().unwrap_or(Value::Null))
                 .map_err(|e| format!("record 参数无效：{e}"))?;
-            ok(crate::nas::nas_save(rec)?)
+            ok(crate::integrations::nas::nas_save(rec)?)
         }
-        "nas_forget" => ok(crate::nas::nas_forget(req_str(a, "id")?)?),
+        "nas_forget" => ok(crate::integrations::nas::nas_forget(req_str(a, "id")?)?),
         "nas_connect" => {
             let rec = serde_json::from_value(a.get("record").cloned().unwrap_or(Value::Null))
                 .map_err(|e| format!("record 参数无效：{e}"))?;
-            ok(crate::nas::nas_connect(rec)?)
+            ok(crate::integrations::nas::nas_connect(rec)?)
         }
         "nas_disconnect" => {
             let rec = serde_json::from_value(a.get("record").cloned().unwrap_or(Value::Null))
                 .map_err(|e| format!("record 参数无效：{e}"))?;
-            ok(crate::nas::nas_disconnect(rec)?)
+            ok(crate::integrations::nas::nas_disconnect(rec)?)
         }
 
         // ── 降级/桌面专属：给惰性 stub，保证前端不报错 ──

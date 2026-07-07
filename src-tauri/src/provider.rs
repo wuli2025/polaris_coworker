@@ -470,7 +470,7 @@ pub fn init(_app: &AppHandle) -> Result<()> {
             // 联动: 若上次退出时正路由到 Codex(本地代理), 重启后端口可能变 → 重新拉起
             // 代理并校正 ANTHROPIC_BASE_URL, 否则 settings.json 残留旧端口 claude 连不上。
             if detect_current(&views, &store) == "codex" {
-                if let Ok(port) = crate::codex_proxy::ensure_running() {
+                if let Ok(port) = crate::integrations::codex_proxy::ensure_running() {
                     let cfg = codex_route_config(port);
                     let _ = apply_settings_config(&cfg);
                     apply_process_env(&cfg);
@@ -944,7 +944,7 @@ fn cfg_for_view(v: &ProviderView) -> Result<Value, String> {
         if !authed {
             return Err("请先授权 ChatGPT (Codex), 再切换到它".to_string());
         }
-        let port = crate::codex_proxy::ensure_running()?;
+        let port = crate::integrations::codex_proxy::ensure_running()?;
         return Ok(codex_route_config(port));
     }
     if v.kind == "official" {

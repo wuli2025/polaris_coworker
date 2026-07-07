@@ -4,16 +4,14 @@ pub mod chat;
 // 多人协作:账号/会话/设备白名单/任务卡/合并闸门(桌面主机与 Docker server 共用)。
 pub mod collab;
 pub mod claude_md;
-pub mod codex_proxy;
 pub mod conv;
 pub mod convert;
 pub mod doctor;
-pub mod feishu;
 pub mod forge;
+pub mod integrations;
 pub mod fable;
 pub mod infer;
 pub mod kb;
-pub mod nas;
 pub mod palette;
 pub mod persona;
 pub mod expert;
@@ -24,7 +22,6 @@ pub mod scan;
 pub mod sense;
 pub mod skills;
 pub mod voice;
-pub mod wecom;
 // 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。
 #[cfg(feature = "desktop")]
 pub mod updater;
@@ -134,7 +131,7 @@ pub fn run() {
             // 自动更新状态机初始化（记录当前版本 + 持久化路径 + 重启续提示）。best-effort。
             let _ = updater::init(h);
             // 飞书网关「开机自动启动」：若用户开了 auto_start 且凭证齐全，后台自动拉起（不阻塞启动）。
-            feishu::auto_start_if_enabled(h);
+            integrations::feishu::auto_start_if_enabled(h);
             // 寓言计划:感官 API 坞(注册表合并 + 落盘)与回声层「每日做梦」调度。
             sense::init();
             // 语音输入「极速说」:配置 + 个人词表(首启种子)就位,供防污染秒达档使用。
@@ -245,26 +242,26 @@ pub fn run() {
             // 色彩调配引擎 (全 app 配色唯一真源)
             palette::palette_generate,
             // 飞书网关 (板块⑭ 阶段 A)
-            feishu::feishu_get_config,
-            feishu::feishu_set_config,
-            feishu::feishu_test_connection,
-            feishu::feishu_create_qr,
-            feishu::feishu_open_console,
+            integrations::feishu::feishu_get_config,
+            integrations::feishu::feishu_set_config,
+            integrations::feishu::feishu_test_connection,
+            integrations::feishu::feishu_create_qr,
+            integrations::feishu::feishu_open_console,
             // 飞书对话引擎（阶段B：Node 桥长连接 → headless claude → 回发）
-            feishu::feishu_gateway_start,
-            feishu::feishu_gateway_stop,
-            feishu::feishu_gateway_status,
+            integrations::feishu::feishu_gateway_start,
+            integrations::feishu::feishu_gateway_stop,
+            integrations::feishu::feishu_gateway_status,
             // 企业微信智能机器人「扫码自动配置」(OAuth 回环, 绕开 Tauri 弹窗限制)
-            wecom::wecom_scan_create,
+            integrations::wecom::wecom_scan_create,
             // 自媒体「账号管理」: 探测平台登录态 + 解绑（删 profile）
             accounts::media_accounts_status,
             accounts::media_account_forget,
             // 「盘管理」: 记住登陆过的 NAS(SMB) + 一键映射/断开网络盘
-            nas::nas_list,
-            nas::nas_save,
-            nas::nas_forget,
-            nas::nas_connect,
-            nas::nas_disconnect,
+            integrations::nas::nas_list,
+            integrations::nas::nas_save,
+            integrations::nas::nas_forget,
+            integrations::nas::nas_connect,
+            integrations::nas::nas_disconnect,
             // Chat
             chat::chat_send,
             chat::chat_cancel,
@@ -313,7 +310,7 @@ pub fn run() {
             provider::claude_finish_login,
             provider::claude_login_poll,
             provider::claude_login_cancel,
-            codex_proxy::codex_proxy_info,
+            integrations::codex_proxy::codex_proxy_info,
             // Forge 跨平台渲染能力 preflight（能出 PPT/视频吗、缺啥降级，三平台各报各的阶梯）
             forge::forge_preflight,
             // Forge 渲染引擎首落地：deck 截图 → 纯 Rust OOXML 打 .pptx（替 pptxgenjs，三平台同一份）
@@ -432,7 +429,7 @@ pub fn run() {
                 // 对话状态强制落盘:append_message 走「脏标记 + 500ms 合并落盘」,
                 // 退出瞬间可能还有最近半秒的消息只在内存里 —— 这里补一刀(不脏则零开销)。
                 conv::flush();
-                feishu::shutdown_on_exit(); // 回收飞书 node 桥,防其 autoReconnect 空转成孤儿烧 CPU
+                integrations::feishu::shutdown_on_exit(); // 回收飞书 node 桥,防其 autoReconnect 空转成孤儿烧 CPU
                 // 释放全局键盘热键监听:置 ENABLED=false,退出时不再处理热键事件
                 //(rdev::listen 无法干净中止是已知限制,置闸 + 进程退出即可接受的清理)。
                 #[cfg(feature = "voice-live")]
