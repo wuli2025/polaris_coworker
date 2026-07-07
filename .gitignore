@@ -60,3 +60,6 @@ _scratch/
 src-tauri/*.log
 _devrun.log
 easytier-panic.log
+
+# 本地 TLS 证书,勿入库
+docker/relay/certs/

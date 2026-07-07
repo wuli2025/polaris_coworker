@@ -1,0 +1,14 @@
+# iroh-relay 手动证书配置示例（纯 IP 自签，配合 gen-cert.sh）。
+# 复制为 config.toml 后按需改端口/路径（容器内挂载点为 /config）。
+
+# HTTPS/relay 监听
+http_bind_addr = "0.0.0.0:80"
+https_bind_addr = "0.0.0.0:443"
+
+# QUIC 地址发现（客户端据此探测自己的公网地址）
+enable_quic_addr_discovery = true
+
+[tls]
+cert_mode = "Manual"
+manual_cert_path = "/config/certs/relay.crt"
+manual_key_path = "/config/certs/relay.key"

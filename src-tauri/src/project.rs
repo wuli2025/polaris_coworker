@@ -33,13 +33,21 @@ use walkdir::WalkDir;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 给从 GUI 进程拉起的子进程加 `CREATE_NO_WINDOW`, 别每起一个服务就闪一个黑控制台。
+/// unix(mac/Linux): 额外把子进程放进 **新进程组** (自己当组长), 这样 `kill_tree` 的
+/// `kill -TERM -<pid>` 能带走 npm→node/vite 整棵子孙树; 否则 child 继承 Polaris 自身
+/// 的 pgid, 负号 kill 找不到该组 → 退化成只杀外层 shell, dev server 变孤儿占端口/CPU。
 fn no_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = cmd;
     }

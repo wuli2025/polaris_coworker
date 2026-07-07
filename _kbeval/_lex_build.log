@@ -1,0 +1,41 @@
+[0] local reachable roots: [1, 2, 3, 4, 5, 6, 7, 8, 15]
+[1] querying pending text files (local roots, ftsed=0) ...
+    177208 local files pending (BATCH=500, READERS=24)
+    5000/177208 (2.8%)  84 f/s  bodied=4105 timeouts=0  elapsed=1.0m eta=34.4m
+    10000/177208 (5.6%)  93 f/s  bodied=6575 timeouts=0  elapsed=1.8m eta=30.1m
+    15000/177208 (8.5%)  118 f/s  bodied=11460 timeouts=0  elapsed=2.1m eta=22.9m
+    20000/177208 (11.3%)  142 f/s  bodied=16372 timeouts=0  elapsed=2.3m eta=18.4m
+    25000/177208 (14.1%)  135 f/s  bodied=21097 timeouts=0  elapsed=3.1m eta=18.8m
+    30000/177208 (16.9%)  123 f/s  bodied=26024 timeouts=0  elapsed=4.1m eta=20.0m
+    35000/177208 (19.8%)  119 f/s  bodied=29554 timeouts=0  elapsed=4.9m eta=20.0m
+    40000/177208 (22.6%)  126 f/s  bodied=34158 timeouts=0  elapsed=5.3m eta=18.1m
+    45000/177208 (25.4%)  124 f/s  bodied=38933 timeouts=0  elapsed=6.1m eta=17.8m
+    50000/177208 (28.2%)  121 f/s  bodied=43930 timeouts=0  elapsed=6.9m eta=17.5m
+    55000/177208 (31.0%)  115 f/s  bodied=48908 timeouts=0  elapsed=7.9m eta=17.6m
+    60000/177208 (33.9%)  114 f/s  bodied=53884 timeouts=0  elapsed=8.8m eta=17.1m
+    65000/177208 (36.7%)  101 f/s  bodied=58809 timeouts=0  elapsed=10.7m eta=18.5m
+    70000/177208 (39.5%)  95 f/s  bodied=63562 timeouts=0  elapsed=12.3m eta=18.8m
+    75000/177208 (42.3%)  97 f/s  bodied=68395 timeouts=0  elapsed=12.9m eta=17.6m
+    80000/177208 (45.1%)  99 f/s  bodied=73395 timeouts=0  elapsed=13.5m eta=16.4m
+    85000/177208 (48.0%)  99 f/s  bodied=78395 timeouts=0  elapsed=14.3m eta=15.5m
+    90000/177208 (50.8%)  102 f/s  bodied=83395 timeouts=0  elapsed=14.7m eta=14.3m
+    95000/177208 (53.6%)  105 f/s  bodied=88395 timeouts=0  elapsed=15.1m eta=13.1m
+    100000/177208 (56.4%)  109 f/s  bodied=93395 timeouts=0  elapsed=15.3m eta=11.8m
+    105000/177208 (59.3%)  113 f/s  bodied=98395 timeouts=0  elapsed=15.5m eta=10.7m
+    110000/177208 (62.1%)  116 f/s  bodied=103395 timeouts=0  elapsed=15.8m eta=9.7m
+    115000/177208 (64.9%)  118 f/s  bodied=108300 timeouts=0  elapsed=16.3m eta=8.8m
+    120000/177208 (67.7%)  119 f/s  bodied=113223 timeouts=0  elapsed=16.8m eta=8.0m
+    125000/177208 (70.5%)  121 f/s  bodied=118208 timeouts=0  elapsed=17.3m eta=7.2m
+    130000/177208 (73.4%)  121 f/s  bodied=123203 timeouts=0  elapsed=17.9m eta=6.5m
+    135000/177208 (76.2%)  110 f/s  bodied=128153 timeouts=0  elapsed=20.4m eta=6.4m
+    140000/177208 (79.0%)  107 f/s  bodied=133077 timeouts=0  elapsed=21.7m eta=5.8m
+    145000/177208 (81.8%)  105 f/s  bodied=137850 timeouts=0  elapsed=23.0m eta=5.1m
+    150000/177208 (84.6%)  108 f/s  bodied=141604 timeouts=0  elapsed=23.2m eta=4.2m
+    155000/177208 (87.5%)  111 f/s  bodied=145409 timeouts=0  elapsed=23.3m eta=3.3m
+    160000/177208 (90.3%)  113 f/s  bodied=149294 timeouts=0  elapsed=23.6m eta=2.5m
+    165000/177208 (93.1%)  115 f/s  bodied=153197 timeouts=0  elapsed=24.0m eta=1.8m
+    170000/177208 (95.9%)  116 f/s  bodied=157012 timeouts=0  elapsed=24.5m eta=1.0m
+    175000/177208 (98.8%)  115 f/s  bodied=160649 timeouts=0  elapsed=25.4m eta=0.3m
+    177208/177208 (100.0%)  113 f/s  bodied=162330 timeouts=0  elapsed=26.1m eta=0.0m
+
+[DONE] processed=177208 bodied=162330 timeouts=0 local_pending_left=0 lex_rows=271091 time=26.8m

@@ -20,6 +20,12 @@ struct Running {
     port: u16,
     urls: Vec<String>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    /// axum serve 任务句柄:stop 时先给优雅窗口,超时 abort(drop listener 释放端口)。
+    /// 只发 oneshot 不收尸的话,/ws 长连接会让 graceful shutdown 永远等不完 →
+    /// 旧 serve 僵尸占 8484,再 start 落到 8485 双服务并存,反复停/开逐次泄漏端口。
+    serve_task: Option<tokio::task::JoinHandle<()>>,
+    /// 事件桥任务句柄(bridge_to_ui):stop 时 abort,防残留任务攒一批订阅者。
+    bridge_task: Option<tauri::async_runtime::JoinHandle<()>>,
     bus: BusHandle,
 }
 
@@ -52,12 +58,43 @@ fn save_cfg(c: HostCfg) {
 }
 
 /// 内核启动(不依赖 tauri,可单测):绑端口 → 建独立事件频道 → 起 axum(graceful shutdown)。
+/// 返回 serve 任务的 JoinHandle:stop 侧靠它「优雅窗口 + 超时 abort」确认端口真正释放。
+#[allow(clippy::type_complexity)]
 pub async fn start_core(
     pref_port: Option<u16>,
-) -> Result<(u16, Vec<String>, BusHandle, tokio::sync::oneshot::Sender<()>), String> {
+) -> Result<
+    (
+        u16,
+        Vec<String>,
+        BusHandle,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ),
+    String,
+> {
     let (tx, _rx) = tokio::sync::broadcast::channel::<crate::host::Event>(4096);
     let bus = BusHandle::new(tx);
     let auth_token = std::env::var("POLARIS_AUTH_TOKEN").ok().filter(|s| !s.is_empty());
+
+    // 绑定地址:默认只绑 loopback(127.0.0.1)。远端成员经 iroh 隧道入内 —— 隧道有设备白名单,
+    // 且把流量转发到本机 127.0.0.1(见 tunnel.rs upstream_addr),loopback 绑定对隧道零影响。
+    // 这样同网段的人**无法直连**该端口打到裸明文 HTTP(此前 0.0.0.0 + 未初始化协作会兜底成 owner,
+    // 等于对局域网敞开一个 owner 权限的裸接口)。
+    // 想让 LAN 内不经隧道、按 IP 直连入伙 → 显式 POLARIS_HOST_ALLOW_LAN=1;但**必须同时设**
+    // POLARIS_AUTH_TOKEN 口令,否则拒绝对外暴露(未鉴权的公网 owner 接口是重大风险),自动回落 loopback。
+    let allow_lan = std::env::var("POLARIS_HOST_ALLOW_LAN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let bind_ip: &str = if allow_lan {
+        if auth_token.is_some() {
+            "0.0.0.0"
+        } else {
+            eprintln!("[collab-host] ⚠ POLARIS_HOST_ALLOW_LAN=1 但未设 POLARIS_AUTH_TOKEN 口令 → 拒绝对局域网暴露未鉴权接口,已回落只绑 127.0.0.1(远端仍可经隧道入内)");
+            "127.0.0.1"
+        }
+    } else {
+        "127.0.0.1"
+    };
 
     let mut cands: Vec<u16> = Vec::new();
     if let Some(p) = pref_port {
@@ -66,12 +103,16 @@ pub async fn start_core(
     cands.extend(PORT_SCAN);
     let mut bound = None;
     for p in cands {
-        if let Ok(l) = tokio::net::TcpListener::bind(("0.0.0.0", p)).await {
+        if let Ok(l) = tokio::net::TcpListener::bind((bind_ip, p)).await {
             bound = Some((l, p));
             break;
         }
     }
     let (listener, port) = bound.ok_or("端口 8484-8494 全被占用,请释放一个再试")?;
+    // 把真实端口告知隧道:此前隧道默认转发 8080 而内嵌服务在 8484-8494,
+    // 未设 POLARIS_TUNNEL_UPSTREAM 时远端流量会打进黑洞。
+    #[cfg(feature = "collab-net")]
+    crate::collab::tunnel::set_upstream_port(port);
     let urls = detect_advertise_urls(port);
 
     let state = CollabState {
@@ -86,14 +127,14 @@ pub async fn start_core(
         .layer(tower_http::cors::CorsLayer::permissive());
 
     let (stx, srx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(async move {
+    let serve_task = tokio::spawn(async move {
         let _ = axum::serve(listener, router)
             .with_graceful_shutdown(async {
                 let _ = srx.await;
             })
             .await;
     });
-    Ok((port, urls, bus, stx))
+    Ok((port, urls, bus, stx, serve_task))
 }
 
 fn status_json() -> serde_json::Value {
@@ -113,14 +154,27 @@ fn status_json() -> serde_json::Value {
 }
 
 /// 事件桥:内嵌服务的广播 → 本机 Tauri UI(主机人自己的看板实时刷新)。
-fn bridge_to_ui(app: tauri::AppHandle, bus: &BusHandle) {
+/// Lagged(积压超容被跳帧)必须 continue 而不是退出 —— `while let Ok(..)` 会在第一次
+/// Lagged 时整个循环永久死亡,主机本机看板从此不再实时刷新且无任何报错
+///(远端成员走 /ws 的 ws_loop 早已是 Lagged=>continue 的正确写法,这里对齐)。
+fn bridge_to_ui(app: tauri::AppHandle, bus: &BusHandle) -> tauri::async_runtime::JoinHandle<()> {
     let mut rx = bus.subscribe();
     tauri::async_runtime::spawn(async move {
         use tauri::Emitter;
-        while let Ok(ev) = rx.recv().await {
-            let _ = app.emit(&ev.topic, ev.payload);
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let _ = app.emit(&ev.topic, ev.payload);
+                }
+                Err(RecvError::Lagged(n)) => {
+                    eprintln!("[collab-host] UI 事件桥积压,跳过 {n} 条旧事件(继续转发)");
+                    continue;
+                }
+                Err(RecvError::Closed) => break, // 主机已停,频道关闭 → 正常收工
+            }
         }
-    });
+    })
 }
 
 #[tauri::command]
@@ -129,10 +183,17 @@ pub async fn collab_host_start(app: tauri::AppHandle, port: Option<u16>) -> Resu
         return Ok(status_json()); // 幂等:已在跑就报状态
     }
     let pref = port.or(load_cfg().port);
-    let (port, urls, bus, stx) = start_core(pref).await?;
-    bridge_to_ui(app, &bus);
+    let (port, urls, bus, stx, serve_task) = start_core(pref).await?;
+    let bridge_task = bridge_to_ui(app, &bus);
     save_cfg(HostCfg { enabled: true, port: Some(port) });
-    *RUNNING.lock() = Some(Running { port, urls, shutdown: Some(stx), bus });
+    *RUNNING.lock() = Some(Running {
+        port,
+        urls,
+        shutdown: Some(stx),
+        serve_task: Some(serve_task),
+        bridge_task: Some(bridge_task),
+        bus,
+    });
     Ok(status_json())
 }
 
@@ -142,12 +203,41 @@ pub fn collab_host_status() -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn collab_host_stop() -> Result<serde_json::Value, String> {
-    if let Some(mut r) = RUNNING.lock().take() {
-        if let Some(s) = r.shutdown.take() {
-            let _ = s.send(());
+pub async fn collab_host_stop() -> Result<serde_json::Value, String> {
+    // ① 只取走信号与任务句柄,先不清 RUNNING:优雅窗口期间保持「运行中」,
+    //    让并发的 start 走幂等分支返回,而不是抢先绑到 8485 造成双服务。
+    //    (parking_lot 锁不能跨 await 持有 → 取出后立刻放锁。)
+    let (shutdown, serve_task, bridge_task) = {
+        let mut g = RUNNING.lock();
+        match g.as_mut() {
+            Some(r) => (r.shutdown.take(), r.serve_task.take(), r.bridge_task.take()),
+            None => (None, None, None),
+        }
+    };
+    // ② 发 graceful shutdown 信号(停止 accept 新连接)。
+    if let Some(s) = shutdown {
+        let _ = s.send(());
+    }
+    // ③ 事件桥是纯转发循环,直接 abort。
+    if let Some(bt) = bridge_task {
+        bt.abort();
+    }
+    // ④ 优雅窗口:graceful shutdown 会等所有在途连接结束,而 /ws 是长连接永不结束
+    //    → 最多等 2s,超时就 abort(drop listener + 连接,端口立即释放),
+    //    再短等 1s 确认任务真正退出。否则旧 serve 僵尸占 8484,stop 后立即 start
+    //    只能落到 8485,反复停/开会把 8484-8494 逐个泄漏光。
+    if let Some(mut h) = serve_task {
+        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut h)
+            .await
+            .is_err()
+        {
+            h.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), &mut h).await;
         }
     }
+    // ⑤ 全部确认退出后才清 RUNNING(顺带 drop bus → broadcast 关闭 → 各 ws_loop 收
+    //    Closed 自行收尾)。stop 返回后立即 start 能重新绑回 8484。
+    *RUNNING.lock() = None;
     save_cfg(HostCfg { enabled: false, ..load_cfg() });
     Ok(status_json())
 }
@@ -160,9 +250,16 @@ pub fn auto_start_if_enabled(app: tauri::AppHandle) {
     }
     tauri::async_runtime::spawn(async move {
         match start_core(cfg.port).await {
-            Ok((port, urls, bus, stx)) => {
-                bridge_to_ui(app, &bus);
-                *RUNNING.lock() = Some(Running { port, urls, shutdown: Some(stx), bus });
+            Ok((port, urls, bus, stx, serve_task)) => {
+                let bridge_task = bridge_to_ui(app, &bus);
+                *RUNNING.lock() = Some(Running {
+                    port,
+                    urls,
+                    shutdown: Some(stx),
+                    serve_task: Some(serve_task),
+                    bridge_task: Some(bridge_task),
+                    bus,
+                });
                 println!("[collab-host] 主机自启成功,端口 {port}");
             }
             Err(e) => eprintln!("[collab-host] 主机自启失败: {e}"),
@@ -177,7 +274,7 @@ mod tests {
         let _g = crate::collab::db::TEST_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!("collab-host-{}.db", std::process::id()));
         std::env::set_var("POLARIS_COLLAB_DB", &tmp);
-        let (port, _urls, _bus, stx) = super::start_core(None).await.expect("start_core");
+        let (port, _urls, _bus, stx, serve_task) = super::start_core(None).await.expect("start_core");
         // ureq 是既有依赖:同步阻塞客户端,放 spawn_blocking 防塞 runtime。
         let body = tokio::task::spawn_blocking(move || {
             ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
@@ -190,6 +287,13 @@ mod tests {
         .unwrap();
         assert_eq!(body, "ok");
         let _ = stx.send(());
+        // 无 /ws 长连接时 graceful shutdown 应迅速完成;随后同端口必须能立刻重绑
+        //(修复2的核心诉求:停机不泄漏端口,stop→start 能回到原端口)。
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), serve_task).await;
+        let l = tokio::net::TcpListener::bind(("0.0.0.0", port))
+            .await
+            .expect("停机后应能立刻重绑同端口");
+        drop(l);
         std::env::remove_var("POLARIS_COLLAB_DB");
         let _ = std::fs::remove_file(&tmp);
     }

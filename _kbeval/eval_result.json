@@ -1,0 +1,30 @@
+{
+  "k": 10,
+  "n_queries": 195,
+  "corpus": {
+    "chunks": 103902,
+    "files": 103896
+  },
+  "query_embed_throughput_per_s": 21.7,
+  "results": {
+    "lexical": {
+      "recall": 0.6256410256410256,
+      "mrr": 0.5982905982905983,
+      "n": 195
+    },
+    "vector": {
+      "recall": 0.39487179487179486,
+      "mrr": 0.30335368335368335,
+      "n": 195
+    },
+    "hybrid": {
+      "recall": 0.6358974358974359,
+      "mrr": 0.505,
+      "n": 195
+    }
+  },
+  "lane_latency_ms": {
+    "vector_mean": 7.5,
+    "lexical_mean": 27.5
+  }
+}

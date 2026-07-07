@@ -845,7 +845,27 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
 pub(crate) fn run_claude_readonly<F: FnMut(&str, &str)>(
     root: &Path,
     prompt: &str,
+    on_event: F,
+) -> Result<String, String> {
+    run_claude_readonly_inner(root, prompt, on_event, None)
+}
+
+/// 同 `run_claude_readonly`,但带墙钟超时:到点 kill 子进程并整树回收,返回 Err。
+/// 用于检索 AI 扩写等「卡住必须能放手」的路径(阻塞线程池有限,不能被永久钉死)。
+pub(crate) fn run_claude_readonly_timeout<F: FnMut(&str, &str)>(
+    root: &Path,
+    prompt: &str,
+    on_event: F,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    run_claude_readonly_inner(root, prompt, on_event, Some(timeout))
+}
+
+fn run_claude_readonly_inner<F: FnMut(&str, &str)>(
+    root: &Path,
+    prompt: &str,
     mut on_event: F,
+    timeout: Option<std::time::Duration>,
 ) -> Result<String, String> {
     let claude_bin: std::ffi::OsString = crate::doctor::resolve_claude_exe()
         .map(|p| p.into_os_string())
@@ -886,8 +906,30 @@ pub(crate) fn run_claude_readonly<F: FnMut(&str, &str)>(
         });
     }
 
+    let stdout = child.stdout.take();
+
+    // 墙钟看门狗:设了 timeout 时,到点 kill 子进程 —— stdout 随之关闭,下面的读循环自然结束。
+    // 命令正常读完会 drop done_tx 让看门狗提前醒来(不空等满 timeout);None=不设超时(旧行为)。
+    let child = std::sync::Arc::new(parking_lot::Mutex::new(child));
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let watchdog = timeout.map(|dur| {
+        let child_w = std::sync::Arc::clone(&child);
+        let flag = std::sync::Arc::clone(&timed_out);
+        std::thread::spawn(move || {
+            if matches!(
+                done_rx.recv_timeout(dur),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = child_w.lock().kill();
+            }
+        })
+    });
+
     let mut collected = String::new();
-    if let Some(so) = child.stdout.take() {
+    let mut result_err: Option<String> = None;
+    if let Some(so) = stdout {
         for line in BufReader::new(so).lines().map_while(std::result::Result::ok) {
             if line.trim().is_empty() {
                 continue;
@@ -899,7 +941,8 @@ pub(crate) fn run_claude_readonly<F: FnMut(&str, &str)>(
             if ty == "result" {
                 if let Some(st) = v.get("subtype").and_then(|x| x.as_str()) {
                     if st.starts_with("error") {
-                        return Err(format!("claude 返回错误: {st}"));
+                        result_err = Some(format!("claude 返回错误: {st}"));
+                        break;
                     }
                 }
                 continue;
@@ -931,10 +974,27 @@ pub(crate) fn run_claude_readonly<F: FnMut(&str, &str)>(
             }
         }
     }
-    let status = child.wait();
+
+    // 读到 EOF(或 error 提前 break):通知看门狗退出,再回收子进程(避免僵尸 + 线程泄漏)。
+    drop(done_tx);
+    if let Some(h) = watchdog {
+        let _ = h.join();
+    }
+    let status = child.lock().wait();
+
+    if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+        let secs = timeout.map(|d| d.as_secs()).unwrap_or_default();
+        return Err(format!("claude 超时({secs}s)已终止"));
+    }
+    if let Some(e) = result_err {
+        return Err(e);
+    }
     if !matches!(&status, Ok(s) if s.success()) {
         let se = stderr_buf.lock().clone();
-        return Err(format!("claude 异常退出{}", if se.is_empty() { String::new() } else { format!(": {se}") }));
+        return Err(format!(
+            "claude 异常退出{}",
+            if se.is_empty() { String::new() } else { format!(": {se}") }
+        ));
     }
     Ok(collected)
 }
@@ -1540,8 +1600,21 @@ fn merge_duplicate_page(root: &Path, canonical: &str, dup: &str) -> Result<(), S
     Ok(())
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+// 桌面 async + spawn_blocking:大库上 idx.iter().map(clone).collect() 会把几十万~
+// 上百万条 rel_path 全克隆,足以在主线程上卡出可感顿挫。server flavor 保持同步直调。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn kb_list(subdir: Option<String>) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || kb_list_sync(subdir))
+        .await
+        .unwrap_or_default()
+}
+#[cfg(not(feature = "desktop"))]
 pub fn kb_list(subdir: Option<String>) -> Vec<String> {
+    kb_list_sync(subdir)
+}
+
+fn kb_list_sync(subdir: Option<String>) -> Vec<String> {
     let idx = INDEX.read();
     idx.iter()
         .filter(|d| {
@@ -1867,8 +1940,21 @@ pub fn path_contains(base: &Path, child: &Path) -> bool {
     norm(child).starts_with(norm(base))
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+// 桌面 async + spawn_blocking:kb_read 做真实磁盘读(最多 8MiB),NAS/机械盘上单次读
+// 可达数百毫秒,叠在主线程会卡界面。server flavor 保持同步直调。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn kb_read(rel_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || kb_read_sync(rel_path))
+        .await
+        .map_err(|e| format!("任务调度失败: {e}"))?
+}
+#[cfg(not(feature = "desktop"))]
 pub fn kb_read(rel_path: String) -> Result<String, String> {
+    kb_read_sync(rel_path)
+}
+
+fn kb_read_sync(rel_path: String) -> Result<String, String> {
     let root = KB_ROOT.read().clone();
     let full = resolve_within_kb(&root, &rel_path)?;
     // 防御:rel_path 由前端/模型决定,无上限直读会被超大文件(GB 级日志/数据集)一次性
@@ -1943,7 +2029,18 @@ pub struct KbHit {
 const MAX_SEARCH_DOCS: usize = 2000;
 
 /// PRD §8.8 关键词加权评分: 标题 +10 / category +8 / 正文 +1
-#[cfg_attr(feature = "desktop", tauri::command)]
+///
+/// 桌面端 async + spawn_blocking:大库(2000 篇上限内仍可能逐篇读全文打分)时这一下可达
+/// 数百毫秒~数秒,直接当同步命令跑在 WebView 主线程会卡界面。server flavor 无 UI 主线程、
+/// dispatch 本就在 spawn_blocking 中,保持同步直调。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn kb_search(query: String, top_k: Option<usize>) -> Vec<KbHit> {
+    tauri::async_runtime::spawn_blocking(move || kb_search_sync(query, top_k))
+        .await
+        .unwrap_or_default()
+}
+#[cfg(not(feature = "desktop"))]
 pub fn kb_search(query: String, top_k: Option<usize>) -> Vec<KbHit> {
     kb_search_sync(query, top_k)
 }

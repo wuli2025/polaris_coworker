@@ -26,3 +26,20 @@ PolarisKB
 # 本地验证用的 claude 凭证种子（绝不进镜像）
 .claude-seed
 .docker-build.log
+
+# —— 服务器镜像套件补充(DEPLOY-CLOUD):再排一批本地实验垃圾 ——
+_kbeval
+_face_crops
+_stress
+_stress*
+_scratch*
+_cl_*
+_cluster_eval*
+_research_promotable
+*.tgz
+*.pid
+Dockerfile
+docker-compose.yml
+DEPLOY-CLOUD.md
+.env
+.env.*

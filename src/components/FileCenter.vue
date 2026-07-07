@@ -41,6 +41,7 @@ import {
   WifiOff,
   Server,
 } from "@lucide/vue";
+import OrbitSpinner from "./icons/OrbitSpinner.vue";
 import {
   files as fc,
   artifacts as artifactsApi,
@@ -1141,7 +1142,7 @@ onBeforeUnmount(() => {
           <X :size="13" :stroke-width="2" />
         </button>
         <button class="sem-btn" :disabled="semBusy || !searchText.trim()" title="语义检索(grep ∥ 向量)" @click="runSemantic">
-          <LoaderCircle v-if="semBusy" :size="14" class="spin" />
+          <OrbitSpinner v-if="semBusy" :size="14" />
           <Radar v-else :size="14" :stroke-width="1.8" />
           <span>语义</span>
         </button>
@@ -1181,7 +1182,7 @@ onBeforeUnmount(() => {
           title="盘点:先扫一眼文件夹结构,勾选要盘点的目录(可选知识库之外的盘符/文件夹),再建库"
           @click="openFolderPicker"
         >
-          <LoaderCircle v-if="scanning || pickerLoading" :size="14" class="spin" />
+          <OrbitSpinner v-if="scanning || pickerLoading" :size="14" />
           <FolderSearch v-else :size="14" :stroke-width="1.8" />
           <span>{{ scanning ? "盘点中" : "盘点" }}</span>
         </button>
@@ -1193,7 +1194,7 @@ onBeforeUnmount(() => {
             : '智能归类:先秒级按结构出星图骨架 → AI 读懂并起名;到设置页配硅基 key(免费)后,还会在后台按内容语义精修一次'"
           @click="doSmartCluster"
         >
-          <LoaderCircle v-if="clustering || llmClustering" :size="14" class="spin" />
+          <OrbitSpinner v-if="clustering || llmClustering" :size="14" />
           <Wand2 v-else :size="14" :stroke-width="1.8" />
           <span>{{ clustering || llmClustering ? "归类中" : "智能归类" }}</span>
         </button>
@@ -1205,7 +1206,7 @@ onBeforeUnmount(() => {
             : '建索引需要嵌入 key:点这里到设置页配硅基 key(免费),全文索引则照常后台建'"
           @click="buildIndex"
         >
-          <LoaderCircle v-if="building" :size="14" class="spin" />
+          <OrbitSpinner v-if="building" :size="14" />
           <Radar v-else :size="14" :stroke-width="1.8" />
           <span>{{ building ? "建索引中" : overview && overview.embeddedFiles > 0 ? "续建索引" : "建索引" }}</span>
         </button>
@@ -1215,7 +1216,7 @@ onBeforeUnmount(() => {
           title="用大模型给乱码/杂乱的文件名起可读的中文标题(只改显示,不改磁盘文件名)"
           @click="doTitlesLlm"
         >
-          <LoaderCircle v-if="llmTitling" :size="14" class="spin" />
+          <OrbitSpinner v-if="llmTitling" :size="14" />
           <Sparkles v-else :size="14" :stroke-width="1.8" />
           <span>{{ llmTitling ? "整理中" : "AI 整理名称" }}</span>
         </button>
@@ -1275,7 +1276,7 @@ onBeforeUnmount(() => {
             :disabled="building"
             @click="buildIndex"
           >
-            <LoaderCircle v-if="building" :size="12" class="spin" />
+            <OrbitSpinner v-if="building" :size="12" />
             <Radar v-else :size="12" :stroke-width="1.8" />
             {{ overview.embeddedFiles > 0 ? "续建索引" : "建索引" }}
           </button>
@@ -1413,7 +1414,7 @@ onBeforeUnmount(() => {
       <div class="empty-title">文件中心还是空的</div>
       <div class="empty-sub">点「盘点」先扫一眼文件夹,勾选要盘点的目录(可选知识库之外的盘符/文件夹),建成可视化文件库;<br />已嵌入文本可再点「智能归类」把相似数据自动放在一起。</div>
       <button class="empty-cta" :disabled="scanning || pickerLoading" @click="openFolderPicker">
-        <LoaderCircle v-if="scanning || pickerLoading" :size="15" class="spin" />
+        <OrbitSpinner v-if="scanning || pickerLoading" :size="15" />
         <FolderSearch v-else :size="15" :stroke-width="1.8" />
         <span>{{ scanning ? "盘点中…" : "立即盘点" }}</span>
       </button>
@@ -1428,7 +1429,7 @@ onBeforeUnmount(() => {
           <span>语义检索:「{{ searchText }}」</span>
           <button class="sem-close" @click="clearSemantic"><X :size="13" :stroke-width="2" /> 收起</button>
         </div>
-        <div v-if="semBusy" class="sem-loading"><LoaderCircle :size="16" class="spin" /> 检索中…</div>
+        <div v-if="semBusy" class="sem-loading"><OrbitSpinner :size="16" /> 检索中…</div>
         <div v-else-if="!semHits.length" class="sem-empty">没有命中。试试更短的关键词,或先在「检索枢纽」构建向量索引。</div>
         <div v-else class="sem-list">
           <div v-for="h in semHits" :key="h.path" class="sem-row" @click="openPath(h.abspath)">
@@ -1492,7 +1493,7 @@ onBeforeUnmount(() => {
         </div>
       </RecycleScroller>
       <div v-show="view === 'gallery'" class="grid-status">
-        <span v-if="loading" class="grid-loading"><LoaderCircle :size="18" class="spin" /> 加载中…</span>
+        <span v-if="loading" class="grid-loading"><OrbitSpinner :size="18" /> 加载中…</span>
         <span v-else-if="!cards.length" class="grid-empty">该筛选下没有文件</span>
         <span v-else-if="exhausted" class="grid-done">已显示全部 {{ total.toLocaleString() }} 个</span>
       </div>
@@ -1507,7 +1508,7 @@ onBeforeUnmount(() => {
             每个大类点开能看它下面又分了哪些子类,点节点即可筛出该类的文件。
           </div>
           <button class="empty-cta" :disabled="clustering || llmClustering || !overview?.totalFiles" @click="doSmartCluster">
-            <LoaderCircle v-if="clustering || llmClustering" :size="15" class="spin" />
+            <OrbitSpinner v-if="clustering || llmClustering" :size="15" />
             <Wand2 v-else :size="15" :stroke-width="1.8" /><span>{{ clustering || llmClustering ? "归类中…" : "智能归类" }}</span>
           </button>
         </div>
@@ -1611,7 +1612,7 @@ onBeforeUnmount(() => {
             <span class="lv-c-time">{{ fmtTime(card.mtime) }}</span>
           </div>
         </RecycleScroller>
-        <div v-if="loading" class="grid-status"><span class="grid-loading"><LoaderCircle :size="18" class="spin" /> 加载中…</span></div>
+        <div v-if="loading" class="grid-status"><span class="grid-loading"><OrbitSpinner :size="18" /> 加载中…</span></div>
       </div>
     </div>
 
@@ -1640,7 +1641,7 @@ onBeforeUnmount(() => {
         <div class="detail-gist">
           <div class="gist-head"><Sparkles :size="13" :stroke-width="1.7" /> 内容速览</div>
           <div v-if="detailGist" class="gist-body">{{ detailGist }}</div>
-          <div v-else class="gist-body loading"><LoaderCircle :size="13" class="spin" /> 生成中…</div>
+          <div v-else class="gist-body loading"><OrbitSpinner :size="13" /> 生成中…</div>
         </div>
         <div class="detail-actions">
           <button class="detail-btn primary" @click="openExternal(selected)"><ExternalLink :size="14" :stroke-width="1.8" /> 打开</button>
@@ -1695,7 +1696,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-if="pickerLoading" class="picker-loading">
-            <LoaderCircle :size="20" class="spin" /> 正在扫描文件夹结构…
+            <OrbitSpinner :size="20" /> 正在扫描文件夹结构…
           </div>
           <div v-else-if="pickerErr" class="picker-error">{{ pickerErr }}</div>
           <div v-else-if="!scanRoots.length" class="picker-error">没有可盘点的目录。</div>
@@ -1748,7 +1749,7 @@ onBeforeUnmount(() => {
                 class="picker-row sub-loading"
                 :style="{ paddingLeft: 8 + row.level * 20 + 'px' }"
               >
-                <LoaderCircle :size="13" class="spin" /> 加载子文件夹…
+                <OrbitSpinner :size="13" /> 加载子文件夹…
               </div>
               <!-- 空目录占位 -->
               <div

@@ -209,13 +209,15 @@ impl TargetPool {
     }
 }
 
-/// kill_tree 两段式:SIGTERM → grace → SIGKILL
-/// 用 libc::kilib 直接调 POSIX;依赖 unix-only,Windows 编译期跳过
+/// kill_tree 两段式:SIGTERM → grace → SIGKILL(用 libc::killpg 直接调 POSIX,unix-only)。
+/// 注意: killpg 要求目标是**进程组组长**——调用方 spawn 时须先 `Command::process_group(0)`,
+/// 否则子进程继承本进程 pgid, killpg 命中不到该组而静默失效(当前实际渲染路走
+/// `forge::run_with_timeout`, 那里已置进程组; 本 helper 暂无调用方, 保留备用)。
 #[cfg(unix)]
 pub fn kill_tree(pid: u32, grace: Duration) -> std::io::Result<()> {
     use libc::{kill, killpg};
     unsafe {
-        // SIGTERM 给整个进程组(假设子进程 setpgid 创建过)
+        // SIGTERM 给整个进程组(要求子进程已 process_group(0) 成为组长)
         let _ = killpg(pid as i32, libc::SIGTERM);
         std::thread::sleep(grace);
         if kill(pid as i32, 0) == 0 {

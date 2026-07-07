@@ -1,69 +1,31 @@
-# Source Registry — Polaris Forge 工业级化
+# Source Registry — Polaris 团队协作架构调研 (2026-07-01)
 
-> 截止 2026-06-10。所有来源来自 4 份 task notes（task-a/b/c/d），按 crates / GitHub / 官方文档 / 既有记忆 / 工具链 5 类分组。
+## A. 编码 Agent 协作产品
+- Devin/Cognition 定价 https://devin.ai/pricing/ · Knowledge https://docs.devin.ai/product-guides/knowledge · VPC https://docs.devin.ai/enterprise/vpc/overview · DeepWiki https://ai.miraheze.org/wiki/DeepWiki
+- Factory 企业部署 https://docs.factory.ai/enterprise · Droid Computers https://factory.ai/news/droid-computers
+- Cursor Teams https://cursor.com/business/teams · IAM https://cursor.com/docs/enterprise/identity-and-access-management · Cloud Agents https://cursor.com/docs/cloud-agent · 自托管 https://cursor.com/blog/self-hosted-cloud-agents
+- Claude Code Enterprise https://claude.com/product/claude-code/enterprise · 部署 https://code.claude.com/docs/en/third-party-integrations
+- GitHub Copilot Spaces https://docs.github.com/en/copilot/concepts/context/spaces
+- Amp https://sourcegraph.com/amp · Windsurf 共享 https://www.iamraghuveer.com/posts/windsurf-team-shared-memory/
 
-## A. Rust Crate（核心选型）
+## B. 企业知识库 Agent + 权限
+- Glean permissions-aware https://www.glean.com/perspectives/security-permissions-aware-ai · 索引ACL https://developers.glean.com/api-info/indexing/documents/permissions
+- Manus Projects https://manus.im/docs/features/projects · Team https://manus.im/team
+- 飞书知识库权限 https://www.feishu.cn/hc/zh-CN/articles/821998241087 · Base高级权限 https://www.feishu.cn/hc/zh-CN/articles/588604550568 · 知识问答 https://www.feishu.cn/hc/zh-CN/articles/854453754409
+- Notion 权限与AI https://www.notion.com/help/sharing-and-permissions · M365 Copilot 架构 https://learn.microsoft.com/en-us/copilot/microsoft-365/microsoft-365-copilot-architecture · Slack AI https://slack.com/help/articles/47421816860947 · Rovo https://support.atlassian.com/rovo/docs/rovo-agent-permissions-and-governance/
 
-[1] chromiumoxide 0.9.1 | https://github.com/mattsse/chromiumoxide | crates.io/api/v1/crates/chromiumoxide | OFFICIAL | Feb 2026 · 1.3k stars · 178 forks · 5 supported target · MIT/Apache-2.0
-[2] headless_chrome 1.0.21 | https://github.com/Edu4rdSHL/rust-headless-chrome | crates.io | OFFICIAL | Feb 2026 · Lib.rs 329k monthly · MIT
-[3] wry 0.55.1 | https://github.com/tauri-apps/wry | crates.io | OFFICIAL | May 2026 · Lib.rs 2.7M monthly · no headless mention
-[4] openh264-rs 0.9.3 | https://github.com/ralfbiedert/openh264-rs | crates.io/api/v1/crates/openh264 | OFFICIAL | Mar 2026 · MSRV 1.85 · BSD-2-Clause · 404k 下载
-[5] cisco/openh264 2.6.0 | https://github.com/cisco/openh264/releases | OFFICIAL | Feb 2025 · BINARY_LICENSE 独立
-[6] openh264 BINARY_LICENSE | http://www.openh264.org/BINARY_LICENSE.txt | PRIMARY | 2024-01 · 商用分发约束
-[7] mp4-rust 0.14.0 | https://github.com/alfg/mp4-rust | crates.io/api/v1/crates/mp4 | OFFICIAL | 2023-08-01 至今未更新 · MIT · 349 stars
-[8] ebur128 0.1.10 | https://github.com/sdroege/ebur128 | crates.io | OFFICIAL | 2024-10-26 · MIT · EBU TECH 3341/3342 测试过
-[9] cosmic-text 0.19.0 | https://github.com/pop-os/cosmic-text | crates.io | OFFICIAL | Apr 2026 · Apache-2.0/MIT · Pop!_OS 维护
-[10] symphonia 0.6.0 | https://github.com/pdeljanov/Symphonia | crates.io | OFFICIAL | May 2026 · MPL-2.0 · 100% safe Rust · 3.3k stars
-[11] audiopus 0.2.0 | https://crates.io/crates/audiopus | OFFICIAL | 2021-04 (5 年停滞) · BSD-3
-[12] ffmpeg-next | https://crates.io/crates/ffmpeg-next | OFFICIAL | 2024 · MIT
-[13] fonttools pyftsubset | https://fonttools.readthedocs.io/en/latest/subset/ | OFFICIAL | webfont 工业做法 · pyftsubset --unicodes --no-hinting --desubroutinize
+## C. 自托管知识库架构 + 本地优先同步
+- Outline https://docs.getoutline.com · Docmost https://noted.lol/docmost/ · Trilium sync https://docs.triliumnotes.org/developer-guide/concepts/sync
+- libSQL/Turso https://docs.turso.tech/features/embedded-replicas/introduction · libSQL https://github.com/tursodatabase/libsql · cr-sqlite https://vlcn.io/docs/cr-sqlite/intro
+- Litestream https://litestream.io/how-it-works/ · PowerSync/Electric/Zero https://trybuildpilot.com/648-electric-sql-vs-powersync-vs-zero-2026 · local-first https://www.inkandswitch.com/essay/local-first/ · SQLite WAL https://sqlite.org/wal.html
 
-## B. Chrome / Chromium 工具链
+## D. 安全与低运维部署
+- Tailscale Serve https://tailscale.com/kb/1312/serve · ACLs https://tailscale.com/docs/features/access-control/acls · Tailnet Lock https://tailscale.com/kb/1226/tailnet-lock/
+- Headscale https://github.com/juanfont/headscale · CF Tunnel token https://developers.cloudflare.com/tunnel/advanced/tunnel-tokens/ · CF Access https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/
+- Pocket-ID https://github.com/pocket-id/pocket-id · distroless/scratch https://safeguard.sh/resources/blog/scratch-vs-distroless-minimal-images · npm供应链 https://www.cisa.gov/news-events/alerts/2025/09/23/... · Next.js SSRF CVE-2026-44578 https://hadrian.io
 
-[14] puppeteer/puppeteer Dockerfile | https://github.com/puppeteer/puppeteer/blob/main/docker/Dockerfile | OFFICIAL | base + 字体清单 + useradd 模式
-[15] Zenika/alpine-chrome | https://github.com/Zenika/alpine-chrome | OFFICIAL | 三方案 no-sandbox/SYS_ADMIN/seccomp 共识
-[16] jfrazelle/dotfiles chrome.json | https://github.com/jfrazelle/dotfiles/blob/master/etc/docker/seccomp/chrome.json | OFFICIAL | chromium seccomp 事实标准
-[17] Chromium Linux sandboxing doc | https://chromium.googlesource.com/chromium/src/+/master/docs/linux/sandboxing.md | OFFICIAL | 进程模型与子进程树清理
-
-## C. 容器与运行时
-
-[18] Docker run reference / resource constraints | https://docs.docker.com/engine/containers/resource_constraints/ | OFFICIAL | --shm-size / --memory / --cpuset-cpus 语义
-[19] Docker Compose spec | https://docs.docker.com/reference/compose-file/services/ | OFFICIAL | shm_size / cap_drop / cap_add / healthcheck / depends_on.condition
-[20] krallin/tini | https://github.com/krallin/tini | OFFICIAL | tini -g 杀进程组 + 1.13+ 内置 init
-[21] OpenTelemetry Rust | https://github.com/open-telemetry/opentelemetry-rust | OFFICIAL | OTLP · 0.x GA
-
-## D. TTS / 字幕 / 第三方 Python 工具
-
-[22] microsoft/edge-tts | https://github.com/microsoft/edge-tts | OFFICIAL | 限流 403 行为
-[23] Initsnow/edge-tts-rust | https://github.com/Initsnow/edge-tts-rust | OFFICIAL | 0 star · 2026-04
-[24] MasterXD123/mini-edge-tts-rust | https://github.com/MasterXD123/mini-edge-tts-rust | OFFICIAL | 0 star · 2026-04
-[25] yynag/edge-tts-rust | https://github.com/yynag/edge-tts-rust | OFFICIAL | 0 star · 2024-12
-[26] rust_xlsxwriter | https://docs.rs/rust_xlsxwriter | OFFICIAL | 不写 .pptx，仅 .xlsx
-[27] pptx-rs | https://crates.io/crates/pptx-rs | OFFICIAL | 2024 之后无大更新
-[28] windows-rs / windows-sys | https://github.com/microsoft/windows-rs | OFFICIAL | 暴露 ISpVoice，Win10/11 自带 SAPI 5.4
-
-## E. Polaris 既有记忆 / 代码（不需重外部证据）
-
-[29] MEMORY forge-engine-prd | 仓库内 | ADR-002/003/011 + 六 crate 骨架
-[30] MEMORY forge-crossplatform-foundation | 仓库内 | 跨平台 preflight + 17 单测 + slim/full 落地
-[31] MEMORY security-hardening-pass-3 | 仓库内 | auto-token + CSP + secrets
-[32] MEMORY docker-render-image-size-audit | 仓库内 | 994MB 体积分析
-[33] MEMORY deck-export-overlap-noanim-bug | 仓库内 | no-anim 误伤
-[34] src-tauri/src/forge_pptx.rs | 仓库内 | 隐形文本层 + 全幅图版式
-[35] src-tauri/src/forge_tts.rs | 仓库内 | MiniMax T2A + Mac say
-[36] src-tauri/src/forge.rs | 仓库内 | 跨平台 preflight `/api/status`
-
-## F. 知识缺口（Gaps — 后续 P5 验证项）
-
-G1. openh264-rs aarch64 **未单测**（仅编译通过）→ 必须落 forge-bench
-G2. chrome-headless-shell 各平台精确二进制大小（Chrome for Testing JSON 不暴露）
-G3. chromiumoxide MSRV 数字未抓到（真机 cargo +1.78 check）
-G4. 多 Browser 横向并发的真实吞吐（无公开 benchmark）
-G5. noto-cjk SC 子集 6763 字的实际命中率（需自有 corpus）
-G6. Jessi Frazelle seccomp 与 docker 25+ 兼容性
-G7. wry headless mode（0.56+ 跟踪）
-G8. chromiumoxide 0.6 进程泄漏 commit 编号
-G9. OpenTelemetry Rust 在 Tauri/WebView2 兼容
-G10. mp4-rust vs 自写 muxer 写盘性能（无第三方 benchmark）
-G11. 1080p openh264 在 aarch64/Apple Silicon 实际 FPS + 功耗
-G12. 群晖 Container Manager userns-remap 支持
+## E. 细粒度授权 + permission-aware RAG
+- RBAC/ABAC/ReBAC https://www.permit.io/blog/rbac-vs-abac-vs-rebac · OpenFGA https://openfga.dev/docs/configuration-language · Rust crate https://docs.rs/openfga-client · SpiceDB https://authzed.com/docs · 比较 https://inferadb.com/dispatch/authorization-infrastructure-compared/
+- permission-aware RAG https://www.rheininsights.com/blog/en/... · 向量层访问控制 https://tianpan.co/blog/2026-05-04-permission-aware-retrieval-enterprise-rag-access-control
+- Azure security trimming https://learn.microsoft.com/en-us/azure/search/search-security-trimming-for-azure-search · 查询时ACL https://learn.microsoft.com/en-us/azure/search/search-query-access-control-rbac-enforcement
+- Pinecone访问控制 https://www.pinecone.io/learn/rag-access-control/ · 预/后过滤 https://apxml.com/courses/advanced-vector-search-llms/... · SQLite RLS https://docs.sqlitecloud.io/docs/rls · FTS5 JOIN https://sqlite.org/forum/info/509bdbe534f58f20 · Postgres RLS https://www.postgresql.org/docs/current/ddl-rowsecurity.html

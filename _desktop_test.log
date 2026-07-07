@@ -1,0 +1,205 @@
+crates\forge-codec\src\encoder.rs:52:16: warning: unused variable: `cfg`: help: if this is intentional, prefix it with an underscore: `_cfg`
+warning: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
+   Compiling polaris-app v1.3.1 (D:\polaris\polaris-app\src-tauri)
+warning: unused import: `std::sync::OnceLock`
+    --> src\kb.rs:3344:13
+     |
+3344 |         use std::sync::OnceLock;
+     |             ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\kb.rs:2804:9
+     |
+2804 |     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `synth_windows_sapi` is never used
+   --> src\forge_tts.rs:254:4
+    |
+254 | fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
+    |    ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `polaris-app` (lib test) generated 3 warnings (run `cargo fix --lib -p polaris-app --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.30s
+     Running unittests src\lib.rs (target\debug\deps\polaris_app_lib-389bee544b30ba76.exe)
+
+running 168 tests
+test chat::tests::folder_artifact_repr_appends_single_trailing_slash ... ok
+test chat::tests::format_memory_map_empty_when_no_entries ... ok
+test chat::tests::split_artifacts_malformed_marker_is_safe ... ok
+test chat::tests::split_artifacts_no_marker_returns_trimmed_body ... ok
+test chat::tests::truncate_chars_is_char_safe_for_cjk ... ok
+test chat::tests::format_memory_map_respects_budget_but_keeps_at_least_one ... ok
+test chat::tests::format_memory_map_keeps_only_entry_lines_and_wraps ... ok
+test chat::tests::split_artifacts_parses_marker_and_strips_body ... ok
+test codex_proxy::tests::build_responses_body_tolerates_malformed_messages ... ok
+test convert::tests::docx_paragraphs_become_newlines ... ok
+test convert::tests::entities_decoded_amp_last ... ok
+test convert::tests::md_cell_escapes_pipe_and_newline ... ok
+test convert::tests::ooxml_handles_tabs_breaks_entities ... ok
+test convert::tests::slide_index_parses_number ... ok
+test convert::tests::squeeze_collapses_blank_runs ... ok
+test doctor::tests::dump_install_scripts ... ignored
+test convert::tests::trim_float_drops_trailing_zeros ... ok
+test doctor::tests::merge_no_proxy_preserves_existing_and_appends ... ok
+test doctor::tests::path_contains_dir_is_case_and_slash_insensitive ... ok
+test expert::avatars::tests::slots_deterministic_and_in_range ... ok
+test expert::teams::tests::team_ids_unique ... ok
+test expert::teams::tests::teams_reference_real_experts ... ok
+test expert::tests::all_experts_count ... ok
+test codex_proxy::tests::build_responses_body_rejects_empty_messages ... ok
+test chat::tests::ymd_converts_known_epochs ... ok
+test codex_proxy::tests::map_model_passthrough_and_default ... ok
+test codex_proxy::tests::build_responses_body_minimal_ok ... ok
+test doctor::tests::merge_no_proxy_adds_loopback_to_empty ... ok
+test codex_proxy::tests::extract_system_handles_all_shapes ... ok
+test doctor::tests::merge_no_proxy_is_idempotent_case_insensitive ... ok
+test chat::tests::displayable_artifact_whitelists_common_formats_only ... ok
+test expert::tests::all_experts_have_unique_ids ... ok
+test expert::tests::route_debug_has_selectable ... ok
+test expert::tests::route_normalizes_and_marks_primary ... ok
+test expert::avatars::tests::avatars_non_empty ... ok
+test expert::tests::auto_match_returns_primary ... ok
+test expert::tests::expert_groups_complete ... ok
+test expert::tests::route_block_injects_full_expert_prompt ... ok
+test expert::tests::route_block_fires_on_domain_not_chitchat ... ok
+test expert::tests::seed_expert_files ... ignored
+test fable::eval::tests::aggregate_recall_and_mrr ... ok
+test expert::tests::routing_returns_results ... ok
+test fable::eval::tests::rank_handles_backslash_paths ... ok
+test fable::index::tests::bits_pack_and_hamming ... ok
+test fable::index::tests::ivf_majority_and_nearest_centroid ... ok
+test fable::files::tests::extract_gist_prefers_title_and_first_para ... ok
+test fable::files::tests::human_size_scales ... ok
+test fable::files::tests::maximal_roots_drops_nested ... ok
+test fable::files::tests::maximal_roots_keeps_siblings_and_prefix_lookalikes ... ok
+test fable::files::tests::source_tag_recognizes_download_dirs ... ok
+test fable::files::tests::tokenize_splits_cjk_and_ascii ... ok
+test fable::eval::tests::rank_substring_case_insensitive ... ok
+test fable::files::tests::b64_roundtrip_basic ... ok
+test fable::files::tests::clean_title_strips_noise_keeps_meaning ... ok
+test fable::index::tests::normalize_makes_unit_length ... ok
+test fable::index::tests::query_cache_lru_evicts_oldest ... ok
+test fable::index::tests::ivf_train_separates_two_clusters ... ok
+test fable::inventory::tests::covered_by_respects_pruned_path ... ok
+test fable::inventory::tests::natural_lang_detects_script ... ok
+test fable::index::tests::routing_skips_data_dumps_within_size ... ok
+test fable::inventory::tests::prog_lang_maps_extensions ... ok
+test fable::inventory::tests::quick_lang_code_and_media ... ok
+test fable::inventory::tests::skip_dir_scan_prunes_system_and_appdata ... ok
+test fable::ontology::tests::empty_fields_rejected ... ok
+test fable::ontology::tests::schemas_have_chinese_names_and_types ... ok
+test fable::retrieve::tests::has_short_terms_detects_bare_cjk_concepts ... ok
+test fable::ontology::tests::validate_rejects_out_of_frame ... ok
+test fable::retrieve::tests::fts_expr_uses_trigrams_not_whole_phrase ... ok
+test fable::retrieve::tests::rerank_sig_changes_with_candidates ... ok
+test fable::retrieve::tests::rerank_cache_roundtrip ... ok
+test fable::retrieve::tests::scope_filter_first_segment ... ok
+test fable::retrieve::tests::split_query_drops_cjk_stopword_bigrams ... ok
+test fable::retrieve::tests::split_query_segments_cjk_and_latin ... ok
+test feishu::tests::group_requires_mention ... ok
+test feishu::tests::never_reply_to_self ... ok
+test feishu::tests::reply_guard_catches_empty_promise ... ok
+test fable::tests::bundled_sqlite_has_fts5_trigram_substring_match ... ok
+test fable::tests::flag_guard_acquire_block_and_release ... ok
+test fable::tests::flag_guard_releases_on_panic ... ok
+test fable::tests::worker_count_bounded_against_oversubscription ... ok
+test feishu::tests::dedup_rejects_repeat_and_evicts ... ok
+test feishu::tests::dm_policy_gates ... ok
+test forge::tests::bundled_exe_safe_when_absent ... ok
+test forge_fx_safe::tests::spring_solve_consistency ... ok
+test forge_fx_safe::tests::spring_solve_zero ... ok
+test forge_capture::tests::capture_tier_name ... ok
+test forge_fx_safe::tests::safe_run_ok ... ok
+test forge_fx_safe::tests::safe_run_err_returned ... ok
+test forge_fx_safe::tests::health_ok_rate_decreases_on_err ... ok
+test forge_pptx::tests::capture_slides_rejects_absurd_slide_count ... ok
+test forge_fx_safe::tests::safe_run_catches_panic ... ok
+test forge_capture::tests::find_browser_does_not_panic ... ok
+test forge_pptx::tests::count_slides_counts_slide_token_only ... ok
+test forge_pptx::tests::extract_text_rects_via_dumpdom_when_chromium_present ... ok
+test forge_pptx::tests::build_pptx_editable_layer_visible_text ... ok
+test forge_pptx::tests::parse_text_rects_extracts_json ... ok
+test forge_pptx_native::tests::rejects_empty_and_bad_spec ... ok
+test forge_pptx::tests::png_size_reads_ihdr ... ok
+test forge_pptx::tests::build_pptx_text_layer_embeds_searchable_text ... ok
+test forge_pptx::tests::build_pptx_produces_valid_package ... ok
+test forge_tts::tests::chunk_text_empty ... ok
+test forge_pptx_native::tests::spec_without_notes_omits_notes_parts ... ok
+test forge_pptx_native::tests::unknown_layout_degrades_to_bullets_with_warning ... ok
+test forge_tts::tests::chunk_text_hard_cut_when_no_punct ... ok
+test forge_tts::tests::chunk_text_splits_on_punctuation ... ok
+test forge_video::tests::missing_audio_fails_fast_before_capture ... ok
+test forge_pptx_native::tests::stats_and_timeline_layouts_render_natively ... ok
+test kb::tests::context_block_map_total_capped_by_global_budget ... ok
+test kb::tests::context_block_no_surplus_when_nav_fills ... ok
+test kb::tests::context_block_surplus_when_nav_is_small ... ok
+test kb::tests::enrich_links_alias_when_term_differs ... ok
+test kb::tests::enrich_links_first_occurrence_skips_code_and_existing ... ok
+test kb::tests::enrich_links_skips_frontmatter_and_already_linked ... ok
+test kb::tests::enrich_links_skips_inline_code ... ok
+test forge_pptx::tests::editable_layer_rejects_bad_color_align ... ok
+test forge_pptx::tests::build_pptx_creates_missing_parent_dirs ... ok
+test forge_pptx_native::tests::spec_text_is_xml_escaped ... ok
+test forge_tts::tests::hex_decode_roundtrip ... ok
+test kb::tests::extract_json_tolerates_fences_and_prose ... ok
+test kb::tests::normalize_title_collapses_punctuation_and_case ... ok
+test forge_tts::tests::silent_fallback_writes_file ... ok
+test kb::tests::safe_path_accepts_normal_wiki_pages ... ok
+test kb::tests::rewrite_wikilink_target_keeps_alias_and_section ... ok
+test kb::tests::safe_path_rejects_escapes_and_absolutes ... ok
+test kb::tests::resolve_within_kb_rejects_traversal ... ok
+test kb::tests::path_contains_handles_verbatim_prefix_and_case ... ok
+test kb::tests::safe_path_rejects_reserved_and_outside_wiki ... ok
+test palette::tests::demo_print ... ignored
+test kb::tests::truncate_keeps_short_and_cuts_long ... ok
+test palette::tests::contrast_known_values ... ok
+test palette::tests::generated_theme_meets_contrast ... ok
+test palette::tests::hex_roundtrip_and_hsl ... ok
+test palette::tests::harmony_is_coherent ... ok
+test palette::tests::outputs_are_usable ... ok
+test palette::tests::mood_maps_to_seed ... ok
+test persona::tests::team_presets_wired_and_bodies_embedded ... ok
+test project::tests::manifest_minimal_defaults ... ok
+test project::tests::manifest_parses_directive_example ... ok
+test project::tests::port_parsing ... ok
+test provider::claude_oauth_tests::b64url_encode_known_vectors ... ok
+test provider::claude_oauth_tests::pkce_s256_rfc7636_vector ... ok
+test persona::tests::single_personas_intact_and_ids_unique ... ok
+test provider::claude_oauth_tests::rand_b64url_len_and_uniqueness ... ok
+test provider::claude_oauth_tests::sha256_known_vector ... ok
+test persona::tests::apply_team_writes_claude_md ... ok
+test updater::tests::check_resolves_to_available_when_version_differs ... ok
+test provider::claude_oauth_tests::url_encode_query_value ... ok
+test updater::tests::check_resolves_up_to_date_when_no_update ... ok
+test updater::tests::mirror_candidates_passthrough_non_github ... ok
+test updater::tests::check_resolves_up_to_date_when_same_version ... ok
+test updater::tests::mirror_candidates_wraps_bare_github_url ... ok
+test updater::tests::state_serializes_with_status_tag ... ok
+test updater::tests::mirror_candidates_unwraps_already_mirrored_url ... ok
+test voice::tests::exact_correction_cross_script ... ok
+test voice::tests::mine_terms_counts_and_filters ... ok
+test voice::tests::no_change_when_already_correct ... ok
+test voice::tests::pinyin_threshold_blocks_far_words ... ok
+test voice::tests::single_char_hotword_never_fuzzy ... ok
+test voice::tests::pinyin_fuzzy_homophone ... ok
+test forge_pptx_native::tests::spec_builds_valid_editable_package ... ok
+test voice::tests::syllable_lev_basic ... ok
+test fable::tests::concurrent_background_writers_no_lock_errors ... ok
+test kb::tests::injection_scanner_flags_attacks_and_spares_benign ... ok
+test kb::tests::parallel_scan_all_complete_ordered_no_dupes ... ok
+test doctor::tests::prime_and_prepend_behaviour ... ok
+test doctor::tests::claude_dir_from_path_picks_parent_or_npm_prefix ... ok
+test forge::tests::timeout_kills_hanging_process ... ok
+test forge_pptx::tests::deck_to_pptx_e2e_when_chromium_present ... ok
+
+test result: ok. 165 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 5.63s
+

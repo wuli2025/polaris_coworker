@@ -15,6 +15,9 @@ use tokio::sync::broadcast;
 pub struct Event {
     pub topic: String,
     pub payload: serde_json::Value,
+    /// 事件受众:None=广播给所有连接;Some(username)=只投递给该用户(owner 全收)。
+    /// 多人协作(/ws 按用户过滤)的最小侵入实现——引擎模块无感,定向事件走 emit_to。
+    pub audience: Option<String>,
 }
 
 /// server 模式下替代 `tauri::AppHandle` 的轻量句柄（Clone + Send + Sync）。
@@ -46,6 +49,19 @@ impl AppHandle {
         let _ = self.tx.send(Event {
             topic: topic.to_string(),
             payload: value,
+            audience: None,
+        });
+        Ok(())
+    }
+
+    /// 定向 emit:只投递给指定用户的连接(以及 owner)。协作事件(任务卡流转、
+    /// 打回意见、个人对话流)用这个,避免 A 的对话流推给所有人(方案硬伤2)。
+    pub fn emit_to<S: Serialize>(&self, user: &str, topic: &str, payload: S) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(payload)?;
+        let _ = self.tx.send(Event {
+            topic: topic.to_string(),
+            payload: value,
+            audience: Some(user.to_string()),
         });
         Ok(())
     }

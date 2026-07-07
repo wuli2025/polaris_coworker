@@ -11,6 +11,7 @@ import {
   LoaderCircle,
   Rocket,
 } from "@lucide/vue";
+import OrbitSpinner from "./icons/OrbitSpinner.vue";
 import {
   currentVersion,
   updateVersion,
@@ -64,11 +65,9 @@ const lastChecked = computed(() => {
           :disabled="checking || updating"
           @click="manualCheck"
         >
-          <LoaderCircle
+          <OrbitSpinner
             v-if="checking"
             :size="15"
-            :stroke-width="2"
-            class="spin"
           />
           <RefreshCw v-else :size="15" :stroke-width="2" />
           <span>{{ checking ? "检查中…" : "检查更新" }}</span>
@@ -98,11 +97,9 @@ const lastChecked = computed(() => {
           </div>
 
           <button class="go-btn" :disabled="updating" @click="applyUpdate">
-            <LoaderCircle
+            <OrbitSpinner
               v-if="updating"
               :size="15"
-              :stroke-width="2"
-              class="spin"
             />
             <Rocket v-else :size="15" :stroke-width="1.9" />
             <span>{{ updating ? `更新中 ${updateProgress}%` : "立即更新" }}</span>

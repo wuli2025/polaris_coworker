@@ -194,6 +194,48 @@ static OVER_CAP_WARNED: AtomicBool = AtomicBool::new(false);
 /// 覆写:`POLARIS_FABLE_MMAP_MB`(MiB,0=关 mmap)、`POLARIS_FABLE_CACHE_MB`(MiB,下限 1)。
 /// 小内存桌面想再省 → 设 `POLARIS_FABLE_MMAP_MB=0 POLARIS_FABLE_CACHE_MB=4`;
 /// Docker 大库想更激进 → 调高二者。
+/// 本机物理内存总量(MiB)。Windows 走 `GlobalMemoryStatusEx`、macOS 走 sysctl `hw.memsize`
+/// —— 两者都是桌面低配自适应的主战场(也是 AppHang/内存膨胀反馈的来源);其它平台(含
+/// Linux Docker server)返回 None → 沿用「仅按核数」的既有策略,行为不变。零额外依赖:
+/// windows-sys 与 libc 均已在用。
+fn total_memory_mb() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{
+            GlobalMemoryStatusEx, MEMORYSTATUSEX,
+        };
+        let mut s: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        s.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if unsafe { GlobalMemoryStatusEx(&mut s) } != 0 {
+            return Some(s.ullTotalPhys / (1024 * 1024));
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // sysctl hw.memsize → 物理内存字节数(u64)。让 mac 桌面也能按内存降级, 补齐 AppHang 防护。
+        let mut size: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        let rc = unsafe {
+            libc::sysctlbyname(
+                b"hw.memsize\0".as_ptr() as *const libc::c_char,
+                &mut size as *mut u64 as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 && size > 0 {
+            return Some(size / (1024 * 1024));
+        }
+        None
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        None
+    }
+}
+
 fn db_mem_budget() -> (i64, i64) {
     // 平台默认:server feature 给大值,其余(桌面)给克制值。
     #[cfg(feature = "server")]
@@ -201,8 +243,14 @@ fn db_mem_budget() -> (i64, i64) {
     // 桌面:cache 从 16MiB 降到 8MiB —— 向量粗筛按 worker 数(≤12)并发开连接,cache 是
     // 「每连接」真实堆,16MiB 时 12 连接最坏 ~192MiB;降到 8MiB 后 12×8=96MiB 最坏(对半砍),
     // 命中缓存仍绰绰有余(单查询工作集远小于 8MiB)。env 覆写不变。
+    // 低内存机器再自动收紧 mmap(每连接一份,×worker 数累加):<8GB 砍到 128MiB、<4GB 砍到
+    // 64MiB 且 cache 降 4MiB —— 这是「按真实 RAM 自适应」而非只按编译特性,弱机不必手改 env。
     #[cfg(not(feature = "server"))]
-    let (def_mmap_mb, def_cache_mb): (i64, i64) = (256, 8);
+    let (def_mmap_mb, def_cache_mb): (i64, i64) = match total_memory_mb() {
+        Some(mb) if mb < 4096 => (64, 4),
+        Some(mb) if mb < 8192 => (128, 8),
+        _ => (256, 8),
+    };
 
     let env_mb = |k: &str| -> Option<i64> {
         std::env::var(k).ok().and_then(|v| v.trim().parse::<i64>().ok()).filter(|n| *n >= 0)
@@ -381,6 +429,32 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         conn.execute("ALTER TABLE files ADD COLUMN lang TEXT NOT NULL DEFAULT ''", [])
             .map_err(|e| format!("fable.db 加 files.lang 列失败: {e}"))?;
     }
+    // ── 去重/冲突四列(索引时算,盘点保持 stat-only)──
+    // content_hash:文件正文内容指纹。文本文件走全文 blake3(前缀 'f:'),索引读文件时顺手算,
+    //   零额外 IO。跨路径同内容 = 同 hash → 精确去重(dedupe_scan)与「整目录移动零重嵌」的判据。
+    //   旧库 '' = 尚未索引/待回填。非文本/未进索引文件保持 ''。
+    if conn.prepare("SELECT content_hash FROM files LIMIT 1").is_err() {
+        conn.execute("ALTER TABLE files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''", [])
+            .map_err(|e| format!("fable.db 加 files.content_hash 列失败: {e}"))?;
+    }
+    // doc_key:文件名归一化键(去版本噪声:v2/日期/final/副本/(1)…)。仅在「同 root+同目录+同 ext」内
+    //   比较,识别「同一份资料的不同版本」→ 新压旧(superseded_by)。旧库 '' = 待回填。
+    if conn.prepare("SELECT doc_key FROM files LIMIT 1").is_err() {
+        conn.execute("ALTER TABLE files ADD COLUMN doc_key TEXT NOT NULL DEFAULT ''", [])
+            .map_err(|e| format!("fable.db 加 files.doc_key 列失败: {e}"))?;
+    }
+    // dup_of:内容完全重复时指向 canonical 文件 id(mtime 最新者);0=本身即 canonical 或无重复。
+    //   非 0 者的 chunks/lex 已被 dedupe_scan 清除、不再参与检索,检索层遇到它归并到 canonical。
+    if conn.prepare("SELECT dup_of FROM files LIMIT 1").is_err() {
+        conn.execute("ALTER TABLE files ADD COLUMN dup_of INTEGER NOT NULL DEFAULT 0", [])
+            .map_err(|e| format!("fable.db 加 files.dup_of 列失败: {e}"))?;
+    }
+    // superseded_by:被同目录同名新版本压制时指向新版 id;0=最新版或无版本冲突。
+    //   检索层对它降权(POLARIS_SUPERSEDE_DECAY,默认 0.4)而非剔除,并回传「有新版本」提示。
+    if conn.prepare("SELECT superseded_by FROM files LIMIT 1").is_err() {
+        conn.execute("ALTER TABLE files ADD COLUMN superseded_by INTEGER NOT NULL DEFAULT 0", [])
+            .map_err(|e| format!("fable.db 加 files.superseded_by 列失败: {e}"))?;
+    }
     // 20TB 热点查询复合索引 + IVF 质心表(均在所需列 ALTER 之后建,故放此处)。
     conn.execute_batch(
         r#"
@@ -409,6 +483,13 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             n     INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_vec_cells_model ON vec_cells(model, dim);
+        -- 去重:按内容指纹分组找完全重复。partial index 只收已算哈希的行,媒体/未索引文件不膨胀。
+        CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash) WHERE content_hash<>'';
+        -- 新压旧:按 (root_id, doc_key) 找同名不同版本。同样 partial,只收已归一化的行。
+        CREATE INDEX IF NOT EXISTS idx_files_dockey ON files(root_id, doc_key) WHERE doc_key<>'';
+        -- 检索时「被压制降权」查询:partial 只收被压制的少数行,让每次检索的 superseded 查库
+        -- 在超大库上也只扫这几行(而非全表扫 superseded_by<>0),不给检索热路添延迟。
+        CREATE INDEX IF NOT EXISTS idx_files_superseded ON files(superseded_by) WHERE superseded_by<>0;
         "#,
     )
     .map_err(|e| format!("fable.db 20TB 索引/IVF 迁移失败: {e}"))?;
@@ -502,11 +583,19 @@ pub(crate) fn worker_count() -> usize {
             return n.clamp(1, 64);
         }
     }
+    // 低内存机器即便多核也别开满:每个粗筛 worker 各开一条 SQLite 连接、各带一份 mmap/cache
+    // 堆(见 db_mem_budget),12 路并发在 8GB 机上会把内存推到危险线(32GB 膨胀事故同构成因)。
+    // 据物理内存把并发上限从 12 收到 4/2;env 覆写永远优先(上面已提前返回)。
+    let cap = match total_memory_mb() {
+        Some(mb) if mb < 4096 => 2,
+        Some(mb) if mb < 8192 => 4,
+        _ => 12,
+    };
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .saturating_sub(1)
-        .clamp(2, 12)
+        .clamp(2, cap)
 }
 
 // ───────────────────────── 状态总览 ─────────────────────────

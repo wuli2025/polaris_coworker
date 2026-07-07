@@ -49,8 +49,9 @@ const PVS_WORKFLOW: &str =
 // 与 PVS 同套路：全部编译期内嵌、启动时确保落到 ~/Polaris/skills（靠 DECK_VERSION 比对覆盖）。
 const DECK_ID: &str = "polaris-deck-studio";
 // 改动任一内嵌资源后必须 +1，让已安装用户下次启动拿到更新。
-const DECK_VERSION: &str = "8";
+const DECK_VERSION: &str = "11";
 const DECK_SKILL_MD: &str = include_str!("templates/skills/polaris-deck-studio/SKILL.md");
+const DECK_DESIGN_MD: &str = include_str!("templates/skills/polaris-deck-studio/design.md");
 const DECK_LICENSE: &str = include_str!("templates/skills/polaris-deck-studio/LICENSE");
 const DECK_BASE_CSS: &str = include_str!("templates/skills/polaris-deck-studio/assets/base.css");
 const DECK_THEMES_CSS: &str =
@@ -70,11 +71,59 @@ const DECK_EXPORT_PPTX: &str =
 const DECK_FIND_BROWSER: &str =
     include_str!("templates/skills/polaris-deck-studio/scripts/find-browser.mjs");
 
+// ───────── 设计师人格包（designers/，编译期内嵌，随 deck-studio 落盘）─────────
+// 「选设计师」体系：11 位设计师人格 + 美学地基(_foundation) + 总索引(INDEX.md)。
+// auto 模式按 INDEX.md 路由表按内容气质选人；用户指定则用指定的。网站生成复用同一份包。
+const DECK_DESIGNERS: &[(&str, &str)] = &[
+    ("INDEX.md", include_str!("templates/skills/polaris-deck-studio/designers/INDEX.md")),
+    ("_foundation/aesthetics.md", include_str!("templates/skills/polaris-deck-studio/designers/_foundation/aesthetics.md")),
+    ("_foundation/rubric.md", include_str!("templates/skills/polaris-deck-studio/designers/_foundation/rubric.md")),
+    ("_foundation/taste.md", include_str!("templates/skills/polaris-deck-studio/designers/_foundation/taste.md")),
+    ("bento-grid.md", include_str!("templates/skills/polaris-deck-studio/designers/bento-grid.md")),
+    ("clay-soft.md", include_str!("templates/skills/polaris-deck-studio/designers/clay-soft.md")),
+    ("doodle-hand.md", include_str!("templates/skills/polaris-deck-studio/designers/doodle-hand.md")),
+    ("glass-crisp.md", include_str!("templates/skills/polaris-deck-studio/designers/glass-crisp.md")),
+    ("keynote-tech.md", include_str!("templates/skills/polaris-deck-studio/designers/keynote-tech.md")),
+    ("memphis-pop.md", include_str!("templates/skills/polaris-deck-studio/designers/memphis-pop.md")),
+    ("mist-gradient.md", include_str!("templates/skills/polaris-deck-studio/designers/mist-gradient.md")),
+    ("oriental-grandeur.md", include_str!("templates/skills/polaris-deck-studio/designers/oriental-grandeur.md")),
+    ("pedagogy-clarity.md", include_str!("templates/skills/polaris-deck-studio/designers/pedagogy-clarity.md")),
+    ("swiss-modernist.md", include_str!("templates/skills/polaris-deck-studio/designers/swiss-modernist.md")),
+    ("xhs-life.md", include_str!("templates/skills/polaris-deck-studio/designers/xhs-life.md")),
+];
+
+/// 把设计师人格包写到 <dest>/designers/（含 _foundation 子目录）。deck-studio 与 web-studio 共用。
+fn write_designers(dest: &Path) -> Result<(), String> {
+    let designers = dest.join("designers");
+    fs::create_dir_all(designers.join("_foundation")).map_err(|e| e.to_string())?;
+    // 先剪除已裁撤的旧人格文件：write 只覆盖不删除，裁掉的设计师 .md 会残留在旧安装里，
+    // 让 auto 路由仍能选到「不存在于花名册」的幽灵设计师。只扫顶层 *.md（_foundation 在子目录，
+    // read_dir 非递归，不受影响），凡不在 DECK_DESIGNERS 白名单里的一律删。
+    let keep: std::collections::HashSet<&str> =
+        DECK_DESIGNERS.iter().map(|(rel, _)| *rel).collect();
+    if let Ok(entries) = fs::read_dir(&designers) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("md") {
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    if !keep.contains(name) {
+                        let _ = fs::remove_file(&p);
+                    }
+                }
+            }
+        }
+    }
+    for (rel, content) in DECK_DESIGNERS {
+        fs::write(designers.join(rel), content).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ───────── 「网站生成」技能（落地页/单页站点，Polaris 自研，编译期内嵌，启动落盘）─────────
 // 支撑「网站生成」UI 入口。复用 deck-studio 的 17 套主题（DECK_THEMES_CSS，不重复源文件），
 // 配一套网站组件 site.css + 滚动揭示 runtime.js + 站点模板 + SKILL.md。
 const WEB_ID: &str = "polaris-web-studio";
-const WEB_VERSION: &str = "3";
+const WEB_VERSION: &str = "6";
 const WEB_SKILL_MD: &str = include_str!("templates/skills/polaris-web-studio/SKILL.md");
 const WEB_LICENSE: &str = include_str!("templates/skills/polaris-web-studio/LICENSE");
 const WEB_SITE_CSS: &str = include_str!("templates/skills/polaris-web-studio/assets/site.css");
@@ -125,7 +174,11 @@ const WECHAT_TS_ID: &str = "wechat-md-typesetter";
 //     ③默认截一整张(--no-slice;SLICE_MAX_CSS 2800→12000);④正文铁律加「开头不写摘要/导语」
 //     +「h2 加 emoji 图标、关键句做 blockquote 卡片」营造配图感(SKILL.md 同步)。
 //     MediaOps 交付改两个功能键二选一:「排版 HTML 文件」(render 出文件自传) /「截图上传」(长图)。
-const WECHAT_TS_VERSION: &str = "10";
+// v11：小红书交付对齐公众号——新增 --mode cards(自包含图卡 HTML 逐卡元素截图 @2x→PNG×N+manifest,
+//     卡约定 <section class="card"> 3:4 竖版 1080×1440,样式上游自己写不套主题);MediaOps 小红书
+//     交付改两个功能键二选一:「图卡截图」(__cardimg,默认)/「排版 HTML 文件」(__htmlfile),
+//     planPrompt 补小红书交付分支;xiaohongshu-pipeline.md 渲染/投递步同步。
+const WECHAT_TS_VERSION: &str = "11";
 const WECHAT_TS_SKILL_MD: &str =
     include_str!("templates/skills/wechat-md-typesetter/SKILL.md");
 const WECHAT_TS_YIBAN_PY: &str =
@@ -172,6 +225,17 @@ const WECHAT_TASKS_SETUP_PY: &str =
 const WECHAT_TASKS_CONFIG_EXAMPLE: &str =
     include_str!("templates/skills/wechat-tasks/scripts/wx_config.example.json");
 
+// ───────── 「项目检测」多文件技能(协作检查闸的默认检查项,编译期内嵌,启动落盘)─────────
+// SKILL.md(声明 check_entry_* / check_timeout_secs 检查协议)+ scripts/check.ps1 + check.sh。
+// 检查闸(collab/checks.rs)按协议执行入口脚本,退出码 0=pass 非 0=fail —— 确定性脚本,
+// AI 不进判定路径。项目未指定 check_skill 时默认用它;团队可复制改造出自己的检查技能。
+pub const PROJECT_CHECK_ID: &str = "project-check-default";
+// 改动 SKILL.md / check.ps1 / check.sh 后必须 +1,让已安装用户下次启动拿到更新。
+const PROJECT_CHECK_VERSION: &str = "1";
+const PROJECT_CHECK_SKILL_MD: &str = include_str!("templates/skills/project-check/SKILL.md");
+const PROJECT_CHECK_PS1: &str = include_str!("templates/skills/project-check/check.ps1");
+const PROJECT_CHECK_SH: &str = include_str!("templates/skills/project-check/check.sh");
+
 // ═══════════════════════════════════════════════════════════════
 // 统一目录 Catalog（编译期，只读）
 // ═══════════════════════════════════════════════════════════════
@@ -206,6 +270,15 @@ fn catalog() -> Vec<CatalogSkill> {
             source: "official",
             preinstalled: true,
             system_prompt: TURBO_SKILL_MD,
+        },
+        // ── 项目检测(预装):协作检查闸的默认检查技能,也是团队自定义检查的模板 ──
+        CatalogSkill {
+            id: PROJECT_CHECK_ID,
+            name: "项目检测(协作检查)",
+            description: "多人协作检查闸的默认项目检测:按仓库探测工具链(cargo check/npm lint·typecheck·build/ruff)跑确定性脚本,退出码定 pass/fail,AI 不参与判定。想自定义团队检查项,复制本技能改脚本即可",
+            source: "official",
+            preinstalled: true,
+            system_prompt: PROJECT_CHECK_SKILL_MD,
         },
         // ── 名人资料包配套技能（随知识库「名人资料包」一起装/卸，不单独预装） ──
         CatalogSkill {
@@ -395,46 +468,17 @@ fn catalog() -> Vec<CatalogSkill> {
         // ═══ 开发工程师工具箱（市场精选，点安装即用）═══
         // 来源:obra superpowers(工程纪律)+ Trae 官方/社区 TRAE-Skills 仓(开发场景)
         // + WorkBuddy 类聚合市场的高频品类。均 preinstalled=false,不污染每轮对话,按需安装/自动激活。
-        // ── superpowers 系(工程纪律;按用户既定取舍,刻意不收 TDD-always/子代理/worktree/激进调度) ──
+        // ── 项目skill(superpowers 精简重构成单卡): 开发七纪律合一 ——
+        //    模型已经够强,不教怎么做只圈行为红线。全文约 40 行 7 小节(读懂项目/放哪层/
+        //    审查/抓虫/测试/迁移/发版),detect_dev_intent 命中开发类任务即自动注入,
+        //    模型按小节自行取用。
         CatalogSkill {
-            id: "writing-plans",
-            name: "写实现计划",
-            description: "多步骤/跨文件/有不确定性的任务,动手前先成文一份可执行计划(目标验收+现状勘查+分步+风险回滚+明确不做);单文件小改不必。源自 obra superpowers",
-            source: "third-party",
-            preinstalled: false,
-            system_prompt: include_str!("templates/skills/writing-plans.md"),
-        },
-        CatalogSkill {
-            id: "systematic-debugging",
-            name: "系统化调试",
-            description: "遇 bug/报错不瞎猜:复现→读真相→二分缩小→定根因(一句话说清因果)→最小修复→防回归;拒绝 shotgun debugging 与把症状压下去当修好。源自 obra superpowers",
-            source: "third-party",
-            preinstalled: false,
-            system_prompt: include_str!("templates/skills/systematic-debugging.md"),
-        },
-        CatalogSkill {
-            id: "verification-before-done",
-            name: "完成前验证",
-            description: "宣称完成/修好/通过或提交前,先真跑验证命令看到通过输出再下结论;证据先于断言,失败如实报。贴合 Polaris 现实=cargo+vue-tsc+真机点测。源自 obra superpowers",
-            source: "third-party",
-            preinstalled: false,
-            system_prompt: include_str!("templates/skills/verification-before-done.md"),
-        },
-        CatalogSkill {
-            id: "brainstorming",
-            name: "方案头脑风暴",
-            description: "路线不唯一或需求未定形时先发散 2-4 个方案比较取舍(工作量/风险/可逆/侵入),再给推荐而非罗列;复用现有轮子优先。源自 obra superpowers",
-            source: "third-party",
-            preinstalled: false,
-            system_prompt: include_str!("templates/skills/brainstorming.md"),
-        },
-        CatalogSkill {
-            id: "code-review",
-            name: "代码审查",
-            description: "合并前把关:当审查者按正确性/安全/复用简化/一致性抓真问题(给 file:line+必改vs可选);当被审者先验证再改、不盲从也不敷衍。融合 superpowers + Trae code-review",
-            source: "third-party",
-            preinstalled: false,
-            system_prompt: include_str!("templates/skills/code-review.md"),
+            id: "project-skill",
+            name: "项目skill",
+            description: "做项目/写编码时自动生效的开发七纪律:先读懂项目、先想放哪层、审查安全/性能/边界、抓虫复现→定位→证据→修复→回归、补真测试、迁移先拆阶段、发版前查全。只约束行为不教做法",
+            source: "official",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/project-skill.md"),
         },
         // ── Trae 开发场景系(官方市场 + 社区 TRAE-Skills 仓 150+ 精选) ──
         CatalogSkill {
@@ -470,14 +514,6 @@ fn catalog() -> Vec<CatalogSkill> {
             system_prompt: include_str!("templates/skills/rest-api-design.md"),
         },
         CatalogSkill {
-            id: "unit-testing",
-            name: "单元测试生成",
-            description: "为函数/模块写拦得住真 bug 的单测:认清契约→覆盖正常/边界/错误/并发→隔离外部依赖→断言具体值→实际跑绿;按需写非强制 TDD,难测代码如实说明。源自 Trae",
-            source: "third-party",
-            preinstalled: false,
-            system_prompt: include_str!("templates/skills/unit-testing.md"),
-        },
-        CatalogSkill {
             id: "docker-deploy",
             name: "Docker 容器化部署",
             description: "把应用打成精简可复现的镜像:多阶段构建+小基镜像+缓存层+非 root+.dockerignore;compose 配资源上限/日志轮转/机密走 env;构建后实跑验证。源自 Trae",
@@ -509,6 +545,117 @@ fn catalog() -> Vec<CatalogSkill> {
             source: "third-party",
             preinstalled: false,
             system_prompt: include_str!("templates/skills/tech-writing.md"),
+        },
+        // ═══ 2026-07 扩容:GitHub 高星 skill 精选(superpowers 248k★ / anthropics官方 159k★ /
+        //     financial-services 33k★ / awesome 合集),按人群补齐 开发/测试/财会/设计 四组。
+        //     全部 preinstalled=false 市场件,按需安装不污染对话。 ═══
+        // ── 开发编程(superpowers 系 + 官方) ──
+        CatalogSkill {
+            id: "systematic-debugging",
+            name: "系统化调试(根因四阶段)",
+            description: "修 bug 铁律:没查到根因不许动手。调查(读全堆栈/稳定复现/边界取证/反向追坏值)→模式对比(找能跑的相似代码逐项比差异)→单假设验证(一次只动一个变量)→先写失败测试固化再修;连修 3 次失败必须停下质疑架构。源自 superpowers(GitHub 248k star)",
+            source: "third-party",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/systematic-debugging.md"),
+        },
+        CatalogSkill {
+            id: "writing-plans",
+            name: "实施计划编写",
+            description: "把多步开发任务写成「零上下文执行者照着打字就能干」的计划:精确路径+完整代码+可跑命令,每步 2-5 分钟粒度,禁止 TBD/「处理边界情况」类占位词,跨任务命名逐字一致,写完自审四查。源自 superpowers(GitHub 248k star)",
+            source: "third-party",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/writing-plans.md"),
+        },
+        CatalogSkill {
+            id: "verification-before-completion",
+            name: "完成前验证(证据门)",
+            description: "根治「Done!应该没问题」式虚报:宣称完成/修好/测试过之前必走五步证据门(定验证命令→新鲜跑→读全输出和退出码→核对论断→才许开口),禁用「应该/大概」,回归要红→绿全程,子任务自报不可信须看 diff。源自 superpowers(GitHub 248k star)",
+            source: "third-party",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/verification-before-completion.md"),
+        },
+        CatalogSkill {
+            id: "mcp-builder",
+            name: "MCP 工具开发",
+            description: "给 AI Agent 造 MCP server 的四阶段:按 agent 任务视角设计工具(非 API 直译)+可自愈的错误信息→先搭鉴权/分页地基再写工具(Zod/Pydantic schema+行为注解)→inspector 实测→出 10 道可验证评测题打分。源自 Anthropic 官方 skills 仓(GitHub 159k star)",
+            source: "official",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/mcp-builder.md"),
+        },
+        // ── 测试质检 ──
+        CatalogSkill {
+            id: "webapp-testing",
+            name: "网页应用 E2E 测试",
+            description: "浏览器自动化测网页的基本功:侦察后行动——networkidle 之前禁止查 DOM,截图/看渲染后结构才定 selector;语义定位(get_by_role)不用脆弱链,auto-waiting 断言禁 sleep,连 console 错误一起报;托管 dev server 生命周期不留孤儿进程。源自 Anthropic 官方 skills 仓(GitHub 159k star)",
+            source: "official",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/webapp-testing.md"),
+        },
+        CatalogSkill {
+            id: "e2e-test-pipeline",
+            name: "自动化测试流水线",
+            description: "从零给应用建 E2E 测试的四段流水线:探索(实际逛应用出上下文文档)→用例设计(前置/步骤/预期,人工评审门)→脚本化(Page Object+getByRole+storageState 多角色登录态,写完跑绿)→维护(失败归因,只提议不自动改,权限断言绝不静默改)。综合 Playwright 生产实践",
+            source: "third-party",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/e2e-test-pipeline.md"),
+        },
+        CatalogSkill {
+            id: "bug-report-repro",
+            name: "Bug 复现与回归",
+            description: "QA 处理 bug 的闭环:复现(逐变量排查,概率性 bug 跑脚本量化复现率)→最小化(删到最小步骤集+git bisect 定引入点)→标准报告(现象+条件标题/编号步骤/预期实际/复现率/严重级)→修后转自动化回归用例固化。复现不了就如实标注,不许凭想象写报告",
+            source: "third-party",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/bug-report-repro.md"),
+        },
+        // ── 财务会计(官方 financial-services 33k★ 投行级规范改写) ──
+        CatalogSkill {
+            id: "financial-model",
+            name: "财务建模(三表+DCF)",
+            description: "建「活的」Excel 财务模型:分段确认制不许一口气建到底;公式全写进单元格禁硬编码,输入蓝字/公式黑字配色;三表勾稽铁律(BS 每期平衡+CF 期末现金对 BS);DCF 固化 FCF 顺序/CAPM 市值权重/期末价值占比黄旗/5×5 全公式敏感性表;交付前公式错误清零。源自 Anthropic 官方 financial-services(GitHub 33k star)",
+            source: "official",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/financial-model.md"),
+        },
+        CatalogSkill {
+            id: "invoice-audit",
+            name: "发票报销批量整理",
+            description: "散落的发票/收据(PDF/图片)批量处理:pdfplumber 提字段(认增值税发票代码/号码/价税合计/税额),扫描件 OCR,失败标「待人工复核」绝不编数;同号发票查重防重复报销;统一重命名归档;出 CSV 台账+汇总报告。原件只复制不动。源自 awesome-claude-skills 合集(GitHub 56k star)+官方 pdf 管线",
+            source: "third-party",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/invoice-audit.md"),
+        },
+        CatalogSkill {
+            id: "bookkeeping-recon",
+            name: "对账与模型审计",
+            description: "月结两件套:对账走六桶法(两边归一化→全外连接→匹配/金额差/时点差/单边各入桶,差异逐笔归因出双报告);Excel 模型审计猎杀公式里的硬编码/模式断裂/断链/BS 不平,输出 sheet+单元格+严重级+修法问题表。只报告不动手,改动须逐项批准。源自 Anthropic 官方 financial-services(GitHub 33k star)",
+            source: "official",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/bookkeeping-recon.md"),
+        },
+        // ── 设计美工(官方 skills 仓设计系) ──
+        CatalogSkill {
+            id: "canvas-design",
+            name: "海报视觉设计",
+            description: "美术馆级海报/封面/视觉稿:先写设计哲学(原创美学流派,五维展开)再动手,从主题挖隐性引用扎根配色;HTML 精确排版后截图出 PNG/PDF;90%视觉10%文字、元素零重叠、禁卡通贴纸感和 AI 模板脸。源自 Anthropic 官方 skills 仓(GitHub 159k star)",
+            source: "official",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/canvas-design.md"),
+        },
+        CatalogSkill {
+            id: "brand-guidelines",
+            name: "品牌主题系统",
+            description: "让 PPT/海报/网页/文档吃同一套品牌规范:有 VI 就固化成规范卡(色值 hex 精确复制/字体带兜底/logo 规则)严格执行;没 VI 就出 3-5 套命名主题实际渲染给用户选,确认后全文应用并校验对比度。规范卡可存成自定义 skill 长期复用。源自 Anthropic 官方 theme-factory+brand-guidelines(GitHub 159k star)",
+            source: "official",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/brand-guidelines.md"),
+        },
+        CatalogSkill {
+            id: "algorithmic-art",
+            name: "生成艺术 Algorithmic Art",
+            description: "p5.js 创意编码:算法哲学→选一个主手法做深(流场/L-system/细胞自动机/噪声位移)→交付自包含 HTML 打开即跑;randomSeed+noiseSeed 双设保证同 seed 复现,带 seed 导航和 PNG 下载,参数须源于算法内在自由度;纯 CSS/Canvas/p5.js 禁 WebGL 重依赖。源自 Anthropic 官方 skills 仓(GitHub 159k star)",
+            source: "official",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/algorithmic-art.md"),
         },
         // ── 默认浏览器插件（预装、默认开启，可随时移除） ──
         CatalogSkill {
@@ -722,6 +869,40 @@ pub struct SkillMeta {
     pub installed: bool,
     /// 是否可删除（物理存在于用户目录，可卸载 / 删除）
     pub removable: bool,
+    /// 市场分组（按人群/用途）；用户自建 = 「我的创建」
+    pub category: String,
+}
+
+/// 目录技能的市场分组。集中一处映射，新增技能记得来这里归组，漏归落「通用」。
+fn skill_category(id: &str) -> &'static str {
+    match id {
+        // 办公文档
+        "pdf" | "xlsx" | "pptx" | "deep-research" | "web-search" => "办公文档",
+        // 财务会计
+        "financial-model" | "invoice-audit" | "bookkeeping-recon" => "财务会计",
+        // 开发编程
+        "project-skill" | "git-commit" | "gh-cli" | "frontend-ui" | "rest-api-design"
+        | "docker-deploy" | "sql-optimization" | "security-audit" | "tech-writing"
+        | "systematic-debugging" | "writing-plans" | "verification-before-completion"
+        | "mcp-builder" => "开发编程",
+        // 测试质检
+        "webapp-testing" | "e2e-test-pipeline" | "bug-report-repro" => "测试质检",
+        // 设计美工
+        "canvas-design" | "brand-guidelines" | "algorithmic-art" | "image-gen" => "设计美工",
+        // 自媒体运营
+        "wechat-pipeline" | "xiaohongshu-pipeline" | "hot-topic-radar"
+        | "content-analytics-report" | "community-engagement" | "xhs-mao-pipeline"
+        | "wechat-md-typesetter" | "gz-wechat-article-writer" | "gz-notion-infographic" => {
+            "自媒体运营"
+        }
+        // 音视频
+        "edge-tts" | "hyperframes" | "web-video-presentation" | "web-video-presentation-guide" => {
+            "音视频"
+        }
+        // 自动化与浏览器
+        "cloak-browser" | "browser-use" | "turbo-download" | "wechat-tasks" => "自动化与浏览器",
+        _ => "通用",
+    }
 }
 
 /// 查找 skill（优先用户目录副本，再 catalog），返回元信息 + system_prompt
@@ -731,6 +912,7 @@ pub fn find(id: &str) -> Option<(SkillMeta, String)> {
         if user.id == id {
             return Some((
                 SkillMeta {
+                    category: skill_category(&user.id).into(),
                     id: user.id,
                     name: user.name,
                     description: user.description,
@@ -752,6 +934,7 @@ pub fn find(id: &str) -> Option<(SkillMeta, String)> {
                 source: c.source.into(),
                 installed: c.preinstalled,
                 removable: false,
+                category: skill_category(c.id).into(),
             },
             c.system_prompt.to_string(),
         )
@@ -807,7 +990,8 @@ pub fn detect_browser_use_intent(prompt: &str) -> bool {
     triggers.iter().any(|t| lower.contains(t))
 }
 
-/// 检测是否是「做 PPT / 演示文稿」的任务。命中即自动激活 pptx 技能，
+/// 检测是否是「做 PPT / 演示文稿」的任务。命中即自动激活 polaris-deck-studio
+/// （自家高级引擎，覆盖传统 .pptx 与网页幻灯片；缺席才退回通用 pptx 技能），
 /// 不再要求用户先去技能中心安装 / 在对话框点选 —— 这是「无法产出 PPT」的首要原因。
 pub fn detect_pptx_intent(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
@@ -817,6 +1001,40 @@ pub fn detect_pptx_intent(prompt: &str) -> bool {
         // 中文
         "幻灯片", "演示文稿", "演示文档", "做个演示", "做一个演示", "做份演示",
         "汇报材料", "路演", "宣讲", "述职", "答辩",
+    ];
+    triggers.iter().any(|t| lower.contains(t))
+}
+
+/// 检测是否是「做网站 / 网页 / HTML 页面成品」的创作任务。命中即自动激活
+/// polaris-web-studio（「网站生成」引擎：主题体系 + 高级动效 + 自包含单文件）——
+/// 与已隐藏的「网站生成」面板同款引擎，现在全靠对话触发。
+/// 与 detect_browser_intent（浏览/抓取，激活 cloak-browser）刻意区分：
+/// 这里只收「做出一个网页成品」的创作短语，不收裸「网页/网站」—— 那多半是要打开/抓取。
+pub fn detect_web_create_intent(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    let triggers = [
+        // 中文 · 建站 / 做页
+        "做个网站", "做一个网站", "做网站", "建个网站", "建一个网站", "搭个网站",
+        "搭建网站", "搭一个网站", "建站", "生成网站", "写个网站", "帮我做网站",
+        "做个网页", "做一个网页", "做网页", "生成网页", "写个网页", "做成网页",
+        "落地页", "着陆页", "做个官网", "做官网", "建官网", "个人网站", "作品集网站",
+        "宣传页", "介绍页", "单页网站", "展示页",
+        // 中文 · HTML 成品（用户常直说「做成 html 文件」）
+        "做个html", "做一个html", "生成html", "写个html", "写一个html",
+        "做成html", "html文件", "html 文件", "html页面", "html 页面", "网页文件",
+        // 中文 · HTML 高频错别字（htlm 几乎必是 html 的手滑，漏检整条链路静默失效）
+        "htlm",
+        // 中文 · 重设计/美化已有页面（走 taste.md T9 重设计协议；仍不收裸「改版/重新设计」——
+        // 那可能改的是 logo/海报/App，只收明确指向网页/网站/页面的组合）
+        "改版网站", "网站改版", "改版官网", "官网改版", "网页改版", "页面改版",
+        "改版页面", "重构页面", "页面重构", "重新设计网站", "重新设计网页",
+        "重新设计页面", "重新设计官网", "美化网页", "美化页面", "美化网站",
+        // 英文
+        "landing page", "make a website", "build a website", "create a website",
+        "make a web page", "build a web page", "make a webpage", "build a webpage",
+        "create a webpage", "html page", "single page site", "portfolio site",
+        "redesign the site", "redesign the website", "redesign the page",
+        "redesign my site", "redesign my website", "website redesign",
     ];
     triggers.iter().any(|t| lower.contains(t))
 }
@@ -877,7 +1095,9 @@ pub fn detect_mao_consult_intent(prompt: &str) -> bool {
 
 /// 按任务意图自动激活的 skill（不依赖用户在对话框点选）。可返回多个。
 /// 创建技能意图 → skill-creator；网页/浏览器自动化 → cloak-browser；
-/// 做 PPT → pptx；生成图片 → image-gen；请教毛主席 → consult-mao。
+/// 做 PPT → polaris-deck-studio（自家高级引擎）；做网站/网页/HTML → polaris-web-studio；
+/// 生成图片 → image-gen；请教毛主席 → consult-mao。
+/// 「演示工坊」「网站生成」两个 UI 入口已从侧栏隐藏，对话意图触发是它们现在的唯一入口。
 pub fn auto_skills_for_intent(prompt: &str) -> Vec<(SkillMeta, String)> {
     let mut out = Vec::new();
     if detect_skill_creation_intent(prompt) {
@@ -905,7 +1125,26 @@ pub fn auto_skills_for_intent(prompt: &str) -> Vec<(SkillMeta, String)> {
         }
     }
     if detect_pptx_intent(prompt) {
-        if let Some(s) = find("pptx") {
+        // 自家高级引擎优先: polaris-deck-studio(36 套主题 + 高级动效 + spec→原生可编辑
+        // .pptx), 一套引擎同时覆盖「传统 PPT」与「网页 PPT」两种交付 —— 与已隐藏的
+        // 「演示工坊」面板同款。deck 是启动时 seed 到用户目录、不在 catalog:首启落盘未完成
+        // 时 find 会 miss,故 miss 即同步补种一次(seed 幂等,已种则秒返)再找 —— 保证注入的
+        // SKILL.md 指向真实文件;仍找不到才退回通用 pptx 技能。
+        let deck = find(DECK_ID).or_else(|| {
+            seed_deck_studio_skill();
+            find(DECK_ID)
+        });
+        if let Some(s) = deck.or_else(|| find("pptx")) {
+            out.push(s);
+        }
+    }
+    if detect_web_create_intent(prompt) {
+        // 同 deck 处理首启竞态:web 线没有 pptx 那样的兜底,不补种就会静默失效。
+        let web = find(WEB_ID).or_else(|| {
+            seed_web_studio_skill();
+            find(WEB_ID)
+        });
+        if let Some(s) = web {
             out.push(s);
         }
     }
@@ -919,15 +1158,74 @@ pub fn auto_skills_for_intent(prompt: &str) -> Vec<(SkillMeta, String)> {
             out.push(s);
         }
     }
+    if detect_dev_intent(prompt) {
+        // 项目skill(开发七纪律合一卡): 命中开发类任务即注入,模型按小节自行取用
+        if let Some(s) = find("project-skill") {
+            out.push(s);
+        }
+    }
     out
+}
+
+/// 是否是「做项目/写代码」类任务。宁可漏报不误报:命中的都是明确的工程词,
+/// 日常问答/创作/自媒体类消息不会带进纪律卡。裸 contains 有误报教训
+/// (".go"⊂.gov.cn、"review"⊂preview、"崩溃"⊂心态崩溃),故通用词一律绑定工程语境,
+/// 源码后缀走边界匹配。
+pub fn detect_dev_intent(prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    const HINTS: &[&str] = &[
+        // 中文工程词(避开「上线/架构/接口/崩溃」这类日常高频歧义词)
+        "写代码", "改代码", "代码库", "重构", "修 bug", "修bug", "报错", "编译",
+        "单测", "测试用例", "跑测试", "发版", "代码迁移", "数据迁移", "依赖升级",
+        "代码审查", "审代码", "闪退", "调试", "系统架构", "架构设计", "函数",
+        // 英文/工具链词(git/cargo 绑定子命令,防 digit/legit/cargo pants)
+        "bug", "debug", "refactor", "compile", "npm ", "pnpm ", "github",
+        "git commit", "git push", "git pull", "git merge", "git rebase",
+        "cargo build", "cargo test", "cargo check", "cargo run",
+        "pull request", "code review", "unit test", "stack trace", "panic",
+    ];
+    if HINTS.iter().any(|h| p.contains(h)) {
+        return true;
+    }
+    // 源码后缀:后一字符必须不是字母数字(或串尾),挡住 .gov.cn/.tsinghua/.rss 类误报
+    const EXTS: &[&str] = &[".rs", ".ts", ".tsx", ".vue", ".py", ".go", ".java", ".sql"];
+    EXTS.iter().any(|ext| contains_ext_token(&p, ext))
+}
+
+/// `ext` 作为完整后缀出现(后随非字母数字或行尾)才算命中。
+fn contains_ext_token(p: &str, ext: &str) -> bool {
+    let mut from = 0;
+    while let Some(i) = p[from..].find(ext) {
+        let end = from + i + ext.len();
+        match p[end..].chars().next() {
+            None => return true,
+            Some(c) if !c.is_ascii_alphanumeric() => return true,
+            _ => from = end,
+        }
+    }
+    false
 }
 
 // ═══════════════════════════════════════════════════════════════
 // Tauri Commands
 // ═══════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+/// 技能列表。桌面端 async + spawn_blocking:scan_user_skills 要 walk 用户技能目录并
+/// 逐文件读 SKILL.md,首帧就会被调到,同步跑在主线程会挤占首屏。server flavor 无 UI
+/// 主线程、dispatch 本就在 spawn_blocking 中,保持同步直调。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn list_skills() -> Vec<SkillMeta> {
+    tauri::async_runtime::spawn_blocking(list_skills_sync)
+        .await
+        .unwrap_or_default()
+}
+#[cfg(not(feature = "desktop"))]
 pub fn list_skills() -> Vec<SkillMeta> {
+    list_skills_sync()
+}
+
+fn list_skills_sync() -> Vec<SkillMeta> {
     let user = scan_user_skills();
     let user_ids: HashSet<String> = user.iter().map(|s| s.id.clone()).collect();
 
@@ -946,6 +1244,7 @@ pub fn list_skills() -> Vec<SkillMeta> {
             source: c.source.into(),
             installed: c.preinstalled || in_user_dir,
             removable: in_user_dir,
+            category: skill_category(c.id).into(),
         });
     }
 
@@ -959,6 +1258,7 @@ pub fn list_skills() -> Vec<SkillMeta> {
                 source: u.source.clone(),
                 installed: true,
                 removable: true,
+                category: "我的创建".into(),
             });
         }
     }
@@ -1173,6 +1473,8 @@ fn write_deck_studio_files(dest: &Path) -> Result<(), String> {
     fs::create_dir_all(&templates).map_err(|e| e.to_string())?;
     fs::create_dir_all(&scripts).map_err(|e| e.to_string())?;
     fs::write(dest.join("skill.md"), DECK_SKILL_MD).map_err(|e| e.to_string())?;
+    // SKILL.md 第一步就让模型读 design.md(设计规范) —— 此前漏落盘,模型只能对着空路径。
+    fs::write(dest.join("design.md"), DECK_DESIGN_MD).map_err(|e| e.to_string())?;
     fs::write(dest.join("LICENSE"), DECK_LICENSE).map_err(|e| e.to_string())?;
     fs::write(assets.join("base.css"), DECK_BASE_CSS).map_err(|e| e.to_string())?;
     fs::write(assets.join("themes.css"), DECK_THEMES_CSS).map_err(|e| e.to_string())?;
@@ -1183,6 +1485,7 @@ fn write_deck_studio_files(dest: &Path) -> Result<(), String> {
     fs::write(scripts.join("install-deps.mjs"), DECK_INSTALL_DEPS).map_err(|e| e.to_string())?;
     fs::write(scripts.join("export-pptx.mjs"), DECK_EXPORT_PPTX).map_err(|e| e.to_string())?;
     fs::write(scripts.join("find-browser.mjs"), DECK_FIND_BROWSER).map_err(|e| e.to_string())?;
+    write_designers(dest)?;
     Ok(())
 }
 
@@ -1217,6 +1520,7 @@ fn write_web_studio_files(dest: &Path) -> Result<(), String> {
     fs::write(assets.join("motion.css"), WEB_MOTION_CSS).map_err(|e| e.to_string())?;
     fs::write(assets.join("motion.js"), WEB_MOTION_JS).map_err(|e| e.to_string())?;
     fs::write(templates.join("site.html"), WEB_TEMPLATE).map_err(|e| e.to_string())?;
+    write_designers(dest)?; // 网站生成复用同一份设计师人格包
     Ok(())
 }
 
@@ -1249,6 +1553,102 @@ fn write_turbo_download_files(dest: &Path) -> Result<(), String> {
     fs::write(scripts.join("fast_download.py"), TURBO_FAST_DL).map_err(|e| e.to_string())?;
     fs::write(references.join("aria2_flags.md"), TURBO_FLAGS_MD).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 启动时确保「项目检测」检查技能在 ~/Polaris/skills 落盘(含 check.ps1/check.sh)。
+/// 策略同上(版本号比对覆盖)。best-effort:失败只让协作检查闸回退到"技能缺失=fail",不阻断启动。
+pub fn seed_project_check_skill() {
+    let Some(root) = skills_dir() else {
+        return;
+    };
+    let dest = root.join(PROJECT_CHECK_ID);
+    let ver_file = dest.join(".polaris_version");
+    let stored = fs::read_to_string(&ver_file).unwrap_or_default();
+    let present = dest.join("skill.md").exists();
+    if present && stored.trim() == PROJECT_CHECK_VERSION {
+        return;
+    }
+    if write_project_check_files(&dest).is_ok() {
+        let _ = fs::write(&ver_file, PROJECT_CHECK_VERSION);
+    }
+}
+
+/// 把内嵌的「项目检测」文件写到目标目录(含 scripts/ 子树)。
+/// 技能正文写成小写 `skill.md`,与 `scan_user_skills` 约定一致。
+fn write_project_check_files(dest: &Path) -> Result<(), String> {
+    let scripts = dest.join("scripts");
+    fs::create_dir_all(&scripts).map_err(|e| e.to_string())?;
+    fs::write(dest.join("skill.md"), PROJECT_CHECK_SKILL_MD).map_err(|e| e.to_string())?;
+    fs::write(scripts.join("check.ps1"), PROJECT_CHECK_PS1).map_err(|e| e.to_string())?;
+    let sh = scripts.join("check.sh");
+    fs::write(&sh, PROJECT_CHECK_SH).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&sh, fs::Permissions::from_mode(0o755));
+    }
+    Ok(())
+}
+
+/// 检查技能的执行入口(collab/checks.rs 按此协议跑脚本)。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CheckSkillEntry {
+    pub skill_id: String,
+    /// 入口脚本绝对路径(按当前平台选 check_entry_windows / check_entry_unix)。
+    pub entry: PathBuf,
+    /// PowerShell 入口(true)还是 sh 入口(false)。
+    pub windows: bool,
+    pub timeout_secs: u64,
+}
+
+/// 解析某技能的检查协议(frontmatter 扁平键 check_entry_windows/check_entry_unix/check_timeout_secs)。
+/// 只信 ~/Polaris/skills 下主机自装的技能——绝不从任务分支读,防协作者注入检查脚本。
+pub fn resolve_check_skill(id: &str) -> Result<CheckSkillEntry, String> {
+    // id 复用 delete_skill 同款安全闸:拒路径穿越。
+    if id.is_empty() || id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
+        return Err(format!("检查技能 id 非法: {id}"));
+    }
+    let root = skills_dir().ok_or("无法获取用户目录")?;
+    let dir = root.join(id);
+    let skill_md = dir.join("skill.md");
+    let content = fs::read_to_string(&skill_md)
+        .map_err(|_| format!("检查技能 {id} 未安装(缺 skill.md),请在技能中心安装或重启应用"))?;
+    let mut entry_win = String::new();
+    let mut entry_unix = String::new();
+    let mut timeout: u64 = 600;
+    for line in content.lines().take(60) {
+        if let Some((k, v)) = line.split_once(':') {
+            let v = v.trim().trim_matches('"').trim_matches('\'');
+            match k.trim() {
+                "check_entry_windows" => entry_win = v.to_string(),
+                "check_entry_unix" => entry_unix = v.to_string(),
+                "check_timeout_secs" => timeout = v.parse().unwrap_or(600),
+                _ => {}
+            }
+        }
+    }
+    let windows = cfg!(windows);
+    let rel = if windows { &entry_win } else { &entry_unix };
+    if rel.is_empty() {
+        return Err(format!("技能 {id} 未声明检查入口(check_entry_windows/check_entry_unix),不是检查技能"));
+    }
+    if rel.contains("..") {
+        return Err(format!("技能 {id} 检查入口路径非法: {rel}"));
+    }
+    let entry = dir.join(rel);
+    if !entry.is_file() {
+        return Err(format!("技能 {id} 检查入口脚本不存在: {rel}"));
+    }
+    Ok(CheckSkillEntry { skill_id: id.to_string(), entry, windows, timeout_secs: timeout.clamp(30, 3600) })
+}
+
+/// 列出本机已安装、声明了检查协议的技能(检查设置下拉用)。返回 (id, name)。
+pub fn list_check_capable() -> Vec<(String, String)> {
+    scan_user_skills()
+        .into_iter()
+        .filter(|s| resolve_check_skill(&s.id).is_ok())
+        .map(|s| (s.id, s.name))
+        .collect()
 }
 
 /// 启动时确保「浏览器智能体 browser-use」技能在 ~/Polaris/skills 落盘（含可执行 runner）。
@@ -1587,4 +1987,63 @@ pub fn delete_skill(id: String) -> Result<(), String> {
         return Err("预装技能不可删除".into());
     }
     Err("技能不存在".into())
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+
+    // 「做网站/网页/HTML 成品」创作短语要命中 —— 这是隐藏工坊入口后的唯一触发路径
+    #[test]
+    fn web_create_intent_hits_creation_phrases() {
+        assert!(detect_web_create_intent("帮我做个网站介绍我们的产品"));
+        assert!(detect_web_create_intent("把这份文案做成HTML 页面"));
+        assert!(detect_web_create_intent("给新品做一个落地页"));
+        assert!(detect_web_create_intent("please build a website for my studio"));
+    }
+
+    // taste 融合新增：重设计/美化/高频错别字要命中；裸「改版/重新设计」（可能改 logo/App）仍不触发
+    #[test]
+    fn web_create_intent_hits_redesign_and_typos() {
+        assert!(detect_web_create_intent("公司官网改版，风格要现代一点"));
+        assert!(detect_web_create_intent("把这个宣传页面改版成深色风"));
+        assert!(detect_web_create_intent("重新设计网页的导航和配色"));
+        assert!(detect_web_create_intent("生成htlm文件到桌面"));
+        assert!(detect_web_create_intent("can you redesign my website?"));
+        assert!(!detect_web_create_intent("重新设计一下我们的 logo"));
+        assert!(!detect_web_create_intent("这次改版加了哪些新功能"));
+    }
+
+    // 纯浏览/抓取语句不能误触发网站生成（那归 cloak-browser 管）
+    #[test]
+    fn web_create_intent_ignores_browsing() {
+        assert!(!detect_web_create_intent("打开网页 https://example.com 看看"));
+        assert!(!detect_web_create_intent("帮我抓取这个网站的数据"));
+        assert!(!detect_web_create_intent("去官网下载最新安装包"));
+    }
+
+    // PPT 意图命中时应优先注入自家高级引擎 polaris-deck-studio(预装,必在)
+    #[test]
+    fn ppt_intent_activates_deck_studio() {
+        let ids: Vec<String> = auto_skills_for_intent("帮我把这份稿子做成 PPT")
+            .into_iter()
+            .map(|(m, _)| m.id)
+            .collect();
+        assert!(ids.iter().any(|i| i == DECK_ID), "实际注入: {:?}", ids);
+    }
+
+    // 开发意图:工程消息命中、日常/自媒体消息不命中(误报=纪律卡污染闲聊)
+    #[test]
+    fn dev_intent_hits_engineering_only() {
+        assert!(detect_dev_intent("这段代码报错了帮我看看"));
+        assert!(detect_dev_intent("重构一下 retrieve.rs 的融合层"));
+        assert!(detect_dev_intent("git commit 前先跑测试用例"));
+        // 曾经的误报源:域名子串/preview/日常词
+        assert!(!detect_dev_intent("帮我查 www.gov.cn 上的政策"));
+        assert!(!detect_dev_intent("去 tsinghua.edu.cn 找找资料"));
+        assert!(!detect_dev_intent("给我 preview 一下这篇文章"));
+        assert!(!detect_dev_intent("我今天心态崩溃了"));
+        assert!(!detect_dev_intent("新品上线的宣传文案怎么写"));
+        assert!(!detect_dev_intent("画一张公司组织架构图"));
+    }
 }

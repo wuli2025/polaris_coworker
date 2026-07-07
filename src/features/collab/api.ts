@@ -60,6 +60,8 @@ export interface CollabProject {
   open_count?: number;
   /** 待验收任务数(review)——侧栏徽章 */
   review_count?: number;
+  /** 管理者放行的全项目共享可见路径(CSV) */
+  shared_scope?: string;
 }
 
 export interface ProjectMember {
@@ -119,11 +121,26 @@ export interface CheckRun {
   ended_at: number;
 }
 
-/** GET /api/collab/checks 响应:项目档位 + 该卡当前轮次 + 各项结果 */
+/** GET /api/collab/checks 响应:项目档位 + 检查技能 + 该卡当前轮次 + 各项结果 */
 export interface ChecksResp {
   profile: string;
+  /** 项目检查技能 id(后端回落默认 project-check-default) */
+  checkSkill?: string;
   round: number;
   runs: CheckRun[];
+}
+
+/** 任务级对话消息(协作者↔负责人↔主 Agent) */
+export interface TaskMessage {
+  id: number;
+  task_id: number;
+  round: number;
+  author_user_id: number;
+  author_name: string;
+  /** lead | assignee | member | ai */
+  role: string;
+  body: string;
+  created_at: number;
 }
 
 export interface Ticket {
@@ -521,12 +538,57 @@ export const collabApi = {
   checksRerun(taskId: number): Promise<{ ok: boolean }> {
     return post("/api/collab/checks/rerun", { taskId });
   },
-  /** 设项目检查档位 code(全套)/creative(视频·游戏放宽)/off(管理者) */
+  /** 设项目检查档位 code(全套)/creative(视频·游戏放宽)/off(管理者)。
+   *  checkSkill 可选:同时设检查技能(空串=回到默认内置技能) */
   checksSetProfile(
     projectId: number,
-    profile: string
+    profile: string,
+    checkSkill?: string
   ): Promise<{ ok: boolean }> {
-    return post("/api/collab/checks/profile", { projectId, profile });
+    return post("/api/collab/checks/profile", {
+      projectId,
+      profile,
+      ...(checkSkill !== undefined ? { checkSkill } : {}),
+    });
+  },
+  /** 主机上可用作检查项的技能清单(检查设置下拉) */
+  checksSkills(): Promise<{
+    skills: { id: string; name: string }[];
+    default: string;
+  }> {
+    return get("/api/collab/checks/skills");
+  },
+
+  // ── 任务级对话(多轮微调通道) ──
+  taskMessages(taskId: number, afterId = 0): Promise<TaskMessage[]> {
+    return get(
+      `/api/collab/tasks/${String(taskId)}/messages?afterId=${String(afterId)}&limit=100`
+    );
+  },
+  postTaskMessage(
+    taskId: number,
+    body: string,
+    idemKey?: string
+  ): Promise<TaskMessage> {
+    return post(`/api/collab/tasks/${String(taskId)}/messages`, {
+      body,
+      ...(idemKey ? { idemKey } : {}),
+    });
+  },
+  /** 主 Agent 在对话里回一条(管理者手动触发,控制 token 用量) */
+  aiTaskReply(taskId: number): Promise<TaskMessage> {
+    return post(`/api/collab/tasks/${String(taskId)}/ai-reply`);
+  },
+
+  /** 设项目共享可见路径(CSV,管理者):协作者开工时并入稀疏集 */
+  setSharedScope(
+    projectId: number,
+    sharedScope: string
+  ): Promise<{ ok: boolean }> {
+    return post("/api/collab/projects/shared-scope", {
+      projectId,
+      sharedScope,
+    });
   },
 
   // ── 合并闸门(冲突裁决台) ──

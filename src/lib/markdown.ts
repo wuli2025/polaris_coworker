@@ -78,7 +78,8 @@ function mathPlaceholders(src: string): string {
 }
 
 export interface RenderOpts {
-  /** false = 流式中的活跃消息:跳过异步增强排队(等定稿后再高亮),省 CPU */
+  /** false = 流式中的活跃消息:跳过异步增强排队(等定稿后再高亮),省 CPU,
+   *  且走「稳定前缀 + 活跃尾巴」增量解析路径(见 renderMarkdownStreaming) */
   enhance?: boolean;
 }
 
@@ -90,14 +91,86 @@ export function renderMarkdown(text: string, opts?: RenderOpts): string {
     if (opts?.enhance !== false) scheduleEnhance(key, hit);
     return hit;
   }
+  // 流式中的活跃消息:增量路径 —— 只影响流式中间帧;定稿后(enhance!==false)
+  // 走下面的完整 parse + 缓存 + 增强,最终渲染与旧行为完全一致。
+  if (opts?.enhance === false) return renderMarkdownStreaming(key);
   const html = sanitizeHtml(marked.parse(mathPlaceholders(key)) as string);
   if (cache.size >= CACHE_CAP) {
     cache.clear();
     enhanceQueued.clear();
   }
   cache.set(key, html);
-  if (opts?.enhance !== false) scheduleEnhance(key, html);
+  scheduleEnhance(key, html); // 走到这里必是定稿路径(enhance=false 已在上面分流)
   return html;
+}
+
+// ── 流式增量渲染:稳定前缀 + 活跃尾巴,消 O(n²) ──
+// 流式中活跃气泡文本每 ~40ms 增长一截,若整段作 cache key 则每帧 cache miss →
+// marked.parse(全文) 重跑,回答越长每帧越贵(累计 O(n²));且增量 key 会把全局 LRU
+// 撑满触发整体 clear() 抖动。这里把文本在最后一个段落边界(\n\n)切成两段:
+// 稳定前缀(多数帧不变,按前缀字符串独立小缓存命中)+ 活跃尾巴(永远很短,每帧 parse)。
+// 中间产物一律不写全局 LRU。定稿后走完整路径,最终 HTML 与旧路径逐字一致。
+const streamPrefixCache = new Map<string, string>();
+const STREAM_CACHE_CAP = 32; // 多个对话并发流式也够用;满了整清,代价只是重 parse 一次前缀
+
+function countOccurrences(s: string, needle: string): number {
+  let n = 0;
+  let i = 0;
+  while ((i = s.indexOf(needle, i)) !== -1) {
+    n++;
+    i += needle.length;
+  }
+  return n;
+}
+
+/** 把流式全文切成「稳定前缀 + 活跃尾巴」。切点选最后一个 \n\n(段落边界),
+ *  且保证不落在代码栅栏内部 / 跨段落的 $$ 公式块内部 —— 否则两段各自 parse 会把
+ *  同一个块拆碎。检测到切点在块内就退到该块开始之前的上一个段落边界重试。 */
+function splitStreamText(text: string): [string, string] {
+  let idx = text.lastIndexOf("\n\n");
+  while (idx > 0) {
+    const prefix = text.slice(0, idx + 2);
+    // 栅栏计数为奇数 = 切点在代码块内 → 退到栅栏开始之前
+    if (countOccurrences(prefix, "```") % 2 === 1) {
+      idx = text.lastIndexOf("\n\n", prefix.lastIndexOf("```") - 1);
+      continue;
+    }
+    // $$ 计数(只数栅栏外,与 mathPlaceholders 同一套 fence 切分)为奇数 =
+    // 切点可能在跨段落的 $$…$$ 块内 → 同样后退,保住数学占位语义
+    if (MATH_HINT.test(prefix)) {
+      const parts = prefix.split(/(```[\s\S]*?(?:```|$))/);
+      let dollars = 0;
+      for (let i = 0; i < parts.length; i += 2)
+        dollars += countOccurrences(parts[i], "$$");
+      if (dollars % 2 === 1) {
+        idx = text.lastIndexOf("\n\n", prefix.lastIndexOf("$$") - 1);
+        continue;
+      }
+    }
+    return [prefix, text.slice(idx + 2)];
+  }
+  // 没有安全切点(单段长文/整段都在栅栏里) → 整段当尾巴,行为同旧路径单帧
+  return ["", text];
+}
+
+function parseChunk(src: string): string {
+  return sanitizeHtml(marked.parse(mathPlaceholders(src)) as string);
+}
+
+function renderMarkdownStreaming(text: string): string {
+  const [prefix, tail] = splitStreamText(text);
+  let head = "";
+  if (prefix) {
+    const hit = streamPrefixCache.get(prefix);
+    if (hit !== undefined) {
+      head = hit;
+    } else {
+      head = parseChunk(prefix);
+      if (streamPrefixCache.size >= STREAM_CACHE_CAP) streamPrefixCache.clear();
+      streamPrefixCache.set(prefix, head);
+    }
+  }
+  return tail ? head + parseChunk(tail) : head;
 }
 
 function scheduleEnhance(key: string, html: string) {

@@ -24,9 +24,13 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 use tauri::AppHandle;
 #[cfg(not(feature = "desktop"))]
@@ -248,8 +252,9 @@ fn gift_minimax_key() -> String {
     String::from_utf8(bytes).unwrap_or_default()
 }
 
-/// 还原源码内置的「免费额度赠送」Kimi For Coding token(XOR 混淆, 见 build.rs)。
-/// 与 MiniMax 不同, 此 key 默认随源码内置 → 任何构建(含本地 dev)都非空, 开箱即用。
+/// 还原构建期注入的「免费额度赠送」Kimi For Coding token(XOR 混淆, 见 build.rs)。
+/// 与 MiniMax 同 —— 仅从环境变量注入(CI secret POLARIS_GIFT_KIMI_KEY);未注入
+/// (本地 dev / 无 secret 构建)时返回空串, seed_gift_kimi 见空即跳过, 不种子。
 fn gift_kimi_key() -> String {
     if GIFT_KIMI_OBF.is_empty() || GIFT_KIMI_PAD.is_empty() {
         return String::new();
@@ -499,6 +504,15 @@ fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     tmp.push(".polaris.tmp");
     let tmp = PathBuf::from(tmp);
     fs::write(&tmp, contents)?;
+    // 收紧权限:providers.json 内含明文 API key —— unix 上设 0o600(仅属主可读写),防同机其它
+    // 用户、或文件被同步/备份进宽权限目录时被顺手读走。在 rename 前设,确保最终文件落地即 600。
+    // (Windows 用户配置目录已按用户 ACL 隔离,此处不额外处理。真·防同用户恶意软件仍需 OS 钥匙串
+    //  级静态加密 —— 见 security 备忘,作为后续带真机验证的独立改动。)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
     fs::rename(&tmp, path)
 }
 
@@ -1246,15 +1260,15 @@ pub fn provider_delete(id: String) -> Result<(), String> {
     Ok(())
 }
 
-// ───────────────────────── Commands: Codex 授权 (原生 Device Code OAuth) ─────────────────────────
+// ───────────────────────── Commands: Codex 授权 (回环一键 + Device Code 兜底) ─────────────────────────
 //
-// 抄自 cc-switch 新版 `codex_oauth_auth.rs` 的 OpenAI Device Code 流程, 但**不背它的翻译代理**:
-// Polaris 不路由 Codex, 拿到的 token 按官方 codex CLI 的 `~/.codex/auth.json` 格式落盘, 让外部
-// `codex` CLI 直接复用。这样「点授权」彻底不依赖 codex CLI 是否已装, 后端直接拉起浏览器授权页。
-//
-// 三步: ① POST usercode 取 device_auth_id + user_code, 同时开浏览器到验证页;
-//        ② 前端按 interval 轮询 token 端点 (403/404=等待用户授权);
-//        ③ 用户授权后返回 authorization_code + code_verifier, 换 access/refresh/id_token 落盘。
+// 桌面端首选「授权码 + PKCE 回环回调」—— 与官方 codex CLI 原生 login 同款
+// (localhost:1455/auth/callback): 点授权 → 浏览器登录并点 Authorize → code 自动
+// 重定向回本机 → 后端换 token 落盘, 用户零核对零回贴。
+// 1455 被占(多半是外部 codex CLI 正在 login)或 server flavor(浏览器在远端,
+// 回环打不回来)时降级 Device Code 流程(抄自 cc-switch `codex_oauth_auth.rs`,
+// 但**不背它的翻译代理**)。两条路拿到的 token 都按官方 codex CLI 的
+// `~/.codex/auth.json` 格式落盘, 外部 `codex` CLI 直接复用, 不依赖其是否已装。
 
 /// OpenAI OAuth 客户端 ID (与官方 Codex CLI 相同)
 pub(crate) const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -1265,6 +1279,11 @@ const CODEX_DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
 /// Device Code 流程约定的 redirect_uri (OpenAI 服务端固定)
 const CODEX_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const CODEX_USER_AGENT: &str = "polaris-codex-oauth";
+// 回环一键授权 (与官方 codex CLI login 同款参数, 见其 codex-rs/login/src/server.rs)
+const CODEX_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+const CODEX_LOOPBACK_PORT: u16 = 1455;
+const CODEX_LOOPBACK_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+const CODEX_LOOPBACK_SCOPES: &str = "openid profile email offline_access";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1278,8 +1297,22 @@ pub(crate) fn codex_auth_path() -> Option<PathBuf> {
     UserDirs::new().map(|u| u.home_dir().join(".codex").join("auth.json"))
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+/// Codex 安装/登录状态。桌面端 async + spawn_blocking:要 spawn `codex --version`
+/// 子进程 + 读 auth.json,首帧就会被调到,同步跑在主线程会挤占首屏 IPC。
+/// server flavor dispatch 本就在 spawn_blocking 中,保持同步直调。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn codex_status() -> Result<CodexStatus, String> {
+    tauri::async_runtime::spawn_blocking(codex_status_sync)
+        .await
+        .map_err(|e| format!("任务调度失败: {e}"))?
+}
+#[cfg(not(feature = "desktop"))]
 pub fn codex_status() -> Result<CodexStatus, String> {
+    codex_status_sync()
+}
+
+fn codex_status_sync() -> Result<CodexStatus, String> {
     let installed = Command::new("codex")
         .arg("--version")
         .stdin(Stdio::null())
@@ -1317,19 +1350,22 @@ pub(crate) fn codex_auth_has_tokens(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// `codex_start_login` 返回给前端的设备授权信息
+/// `codex_start_login` 返回给前端的授权信息
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexDeviceLogin {
-    /// device_auth_id, 轮询时回传
+    /// auto = 回环一键授权(device/user_code 为空, 前端轮询 codex_login_poll);
+    /// device = 设备码流程(前端轮询 codex_poll_login)
+    pub mode: String,
+    /// device_auth_id, 轮询时回传 (device 模式)
     pub device_code: String,
-    /// 展示给用户的配对码
+    /// 展示给用户的配对码 (device 模式)
     pub user_code: String,
-    /// 浏览器验证页 (已自动打开, UI 也显示便于手动打开)
+    /// 浏览器授权/验证页 (已自动打开, UI 也显示便于手动打开)
     pub verification_uri: String,
     /// 建议轮询间隔 (秒)
     pub interval: u64,
-    /// 设备码有效期 (秒)
+    /// 本次授权有效期 (秒)
     pub expires_in: u64,
 }
 
@@ -1395,9 +1431,62 @@ fn codex_agent() -> ureq::Agent {
         .build()
 }
 
-/// ① 启动 Device Code 流程并打开浏览器验证页
+/// ① 发起授权: 桌面端首选回环一键授权(浏览器点 Authorize 即完成), 兜底 Device Code
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn codex_start_login() -> Result<CodexDeviceLogin, String> {
+    // 回环一键: server flavor 浏览器在远端打不回本机, 只在桌面端启用
+    if cfg!(feature = "desktop") {
+        if let Some(listener) = loopback_take_port(&CODEX_LOOPBACK, CODEX_LOOPBACK_PORT) {
+            let verifier = claude_rand_b64url(48)?;
+            let state = claude_rand_b64url(32)?;
+            let challenge = claude_b64url_encode(&claude_sha256(verifier.as_bytes()));
+            let authorize_url = format!(
+                "{base}?response_type=code&client_id={cid}&redirect_uri={redir}&scope={scope}&code_challenge={chal}&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&state={state}&originator=codex_cli_rs",
+                base = CODEX_AUTHORIZE_URL,
+                cid = CODEX_CLIENT_ID,
+                redir = claude_url_encode(CODEX_LOOPBACK_REDIRECT_URI),
+                scope = claude_url_encode(CODEX_LOOPBACK_SCOPES),
+                chal = challenge,
+                state = state,
+            );
+            let session = LoopbackSession::new();
+            *CODEX_LOOPBACK.lock() = Some(session.clone());
+            thread::spawn(move || {
+                let r = loopback_run(
+                    listener,
+                    "/auth/callback",
+                    &state,
+                    "ChatGPT (Codex)",
+                    &session,
+                    Duration::from_secs(LOOPBACK_TIMEOUT_SECS),
+                    |code| {
+                        let tokens = codex_exchange_code(code, &verifier, CODEX_LOOPBACK_REDIRECT_URI)?;
+                        let refresh = tokens
+                            .refresh_token
+                            .clone()
+                            .ok_or_else(|| "授权响应缺少 refresh_token".to_string())?;
+                        let account_id = codex_account_id(&tokens);
+                        codex_write_auth_json(&tokens, &refresh, account_id.as_deref())
+                    },
+                );
+                match r {
+                    Ok(()) => session.set("ok", ""),
+                    Err(e) => session.set("failed", &e),
+                }
+            });
+            let _ = codex_open_browser(&authorize_url);
+            return Ok(CodexDeviceLogin {
+                mode: "auto".into(),
+                device_code: String::new(),
+                user_code: String::new(),
+                verification_uri: authorize_url,
+                interval: 2,
+                expires_in: LOOPBACK_TIMEOUT_SECS,
+            });
+        }
+    }
+
+    // Device Code 兜底 (1455 被占 / server flavor)
     let resp = codex_agent()
         .post(CODEX_DEVICE_USERCODE_URL)
         .set("Content-Type", "application/json")
@@ -1416,12 +1505,26 @@ pub fn codex_start_login() -> Result<CodexDeviceLogin, String> {
     let _ = codex_open_browser(CODEX_DEVICE_VERIFY_URL);
 
     Ok(CodexDeviceLogin {
+        mode: "device".into(),
         device_code: device.device_auth_id,
         user_code: device.user_code,
         verification_uri: CODEX_DEVICE_VERIFY_URL.to_string(),
         interval,
         expires_in,
     })
+}
+
+/// 回环一键授权进度 (auto 模式前端轮询用)
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn codex_login_poll() -> Result<LoginPollResult, String> {
+    Ok(loopback_poll(&CODEX_LOOPBACK))
+}
+
+/// 取消进行中的回环授权 (关卡片/重开时释放 1455 端口)
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn codex_login_cancel() -> Result<(), String> {
+    loopback_stop(&CODEX_LOOPBACK);
+    Ok(())
 }
 
 /// ② 轮询授权状态; 成功则换 token 并落盘 ~/.codex/auth.json
@@ -1449,7 +1552,11 @@ pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexP
         .map_err(|e| format!("解析授权响应失败: {e}"))?;
 
     // ③ authorization_code + code_verifier 换 access/refresh/id_token
-    let tokens = codex_exchange_code(&success.authorization_code, &success.code_verifier)?;
+    let tokens = codex_exchange_code(
+        &success.authorization_code,
+        &success.code_verifier,
+        CODEX_DEVICE_REDIRECT_URI,
+    )?;
     let refresh_token = tokens
         .refresh_token
         .clone()
@@ -1460,15 +1567,19 @@ pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexP
     Ok(CodexPollResult { status: "ok".into() })
 }
 
-/// 用 authorization_code + code_verifier 换 token
-fn codex_exchange_code(code: &str, code_verifier: &str) -> Result<CodexTokenResp, String> {
+/// 用 authorization_code + code_verifier 换 token (redirect_uri 须与授权时一致)
+fn codex_exchange_code(
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Result<CodexTokenResp, String> {
     let resp = codex_agent()
         .post(CODEX_OAUTH_TOKEN_URL)
         .set("User-Agent", CODEX_USER_AGENT)
         .send_form(&[
             ("grant_type", "authorization_code"),
             ("code", code),
-            ("redirect_uri", CODEX_DEVICE_REDIRECT_URI),
+            ("redirect_uri", redirect_uri),
             ("client_id", CODEX_CLIENT_ID),
             ("code_verifier", code_verifier),
         ])
@@ -1611,9 +1722,10 @@ fn codex_open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW(0x0800_0000): 别闪黑窗
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
+        // rundll32 不解析 &,URL 原样透传(cmd start 会在 & 处截断 —— OAuth 授权 URL
+        // 含多个 & 参数,截断后授权页直接报错)。CREATE_NO_WINDOW(0x0800_0000): 别闪黑窗。
+        Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
             .creation_flags(0x0800_0000)
             .spawn()
             .map_err(|e| e.to_string())?;
@@ -1629,23 +1741,284 @@ fn codex_open_browser(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ───────────────────────── OAuth 回环回调 (一键授权公共设施) ─────────────────────────
+//
+// 桌面端把 Claude / Codex 两条授权流升级成与官方 CLI 原生 login 同款的「本地回环回调」:
+// 后端在 127.0.0.1 起一次性 HTTP 监听 → 浏览器点 Authorize → 授权服务器把 code 重定向
+// 回 localhost → 后端自动换 token 落盘。用户全程只点一次授权, 零复制零回贴。
+// 端口被占或 server flavor(浏览器在远端, 回环打不回来)自动降级旧流程:
+// Claude → 手工回贴授权码, Codex → Device Code。
+
+/// 回环授权整体时限 (秒): 浏览器里迟迟不点授权, 超时自动收监听释放端口
+const LOOPBACK_TIMEOUT_SECS: u64 = 600;
+
+/// 一次回环授权会话: 监听线程写状态, poll 命令读; cancel 置位后监听线程 ≤200ms 自退释放端口。
+struct LoopbackSession {
+    /// (status, message): pending | ok | failed
+    status: parking_lot::Mutex<(String, String)>,
+    cancel: AtomicBool,
+}
+
+impl LoopbackSession {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            status: parking_lot::Mutex::new(("pending".into(), String::new())),
+            cancel: AtomicBool::new(false),
+        })
+    }
+    fn set(&self, status: &str, message: &str) {
+        *self.status.lock() = (status.into(), message.into());
+    }
+}
+
+static CLAUDE_LOOPBACK: Lazy<parking_lot::Mutex<Option<Arc<LoopbackSession>>>> =
+    Lazy::new(|| parking_lot::Mutex::new(None));
+static CODEX_LOOPBACK: Lazy<parking_lot::Mutex<Option<Arc<LoopbackSession>>>> =
+    Lazy::new(|| parking_lot::Mutex::new(None));
+
+/// 轮询结果 (claude_login_poll / codex_login_poll 共用)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginPollResult {
+    /// idle(无进行中会话, 如应用重启过) | pending | ok | failed
+    pub status: String,
+    pub message: String,
+}
+
+fn loopback_poll(slot: &parking_lot::Mutex<Option<Arc<LoopbackSession>>>) -> LoginPollResult {
+    match slot.lock().as_ref() {
+        None => LoginPollResult { status: "idle".into(), message: String::new() },
+        Some(s) => {
+            let (status, message) = s.status.lock().clone();
+            LoginPollResult { status, message }
+        }
+    }
+}
+
+/// 叫停并丢弃当前会话 (监听线程见 cancel 置位后自退, 端口随之释放)
+fn loopback_stop(slot: &parking_lot::Mutex<Option<Arc<LoopbackSession>>>) {
+    if let Some(old) = slot.lock().take() {
+        old.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 抢回环端口: 先叫停旧会话再绑定, 短暂重试等旧监听线程退出释放端口。
+/// 仍绑不上(被外部程序占, 如正在 login 的官方 CLI)→ None, 调用方降级旧流程。
+fn loopback_take_port(
+    slot: &parking_lot::Mutex<Option<Arc<LoopbackSession>>>,
+    port: u16,
+) -> Option<TcpListener> {
+    loopback_stop(slot);
+    for _ in 0..8 {
+        if let Ok(l) = TcpListener::bind(("127.0.0.1", port)) {
+            return Some(l);
+        }
+        thread::sleep(Duration::from_millis(120));
+    }
+    None
+}
+
+/// 极简 HTTP 应答 (一次性连接, 写完即半关)
+fn loopback_respond(stream: &mut TcpStream, status_line: &str, content_type: &str, body: &str) {
+    let resp = format!(
+        "HTTP/1.1 {status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        len = body.len(),
+    );
+    let _ = std::io::Write::write_all(stream, resp.as_bytes());
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// 授权结果落地页 (浏览器里给用户看的最后一页)
+fn loopback_page(ok: bool, brand: &str, detail: &str) -> String {
+    let (icon, title, tone) = if ok {
+        ("&#10003;", "授权成功", "#34c08b")
+    } else {
+        ("&#10005;", "授权未完成", "#e5673f")
+    };
+    format!(
+        r#"<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>{title} · Polaris</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#101418;color:#e8edf2;font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}}
+  .card{{text-align:center;padding:44px 52px;border:1px solid #ffffff1f;border-radius:16px;
+    background:#ffffff0a;box-shadow:0 18px 60px #00000055;max-width:420px}}
+  .icon{{width:52px;height:52px;line-height:52px;margin:0 auto 14px;border-radius:50%;
+    font-size:24px;color:#fff;background:{tone}}}
+  h1{{font-size:19px;margin:0 0 6px}} p{{margin:0;color:#9aa7b3;font-size:13.5px;word-break:break-all}}
+</style></head><body><div class="card">
+  <div class="icon">{icon}</div><h1>{title}</h1>
+  <p>{brand}{sep}{detail}</p><p style="margin-top:10px">可以关闭此页, 回到 Polaris。</p>
+</div></body></html>"#,
+        sep = if detail.is_empty() { "" } else { " · " },
+    )
+}
+
+/// 从 query string 取参数并做 percent 解码 ('+' 视作空格)
+fn loopback_query_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == key {
+            return Some(loopback_pct_decode(v));
+        }
+    }
+    None
+}
+
+fn loopback_pct_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = |c: u8| (c as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 回环授权主循环: 等浏览器带 code 回调 → 校验 state 防串话 → 执行 finish(换 token 落盘)
+/// → 按真实结果回落地页。只认 want_path; favicon 等杂请求回 404 继续等; error= 直接判败。
+fn loopback_run(
+    listener: TcpListener,
+    want_path: &str,
+    expected_state: &str,
+    brand: &str,
+    session: &LoopbackSession,
+    timeout: Duration,
+    finish: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("回环监听设置失败: {e}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if session.cancel.load(Ordering::SeqCst) {
+            return Err("授权已取消".into());
+        }
+        if Instant::now() > deadline {
+            return Err("等待浏览器授权超时, 请重新发起".into());
+        }
+        let mut stream = match listener.accept() {
+            Ok((s, _)) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(150));
+                continue;
+            }
+            Err(e) => return Err(format!("回环监听故障: {e}")),
+        };
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+        // 只需请求行 (`GET /path?query HTTP/1.1`); 读到首个换行即可, 16KB 上限防灌爆
+        let mut buf: Vec<u8> = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 1024];
+        while !buf.contains(&b'\n') && buf.len() < 16 * 1024 {
+            match std::io::Read::read(&mut stream, &mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let target = line
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or("")
+            .to_string();
+        let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
+
+        if path != want_path {
+            loopback_respond(&mut stream, "404 Not Found", "text/plain; charset=utf-8", "not found");
+            continue;
+        }
+        if let Some(err) = loopback_query_param(query, "error") {
+            let detail = loopback_query_param(query, "error_description").unwrap_or(err);
+            loopback_respond(
+                &mut stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                &loopback_page(false, brand, &detail),
+            );
+            return Err(format!("授权被拒绝: {detail}"));
+        }
+        let code = loopback_query_param(query, "code").unwrap_or_default();
+        let state_ok = loopback_query_param(query, "state")
+            .map(|s| s == expected_state)
+            .unwrap_or(false);
+        if code.is_empty() || !state_ok {
+            loopback_respond(
+                &mut stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                &loopback_page(false, brand, "回调参数不完整或不属于本次授权, 请回 Polaris 重新发起"),
+            );
+            return Err("回调缺少授权码或 state 不一致, 请重新发起授权".into());
+        }
+
+        // 换 token 落盘完成后再回落地页, 页面结果与真实结果一致
+        return match finish(&code) {
+            Ok(()) => {
+                loopback_respond(
+                    &mut stream,
+                    "200 OK",
+                    "text/html; charset=utf-8",
+                    &loopback_page(true, brand, "凭据已写入本机"),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                loopback_respond(
+                    &mut stream,
+                    "200 OK",
+                    "text/html; charset=utf-8",
+                    &loopback_page(false, brand, &e),
+                );
+                Err(e)
+            }
+        };
+    }
+}
+
 // ───────────────────────── Commands: Claude 官方订阅授权 (PKCE Authorization Code) ─────────────────────────
 //
-// Claude 官方订阅登录(与 `claude setup-token` 同源的 OAuth 流):浏览器登录 + 手工回贴授权码。
-// 不依赖外部 CLI —— 后端自起浏览器到 claude.ai 授权页,用户登录授权后页面给出 `code#state`,
-// 贴回 Polaris,后端用 PKCE code_verifier 换 access/refresh token,按官方
-// `~/.claude/.credentials.json` 的 `claudeAiOauth` 结构落盘。外部 `claude` CLI 与 Polaris
-// 自起的 claude 都能直接复用这份订阅凭据,无需在外壳里再登录一次。
+// Claude 官方订阅登录, 桌面端首选「回环一键授权」—— 与官方 claude CLI 原生 /login 同款
+// (localhost:54545/callback): 点授权 → 浏览器登录并点 Authorize → code 自动重定向回本机
+// → 后端换 token 落盘, 用户零复制零回贴。54545 被占或 server flavor 降级手工回贴
+// (与 `claude setup-token` 同源: 授权页给 `code#state`, 贴回 Polaris 换 token)。
+// 两条路都按官方 `~/.claude/.credentials.json` 的 `claudeAiOauth` 结构落盘, 外部
+// `claude` CLI 与 Polaris 自起的 claude 直接复用, 无需在外壳里再登录一次。
 //
-// 两步: ① claude_start_login 生成 PKCE(S256)+ state,拼授权 URL(已自动开浏览器),
-//          把 verifier/state 回给前端(本地 IPC,无状态后端,免全局可变态);
-//        ② claude_finish_login(回贴的 code、verifier、state)换 token 落盘。
+// 注意: 授权 URL 里 `code=true` 是「手工回贴」模式的开关(授权页显示授权码而非重定向),
+// 回环模式**不带**它, 且 redirect_uri 换成 localhost。
 
 const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_OAUTH_AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 const CLAUDE_OAUTH_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 const CLAUDE_OAUTH_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 const CLAUDE_OAUTH_SCOPES: &str = "org:create_api_key user:profile user:inference";
+// 回环一键授权 (与官方 claude CLI 原生 login 同款端口/路径)
+const CLAUDE_LOOPBACK_PORT: u16 = 54545;
+const CLAUDE_LOOPBACK_REDIRECT_URI: &str = "http://localhost:54545/callback";
 
 fn claude_credentials_path() -> Option<PathBuf> {
     claude_dir().map(|d| d.join(".credentials.json"))
@@ -1694,20 +2067,73 @@ pub fn claude_oauth_status() -> Result<ClaudeAuthStatus, String> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeLoginStart {
+    /// auto = 回环一键授权(前端轮询 claude_login_poll); manual = 手工回贴授权码
+    pub mode: String,
     /// 授权页 URL(已自动打开, UI 也展示便于手动打开)
     pub authorize_url: String,
-    /// PKCE code_verifier, 回贴换 token 时原样带回
+    /// PKCE code_verifier, manual 模式回贴换 token 时原样带回
     pub verifier: String,
-    /// 防串话 state, 回贴换 token 时原样带回 (授权码尾部 #state 须与之一致)
+    /// 防串话 state, manual 模式回贴换 token 时原样带回 (授权码尾部 #state 须与之一致)
     pub state: String,
 }
 
-/// ① 生成 PKCE(S256)+ state, 拼授权 URL 并打开浏览器
+/// ① 生成 PKCE(S256)+ state, 拼授权 URL 并打开浏览器。
+/// 桌面端优先回环一键授权; `force_manual` / 54545 被占 / server flavor → 手工回贴。
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn claude_start_login() -> Result<ClaudeLoginStart, String> {
+pub fn claude_start_login(force_manual: Option<bool>) -> Result<ClaudeLoginStart, String> {
     let verifier = claude_rand_b64url(32)?;
     let state = claude_rand_b64url(32)?;
     let challenge = claude_b64url_encode(&claude_sha256(verifier.as_bytes()));
+
+    if cfg!(feature = "desktop") && !force_manual.unwrap_or(false) {
+        if let Some(listener) = loopback_take_port(&CLAUDE_LOOPBACK, CLAUDE_LOOPBACK_PORT) {
+            let authorize_url = format!(
+                "{base}?client_id={cid}&response_type=code&redirect_uri={redir}&scope={scope}&code_challenge={chal}&code_challenge_method=S256&state={state}",
+                base = CLAUDE_OAUTH_AUTHORIZE_URL,
+                cid = CLAUDE_OAUTH_CLIENT_ID,
+                redir = claude_url_encode(CLAUDE_LOOPBACK_REDIRECT_URI),
+                scope = claude_url_encode(CLAUDE_OAUTH_SCOPES),
+                chal = challenge,
+                state = state,
+            );
+            let session = LoopbackSession::new();
+            *CLAUDE_LOOPBACK.lock() = Some(session.clone());
+            {
+                let (state, verifier) = (state.clone(), verifier.clone());
+                thread::spawn(move || {
+                    let r = loopback_run(
+                        listener,
+                        "/callback",
+                        &state,
+                        "Claude 官方订阅",
+                        &session,
+                        Duration::from_secs(LOOPBACK_TIMEOUT_SECS),
+                        |code| {
+                            claude_exchange_and_store(
+                                code,
+                                &state,
+                                &verifier,
+                                CLAUDE_LOOPBACK_REDIRECT_URI,
+                            )
+                        },
+                    );
+                    match r {
+                        Ok(()) => session.set("ok", ""),
+                        Err(e) => session.set("failed", &e),
+                    }
+                });
+            }
+            let _ = codex_open_browser(&authorize_url);
+            return Ok(ClaudeLoginStart {
+                mode: "auto".into(),
+                authorize_url,
+                verifier,
+                state,
+            });
+        }
+    }
+
+    // 手工回贴兜底 (code=true → 授权页显示授权码供复制)
     let authorize_url = format!(
         "{base}?code=true&client_id={cid}&response_type=code&redirect_uri={redir}&scope={scope}&code_challenge={chal}&code_challenge_method=S256&state={state}",
         base = CLAUDE_OAUTH_AUTHORIZE_URL,
@@ -1720,10 +2146,24 @@ pub fn claude_start_login() -> Result<ClaudeLoginStart, String> {
     // 自动拉起浏览器到授权页 (失败不致命, UI 仍展示链接供手动打开)
     let _ = codex_open_browser(&authorize_url);
     Ok(ClaudeLoginStart {
+        mode: "manual".into(),
         authorize_url,
         verifier,
         state,
     })
+}
+
+/// 回环一键授权进度 (auto 模式前端轮询用)
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn claude_login_poll() -> Result<LoginPollResult, String> {
+    Ok(loopback_poll(&CLAUDE_LOOPBACK))
+}
+
+/// 取消进行中的回环授权 (关卡片/改手工时释放 54545 端口)
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn claude_login_cancel() -> Result<(), String> {
+    loopback_stop(&CLAUDE_LOOPBACK);
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1761,6 +2201,18 @@ pub fn claude_finish_login(
         return Err("授权码为空".into());
     }
 
+    claude_exchange_and_store(&code, &state, &verifier, CLAUDE_OAUTH_REDIRECT_URI)?;
+    claude_oauth_status()
+}
+
+/// code(+state/verifier) 换 token 并按官方结构落盘 —— 回环回调与手工回贴共用。
+/// redirect_uri 须与授权时一致 (回环 = localhost, 手工 = console 展示页)。
+fn claude_exchange_and_store(
+    code: &str,
+    state: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<(), String> {
     let resp = codex_agent()
         .post(CLAUDE_OAUTH_TOKEN_URL)
         .set("Content-Type", "application/json")
@@ -1770,7 +2222,7 @@ pub fn claude_finish_login(
             "code": code,
             "state": state,
             "client_id": CLAUDE_OAUTH_CLIENT_ID,
-            "redirect_uri": CLAUDE_OAUTH_REDIRECT_URI,
+            "redirect_uri": redirect_uri,
             "code_verifier": verifier,
         }))
         .map_err(|e| format!("换取 Claude Token 失败: {}", codex_http_err(e)))?;
@@ -1783,8 +2235,7 @@ pub fn claude_finish_login(
     let scope_str = tokens.scope.as_deref().unwrap_or(CLAUDE_OAUTH_SCOPES);
     let scopes: Vec<&str> = scope_str.split_whitespace().collect();
 
-    claude_write_credentials(&tokens.access_token, &refresh, expires_at, &scopes)?;
-    claude_oauth_status()
+    claude_write_credentials(&tokens.access_token, &refresh, expires_at, &scopes)
 }
 
 /// 按官方 `~/.claude/.credentials.json` 的 claudeAiOauth 结构写;合并保留文件里已有的其它键。
@@ -2385,6 +2836,112 @@ mod claude_oauth_tests {
             "org%3Acreate_api_key%20user%3Aprofile"
         );
         assert_eq!(claude_url_encode("aZ09-_.~"), "aZ09-_.~");
+    }
+
+    /// 回环回调 query 解析: 取参 + percent 解码 + '+' 还原空格; 缺参给 None
+    #[test]
+    fn loopback_query_param_decode() {
+        let q = "code=ac_1%2Babc%3D%3D&state=st-42&error_description=Access+denied%21";
+        assert_eq!(loopback_query_param(q, "code").as_deref(), Some("ac_1+abc=="));
+        assert_eq!(loopback_query_param(q, "state").as_deref(), Some("st-42"));
+        assert_eq!(
+            loopback_query_param(q, "error_description").as_deref(),
+            Some("Access denied!")
+        );
+        assert_eq!(loopback_query_param(q, "missing"), None);
+        // 裸键(无 =)与坏 percent 序列不 panic
+        assert_eq!(loopback_query_param("flag&x=1", "flag").as_deref(), Some(""));
+        assert_eq!(loopback_pct_decode("%zz%"), "%zz%");
+    }
+
+    /// 回环授权 URL 构造纪律: 回环模式不带 code=true(那是手工回贴开关),
+    /// redirect_uri 是 localhost; 手工模式带 code=true 且指向 console 展示页
+    #[test]
+    fn loopback_vs_manual_authorize_url_shape() {
+        let redir_loop = claude_url_encode(CLAUDE_LOOPBACK_REDIRECT_URI);
+        assert_eq!(redir_loop, "http%3A%2F%2Flocalhost%3A54545%2Fcallback");
+        let redir_manual = claude_url_encode(CLAUDE_OAUTH_REDIRECT_URI);
+        assert!(redir_manual.starts_with("https%3A%2F%2Fconsole.anthropic.com"));
+    }
+
+    /// 回环监听本机端到端: favicon 杂请求 404 不终止会话 → 真回调(percent 编码的
+    /// code + 正确 state)→ finish 收到解码后的 code, 浏览器拿到成功落地页
+    #[test]
+    fn loopback_run_end_to_end_local() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let session = LoopbackSession::new();
+        let sess = session.clone();
+        let handle = thread::spawn(move || {
+            let mut got = String::new();
+            let r = loopback_run(
+                listener,
+                "/callback",
+                "st-1",
+                "测试",
+                &sess,
+                Duration::from_secs(10),
+                |code| {
+                    got = code.to_string();
+                    Ok(())
+                },
+            );
+            (r, got)
+        });
+
+        // 杂请求(favicon): 404, 会话继续等
+        {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut buf = String::new();
+            let _ = s.read_to_string(&mut buf);
+            assert!(buf.starts_with("HTTP/1.1 404"), "杂请求应 404: {buf}");
+        }
+        // 真回调: code 带 percent 编码, state 正确
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"GET /callback?code=ac%2D9&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        let mut buf = String::new();
+        let _ = s.read_to_string(&mut buf);
+        assert!(buf.starts_with("HTTP/1.1 200"), "回调应 200: {buf}");
+        assert!(buf.contains("授权成功"), "应回成功落地页: {buf}");
+
+        let (r, code) = handle.join().unwrap();
+        assert!(r.is_ok(), "会话应成功结束: {r:?}");
+        assert_eq!(code, "ac-9", "finish 应拿到 percent 解码后的 code");
+    }
+
+    /// state 不符(伪造回调)必须拒绝: 会话判败, 浏览器拿到失败页
+    #[test]
+    fn loopback_run_rejects_wrong_state() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let session = LoopbackSession::new();
+        let sess = session.clone();
+        let handle = thread::spawn(move || {
+            loopback_run(
+                listener,
+                "/callback",
+                "st-expected",
+                "测试",
+                &sess,
+                Duration::from_secs(10),
+                |_| panic!("state 不符时绝不能进入换 token"),
+            )
+        });
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"GET /callback?code=x&state=st-forged HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        let mut buf = String::new();
+        let _ = s.read_to_string(&mut buf);
+        assert!(buf.contains("授权未完成"), "应回失败落地页: {buf}");
+        assert!(handle.join().unwrap().is_err(), "state 不符应判败");
     }
 }
 

@@ -70,6 +70,7 @@ pub async fn serve() -> anyhow::Result<()> {
     crate::skills::seed_web_studio_skill();
     crate::skills::seed_wechat_typesetter_skill();
     crate::skills::seed_wechat_tasks_skill();
+    crate::skills::seed_project_check_skill();
     // 注：「请教毛主席」默认隐藏 —— 仅在用户主动安装「毛主席」资料包时装 consult-mao 技能，
     // 启动时不再自动补装（盘上已有数据保留，不删）。
     // 飞书网关「开机自动启动」（若用户开了 auto_start 且凭证齐全）。
@@ -87,14 +88,33 @@ pub async fn serve() -> anyhow::Result<()> {
         });
     }
 
-    let auth_token = std::env::var("POLARIS_AUTH_TOKEN")
+    let explicit = std::env::var("POLARIS_AUTH_TOKEN")
         .ok()
         .filter(|s| !s.is_empty());
-    if auth_token.is_some() {
-        println!("[polaris-server] 已启用访问口令 (POLARIS_AUTH_TOKEN)");
-    } else {
-        println!("[polaris-server] ⚠ 未设访问口令，服务对所有可达网络开放");
-    }
+    let allow_open = std::env::var("POLARIS_ALLOW_OPEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    // 安全默认:未设口令且未显式选择开放 → **自动生成本次随机口令并打印**,而不是裸奔对所有
+    // 网络开放(旧默认会合成 owner 全放行,而 /api/invoke 能触到 docker_update/provider_save 等
+    // 高危命令)。要固定口令设 POLARIS_AUTH_TOKEN;要维持旧的「无口令全开放」显式设 POLARIS_ALLOW_OPEN=1。
+    let auth_token = match explicit {
+        Some(t) => {
+            println!("[polaris-server] 已启用访问口令 (POLARIS_AUTH_TOKEN)");
+            Some(t)
+        }
+        None if allow_open => {
+            println!("[polaris-server] ⚠ POLARIS_ALLOW_OPEN=1:未设口令,服务对所有可达网络开放(请仅在完全可信网络使用)");
+            None
+        }
+        None => {
+            let gen = crate::collab::auth::random_token();
+            println!("[polaris-server] 🔐 未设 POLARIS_AUTH_TOKEN,已自动生成本次访问口令:");
+            println!("[polaris-server]     {gen}");
+            println!("[polaris-server]     客户端用此口令连接;固定口令请设 POLARIS_AUTH_TOKEN,");
+            println!("[polaris-server]     要维持旧的「无口令全开放」请显式设 POLARIS_ALLOW_OPEN=1。");
+            Some(gen)
+        }
+    };
 
     let web_dir = std::env::var("POLARIS_WEB_DIR").unwrap_or_else(|_| "/srv/web".to_string());
     let web_dir = PathBuf::from(web_dir);
@@ -143,6 +163,9 @@ pub async fn serve() -> anyhow::Result<()> {
         .layer(CorsLayer::permissive());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // 隧道上游对齐:服务器壳的真实端口告知 tunnel(与 hosting.rs 同理)。
+    #[cfg(feature = "collab-net")]
+    crate::collab::tunnel::set_upstream_port(port);
     println!("[polaris-server] 监听 http://0.0.0.0:{port} (前端目录: {})", web_dir.display());
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -583,6 +606,7 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "echo_distill_conversation" => {
             ok(echo::echo_distill_conversation(app, req_str(a, "convId")?)?)
         }
+        "echo_clear_context" => ok(echo::echo_clear_context(app, req_str(a, "convId")?)?),
         "echo_briefing_today" => ok(echo::echo_briefing_today()),
         "echo_briefing_dismiss" => ok(echo::echo_briefing_dismiss(req_str(a, "id")?)),
         "echo_briefing_run" => ok(echo::echo_briefing_run(app)?),
@@ -837,8 +861,16 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             req_str(a, "deviceCode")?,
             req_str(a, "userCode")?,
         )?),
+        "codex_login_poll" => ok(provider::codex_login_poll()?),
+        "codex_login_cancel" => ok(provider::codex_login_cancel()?),
         "claude_oauth_status" => ok(provider::claude_oauth_status()?),
-        "claude_start_login" => ok(provider::claude_start_login()?),
+        "claude_start_login" => ok(provider::claude_start_login(Some(bool_def(
+            a,
+            "forceManual",
+            false,
+        )))?),
+        "claude_login_poll" => ok(provider::claude_login_poll()?),
+        "claude_login_cancel" => ok(provider::claude_login_cancel()?),
         "claude_finish_login" => ok(provider::claude_finish_login(
             req_str(a, "pasted")?,
             req_str(a, "verifier")?,

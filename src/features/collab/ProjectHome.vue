@@ -20,7 +20,7 @@ import {
 } from "@lucide/vue";
 import { useAppStore } from "../../stores/app";
 import { useCollabStore } from "./stores/collab";
-import { fmtTime } from "./api";
+import { collabApi, fmtTime } from "./api";
 import type { Conversation } from "../../tauri";
 import TaskBoard from "./TaskBoard.vue";
 import { toast } from "../../composables/useToast";
@@ -80,6 +80,59 @@ async function changeProfile(e: Event) {
     profileBusy.value = false;
   }
 }
+// ── 检查技能(项目检测跑哪个 skill;默认内置 project-check-default) ──
+const checkSkills = ref<{ id: string; name: string }[]>([]);
+const defaultSkill = ref("project-check-default");
+const skillBusy = ref(false);
+async function loadCheckSkills() {
+  try {
+    const r = await collabApi.checksSkills();
+    checkSkills.value = r.skills;
+    defaultSkill.value = r.default;
+  } catch {
+    /* 主机旧版无此端点 → 隐藏下拉 */
+  }
+}
+async function changeCheckSkill(e: Event) {
+  const el = e.target as HTMLSelectElement;
+  const v = el.value;
+  skillBusy.value = true;
+  try {
+    // 只动技能不动档位(profile 传空串,后端跳过档位更新)。
+    await collab.setCheckProfile("", v);
+    toast.info("检查技能已更新");
+  } catch (err) {
+    toast.error((err as Error).message);
+    el.value = collab.checkSkill || defaultSkill.value;
+  } finally {
+    skillBusy.value = false;
+  }
+}
+
+// ── 共享可见路径(管理者放行,协作者开工时并入稀疏集) ──
+const sharedScope = ref("");
+const sharedBusy = ref(false);
+watch(
+  () => proj.value?.id,
+  () => {
+    sharedScope.value = proj.value?.shared_scope ?? "";
+  },
+  { immediate: true }
+);
+async function saveSharedScope() {
+  if (!proj.value) return;
+  sharedBusy.value = true;
+  try {
+    await collabApi.setSharedScope(proj.value.id, sharedScope.value.trim());
+    toast.info("共享可见路径已保存,协作者下次开工生效");
+    await collab.refreshProjects();
+  } catch (err) {
+    toast.error((err as Error).message);
+  } finally {
+    sharedBusy.value = false;
+  }
+}
+
 // 档位初值:GET /checks 要 taskId,又不想加后端接口 —— 项目里有卡就借第一张卡的
 // checks 响应把 profile 顺带带回来(懒且只在没值时发一次;没卡就显示「—」)。
 watch(
@@ -148,6 +201,7 @@ const STATE_LABEL: Record<string, string> = {
 
 onMounted(() => {
   void collab.init();
+  void loadCheckSkills();
   // 直接冷启进本页(如侧栏点击后刷新):init 里 afterAuth 会拉项目;动态单独补一发
   void collab.refreshActivity();
   // 绑定项目的对话列表需要 conv 数据就位
@@ -253,7 +307,38 @@ onMounted(() => {
             </select>
             <span v-else class="ov-profile-ro">{{ profileLabel }}</span>
             <p class="ph-dim">
-              提交送验时自动在临时 worktree 跑检查;创作档只保留密钥扫描与 500MB 大文件闸,关闭则不跑不拦。
+              提交送验时自动在临时 worktree 跑检查;创作档只保留密钥扫描与 500MB 大文件闸+越界闸,关闭则不跑不拦。
+            </p>
+          </div>
+          <div v-if="collab.canManage && checkSkills.length" class="ov-profile">
+            <label class="ph-dim">项目检测技能(代码档执行,脚本在主机运行):</label>
+            <select
+              class="ov-sel"
+              :value="collab.checkSkill || defaultSkill"
+              :disabled="skillBusy"
+              @change="changeCheckSkill"
+            >
+              <option v-for="s in checkSkills" :key="s.id" :value="s.id">
+                {{ s.name }}{{ s.id === defaultSkill ? "(默认)" : "" }}
+              </option>
+            </select>
+          </div>
+        </section>
+
+        <section v-if="collab.canManage" class="ov-sec">
+          <h3><FolderGit2 :size="14" /> 共享可见路径</h3>
+          <div class="ov-profile">
+            <input
+              v-model="sharedScope"
+              class="ov-input"
+              placeholder="如:docs, src/shared(逗号分隔;留空=只按任务 scope 可见)"
+            />
+            <button class="btn sm" :disabled="sharedBusy" @click="saveSharedScope">
+              <LoaderCircle v-if="sharedBusy" :size="12" class="spin" />
+              保存
+            </button>
+            <p class="ph-dim">
+              协作者领卡开工时,除任务 scope 外还会检出这些目录——主项目里想让所有人都能看到的部分放这里。
             </p>
           </div>
         </section>
@@ -375,6 +460,11 @@ onMounted(() => {
   font-size: 12.5px; padding: 6px 10px; cursor: pointer;
 }
 .ov-sel:disabled { opacity: 0.6; cursor: default; }
+.ov-input {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); color: var(--ink);
+  font-size: 12.5px; padding: 6px 10px; width: 100%; max-width: 420px;
+}
 .ov-profile-ro {
   font-size: 12.5px; color: var(--text);
   border: 1px solid var(--border-soft); border-radius: 8px;

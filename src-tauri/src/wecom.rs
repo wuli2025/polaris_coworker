@@ -176,8 +176,9 @@ fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
+        // rundll32 不解析 &,URL 原样透传(cmd start 会在 & 处截断 query 参数)
+        Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .spawn()
             .map_err(|e| e.to_string())?;

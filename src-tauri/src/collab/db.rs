@@ -213,6 +213,21 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_checks_task ON check_runs(task_id, round);
 
+        -- 任务级对话(协作者↔负责人↔主Agent 的多轮微调通道,区别于 review_rounds 工单轮次)。
+        -- author_user_id=0 且 role='ai' 表示主 Agent;idem_key 供 outbox 断线补传去重。
+        CREATE TABLE IF NOT EXISTS task_messages(
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id        INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            round          INTEGER NOT NULL DEFAULT 0,
+            author_user_id INTEGER NOT NULL,
+            author_name    TEXT NOT NULL DEFAULT '',
+            role           TEXT NOT NULL,
+            body           TEXT NOT NULL,
+            idem_key       TEXT UNIQUE,
+            created_at     INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, id);
+
         CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, state);
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_devices_node ON devices(node_id);
@@ -246,6 +261,33 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if !has_profile {
         conn.execute("ALTER TABLE projects ADD COLUMN check_profile TEXT NOT NULL DEFAULT 'code'", [])
             .map_err(|e| format!("补 check_profile 列失败: {e}"))?;
+    }
+
+    // 增量列:projects.shared_scope —— 管理者放行的全项目共享可见路径(CSV),
+    // 协作者开工时并入稀疏集(scope_csv ∪ shared_scope)。
+    let has_shared: bool = conn
+        .prepare("PRAGMA table_info(projects)")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(1))
+                .map(|rows| rows.flatten().any(|c| c == "shared_scope"))
+        })
+        .unwrap_or(false);
+    if !has_shared {
+        conn.execute("ALTER TABLE projects ADD COLUMN shared_scope TEXT NOT NULL DEFAULT ''", [])
+            .map_err(|e| format!("补 shared_scope 列失败: {e}"))?;
+    }
+
+    // 增量列:projects.check_skill —— 项目检查用的技能 id;空 = 内置 project-check-default。
+    let has_check_skill: bool = conn
+        .prepare("PRAGMA table_info(projects)")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(1))
+                .map(|rows| rows.flatten().any(|c| c == "check_skill"))
+        })
+        .unwrap_or(false);
+    if !has_check_skill {
+        conn.execute("ALTER TABLE projects ADD COLUMN check_skill TEXT NOT NULL DEFAULT ''", [])
+            .map_err(|e| format!("补 check_skill 列失败: {e}"))?;
     }
 
     // 增量列:check_runs.sha —— 今日早版建过无 sha 的表(未发版但开发库存在),探测补齐。

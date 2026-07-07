@@ -448,6 +448,129 @@ fn invalidate_skipped_parents(
     n
 }
 
+/// 跨文件重命名/移动识别是否开启(`POLARIS_RENAME_MATCH=0` 一键关闭 → 退回「删旧+增新」)。
+fn rename_match_enabled() -> bool {
+    std::env::var("POLARIS_RENAME_MATCH")
+        .map(|v| v.trim() != "0")
+        .unwrap_or(true)
+}
+
+/// 重命名/移动免重嵌:在「本轮消失(gone)且带索引」的文件里,找本轮新增(seen=gen、chunked=0)
+/// 中「**同名同大小**且内容指纹一致」的**唯一**新文件 → 把旧行的路径/mtime 改指过去、保 id 保
+/// 已建 chunks/lex,并删掉新占位行。整目录移动因此零重嵌(也顺带省一大笔嵌入网络开销)。
+///
+/// 判据严到「同名 + 同 size + 内容哈希相等」:同名同大小候选通常就是被移动的那一个,读一次核验哈希
+/// (盘点时新文件尚未索引、无哈希,只能现读现算)即可确认;命中不唯一 / 无候选 → 维持原「删旧+增新」,
+/// 宁可多嵌一次也不错接。仅在同 root 内匹配(跨盘移动第一期不处理)。返回被判为「移动」的旧 id 集合。
+fn reconcile_renames(
+    conn: &rusqlite::Connection,
+    root_id: i64,
+    root_base: &Path,
+    gen: i64,
+    gone: &[i64],
+) -> HashSet<i64> {
+    let mut moved: HashSet<i64> = HashSet::new();
+    if !rename_match_enabled() || gone.is_empty() {
+        return moved;
+    }
+    // 只有「带可复用索引状态」的消失文件才值得救(chunked=1 且有内容指纹)。name 一并取出
+    // 作同名预筛,免逐行再查一次。IN 列表按 512 分批,避开 SQLite 变量上限(同旁边删除逻辑)。
+    let mut reusable: Vec<(i64, i64, String, String)> = Vec::new();
+    for chunk in gone.chunks(512) {
+        let ph = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT id, size, content_hash, name FROM files
+             WHERE id IN ({ph}) AND chunked=1 AND content_hash<>''"
+        );
+        let Ok(mut stmt) = conn.prepare(&sql) else { return moved };
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        });
+        match rows {
+            Ok(rs) => reusable.extend(rs.filter_map(|r| r.ok())),
+            Err(_) => return moved,
+        }
+    }
+    if reusable.is_empty() {
+        return moved;
+    }
+    let mut used_new: HashSet<i64> = HashSet::new();
+    for (old_id, size, ohash, oname) in reusable {
+        if cancelled() {
+            break;
+        }
+        // 同名 + 同大小 + 本轮新增未索引的候选(通常 0 或 1 条)
+        let cands: Vec<(i64, String, String, i64)> = {
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT id, relpath, name, mtime FROM files
+                 WHERE root_id=?1 AND seen=?2 AND chunked=0 AND size=?3 AND name=?4 LIMIT 16",
+            ) else {
+                continue;
+            };
+            let rows = stmt.query_map(
+                rusqlite::params![root_id, gen, size, oname],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            );
+            match rows {
+                Ok(rs) => rs.filter_map(|r| r.ok()).collect(),
+                Err(_) => continue,
+            }
+        };
+        // 读候选核验内容指纹,要求「恰好一个」匹配才判移动
+        let mut hit: Option<(i64, String, String, i64)> = None;
+        let mut hit_count = 0u32;
+        for c in cands {
+            if used_new.contains(&c.0) {
+                continue;
+            }
+            let abs = super::reencode_fs_path(&root_base.join(&c.1).to_string_lossy());
+            let Ok(bytes) = std::fs::read(&abs) else { continue };
+            if bytes.iter().take(4096).any(|&b| b == 0) {
+                continue; // 伪文本,内容哈希只对文本有意义
+            }
+            let chash = super::index::content_fingerprint(&String::from_utf8_lossy(&bytes));
+            if chash == ohash {
+                hit_count += 1;
+                if hit_count > 1 {
+                    break; // 不唯一 → 放弃,维持删旧+增新
+                }
+                hit = Some(c);
+            }
+        }
+        if hit_count == 1 {
+            if let Some((new_id, new_rel, new_name, new_mtime)) = hit {
+                // 先删新占位行释放 UNIQUE(root_id, relpath),再把旧行改指过去(保 id/保 chunks)。
+                if conn
+                    .execute("DELETE FROM files WHERE id=?1", [new_id])
+                    .is_ok()
+                    && conn
+                        .execute(
+                            "UPDATE files SET relpath=?2, name=?3, mtime=?4, seen=?5 WHERE id=?1",
+                            rusqlite::params![old_id, new_rel, new_name, new_mtime, gen],
+                        )
+                        .is_ok()
+                {
+                    used_new.insert(new_id);
+                    moved.insert(old_id);
+                }
+            }
+        }
+    }
+    moved
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanSummary {
     pub root: String,
@@ -980,16 +1103,35 @@ pub fn scan_root(
             rows.filter_map(|r| r.ok()).collect()
         };
         let root_base = PathBuf::from(&root_canon);
-        let gone: Vec<i64> = stale
+        let mut gone: Vec<i64> = stale
             .into_iter()
             .filter(|(_, rel)| {
                 // relpath 用 '/',Path::join 在 Windows 上也认 '/',无需替换分隔符。
-                let abs = root_base.join(rel);
-                let parent_ok = abs.parent().map(|p| p.exists()).unwrap_or(false);
-                parent_ok && !abs.exists()
+                // rel 是 decode_fs() 后的显示路径, Unix 上 GBK 名文件的磁盘字节与其
+                // 不同 → 先经 reencode_fs_path 还原真实路径, 否则 stat 恒失败被误删。
+                let abs = super::reencode_fs_path(&root_base.join(rel).to_string_lossy());
+                // Path::exists() 把 EACCES/SMB 认证过期等一切 IO 错误折叠成「不存在」,
+                // 会把只是暂时读不到的文件连 chunks(向量)+lex(倒排)一起误删。
+                // 只认 NotFound 才判「真消失」; 其余错误(权限/网络抖动)一律保留待下轮。
+                let parent_ok = abs
+                    .parent()
+                    .map(|p| std::fs::symlink_metadata(p).is_ok())
+                    .unwrap_or(false);
+                parent_ok
+                    && matches!(
+                        std::fs::symlink_metadata(&abs),
+                        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
+                    )
             })
             .map(|(id, _)| id)
             .collect();
+
+        // 重命名/移动免重嵌:把「其实只是被移动了」的文件从 gone 里摘出来(改指新路径、保留向量),
+        // 剩下的才是真正消失、该删的。整目录移动因此零重嵌。
+        let moved = reconcile_renames(&conn, root_id, &root_base, gen, &gone);
+        if !moved.is_empty() {
+            gone.retain(|id| !moved.contains(id));
+        }
 
         let mut n = 0u64;
         if !gone.is_empty() {
@@ -1016,6 +1158,19 @@ pub fn scan_root(
                         rusqlite::params_from_iter(batch.iter()),
                     )
                     .map_err(|e| e.to_string())? as u64;
+                // 悬挂去重指针自愈:canonical 被删 → 其副本失去归并目标,清 dup_of 且重置 chunked=0
+                // 让它们重新入索引(下次 dedupe_scan 会在其中重选 canonical);被压制的新版被删 →
+                // 清 superseded_by,让旧版不再被降权。避免删原件后副本/旧版永久隐身。
+                conn.execute(
+                    &format!("UPDATE files SET dup_of=0, chunked=0 WHERE dup_of IN ({ph})"),
+                    rusqlite::params_from_iter(batch.iter()),
+                )
+                .map_err(|e| e.to_string())?;
+                conn.execute(
+                    &format!("UPDATE files SET superseded_by=0 WHERE superseded_by IN ({ph})"),
+                    rusqlite::params_from_iter(batch.iter()),
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
         // 目录缓存对账:本轮没确认(seen<>gen)的 dirs 行清掉 —— 目录已消失,或本轮没扫到
@@ -1688,6 +1843,201 @@ pub fn fable_folder_size(path: String) -> Result<FolderSize, String> {
 /// 「按语言归类」回填:给所有还没定语言(lang='')的文件补上语言标签。
 /// 代码/媒体零 IO 当场定;文稿读文件头嗅探自然语言(中文/英文/其他)。多核并行、幂等续跑。
 /// 旧库(刚加 lang 列,全为 '')或新盘点后的文稿都靠它补齐。返回本轮回填条数。
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditReport {
+    pub mode: String,
+    pub roots: u64,
+    pub files_total: u64,
+    /// dup_of / superseded_by 指向已不存在的文件 id(悬挂引用;健康库应为 0)。
+    pub dangling_refs: u64,
+    /// roots.files 记录数与实际 files 行数不一致的根个数(计数漂移)。
+    pub roots_count_drift: u64,
+    /// sample 模式:实际抽查的目录数。
+    pub dirs_sampled: u64,
+    /// 盘上有、库里无(漏收)。
+    pub missing_in_db: u64,
+    /// 库里有、盘上无(幻影,可能是删除未对账或抽样期文件刚消失)。
+    pub missing_on_disk: u64,
+    /// 盘上 mtime 与库里不一致(原地改写盲区);fix 模式当场重置 chunked/ftsed 待重建。
+    pub mtime_drift: u64,
+    /// 抽到但读不到的目录数(NAS 掉线 / 权限),不计入漏收。
+    pub unreachable_dirs: u64,
+    /// fix 模式作废缓存的目录数(下轮增量必重扫)。
+    pub fixed_dirs: u64,
+    pub seconds: f64,
+}
+
+/// 盘点完整性对账(填补「扫到的 vs 库里的」一直缺的显式对账)。三档:
+/// - `counters`(默认,秒级纯 SQL):totals + 悬挂 dup/supersede 引用 + roots 计数漂移。
+/// - `sample`(分钟级,随机抽 K 个目录**绕过 mtime 缓存**真 read_dir + stat):量化漏收/幻影/
+///   **mtime 漂移**(直接测「原地追加写不碰目录」盲区的实际发生率)。
+/// - `fix`:在 sample 基础上,漂移文件当场重置 chunked/ftsed 待重建,漏收目录作废其 dirs 缓存
+///   (复用 [`invalidate_skipped_parents`] 的同款自愈:mtime=0 → 下轮增量必 read_dir)。
+/// 掉线 NAS 的目录读不到时计入 `unreachable_dirs` 而非误报漏收(不重蹈 seen 抹库教训)。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
+pub fn fable_audit(mode: Option<String>, sample: Option<usize>) -> Result<AuditReport, String> {
+    let started = Instant::now();
+    let mode = mode.unwrap_or_else(|| "counters".into());
+    let do_sample = mode == "sample" || mode == "fix";
+    let do_fix = mode == "fix";
+    let conn = open_db()?;
+
+    let one = |sql: &str| -> u64 {
+        conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
+    };
+    let roots = one("SELECT COUNT(*) FROM roots");
+    let files_total = one("SELECT COUNT(*) FROM files");
+    let dangling_refs = one(
+        "SELECT COUNT(*) FROM files
+         WHERE (dup_of<>0 AND dup_of NOT IN (SELECT id FROM files))
+            OR (superseded_by<>0 AND superseded_by NOT IN (SELECT id FROM files))",
+    );
+    let roots_count_drift = one(
+        "SELECT COUNT(*) FROM roots r
+         WHERE r.files <> (SELECT COUNT(*) FROM files f WHERE f.root_id=r.id)",
+    );
+
+    let mut rep = AuditReport {
+        mode: mode.clone(),
+        roots,
+        files_total,
+        dangling_refs,
+        roots_count_drift,
+        dirs_sampled: 0,
+        missing_in_db: 0,
+        missing_on_disk: 0,
+        mtime_drift: 0,
+        unreachable_dirs: 0,
+        fixed_dirs: 0,
+        seconds: 0.0,
+    };
+
+    if do_sample {
+        let k = sample.unwrap_or(200).clamp(1, 5000);
+        let dirs: Vec<(i64, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT d.root_id, d.relpath, r.path FROM dirs d
+                     JOIN roots r ON r.id=d.root_id ORDER BY RANDOM() LIMIT ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([k as i64], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.flatten().collect()
+        };
+        for (root_id, drel, root_path) in dirs {
+            if cancelled() {
+                break;
+            }
+            rep.dirs_sampled += 1;
+            let abs_dir = super::reencode_fs_path(
+                &PathBuf::from(&root_path).join(&drel).to_string_lossy(),
+            );
+            let rd = match std::fs::read_dir(&abs_dir) {
+                Ok(rd) => rd,
+                Err(_) => {
+                    rep.unreachable_dirs += 1;
+                    continue;
+                }
+            };
+            // 盘上直属文件:显示名 → mtime 秒(与盘点写库同口径)。
+            let mut disk: HashSet<String> = HashSet::new();
+            let mut dir_missing = 0u64;
+            for ent in rd.flatten() {
+                let ft = match ent.file_type() {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if ft.is_dir() {
+                    continue;
+                }
+                let name = super::decode_fs(ent.file_name().as_os_str());
+                let rel = if drel.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{drel}/{name}")
+                };
+                disk.insert(name);
+                let disk_mtime = ent
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let db_mtime: Option<i64> = conn
+                    .query_row(
+                        "SELECT mtime FROM files WHERE root_id=?1 AND relpath=?2",
+                        rusqlite::params![root_id, rel],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                match db_mtime {
+                    None => {
+                        rep.missing_in_db += 1;
+                        dir_missing += 1;
+                    }
+                    Some(m) if m != disk_mtime => {
+                        rep.mtime_drift += 1;
+                        if do_fix {
+                            let _ = conn.execute(
+                                "UPDATE files SET chunked=0, ftsed=0 WHERE root_id=?1 AND relpath=?2",
+                                rusqlite::params![root_id, rel],
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // 幻影:库里记的直属文件盘上没有。只取「恰好多一段」的直属子(不含更深层)。
+            let db_children: Vec<String> = if drel.is_empty() {
+                match conn
+                    .prepare("SELECT relpath FROM files WHERE root_id=?1 AND relpath NOT LIKE '%/%'")
+                {
+                    Ok(mut s) => s
+                        .query_map([root_id], |r| r.get::<_, String>(0))
+                        .map(|rs| rs.flatten().collect())
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                match conn.prepare(
+                    "SELECT relpath FROM files WHERE root_id=?1
+                     AND relpath LIKE ?2||'/%' AND relpath NOT LIKE ?2||'/%/%'",
+                ) {
+                    Ok(mut s) => s
+                        .query_map(rusqlite::params![root_id, drel], |r| r.get::<_, String>(0))
+                        .map(|rs| rs.flatten().collect())
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                }
+            };
+            for rel in db_children {
+                let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                if !disk.contains(&name) {
+                    rep.missing_on_disk += 1;
+                }
+            }
+            // fix:本目录有漏收 → 作废其缓存,下轮增量必重扫补齐。
+            if do_fix && dir_missing > 0 {
+                let n = conn
+                    .execute(
+                        "UPDATE dirs SET mtime=0 WHERE root_id=?1 AND relpath=?2",
+                        rusqlite::params![root_id, drel],
+                    )
+                    .unwrap_or(0);
+                rep.fixed_dirs += n as u64;
+            }
+        }
+    }
+
+    rep.seconds = started.elapsed().as_secs_f64();
+    Ok(rep)
+}
+
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn fable_backfill_lang() -> Result<u64, String> {
     let conn = open_db()?;
@@ -2231,6 +2581,165 @@ mod tests {
             mtime_of(&conn, "B/SUB/s1.txt") > s1_mtime_scan1,
             "完整盘点应补回原地改写文件的新 mtime"
         );
+
+        drop(conn);
+        std::env::remove_var("POLARIS_FABLE_DB");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// fable_audit 端到端(默认 `#[ignore]`,单独跑):counters 对账 + sample 检出漏收/mtime 漂移 +
+    /// fix 作废缓存与重置标记。`cargo test ... --lib fable_audit_e2e -- --ignored --exact --nocapture`
+    #[test]
+    #[ignore]
+    fn fable_audit_e2e() {
+        use std::io::Write;
+        let base = std::env::temp_dir().join(format!("polaris_audit_{}", std::process::id()));
+        let root = base.join("root");
+        let db = base.join("fable_test.db");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(root.join("d")).unwrap();
+        let write = |p: &Path, s: &str| {
+            let mut f = std::fs::File::create(p).unwrap();
+            f.write_all(s.as_bytes()).unwrap();
+        };
+        write(&root.join("d").join("keep.txt"), "keep");
+        write(&root.join("d").join("drift.txt"), "v1");
+        std::env::set_var("POLARIS_FABLE_DB", &db);
+        let root_s = root.to_string_lossy().to_string();
+        let empty = HashSet::new();
+        let noop = |_f: u64, _b: u64| {};
+
+        scan_root(&root_s, &empty, false, &noop).unwrap();
+
+        // counters:干净库应无悬挂引用、无计数漂移。
+        let c = fable_audit(Some("counters".into()), None).unwrap();
+        assert_eq!(c.dangling_refs, 0);
+        assert_eq!(c.roots_count_drift, 0, "刚扫完 roots.files 应与实际一致");
+        assert!(c.files_total >= 2);
+
+        // 制造盲区:① 原地改写 drift.txt(不碰目录 mtime)→ 增量察觉不到;② 直接新增 sneak.txt。
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(root.join("d").join("drift.txt"))
+                .unwrap();
+            f.write_all(b"v2-much-longer-content").unwrap();
+        }
+        write(&root.join("d").join("sneak.txt"), "sneaked-in");
+
+        // sample:强制抽满,应检出 1 漏收(sneak)+ 1 mtime 漂移(drift)。
+        let s = fable_audit(Some("sample".into()), Some(5000)).unwrap();
+        assert!(s.dirs_sampled >= 1);
+        assert_eq!(s.missing_in_db, 1, "sneak.txt 应报漏收");
+        assert_eq!(s.mtime_drift, 1, "drift.txt 原地改写应报 mtime 漂移");
+
+        // fix:同上并落自愈——drift 文件 chunked/ftsed 归零,d 目录缓存作废。
+        let conn = open_db().unwrap();
+        conn.execute(
+            "UPDATE files SET chunked=1, ftsed=1 WHERE relpath='d/drift.txt'",
+            [],
+        )
+        .unwrap();
+        let f = fable_audit(Some("fix".into()), Some(5000)).unwrap();
+        assert!(f.fixed_dirs >= 1, "有漏收的目录应被作废缓存");
+        let drift_chunked: i64 = conn
+            .query_row("SELECT chunked FROM files WHERE relpath='d/drift.txt'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(drift_chunked, 0, "漂移文件标记应被重置待重建");
+
+        drop(conn);
+        std::env::remove_var("POLARIS_FABLE_DB");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 重命名/移动免重嵌端到端(默认 `#[ignore]`,单独跑):把一个已索引文件移到另一目录(同名),
+    /// 增量重扫后旧行应「改指新路径、保 id 保 chunk」,而非删旧+增新触发重嵌。
+    /// `cargo test --manifest-path src-tauri/Cargo.toml --lib rename_move_reuses_index -- --ignored --exact --nocapture`
+    #[test]
+    #[ignore]
+    fn rename_move_reuses_index() {
+        use std::io::Write;
+        let base = std::env::temp_dir().join(format!("polaris_rename_{}", std::process::id()));
+        let root = base.join("root");
+        let db = base.join("fable_test.db");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(root.join("dir1")).unwrap();
+        let content = "hello rename world 内容用于内容指纹核验";
+        {
+            let mut f = std::fs::File::create(root.join("dir1").join("doc.txt")).unwrap();
+            f.write_all(content.as_bytes()).unwrap();
+        }
+        std::env::set_var("POLARIS_FABLE_DB", &db);
+        let root_s = root.to_string_lossy().to_string();
+        let empty = HashSet::new();
+        let noop = |_f: u64, _b: u64| {};
+
+        scan_root(&root_s, &empty, false, &noop).unwrap();
+        let conn = open_db().unwrap();
+        let file_id: i64 = conn
+            .query_row(
+                "SELECT id FROM files WHERE relpath='dir1/doc.txt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // 模拟「已建索引」:标 chunked=1、写入与磁盘内容一致的指纹、挂一条 chunk。
+        let hash = crate::fable::index::content_fingerprint(content);
+        conn.execute(
+            "UPDATE files SET chunked=1, ftsed=1, content_hash=?1, doc_key='doc' WHERE id=?2",
+            rusqlite::params![hash, file_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunks(file_id,seq,text,dim,vec) VALUES(?1,0,'x',1,x'00')",
+            [file_id],
+        )
+        .unwrap();
+
+        // 目录 mtime 按秒;睡过 1 秒边界让移动后 dir1/dir2 的 mtime 与首扫不同秒,增量必重读。
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::create_dir_all(root.join("dir2")).unwrap();
+        std::fs::rename(
+            root.join("dir1").join("doc.txt"),
+            root.join("dir2").join("doc.txt"),
+        )
+        .unwrap();
+
+        // 用完整盘点(full=true)确定性触发对账:不依赖「移动是否改了源目录 mtime」的文件系统行为
+        // (增量下若源目录 mtime 未变,旧文件会以幽灵形式留存,由 dedupe_scan 作为兜底清成完全重复)。
+        scan_root(&root_s, &empty, true, &noop).unwrap();
+
+        // 同一 id 现落在 dir2/doc.txt,chunked 保持 1、chunk 未删(零重嵌)。
+        let new_rel: String = conn
+            .query_row("SELECT relpath FROM files WHERE id=?1", [file_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(new_rel, "dir2/doc.txt", "旧行应改指移动后的新路径");
+        let chunked: i64 = conn
+            .query_row("SELECT chunked FROM files WHERE id=?1", [file_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(chunked, 1, "移动后仍标已索引,不触发重嵌");
+        let nchunks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks WHERE file_id=?1", [file_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(nchunks, 1, "已建向量随文件一起保留");
+        let at_new: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE relpath='dir2/doc.txt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(at_new, 1, "新路径不应另起一行(占位行已被并入旧行)");
+        let at_old: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE relpath='dir1/doc.txt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(at_old, 0, "旧路径行已迁走");
 
         drop(conn);
         std::env::remove_var("POLARIS_FABLE_DB");

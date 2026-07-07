@@ -93,7 +93,20 @@ onMounted(async () => {
 
   unlisten = await listen<EnvStreamEvent>("env:stream", onStream);
 
-  const r = await runCheck();
+  // env_check 一旦 reject,不能把启动门永远钉死在「正在检测…」(全屏转圈无出口):
+  // gate 模式失败即放行进主界面;面板模式落到 panel 并给出错误横幅,可点「重新检测」。
+  let r: EnvReport;
+  try {
+    r = await runCheck();
+  } catch (e) {
+    banner.value = {
+      kind: "err",
+      text: `环境检测失败：${String(e)}。可稍后在侧栏「环境」页重新检测。`,
+    };
+    if (props.gate) emit("done");
+    else phase.value = "panel";
+    return;
+  }
   if (r.ready) localStorage.setItem(READY_FLAG, "1");
   // claude 在但缺 shell → 自动补装 PowerShell 7 (进入流式日志), 不再放任用户进去后对话报错
   if (maybeAutoInstallShell(r)) return;
@@ -309,8 +322,13 @@ async function cancelInstall() {
 async function recheck() {
   banner.value = null;
   phase.value = "checking";
-  const r = await runCheck();
-  if (r.ready) localStorage.setItem(READY_FLAG, "1");
+  try {
+    const r = await runCheck();
+    if (r.ready) localStorage.setItem(READY_FLAG, "1");
+  } catch (e) {
+    // 复检失败同样不能卡死在 checking:回到面板报错,按钮可再试
+    banner.value = { kind: "err", text: `环境检测失败：${String(e)}，请重试。` };
+  }
   phase.value = "panel";
 }
 

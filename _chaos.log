@@ -1,0 +1,17 @@
+{"t": 30, "search_ok": 4869, "search_err": 0, "zero": 0, "ops_ok": 3, "ops_err": 0}
+{"t": 60, "search_ok": 9506, "search_err": 0, "zero": 0, "ops_ok": 7, "ops_err": 0}
+{"t": 90, "search_ok": 14100, "search_err": 0, "zero": 0, "ops_ok": 10, "ops_err": 1}
+{"t": 120, "search_ok": 19096, "search_err": 0, "zero": 0, "ops_ok": 13, "ops_err": 1}
+{"t": 150, "search_ok": 23392, "search_err": 0, "zero": 0, "ops_ok": 17, "ops_err": 1}
+{"t": 180, "search_ok": 27852, "search_err": 0, "zero": 0, "ops_ok": 21, "ops_err": 1}
+{"t": 210, "search_ok": 32590, "search_err": 0, "zero": 0, "ops_ok": 24, "ops_err": 1}
+{"t": 240, "search_ok": 36845, "search_err": 0, "zero": 0, "ops_ok": 28, "ops_err": 1}
+{"t": 270, "search_ok": 41410, "search_err": 0, "zero": 0, "ops_ok": 32, "ops_err": 1}
+{"t": 300, "search_ok": 46132, "search_err": 0, "zero": 0, "ops_ok": 36, "ops_err": 1}
+{"t": 330, "search_ok": 50635, "search_err": 0, "zero": 0, "ops_ok": 39, "ops_err": 1}
+{"t": 360, "search_ok": 55393, "search_err": 0, "zero": 0, "ops_ok": 43, "ops_err": 1}
+{"t": 390, "search_ok": 60116, "search_err": 0, "zero": 0, "ops_ok": 47, "ops_err": 1}
+{"t": 420, "search_ok": 64681, "search_err": 0, "zero": 0, "ops_ok": 51, "ops_err": 1}
+{"t": 450, "search_ok": 69466, "search_err": 0, "zero": 0, "ops_ok": 54, "ops_err": 1}
+{"t": 480, "search_ok": 73854, "search_err": 0, "zero": 0, "ops_ok": 58, "ops_err": 1}
+{"FINAL": true, "wall_s": 484.1, "search_ok": 73876, "search_err": 0, "zero": 0, "ops_ok": 59, "ops_err": 1, "search_qps": 152.6, "lat_p50": 87.8, "lat_p99": 562.5, "lat_max": 848.9, "errs": ["op1:HTTP Error 500: Internal Server Error"]}

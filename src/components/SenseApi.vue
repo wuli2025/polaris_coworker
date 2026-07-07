@@ -253,13 +253,15 @@ async function cancelFable() {
   }
 }
 
-async function runSearch() {
+async function runSearch(ai = false) {
   const q = searchQ.value.trim();
   if (!q || searchBusy.value) return;
   searchBusy.value = true;
   fableErr.value = "";
   try {
-    searchRes.value = await invoke<FableSearchResult>("fable_search", { query: q });
+    searchRes.value = ai
+      ? await invoke<FableSearchResult>("fable_search_ai", { query: q })
+      : await invoke<FableSearchResult>("fable_search", { query: q });
   } catch (e) {
     fableErr.value = String(e);
   } finally {
@@ -725,16 +727,25 @@ function statusDot(p: SenseProviderView): string {
             v-model="searchQ"
             class="fable-in"
             placeholder="测一下混合检索(grep ∥ 向量并行)…"
-            @keydown.enter="runSearch"
+            @keydown.enter="runSearch()"
           />
-          <button class="btn sm" :disabled="searchBusy || !searchQ.trim()" @click="runSearch">
+          <button class="btn sm" :disabled="searchBusy || !searchQ.trim()" @click="runSearch()">
             {{ searchBusy ? "检索中…" : "检索" }}
+          </button>
+          <button
+            class="btn sm"
+            :disabled="searchBusy || !searchQ.trim()"
+            title="AI 深度检索:让 AI 把查询多路扩写后并行召回再融合,提升模糊/关键词查询的召回与精度(数秒级)"
+            @click="runSearch(true)"
+          >
+            {{ searchBusy ? "…" : "✨ AI 深度" }}
           </button>
         </div>
         <div v-if="searchRes" class="fable-results">
           <div class="muted-txt" style="margin-bottom: 6px">
             {{ searchRes.ms }}ms · grep {{ searchRes.grep_hits }} 命中 · 向量 {{ searchRes.vector_hits }} 命中
             <template v-if="searchRes.reranked"> · 已重排</template>
+            <template v-if="searchRes.mode && searchRes.mode.startsWith('ai')"> · {{ searchRes.mode }}</template>
             <template v-if="searchRes.grep_truncated"> · grep 预算截断</template>
           </div>
           <div v-for="(h, i) in searchRes.hits" :key="i" class="fable-hit">

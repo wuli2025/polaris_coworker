@@ -21,6 +21,7 @@ import {
 } from "@lucide/vue";
 import { useCollabStore } from "./stores/collab";
 import MergeConsole from "./MergeConsole.vue";
+import TaskChat from "./TaskChat.vue";
 import {
   collabApi,
   fmtTime,
@@ -714,6 +715,11 @@ const STATE_LABEL: Record<TaskState, string> = {
               </button>
               <span class="ck-force-hint">检查未过;owner 可强推,会记入审计</span>
             </div>
+          </section>
+
+          <!-- 任务级对话:协作者↔负责人↔主 Agent 的多轮微调通道 -->
+          <section class="dr-sec">
+            <TaskChat :task-id="detail.id" />
           </section>
 
           <section class="dr-sec">

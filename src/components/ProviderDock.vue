@@ -46,12 +46,14 @@ const codexCopied = ref(false);
 let codexTimer: number | null = null;
 let codexExpireAt = 0;
 
-// Claude 官方订阅授权 (PKCE OAuth · 手工回贴授权码)
+// Claude 官方订阅授权 (PKCE OAuth · 回环一键为主, 手工回贴兜底)
 const claudeOpen = ref(false);
 const claudeLogin = ref<ClaudeLoginStart | null>(null);
 const claudePasted = ref("");
 const claudeBusy = ref(false);
 const claudeErr = ref<string | null>(null);
+let claudeTimer: number | null = null;
+let claudeExpireAt = 0;
 
 // 用量周期
 type Period = "today" | "week" | "month" | "year";
@@ -95,6 +97,7 @@ watch(
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onEsc);
   stopCodexPoll();
+  stopClaudePoll();
 });
 function onEsc(e: KeyboardEvent) {
   if (e.key !== "Escape") return;
@@ -270,7 +273,9 @@ async function startCodexAuth() {
   }
   codexDevice.value = dev;
   codexExpireAt = Date.now() + dev.expiresIn * 1000;
-  startCodexPoll(dev);
+  // auto = 回环一键授权(浏览器点 Authorize 即完成); device = 设备码流程兜底
+  if (dev.mode === "auto") startCodexAutoPoll();
+  else startCodexPoll(dev);
 }
 function startCodexPoll(dev: CodexDeviceLogin) {
   stopCodexPoll();
@@ -296,6 +301,30 @@ function startCodexPoll(dev: CodexDeviceLogin) {
     }
   }, intervalMs);
 }
+/** auto 模式:轮询后端回环会话状态,授权码由浏览器重定向自动送达后端 */
+function startCodexAutoPoll() {
+  stopCodexPoll();
+  codexTimer = window.setInterval(async () => {
+    if (Date.now() > codexExpireAt) {
+      resetCodexAuth();
+      codexErr.value = "授权超时, 请重试";
+      return;
+    }
+    try {
+      const r = await store.codexLoginPoll();
+      if (r.status === "pending") return;
+      stopCodexPoll();
+      codexDevice.value = null;
+      if (r.status !== "ok") {
+        codexErr.value = r.message || "授权未完成, 请重试";
+      }
+    } catch (e) {
+      stopCodexPoll();
+      codexDevice.value = null;
+      codexErr.value = String(e);
+    }
+  }, 1500);
+}
 function stopCodexPoll() {
   if (codexTimer !== null) {
     clearInterval(codexTimer);
@@ -304,6 +333,7 @@ function stopCodexPoll() {
 }
 function resetCodexAuth() {
   stopCodexPoll();
+  if (codexDevice.value?.mode === "auto") store.codexLoginCancel();
   codexDevice.value = null;
   codexBusy.value = false;
   codexErr.value = null;
@@ -330,19 +360,54 @@ async function copyUserCode() {
   }
 }
 
-// ── Claude 官方订阅授权 (手工回贴授权码) ─────────────────────────
-/** 点「授权」:后端生成 PKCE + 开浏览器到登录页,返回 verifier/state 暂存待回贴 */
-async function startClaudeAuth() {
+// ── Claude 官方订阅授权 (回环一键 · 手工回贴兜底) ─────────────────────────
+/** 点「授权」:桌面端默认回环一键(开浏览器点 Authorize 即完成);
+ *  forceManual=true 强制手工回贴(回环失灵时的兜底入口) */
+async function startClaudeAuth(forceManual = false) {
+  stopClaudePoll();
+  if (forceManual) store.claudeLoginCancel(); // 改走手工, 顺手释放 54545 监听
   claudeErr.value = null;
   claudePasted.value = "";
   claudeBusy.value = true;
-  const login = await store.claudeStartLogin();
+  const login = await store.claudeStartLogin(forceManual);
   claudeBusy.value = false;
   if (!login) {
     claudeErr.value = store.error || "发起授权失败";
     return;
   }
   claudeLogin.value = login;
+  if (login.mode === "auto") startClaudeAutoPoll();
+}
+/** auto 模式:轮询后端回环会话状态,授权码由浏览器重定向自动送达后端 */
+function startClaudeAutoPoll() {
+  stopClaudePoll();
+  claudeExpireAt = Date.now() + 10 * 60 * 1000;
+  claudeTimer = window.setInterval(async () => {
+    if (Date.now() > claudeExpireAt) {
+      resetClaudeAuth();
+      claudeErr.value = "授权超时, 请重试";
+      return;
+    }
+    try {
+      const r = await store.claudeLoginPoll();
+      if (r.status === "pending") return;
+      stopClaudePoll();
+      claudeLogin.value = null;
+      if (r.status !== "ok") {
+        claudeErr.value = r.message || "授权未完成, 请重试";
+      }
+    } catch (e) {
+      stopClaudePoll();
+      claudeLogin.value = null;
+      claudeErr.value = String(e);
+    }
+  }, 1500);
+}
+function stopClaudePoll() {
+  if (claudeTimer !== null) {
+    clearInterval(claudeTimer);
+    claudeTimer = null;
+  }
 }
 function openClaudeAuthPage() {
   if (claudeLogin.value) window.open(claudeLogin.value.authorizeUrl, "_blank");
@@ -371,6 +436,8 @@ async function submitClaudeCode() {
   }
 }
 function resetClaudeAuth() {
+  stopClaudePoll();
+  if (claudeLogin.value?.mode === "auto") store.claudeLoginCancel();
   claudeLogin.value = null;
   claudePasted.value = "";
   claudeBusy.value = false;
@@ -740,17 +807,27 @@ function subtitleOf(p: ProviderView): string {
 
                   <!-- 授权进行中 -->
                   <template v-if="codexDevice">
-                    <p class="codex-note">
-                      已为你打开 ChatGPT 授权页。在浏览器里确认设备码后回到这里,授权完成会自动识别:
-                    </p>
-                    <button
-                      class="codex-code"
-                      :title="codexCopied ? '已复制' : '点击复制'"
-                      @click="copyUserCode"
-                    >
-                      {{ codexDevice.userCode }}
-                      <span class="code-copy">{{ codexCopied ? "已复制" : "复制" }}</span>
-                    </button>
+                    <!-- 回环一键:浏览器点 Authorize 即完成, 零核对零回贴 -->
+                    <template v-if="codexDevice.mode === 'auto'">
+                      <p class="codex-note">
+                        已为你打开 ChatGPT 授权页。在浏览器里登录并点「<b>Authorize</b>」即可,
+                        授权会自动送回 Polaris,无需核对配对码:
+                      </p>
+                    </template>
+                    <!-- 设备码兜底:1455 端口被占时的旧流程 -->
+                    <template v-else>
+                      <p class="codex-note">
+                        已为你打开 ChatGPT 授权页。在浏览器里确认设备码后回到这里,授权完成会自动识别:
+                      </p>
+                      <button
+                        class="codex-code"
+                        :title="codexCopied ? '已复制' : '点击复制'"
+                        @click="copyUserCode"
+                      >
+                        {{ codexDevice.userCode }}
+                        <span class="code-copy">{{ codexCopied ? "已复制" : "复制" }}</span>
+                      </button>
+                    </template>
                     <p class="codex-poll"><span class="spinner" /> 等待浏览器中完成授权…</p>
                     <div class="ed-actions">
                       <button class="ed-cancel" @click="resetCodexAuth">取消</button>
@@ -797,8 +874,9 @@ function subtitleOf(p: ProviderView): string {
                   <!-- 未授权:显著大按钮 -->
                   <template v-else>
                     <p class="codex-note">
-                      用 ChatGPT 账号授权(无需安装 codex CLI)。点击后将自动打开浏览器完成登录,
-                      凭据写入 <code>~/.codex/auth.json</code>,授权后点「用 GPT 对话」即生效。
+                      用 ChatGPT 账号授权(无需安装 codex CLI)。点击后将自动打开浏览器,
+                      登录并点「Authorize」即自动完成,凭据写入
+                      <code>~/.codex/auth.json</code>,授权后点「用 GPT 对话」即生效。
                     </p>
                     <div class="ed-actions">
                       <button class="ed-cancel" @click="codexOpen = false">关闭</button>
@@ -843,7 +921,7 @@ function subtitleOf(p: ProviderView): string {
                       <code>claude</code> 都会复用这份订阅,无需在外壳里再登录。
                     </p>
                     <div class="ed-actions">
-                      <button class="ed-cancel" @click="startClaudeAuth" :disabled="claudeBusy">
+                      <button class="ed-cancel" @click="startClaudeAuth()" :disabled="claudeBusy">
                         <RefreshCw :size="13" :stroke-width="2" /> 重新授权
                       </button>
                       <button class="ed-save" @click="claudeOpen = false">
@@ -852,41 +930,61 @@ function subtitleOf(p: ProviderView): string {
                     </div>
                   </template>
 
-                  <!-- 授权进行中:已开浏览器,等回贴授权码 -->
+                  <!-- 授权进行中 -->
                   <template v-else-if="claudeLogin">
-                    <p class="codex-note">
-                      已为你打开 Claude 登录页。登录并点「Authorize」后,页面会给出一段授权码,
-                      <b>整段复制</b>粘贴到下面(形如 <code>xxxx#yyyy</code>,带 # 一起贴):
-                    </p>
-                    <textarea
-                      v-model="claudePasted"
-                      class="claude-input"
-                      rows="2"
-                      placeholder="在此粘贴授权码…"
-                      spellcheck="false"
-                      @keydown.enter.prevent="submitClaudeCode"
-                    />
-                    <div class="ed-actions">
-                      <button class="ed-cancel" @click="openClaudeAuthPage">
-                        <ExternalLink :size="13" :stroke-width="2" /> 重新打开登录页
-                      </button>
-                      <button
-                        class="ed-save login claude"
-                        :disabled="claudeBusy || !claudePasted.trim()"
-                        @click="submitClaudeCode"
-                      >
-                        <span v-if="claudeBusy" class="spinner" />
-                        <Check v-else :size="13" :stroke-width="2" />
-                        {{ claudeBusy ? "验证中…" : "完成授权" }}
-                      </button>
-                    </div>
+                    <!-- 回环一键:浏览器点 Authorize 即完成, 零复制零回贴 -->
+                    <template v-if="claudeLogin.mode === 'auto'">
+                      <p class="codex-note">
+                        已为你打开 Claude 登录页。登录并点「<b>Authorize</b>」即可,
+                        授权会自动送回 Polaris,无需复制授权码:
+                      </p>
+                      <p class="codex-poll"><span class="spinner" /> 等待浏览器中完成授权…</p>
+                      <div class="ed-actions">
+                        <button class="ed-cancel" @click="resetClaudeAuth">取消</button>
+                        <button class="ed-cancel" @click="startClaudeAuth(true)">
+                          改用手工回贴
+                        </button>
+                        <button class="ed-save login claude" @click="openClaudeAuthPage">
+                          <ExternalLink :size="13" :stroke-width="2" /> 重新打开登录页
+                        </button>
+                      </div>
+                    </template>
+                    <!-- 手工回贴兜底:54545 被占 / 用户主动选择 -->
+                    <template v-else>
+                      <p class="codex-note">
+                        已为你打开 Claude 登录页。登录并点「Authorize」后,页面会给出一段授权码,
+                        <b>整段复制</b>粘贴到下面(形如 <code>xxxx#yyyy</code>,带 # 一起贴):
+                      </p>
+                      <textarea
+                        v-model="claudePasted"
+                        class="claude-input"
+                        rows="2"
+                        placeholder="在此粘贴授权码…"
+                        spellcheck="false"
+                        @keydown.enter.prevent="submitClaudeCode"
+                      />
+                      <div class="ed-actions">
+                        <button class="ed-cancel" @click="openClaudeAuthPage">
+                          <ExternalLink :size="13" :stroke-width="2" /> 重新打开登录页
+                        </button>
+                        <button
+                          class="ed-save login claude"
+                          :disabled="claudeBusy || !claudePasted.trim()"
+                          @click="submitClaudeCode"
+                        >
+                          <span v-if="claudeBusy" class="spinner" />
+                          <Check v-else :size="13" :stroke-width="2" />
+                          {{ claudeBusy ? "验证中…" : "完成授权" }}
+                        </button>
+                      </div>
+                    </template>
                   </template>
 
                   <!-- 未授权:发起按钮 -->
                   <template v-else>
                     <p class="codex-note">
-                      用 Claude 账号登录订阅(Pro / Max)。点击后将打开浏览器登录,
-                      登录后把页面给出的授权码贴回这里即可,凭据写入
+                      用 Claude 账号登录订阅(Pro / Max)。点击后将打开浏览器,
+                      登录并点「Authorize」即自动完成授权,凭据写入
                       <code>~/.claude/.credentials.json</code>。
                     </p>
                     <div class="ed-actions">
@@ -894,7 +992,7 @@ function subtitleOf(p: ProviderView): string {
                       <button
                         class="ed-save login claude big"
                         :disabled="claudeBusy"
-                        @click="startClaudeAuth"
+                        @click="startClaudeAuth()"
                       >
                         <span v-if="claudeBusy" class="spinner" />
                         <LogIn v-else :size="14" :stroke-width="2" />

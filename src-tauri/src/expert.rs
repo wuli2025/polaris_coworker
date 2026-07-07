@@ -673,8 +673,11 @@ pub fn route_block(query: &str) -> Option<String> {
     let primary = &hit[0].expert;
     let mut s = String::new();
     s.push_str(
-        "【智能匹配·专家团】本轮自动匹配到主理专家。请**严格以下述专家的标准、品味与方法**作答 —— \
-         这是该专家完整的工作准则,优先级高于泛泛的通用风格(若与默认风格冲突,以专家准则为准):\n\n",
+        "【智能匹配·专家团】本轮自动匹配到主理专家。以下述专家的标准与品味作答。\
+         优先级:用户的明确要求 > 专家准则 > 通用风格 —— 用户要求与专家铁律冲突时,\
+         一律按用户的来(至多一句话点明代价,不说教、不拒绝)。始终用用户提问的语言回答。\n\
+         动手前先按领域直觉扫一遍本题最可能出错/最刁钻处(隐藏陷阱、边界、易漏项),\
+         再对照下述铁律清单——别让清单挤掉探索,清单是下限不是上限。\n\n",
     );
     s.push_str(&format!("# 主理专家:{}（{}）\n\n", primary.name, primary.role));
     // ★关键:注入该专家**完整提示词正文**(来自 templates/experts/<group>/<id>.md,可本地编辑),
@@ -704,10 +707,55 @@ pub fn route_block(query: &str) -> Option<String> {
             ));
         }
     }
+    s.push_str("\n纪律:任务简单就主理专家一人直接干到好,确需分工且并行有收益时才召备选。");
+    Some(s)
+}
+
+/// 多专家召集注入块（expert-team 模式）：给每位主选专家注入**完整工作准则正文**，
+/// 备选只给一行。此前这里只注入「名字+分工标签」——最需要专家标准的多人场景反而
+/// 拿不到任何准则，现在与 route_block 的单专家路径对齐。
+pub fn team_block(matches: &[ExpertMatch]) -> Option<String> {
+    if matches.is_empty() {
+        return None;
+    }
+    let mut s = String::new();
     s.push_str(
-        "\n纪律:以主理专家的标准为准、备选为辅;任务简单就主理专家一人直接干到好,\
-         确需分工且并行有收益时才召备选(一次≤4~5 人,紧耦合则串行)。",
+        "【专家团召集】本轮召集以下专家协同。各自严守自己的准则,分工不重叠。\
+         优先级:用户的明确要求 > 专家准则 > 通用风格 —— 冲突时一律按用户的来\
+         (至多一句话点明代价)。始终用用户提问的语言回答。\
+         动手前各自先按领域直觉扫一遍本题最可能出错/最刁钻处,再对照自己的铁律清单——\
+         别让清单挤掉探索,清单是下限不是上限。\n\n",
     );
+    for m in matches.iter().filter(|m| m.is_primary) {
+        let e = &m.expert;
+        s.push_str(&format!("# 专家:{}（{}）\n\n", e.name, e.role));
+        if let Some(body) = expert_docs::build_expert_doc(
+            &e.claude_md_ref,
+            &e.name,
+            &e.role,
+            &e.description,
+            &e.keywords,
+            &e.capabilities,
+            &e.trigger_signals,
+            &e.complements,
+            &e.exclusive_with,
+            e.cost_tier,
+        ) {
+            s.push_str(&body);
+            s.push_str("\n\n");
+        }
+    }
+    let backups: Vec<_> = matches.iter().filter(|m| !m.is_primary).collect();
+    if !backups.is_empty() {
+        s.push_str("## 可借力的备选专家\n");
+        for m in &backups {
+            s.push_str(&format!(
+                "- **{}**（{}）— 补「{}」\n",
+                m.expert.name, m.expert.role, m.complements
+            ));
+        }
+    }
+    s.push_str("\n纪律:独立子任务才并行,紧耦合退回串行;由第一位专家统一收口交付。");
     Some(s)
 }
 
@@ -973,10 +1021,10 @@ mod tests {
     fn route_block_injects_full_expert_prompt() {
         let block = route_block("你帮我写一个这个的ppt").expect("ppt 应命中专家");
         assert!(block.contains("视觉设计"), "应路由到视觉设计专家");
+        let head: String = block.chars().take(200).collect();
         assert!(
-            block.contains("演示美学") || block.contains("大字少字"),
-            "应注入 visual-designer.md 的实质提示词(证明吃的是文件全文而非标签),实际开头:\n{}",
-            &block[..block.len().min(400)]
+            block.contains("项目符号墙") || block.contains("发布会 slide"),
+            "应注入 visual-designer.md 的实质提示词(证明吃的是文件全文而非标签),实际开头:\n{head}"
         );
     }
 }

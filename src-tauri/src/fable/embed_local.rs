@@ -208,7 +208,16 @@ pub fn embed(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     let m = embedder()?;
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
     let mut g = m.lock().map_err(|_| "本地嵌入锁中毒".to_string())?;
-    let out = g.embed(refs, Some(32)).map_err(|e| format!("本地嵌入失败: {e}"))?;
+    // fastembed 内部推理批:`POLARIS_EMBED_BATCH` 覆盖(clamp [1,64],默认 32)。
+    // 本地 INT8 是 CPU 密集且 [batch,seq=512,1024] 张量随 batch 线性涨内存,故上限比云档(128)保守。
+    let inner_batch = std::env::var("POLARIS_EMBED_BATCH")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(1, 64))
+        .unwrap_or(32);
+    let out = g
+        .embed(refs, Some(inner_batch))
+        .map_err(|e| format!("本地嵌入失败: {e}"))?;
     Ok(out.dense)
 }
 

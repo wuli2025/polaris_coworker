@@ -312,11 +312,17 @@ async fn collab_device_revoke(State(state): State<CollabState>, headers: HeaderM
 
 // ── GitHub 式注册与团队 ──
 
-/// 开放注册:只要账号密码(默认开;POLARIS_OPEN_SIGNUP=0 可关回票据制)。
+/// 注册:**默认邀请/票据制**(安全默认)。显式 POLARIS_OPEN_SIGNUP=1 才开放自助注册。
+/// 为什么默认关:开放注册 = 陌生人可自助入伙,而入伙后能建项目、push 仓库,checks 会在主机上
+/// 跑该仓库的构建(npm run build 直接执行 package.json 脚本;cargo check 会运行 build.rs 与
+/// proc-macro)—— 本质是「在主机上执行不可信代码」= 主机 RCE。故收紧为邀请制,把能 push 代码的
+/// 人限定在管理员亲自发票据请进来的可信成员。
 async fn collab_signup(Json(v): Json<Value>) -> Response {
-    let closed = std::env::var("POLARIS_OPEN_SIGNUP").map(|s| s == "0" || s.eq_ignore_ascii_case("false")).unwrap_or(false);
-    if closed {
-        return (StatusCode::FORBIDDEN, Json(json!({"error":"本主机关闭了开放注册,请找管理员要邀请票据"}))).into_response();
+    let open = std::env::var("POLARIS_OPEN_SIGNUP")
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !open {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"本主机为邀请制,请找管理员要邀请票据"}))).into_response();
     }
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let u = crate::collab::auth::create_user(&s_of(&v, "username"), &s_of(&v, "password"), "collaborator", &s_of(&v, "displayName"))?;
@@ -555,6 +561,22 @@ async fn project_set_lead(State(state): State<CollabState>, headers: HeaderMap, 
     unwrap_api(out)
 }
 
+/// 设项目共享可见路径(CSV):协作者开工时并入稀疏集(scope ∪ shared_scope)。管理者专属。
+async fn project_shared_scope_set(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let global_owner = role_rank(&ctx.role) >= 3;
+    let out = tokio::task::spawn_blocking(move || {
+        let pid = i_of(&v, "projectId").ok_or("缺 projectId")?;
+        if !crate::collab::projects::can_admin(pid, ctx.user_id, global_owner) {
+            return Err("只有项目/团队管理者能改共享可见路径".into());
+        }
+        crate::collab::projects::set_shared_scope(pid, &s_of(&v, "sharedScope"), &ctx.username)
+            .map(|_| json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
 async fn task_list(
     State(state): State<CollabState>,
     headers: HeaderMap,
@@ -572,6 +594,100 @@ async fn task_list(
 /// 任务卡变更统一广播(看板实时刷新)。项目级事件,广播即可;个人定向流走 emit_to。
 fn emit_task(state: &CollabState, card: &crate::collab::tasks::TaskCard) {
     let _ = state.app.emit("collab:task", card);
+}
+
+// ── 任务级对话(多轮微调通道,详见 chat.rs)──
+
+/// 消息鉴权 + 身份归类:项目成员可读写;返回 (card, 消息 role)。
+fn chat_access(
+    ctx: &AuthCtx,
+    task_id: i64,
+) -> Result<(crate::collab::tasks::TaskCard, String), Response> {
+    let card = crate::collab::tasks::get(task_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response())?;
+    ensure_member(ctx, card.project_id)?;
+    let global_owner = role_rank(&ctx.role) >= 3;
+    let role = if card.assignee == Some(ctx.user_id) {
+        "assignee"
+    } else if crate::collab::projects::can_admin(card.project_id, ctx.user_id, global_owner) {
+        "lead"
+    } else {
+        "member"
+    };
+    Ok((card, role.to_string()))
+}
+
+async fn task_messages_get(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    axum::extract::Path(tid): axum::extract::Path<i64>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let after_id = q.get("afterId").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(100);
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, Response> {
+        chat_access(&ctx, tid)?;
+        crate::collab::chat::list(tid, after_id, limit)
+            .and_then(ok)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response())
+    })
+    .await;
+    match out {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(resp)) => resp,
+        Err(e) => err_resp(format!("内部任务失败: {e}")),
+    }
+}
+
+async fn task_messages_post(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    axum::extract::Path(tid): axum::extract::Path<i64>,
+    Json(v): Json<Value>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 2 { return forbid(); }
+    let st = state.clone();
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, Response> {
+        let (_card, role) = chat_access(&ctx, tid)?;
+        let idem = v.get("idemKey").and_then(|k| k.as_str());
+        let msg = crate::collab::chat::post(tid, ctx.user_id, &ctx.username, &role, &s_of(&v, "body"), idem)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response())?;
+        // 项目级广播:任务抽屉聊天面板实时追加(/ws 与看板事件同通道)。
+        let _ = st.app.emit("collab:task_message", &msg);
+        ok(msg).map_err(|e| err_resp(e))
+    })
+    .await;
+    match out {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(resp)) => resp,
+        Err(e) => err_resp(format!("内部任务失败: {e}")),
+    }
+}
+
+/// 主 Agent 在任务对话里回一条(lead/管理者手动触发,控制 token 用量)。
+/// AI 输出仍只是建议:写进消息流,不碰状态机。
+async fn task_ai_reply(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    axum::extract::Path(tid): axum::extract::Path<i64>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let st = state.clone();
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let card = crate::collab::tasks::get(tid)?;
+        let global_owner = role_rank(&ctx.role) >= 3;
+        if !crate::collab::projects::can_admin(card.project_id, ctx.user_id, global_owner) {
+            return Err("只有项目/团队管理者能触发主 Agent 回复".into());
+        }
+        let text = crate::collab::lead_ai::ai_task_reply(card.project_id, tid)?;
+        let msg = crate::collab::chat::post(tid, 0, "主Agent", "ai", &text, None)?;
+        let _ = st.app.emit("collab:task_message", &msg);
+        ok(msg)
+    })
+    .await;
+    unwrap_api(out)
 }
 
 async fn task_create(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
@@ -737,11 +853,12 @@ async fn checks_get(
         crate::collab::checks::sweep_stale_running(); // 崩溃残留的 running 行超时清掉,前端不永久转圈
         let card = crate::collab::tasks::get(tid)?;
         let profile = crate::collab::checks::project_profile(card.project_id);
+        let check_skill = crate::collab::checks::project_check_skill(card.project_id);
         // 用检查实际落库的最大轮次,而非 card.round(review 通过会 +1 令其漂移;见
         // checks::latest_round)。没跑过检查则回落 card.round(runs 为空,前端不显示徽章)。
         let rnd = crate::collab::checks::latest_round(tid).unwrap_or(card.round);
         let runs = crate::collab::checks::list(tid, rnd)?;
-        Ok(json!({"profile": profile, "round": rnd, "runs": runs}))
+        Ok(json!({"profile": profile, "checkSkill": check_skill, "round": rnd, "runs": runs}))
     })
     .await;
     unwrap_api(out)
@@ -767,9 +884,30 @@ async fn checks_profile_set(State(state): State<CollabState>, headers: HeaderMap
             return Err("只有项目/团队管理者能改检查档位".into());
         }
         let profile = s_of(&v, "profile");
-        crate::collab::checks::set_project_profile(pid, &profile)?;
-        crate::collab::db::audit(&ctx.username, "checks.profile", &pid.to_string(), &profile);
+        if !profile.is_empty() {
+            crate::collab::checks::set_project_profile(pid, &profile)?;
+            crate::collab::db::audit(&ctx.username, "checks.profile", &pid.to_string(), &profile);
+        }
+        // 可选:同请求顺带设检查技能(前端设置面板一次提交)。传空串=回到默认内置技能。
+        if let Some(skill) = v.get("checkSkill").and_then(|s| s.as_str()) {
+            crate::collab::checks::set_project_check_skill(pid, skill)?;
+            crate::collab::db::audit(&ctx.username, "checks.skill", &pid.to_string(), skill);
+        }
         Ok(json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 主机本机已安装、可用作检查项的技能清单(检查设置下拉)。
+async fn checks_skills_list(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(_ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let items: Vec<Value> = crate::skills::list_check_capable()
+            .into_iter()
+            .map(|(id, name)| json!({"id": id, "name": name}))
+            .collect();
+        Ok(json!({"skills": items, "default": crate::skills::PROJECT_CHECK_ID}))
     })
     .await;
     unwrap_api(out)
@@ -1181,7 +1319,7 @@ async fn tunnel_relays_api(State(state): State<CollabState>, headers: HeaderMap,
     if role_rank(&ctx.role) < 3 { return forbid(); }
     #[cfg(feature = "collab-net")]
     {
-        return match crate::collab::tunnel::apply_relay_config(_v) {
+        return match crate::collab::tunnel::apply_relay_config(&_v.to_string()) {
             Ok(_) => Json(json!({"ok": true})).into_response(),
             Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
         };
@@ -1407,9 +1545,13 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/collab/mirror/restore", post(mirror_restore_api))
         // 项目与任务卡(六态状态机;权限先过项目成员表)
         .route("/api/collab/projects", get(project_list).post(project_create))
+        .route("/api/collab/projects/shared-scope", post(project_shared_scope_set))
         .route("/api/collab/project/members", get(project_members).post(project_member_add))
         .route("/api/collab/project/lead", post(project_set_lead))
         .route("/api/collab/tasks", get(task_list).post(task_create))
+        // 任务级对话:增量拉取 + 发消息 + 主 Agent 手动回复
+        .route("/api/collab/tasks/:id/messages", get(task_messages_get).post(task_messages_post))
+        .route("/api/collab/tasks/:id/ai-reply", post(task_ai_reply))
         .route("/api/collab/task/claim", post(task_claim))
         .route("/api/collab/task/submit", post(task_submit))
         .route("/api/collab/task/review", post(task_review))
@@ -1421,6 +1563,7 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/collab/checks", get(checks_get))
         .route("/api/collab/checks/rerun", post(checks_rerun))
         .route("/api/collab/checks/profile", post(checks_profile_set))
+        .route("/api/collab/checks/skills", get(checks_skills_list))
         // 主 Agent:授权位 / 晨会 / 改派 / 催办 / 模型配置 / AI 拆卡·验收·融合
         .route("/api/collab/lead/grants", get(lead_grants_get).post(lead_grants_set))
         .route("/api/collab/lead/morning", get(lead_morning))

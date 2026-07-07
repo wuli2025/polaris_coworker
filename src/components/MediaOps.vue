@@ -95,9 +95,12 @@ const WX_OUTPUT: SkillCard[] = [
   { id: "image-gen", label: "AI 配图", hint: "自动配封面/插图，失败有兜底", icon: "🎨", isSkill: true },
   { id: "__deai", label: "去 AI 痕", hint: "把机翻腔改成人话", icon: "🪶", isSkill: false },
 ];
+// 小红书交付同样是两个「功能键」二选一（对齐公众号）：图卡自动截成 PNG 直接发 / 出排版 HTML 自己截或复制。
 const XHS_OUTPUT: SkillCard[] = [
-  { id: "gz-notion-infographic", label: "图卡渲染", hint: "把文案排成小红书方形图卡", icon: "🖼", isSkill: true, wx: true },
-  { id: "cloak-browser", label: "CloakBrowser 待发包", hint: "浏览器自动登录，导出待发/半自动发布", icon: "🌐", isSkill: true, wx: true },
+  { id: "__cardimg", label: "图卡截图", hint: "默认·排成 3:4 竖版图卡并逐卡自动截成高清 PNG，直接发小红书；文案另存可复制", icon: "🖼", isSkill: false, wx: true },
+  { id: "__htmlfile", label: "排版 HTML 文件", hint: "生成排版好的图卡 HTML 给你——浏览器打开自己截图或复制文案，想微调时用这个", icon: "📄", isSkill: false, wx: true },
+  { id: "cloak-browser", label: "自动填进创作页", hint: "把图卡 PNG + 文案自动填进小红书创作页存草稿，只填不发", icon: "🌐", isSkill: true },
+  { id: "gz-notion-infographic", label: "手绘信息图风", hint: "Notion 手绘风信息图组图（带研究，更精致但更慢）", icon: "✏️", isSkill: true },
   { id: "image-gen", label: "AI 配图", hint: "自动配封面/插图，失败有兜底", icon: "🎨", isSkill: true },
   { id: "__deai", label: "去 AI 痕", hint: "把机翻腔改成人话", icon: "🪶", isSkill: false },
 ];
@@ -112,8 +115,9 @@ function toggleResearch(id: string) {
   next.has(id) ? next.delete(id) : next.add(id);
   selResearch.value = next;
 }
-// 公众号两个交付「功能键」二选一：选中一个就把另一个让出来（同为最终交付路径，不能同时跑）。
-const DELIVERY_EXCLUSIVE = ["__htmlfile", "__longimg"];
+// 两个交付「功能键」二选一：选中一个就把另一个让出来（同为最终交付路径，不能同时跑）。
+// 公众号=__htmlfile/__longimg；小红书=__htmlfile/__cardimg。
+const DELIVERY_EXCLUSIVE = ["__htmlfile", "__longimg", "__cardimg"];
 function toggleOutput(id: string) {
   const next = new Set(selOutput.value);
   if (next.has(id)) {
@@ -160,7 +164,7 @@ function pickPlatform(p: Platform) {
   selResearch.value = new Set(["hot-topic-radar", "deep-research"]);
   selOutput.value = p === "wechat"
     ? new Set(["__longimg"])
-    : new Set(["gz-notion-infographic", "cloak-browser"]);
+    : new Set(["__cardimg"]);
 }
 function pickWrite(id: string) {
   selectedWrite.value = id;
@@ -174,7 +178,7 @@ function applyRecommended() {
   selResearch.value = new Set(["hot-topic-radar", "deep-research"]);
   selOutput.value = platform.value === "wechat"
     ? new Set(["__longimg"])
-    : new Set(["gz-notion-infographic", "cloak-browser"]);
+    : new Set(["__cardimg"]);
   selCustom.value = new Set();
 }
 
@@ -192,8 +196,8 @@ const finalSkillIds = computed(() => {
   ids.add(platform.value === "wechat" ? "wechat-pipeline" : "xiaohongshu-pipeline");
   selResearch.value.forEach((r) => { if (!r.startsWith("__")) ids.add(r); });
   selOutput.value.forEach((o) => { if (!o.startsWith("__")) ids.add(o); });
-  // 两条交付路径都靠壹伴脚本(截图=snapshot/publish-image,出文件=render),隐式带上该技能
-  if (selOutput.value.has("__longimg") || selOutput.value.has("__htmlfile"))
+  // 交付功能键都靠壹伴脚本(公众号:截图=snapshot/publish-image,出文件=render;小红书:图卡=cards),隐式带上该技能
+  if (selOutput.value.has("__longimg") || selOutput.value.has("__htmlfile") || selOutput.value.has("__cardimg"))
     ids.add("wechat-md-typesetter");
   if (customWriteSkillId.value) ids.add(customWriteSkillId.value);
   selCustom.value.forEach((c) => ids.add(c));
@@ -493,6 +497,33 @@ function planPrompt(): string {
         "- 我确认后跑 `wechat_yiban.py --mode publish-image --slices-dir <切片目录> --title <标题> --intro <一两句真文字导语>`：开头插真文字导语（利于摘要/搜一搜，但不渲进图里），长图按序粘贴进正文（编辑器原生欢迎图片，零清洗），保存为草稿（绝不自动发布），窗口留着让我核对后自己点发布。"
       );
     }
+  } else {
+    // 小红书交付：两个功能键二选一——图卡自动截成 PNG 直接发 / 出排版 HTML 自己截。
+    const wantCardImg = selOutput.value.has("__cardimg");
+    const wantHtmlFile = selOutput.value.has("__htmlfile");
+    // 两条路共用的图卡铁律
+    const CARD_RULES = [
+      "- 成稿后把图卡做成**一个自包含的单文件 HTML**（样式全内联/内嵌 `<style>`，本地双击能直接看）：每张卡一个 `<section class=\"card\">`，**固定 3:4 竖版（宽 1080px × 高 1440px）**；封面 1 张（大标题 + 钩子，字要大）+ 内容卡每张只讲一个要点，总数 3~9 张；配色统一、字大留白多，禁止一张卡塞成字墙。",
+      "- 文案（标题 ≤20 字含 1-2 个 emoji + 正文 300-600 字 + 8-12 个话题标签）同时存一份 `.md`，并**在回复里直接给出完整可复制的文案块**——我要能一键复制粘进小红书。",
+    ];
+    if (wantCardImg) {
+      lines.push(
+        "",
+        "【图卡截图 · 已在面板选定，按此执行，不用再问我】",
+        ...CARD_RULES,
+        "- 跑 `python ~/Polaris/skills/wechat-md-typesetter/scripts/wechat_yiban.py --mode cards --body-file <图卡.html> --title <笔记标题>`：逐卡自动截成高清 PNG（@2x），把图卡 HTML 和每张 PNG 的绝对路径都报给我——PNG 直接拖进小红书创作页就能发。",
+        selOutput.value.has("cloak-browser")
+          ? "- 我确认图卡后，用「post-to-xhs」把 PNG + 文案填进小红书创作页存草稿：**只填不发**，发布键留给我。"
+          : "- 不用自动投递：把 PNG 和文案给我，我自己发。"
+      );
+    } else if (wantHtmlFile) {
+      lines.push(
+        "",
+        "【排版 HTML 文件 · 已在面板选定，按此执行，不用再问我】",
+        ...CARD_RULES,
+        "- 把图卡 HTML 的绝对路径报给我，并告诉我：浏览器打开后每张卡截图（或直接用系统截图工具框选）即可发小红书；想让你代截时再说一声（cards 模式随时可跑）。"
+      );
+    }
   }
   return lines.join("\n");
 }
@@ -773,7 +804,7 @@ onMounted(async () => {
               >
                 <BookMarked :size="22" :stroke-width="1.6" />
                 <div class="mo-plat-name">小红书</div>
-                <div class="mo-plat-desc">钩子文案 + 图卡 → 待发包</div>
+                <div class="mo-plat-desc">钩子文案 + 3:4 图卡 → 自动截图 / 待发包</div>
                 <Check v-if="platform === 'xhs'" :size="15" class="mo-plat-check" />
               </button>
             </div>
@@ -784,7 +815,7 @@ onMounted(async () => {
             <div class="mo-reco-ico"><Sparkles :size="17" /></div>
             <div class="mo-reco-txt">
               <div class="mo-reco-t">第一次用？一键套推荐配置</div>
-              <div class="mo-reco-d">深度评论体 + 选题雷达 + 深度搜索 + 壹伴排版 + CloakBrowser 直传，够发一篇了。</div>
+              <div class="mo-reco-d">文风 + 选题雷达 + 深度搜索 + 默认交付（公众号=截图上传草稿箱 / 小红书=图卡自动截图），够发一篇了。</div>
             </div>
             <button class="mo-reco-btn" @click="applyRecommended"><Check :size="13" /> 一键推荐</button>
           </div>

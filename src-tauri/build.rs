@@ -6,12 +6,11 @@ use std::path::Path;
 // 注意: 客户端混淆只能延缓提取、不能真正保护密钥 —— 真正的止损是给该 key 设额度封顶。
 const GIFT_PAD: [u8; 8] = [0x9E, 0x37, 0x79, 0xB1, 0x5A, 0xC4, 0x2D, 0xE6];
 
-// Kimi For Coding「免费额度赠送」token —— 源码内置, 开箱即用。
-// 任何构建(含本地 dev)都会把它种进供应商坞的 kimi-for-coding, 无需配置 CI secret。
-// 设了环境变量 POLARIS_GIFT_KIMI_KEY 时以环境变量为准(便于日后轮换 / 失效替换)。
-// 提醒: 这是公开赠送的共享 token, 明文进 git 与随二进制分发同等暴露面, 可接受。
-const GIFT_KIMI_DEFAULT: &str =
-    "sk-kimi-9WLHZfUxcpzi2l9AsTqMatBYOzpHoCtOsxIVFuyRIlQIPDz76p0aoXLjSHuVw4pu";
+// Kimi / MiniMax 两个「粉丝福利」赠送 token **都只从环境变量注入**(CI 走 GitHub secret),
+// 不再硬编码明文进 git —— 明文入版本库会永久留痕, 比随二进制分发的暴露面更糟(任何拿到
+// 仓库快照的人可直接读到, 且无法从历史抹除)。生产发版由 release.yml 注入 secret;未注入
+// (本地 dev / 无 secret 构建)时该赠送项不种子(seed_gift_* 见空 key 即跳过), 不影响功能。
+// 轮换/失效替换: 直接改 GitHub secret 的值即可, 无需动源码。
 
 /// 把明文 key 按滚动 XOR 编成 `0xAB, 0xCD, …` 字节字面量(供生成的 Rust const 用)。
 fn obfuscate(key: &str) -> String {
@@ -34,11 +33,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=POLARIS_GIFT_MINIMAX_KEY");
     println!("cargo:rerun-if-env-changed=POLARIS_GIFT_KIMI_KEY");
     let minimax_key = env::var("POLARIS_GIFT_MINIMAX_KEY").unwrap_or_default();
-    // Kimi: 环境变量优先, 否则回落源码内置默认 → 始终开箱即用。
-    let kimi_key = env::var("POLARIS_GIFT_KIMI_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| GIFT_KIMI_DEFAULT.to_string());
+    // Kimi: 与 MiniMax 同 —— 仅从环境变量注入, 未设则空串(运行时不种子, 不硬编码明文)。
+    let kimi_key = env::var("POLARIS_GIFT_KIMI_KEY").unwrap_or_default();
 
     let pad: Vec<String> = GIFT_PAD.iter().map(|b| format!("0x{:02X}", b)).collect();
     let pad = pad.join(", ");

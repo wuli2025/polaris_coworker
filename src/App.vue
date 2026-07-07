@@ -11,7 +11,6 @@ import {
 import Sidebar from "./components/Sidebar.vue";
 import ViewLoader from "./components/ViewLoader.vue";
 import RightDrawer from "./components/RightDrawer.vue";
-import ChatPanel from "./components/ChatPanel.vue";
 import SplashScreen from "./components/SplashScreen.vue";
 import Onboarding from "./components/Onboarding.vue";
 import EnvDoctor from "./components/EnvDoctor.vue"; // 既是视图也是启动 env 网关，留静态
@@ -30,6 +29,11 @@ import { isLowSpec } from "./composables/useLowSpec";
 // 把 cytoscape(图谱) + 4 套工坊 + 各面板/弹层(合计上万行)从启动主包挪走 → 开窗快、首屏不卡。
 // KnowledgeGraph / SandboxStatus / 四工坊都有 defineOptions({name})，懒加载后 KeepAlive 仍按 name 缓存；
 // 其首次挂载本就被 ViewLoader 加载条盖住，chunk 拉取(本地 ms 级)一并被遮。
+// ChatPanel 也懒加载:它是最大的单体组件树(~142KB),静态导入会整棵进启动主包、
+// 首帧就要解析。异步化后主包先画出外壳,ChatPanel chunk 在 SplashScreen 的
+// 最短展示窗(MIN_MS=900ms,本地 chunk 拉取 ms 级)内加载完成,不会露出白屏帧。
+// 流式事件监听在 chatStore(app 级)注册,不依赖 ChatPanel 挂载时序。
+const ChatPanel = defineAsyncComponent(() => import("./components/ChatPanel.vue"));
 const KnowledgeGraph = defineAsyncComponent(() => import("./components/KnowledgeGraph.vue"));
 const SandboxStatus = defineAsyncComponent(() => import("./features/sandbox/components/SandboxStatus.vue"));
 const WikiBrowse = defineAsyncComponent(() => import("./components/WikiBrowse.vue"));

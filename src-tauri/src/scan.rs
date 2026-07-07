@@ -473,14 +473,35 @@ fn roots_impl() -> Vec<ScanRoot> {
         if let Ok(rd) = fs::read_dir("/Volumes") {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.is_dir() {
+                // 陈旧/掉线的 SMB/AFP 网络卷, is_dir()(底层 stat)可能阻塞数十秒 —— 会卡住
+                // 「列可盘点的盘」这一步(它不在 inventory 的 probe 死线保护内)。故把 stat 放后台
+                // 线程, 2s 内不回就当它「不响应」:仍列出(/Volumes 下条目本就是挂载卷)但默认不勾,
+                // 真正扫描时由 inventory 自己的 dir_deadline 兜底。超时线程随 stat 自行结束(分离)。
+                let (is_dir, responsive) = {
+                    let pp = p.clone();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(pp.is_dir());
+                    });
+                    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                        Ok(v) => (v, true),
+                        Err(_) => (true, false),
+                    }
+                };
+                if is_dir {
                     let name = e.file_name().to_string_lossy().to_string();
+                    let label = if responsive {
+                        format!("卷 · {name}")
+                    } else {
+                        format!("卷 · {name}(未响应)")
+                    };
                     out.push(ScanRoot {
                         id: p.to_string_lossy().to_string(),
-                        label: format!("卷 · {name}"),
+                        label,
                         path: p.to_string_lossy().to_string(),
                         kind: "volume".into(),
-                        default_on: true,
+                        // 未响应的网络卷不默认勾, 避免拖慢首次盘点。
+                        default_on: responsive,
                     });
                 }
             }

@@ -1,0 +1,105 @@
+# Polaris 服务器一键上云。用法：
+#   cp .env.server.example .env   # 填 token/key
+#   docker compose --profile relay up -d     # 纯中继:polaris-web(账号/团队) + iroh-relay
+#
+# ── 服务角色 ──
+# · polaris-web  账号/邀请票据/白名单/审计 + Web 面板(8080) + 中继协调   [常驻]
+# · relay        iroh-relay 中继:打洞协调 + 密文兜底转发(443)          [--profile relay]
+# · gitea        无头 Gitea:git 仓库存储                               [--profile gitea, 默认不起]
+#
+# ⚠ Gitea 只在「这台机也要当权威仓库存储」时才需要(整栈上云)。
+#   纯中继模型下仓库存在你的主机(电脑/NAS),云机不存项目 → 不要 gitea profile。
+#   自签证书见 docker/relay/gen-cert.sh。
+
+services:
+  polaris:
+    # 预构建镜像优先(R2 一键安装脚本 docker load 后直接 up,无需源码);
+    # 本地有源码想自建时 docker compose up -d --build 走下面的 build。
+    image: polaris-server:${POLARIS_IMAGE_TAG:-latest}
+    build: .
+    container_name: polaris-web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - POLARIS_AUTH_TOKEN=${POLARIS_AUTH_TOKEN:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
+      # 协作:/git/* 反代与 Gitea REST 指向 gitea 容器(仅在 --profile gitea 启用时用到;
+      # 纯中继下 gitea 不起,polaris-web 只在有人真正用 git 功能时才惰性访问,不硬依赖)
+      - POLARIS_GITEA_HOST=gitea
+      - POLARIS_GITEA_PORT=3000
+      # ── 小内存服务器(2G/2核)适配 ──
+      # server feature 的 SQLite 预算默认按大内存机给(每连接 mmap 2GiB + cache 64MiB),
+      # 2G 小机必炸;这里压到 mmap 64MiB / cache 8MiB / 2 worker。大内存机器想吃满吞吐
+      # 在 .env 里调大(POLARIS_FABLE_MMAP_MB=2048 等)即可。
+      - POLARIS_FABLE_WORKERS=${POLARIS_FABLE_WORKERS:-2}
+      - POLARIS_FABLE_MMAP_MB=${POLARIS_FABLE_MMAP_MB:-64}
+      - POLARIS_FABLE_CACHE_MB=${POLARIS_FABLE_CACHE_MB:-8}
+    volumes:
+      - polaris-data:/home/polaris/Polaris   # 数据根：知识库/collab.db(data/) 等
+      - polaris-claude:/home/polaris/.claude # claude 凭证与 settings.json
+    # 2G 整机预算(纯中继:无 gitea):polaris 1.6G + relay 128M,留 ~300M 给内核/系统。
+    # 若开 --profile gitea(整栈),把 POLARIS_MEM_LIMIT 调回 1250m 给 gitea 让 384M。
+    # docker compose v2 在非 swarm 下同样吃 deploy.resources.limits。
+    deploy:
+      resources:
+        limits:
+          memory: ${POLARIS_MEM_LIMIT:-1600m}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # 无头 Gitea：git 仓库存储（仅供 Polaris 容器内部访问），不对外发布端口。
+  # 默认不起——纯中继模型下仓库存主机,云机不需要。整栈上云才 --profile gitea。
+  gitea:
+    profiles: ["gitea"]
+    image: gitea/gitea:1.22
+    container_name: polaris-gitea
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      - GITEA__service__DISABLE_REGISTRATION=true
+      - GITEA__server__HTTP_ADDR=0.0.0.0
+      - GITEA__server__ROOT_URL=http://gitea:3000/
+      # 管理员账号在 DEPLOY-CLOUD.md「初始化 Gitea」一步用 gitea admin 命令创建
+    volumes:
+      - gitea-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: ${GITEA_MEM_LIMIT:-384m}
+
+  # 可选：iroh-relay 中继（profile: relay）。先跑 docker/relay/gen-cert.sh <公网IP>
+  # 生成自签证书，再 --profile relay 启动。
+  relay:
+    profiles: ["relay"]
+    # n0computer/iroh-relay 官方镜像（Docker Hub）。若你的环境拉不到该镜像，
+    # 注释掉 image 行，改用源码构建占位：
+    #   build: https://github.com/n0-computer/iroh.git#main:iroh-relay
+    # 或在服务器上 cargo install iroh-relay 后自行打镜像。
+    image: n0computer/iroh-relay:latest
+    container_name: polaris-relay
+    restart: unless-stopped
+    command: ["--config-path", "/config/config.toml"]
+    # v7 定案:对外只开 443 TCP(中继转发) + 443 UDP(QUIC 中继+地址发现)。
+    # STUN(3478) 不开——QUIC 地址发现已替代;80 也不开——手动自签证书用不上 ACME。
+    ports:
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./docker/relay:/config:ro   # config.toml + certs/（gen-cert.sh 产物）
+    deploy:
+      resources:
+        limits:
+          memory: ${RELAY_MEM_LIMIT:-128m}
+
+volumes:
+  polaris-data:
+  polaris-claude:
+  gitea-data:

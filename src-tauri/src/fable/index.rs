@@ -31,14 +31,28 @@ const MAX_CHUNKS_PER_FILE: usize = 2000;
 /// 每请求批量条数默认值。原 16 偏保守;调高 = 同样的 chunk 数**更少的网络往返**,直接抬云
 /// 嵌入吞吐(报告痛点:35/秒、61.9 万要 6-28h)。32 对硅基 BGE-M3 仍在安全区,故默认上调到 32。
 const EMBED_BATCH_DEFAULT: usize = 32;
-/// 实际每请求批量条数:`POLARIS_EMBED_BATCH` 可覆盖(clamp 到 [1,64])。云档可调大减往返;
-/// 遇到 413/请求体过大再调小。本地档无网络往返,此值影响甚微。
+/// 实际每请求批量条数:`POLARIS_EMBED_BATCH` 可覆盖(clamp 到 [1,128])。云档可调大减往返;
+/// 遇到 413/请求体过大再调小。本地档内部另按 [1,64] 自钳(见 embed_local),此值只定「一次交给
+/// embed_texts 的文本数」。
 fn embed_batch() -> usize {
     std::env::var("POLARIS_EMBED_BATCH")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .map(|n| n.clamp(1, 64))
+        .map(|n| n.clamp(1, 128))
         .unwrap_or(EMBED_BATCH_DEFAULT)
+}
+
+/// 跨文件凑批目标:攒够这么多 chunk 就 flush 一次(减少 API 往返)。默认 = 批宽 × 并发度,
+/// 让每次 flush 正好喂满所有并发路。`POLARIS_EMBED_COALESCE=0` → 返回 1,退回「每文件独立嵌入」
+/// 的旧行为(逐文件 flush,无跨文件凑批),作为一键回退开关。
+fn embed_coalesce_target() -> usize {
+    let on = std::env::var("POLARIS_EMBED_COALESCE")
+        .map(|v| v.trim() != "0")
+        .unwrap_or(true);
+    if !on {
+        return 1;
+    }
+    (embed_batch() * embed_concurrency()).max(1)
 }
 /// 单文件多个 chunk 批的并发嵌入度。嵌入是网络往返(每批可达数百 ms~数秒),长文档会切成
 /// 几十上百批,旧实现严格串行 → 总耗时 ≈ 批数 × 单批延迟。embed_texts 是纯网络调用、无共享
@@ -343,10 +357,28 @@ pub fn embed_query(query: &str) -> Result<Vec<f32>, String> {
     if let Some(v) = QUERY_CACHE.lock().unwrap().get(&key) {
         return Ok(v);
     }
-    let mut v = embed_texts(&[query.to_string()])?
-        .into_iter()
-        .next()
-        .ok_or("查询嵌入为空")?;
+    let mut v = match embed_texts(&[query.to_string()]) {
+        Ok(vs) => vs.into_iter().next().ok_or("查询嵌入为空")?,
+        Err(e) => {
+            // 云嵌入失败(断网/限速/服务挂)→ 若本地模型已下载就位且当前非本地档(本地档失败再退本地
+            // 无意义),退回本地 BGE-M3 现算。同 1024 维空间,兼容云建的既有索引 → 查询韧性不靠云。
+            #[cfg(feature = "local-embed")]
+            {
+                if !crate::fable::embed_local::enabled() && crate::fable::embed_local::ready() {
+                    crate::fable::embed_local::embed(&[query.to_string()])?
+                        .into_iter()
+                        .next()
+                        .ok_or("查询嵌入为空")?
+                } else {
+                    return Err(e);
+                }
+            }
+            #[cfg(not(feature = "local-embed"))]
+            {
+                return Err(e);
+            }
+        }
+    };
     normalize(&mut v);
     QUERY_CACHE.lock().unwrap().put(key, v.clone());
     Ok(v)
@@ -362,6 +394,207 @@ pub struct IndexSummary {
     pub seconds: f64,
     /// 提前停的原因(预算耗尽/取消/全部完成)
     pub stopped: String,
+}
+
+/// 文本内容指纹:全文 SHA-256 取前 128 位(32 hex),前缀 `f:` 标明「全文哈希」(留 `s:` 采样哈希扩展位)。
+/// 作用于索引管线已读入内存的文本,零额外 IO。跨路径同内容 → 同指纹,是精确去重与「移动免重嵌」的判据。
+pub(crate) fn content_fingerprint(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(text.as_bytes());
+    let d = h.finalize();
+    let mut s = String::with_capacity(34);
+    s.push_str("f:");
+    for b in d.iter().take(16) {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// 文件名归一化键:去掉扩展名与「版本噪声」token(v2 / 日期 / final / 副本 / (1) …),小写后拼接。
+/// 仅在「同 root + 同目录 + 同 ext」范围内做等值比较,用于识别「同一份资料的不同版本」→ 新压旧。
+/// 保守起见只剪能被分隔符切出的独立噪声 token(CJK 无分隔的「报告最终版」整体保留,交给内容哈希兜底)。
+pub(crate) fn doc_key(name: &str) -> String {
+    // stem:去掉最后一个扩展名(隐藏文件 .gitignore 的前导点不算扩展名)
+    let stem = match name.rfind('.') {
+        Some(i) if i > 0 => &name[..i],
+        _ => name,
+    };
+    let lower = stem.to_lowercase();
+    let is_noise = |t: &str| -> bool {
+        // v1 / v10 / ver2
+        let vtail = t.strip_prefix("ver").or_else(|| t.strip_prefix('v'));
+        if let Some(rest) = vtail {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                return true;
+            }
+        }
+        // 纯数字:≤3 位副本序号,或 8 位日期(20230101)
+        if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) {
+            let n = t.len();
+            if n <= 3 || n == 8 {
+                return true;
+            }
+        }
+        matches!(
+            t,
+            "final" | "finalversion" | "copy" | "draft" | "new" | "old" | "latest"
+                | "最终" | "最终版" | "定稿" | "副本" | "草稿" | "最新" | "修改" | "修订"
+        )
+    };
+    let mut kept = String::new();
+    for tok in lower.split(|c: char| {
+        matches!(
+            c,
+            ' ' | '\t' | '　' | '-' | '_' | '.' | '(' | ')' | '[' | ']'
+                | '（' | '）' | '【' | '】' | '·' | ','
+        )
+    }) {
+        let t = tok.trim();
+        if t.is_empty() || is_noise(t) {
+            continue;
+        }
+        kept.push_str(t);
+    }
+    if kept.is_empty() {
+        // 全被剪光(如文件名就叫「v2」):回退为去分隔符的原 stem,避免空 key 误并
+        lower.chars().filter(|c| !c.is_whitespace()).collect()
+    } else {
+        kept
+    }
+}
+
+/// 把攒到的「跨文件 chunk 缓冲」一次性嵌入并落库。
+///
+/// 「凑批只凑计算,落库仍按文件」:先把整个缓冲切成 batch 宽的组、并发嵌完**所有**批,
+/// 全部成功后才在单事务里逐文件 DELETE 旧 chunk + INSERT 新 chunk + 标 chunked=1。
+/// 任一批出错 → 整个 flush 放弃(不 BEGIN、旧 chunk 未动、涉及文件保持 chunked=0),
+/// 返回 Err,由调用方留待下轮重试。海量小文件时把「每文件一次 API 往返」聚成满批,
+/// 限速档(瓶颈是请求数而非字节)吞吐显著抬升。
+///
+/// `keys[i]=(file_id, seq)` 与 `texts[i]` 平行对齐。返回提交的 chunk 数。
+fn flush_embed_buffer(
+    conn: &rusqlite::Connection,
+    keys: &[(i64, i64)],
+    texts: &[String],
+    model: &str,
+    batch: usize,
+) -> Result<u64, String> {
+    debug_assert_eq!(keys.len(), texts.len());
+    if texts.is_empty() {
+        return Ok(0);
+    }
+    // ── 并发嵌入所有批(与旧单文件路径同构:纯网络、无共享态)──
+    let groups: Vec<&[String]> = texts.chunks(batch).collect();
+    let mut all_vecs: Vec<Vec<Vec<f32>>> = vec![Vec::new(); groups.len()];
+    {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let collected: Mutex<Vec<(usize, Result<Vec<Vec<f32>>, String>)>> =
+            Mutex::new(Vec::with_capacity(groups.len()));
+        let nthreads = embed_concurrency().min(groups.len()).max(1);
+        std::thread::scope(|s| {
+            for _ in 0..nthreads {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= groups.len() {
+                        break;
+                    }
+                    let r = embed_texts(groups[i]);
+                    collected.lock().unwrap().push((i, r));
+                });
+            }
+        });
+        for (i, r) in collected.into_inner().unwrap() {
+            match r {
+                Ok(mut vecs) => {
+                    for v in vecs.iter_mut() {
+                        normalize(v); // 入库归一化一次 → 查询退化成纯点积
+                    }
+                    all_vecs[i] = vecs;
+                }
+                Err(e) => return Err(e), // 整个 flush 放弃,旧 chunk 未动、chunked 仍 0
+            }
+        }
+    }
+    // 展平回与 keys 对齐的顺序
+    let mut flat: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+    for g in all_vecs {
+        for v in g {
+            flat.push(v);
+        }
+    }
+    if flat.len() != keys.len() {
+        return Err(format!("嵌入返回数与请求数不符({} vs {})", flat.len(), keys.len()));
+    }
+    // 涉及的 file_id(保序去重)——DELETE 旧 chunk 与 UPDATE chunked 各做一次
+    let mut file_ids: Vec<i64> = Vec::new();
+    for (fid, _) in keys {
+        if file_ids.last() != Some(fid) && !file_ids.contains(fid) {
+            file_ids.push(*fid);
+        }
+    }
+    // ── 单事务落库:DELETE 移进事务(旧 chunk 直到新 chunk 提交才消失,失败时旧向量仍可检索)──
+    conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+    {
+        for fid in &file_ids {
+            conn.execute("DELETE FROM chunks WHERE file_id=?1", [fid])
+                .map_err(|e| e.to_string())?;
+        }
+        let mut stmt = conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO chunks(file_id,seq,text,dim,vec,model,bits)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            )
+            .map_err(|e| e.to_string())?;
+        for (((fid, seq), t), v) in keys.iter().zip(texts.iter()).zip(flat.iter()) {
+            stmt.execute(rusqlite::params![
+                fid,
+                seq,
+                t,
+                v.len() as i64,
+                vec_to_blob(v),
+                model,
+                bits_of(v),
+            ])
+            .map_err(|e| e.to_string())?;
+        }
+        for fid in &file_ids {
+            conn.execute("UPDATE files SET chunked=1 WHERE id=?1", [fid])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+    Ok(keys.len() as u64)
+}
+
+/// chunk 上下文头实验开关(默认关)。开启后每个 chunk 前缀「【文件名 · 父目录】」,给向量注入
+/// 文件级上下文(文献与工程上验证过的 contextual-header 手法),尤其利于「文件名点题、正文不点题」。
+fn chunk_header_enabled() -> bool {
+    std::env::var("POLARIS_CHUNK_HEADER")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// 由相对路径构造上下文头「【文件名 · 父目录】\n」,总长截到 ~80 字符(不挤占 chunk 正文预算)。
+fn chunk_header_for(rel: &str) -> String {
+    let norm = rel.replace('\\', "/");
+    let name = norm.rsplit('/').next().unwrap_or(&norm);
+    let parent = {
+        let p = match norm.rfind('/') {
+            Some(i) => &norm[..i],
+            None => "",
+        };
+        p.rsplit('/').next().unwrap_or("")
+    };
+    let mut inner = if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} · {parent}")
+    };
+    if inner.chars().count() > 72 {
+        inner = inner.chars().take(72).collect();
+    }
+    format!("【{inner}】\n")
 }
 
 /// 同步构建:消化 pending 文本文件直到预算耗尽。`progress(files_done, chunks_added, current)`。
@@ -391,26 +624,33 @@ pub fn build_index(
     // - 两腿都在: chunked=0 OR ftsed=0
     // - 仅认字腿(无 key): ftsed=0  ← 不因 chunked=0 反复空转(等补 key 再嵌)
     // - 仅认意思腿(FTS 未就绪): chunked=0
+    // dup_of=0:内容完全重复的副本(dedupe_scan 已删其 chunks 并指向 canonical)不再花嵌入钱。
     let pending_sql = match (embed_ok, lex_ok) {
         (true, true) => {
             "SELECT f.id, r.path, f.relpath, f.ext, f.size, f.chunked, f.ftsed
              FROM files f JOIN roots r ON r.id=f.root_id
-             WHERE f.kind='text' AND f.size<=?1 AND (f.chunked=0 OR f.ftsed=0)
+             WHERE f.kind='text' AND f.size<=?1 AND f.dup_of=0 AND (f.chunked=0 OR f.ftsed=0)
              ORDER BY f.size ASC LIMIT 32"
         }
         (false, true) => {
             "SELECT f.id, r.path, f.relpath, f.ext, f.size, f.chunked, f.ftsed
              FROM files f JOIN roots r ON r.id=f.root_id
-             WHERE f.kind='text' AND f.size<=?1 AND f.ftsed=0
+             WHERE f.kind='text' AND f.size<=?1 AND f.dup_of=0 AND f.ftsed=0
              ORDER BY f.size ASC LIMIT 32"
         }
         _ => {
             "SELECT f.id, r.path, f.relpath, f.ext, f.size, f.chunked, f.ftsed
              FROM files f JOIN roots r ON r.id=f.root_id
-             WHERE f.kind='text' AND f.size<=?1 AND f.chunked=0
+             WHERE f.kind='text' AND f.size<=?1 AND f.dup_of=0 AND f.chunked=0
              ORDER BY f.size ASC LIMIT 32"
         }
     };
+
+    // 跨文件 chunk 缓冲(凑批只凑计算,落库仍按文件)。keys[i]=(file_id, seq) 与 buf_texts[i] 平行。
+    // 攒够 embed_coalesce_target() 就 flush 一次;POLARIS_EMBED_COALESCE=0 时目标=1,退回逐文件。
+    let coalesce_target = embed_coalesce_target();
+    let mut buf_keys: Vec<(i64, i64)> = Vec::new();
+    let mut buf_texts: Vec<String> = Vec::new();
 
     'outer: loop {
         if cancelled() {
@@ -446,6 +686,12 @@ pub fn build_index(
         if batch.is_empty() {
             break;
         }
+        // 批级事务:本批全部轻量写(指纹/倒排 DELETE+INSERT/ftsed/chunked 标记)合成一笔。
+        // SQLite 写瓶颈在事务数(每次自动提交一次 fsync,见模块头注释),此前每文件 3-4 个
+        // 自动提交事务 → 现在每批 1 个,纯 FTS 构建(无 key 全盘建倒排)提速一个量级。
+        // 向量 flush 自带事务:进入前先 COMMIT、成功后再 BEGIN 新批(失败路径直接 break,不留悬挂)。
+        // 中途 `?` 上抛时连接随函数退出回滚 —— 本批标记重做,幂等无害。
+        conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
         for (file_id, root, rel, ext, size, chunked, ftsed) in batch {
             if cancelled()
                 || chunks_added >= max_chunks as u64
@@ -465,6 +711,22 @@ pub fn build_index(
                 Err(_) => String::new(), // 文件已消失/不可读:标记完成,下轮重扫会清
             };
 
+            // ── 内容指纹 + 版本键(去重/新压旧/移动免重嵌的地基)──
+            // 索引读文件时顺手算,零额外 IO;只对真文本算(空/伪文本留 ''=无指纹)。
+            // 文件只在 chunked=0 或 ftsed=0 时才进本批,处理完不再入选 → 指纹不会重复回写。
+            if !text.is_empty() {
+                let name = std::path::Path::new(&rel)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let chash = content_fingerprint(&text);
+                let dkey = doc_key(&name);
+                let _ = conn.execute(
+                    "UPDATE files SET content_hash=?1, doc_key=?2 WHERE id=?3",
+                    rusqlite::params![chash, dkey, file_id],
+                );
+            }
+
             // ── P1-2 全文倒排(认字腿):提前建好,查词秒回、覆盖全部文本文件 ──
             if lex_ok && ftsed == 0 {
                 conn.execute("DELETE FROM lex WHERE rowid=?1", [file_id])
@@ -483,96 +745,73 @@ pub fn build_index(
             // ── 向量层(认意思腿):P1-4 只覆盖「精华」文本(按类型/大小分流)──
             // 无 key 时整块跳过:chunked 保持 0,补 key 后再点构建即补建向量(认字腿已先行覆盖)。
             if embed_ok && chunked == 0 {
+                let mut buffered = false;
                 if embeddable(&ext, size) && !text.is_empty() {
-                    let chunks = chunk_text(&text);
+                    let mut chunks = chunk_text(&text);
+                    // 实验:给每个 chunk 前缀「【文件名 · 父目录】」上下文头(默认关,POLARIS_CHUNK_HEADER=1
+                    // 开)。同嵌入空间、不动 chunks.model → 只影响新建/重建的 chunk,存量随自然重建轮换,
+                    // 绝不触发全库重嵌。命中率须经 eval A/B 达标(nDCG/recall ≥+2pt)再考虑默认开。
+                    if chunk_header_enabled() {
+                        let hdr = chunk_header_for(&rel);
+                        if !hdr.is_empty() {
+                            for c in chunks.iter_mut() {
+                                *c = format!("{hdr}{c}");
+                            }
+                        }
+                    }
                     if !chunks.is_empty() {
-                        // 重嵌入前清旧 chunk(mtime 变更后 chunked 被重置的场景)
-                        conn.execute("DELETE FROM chunks WHERE file_id=?1", [file_id])
-                            .map_err(|e| e.to_string())?;
-                        let batch = embed_batch();
-                        let groups: Vec<&[String]> = chunks.chunks(batch).collect();
-                        // ── 并发嵌入各批 ──
-                        // embed_texts 纯网络调用、无共享态 → 多批可并发取证。长文档(几十上百批)
-                        // 由「批数 × 单批延迟」降到「批数/并发 × 单批延迟」;小文档单批时退化为原行为。
-                        // 任一批出错即整体上抛(与旧逐批 `?` 同语义):此前已 DELETE 旧 chunk、
-                        // 且未标记 chunked=1,下轮重扫会重试,不留半截向量。
-                        let mut all_vecs: Vec<Vec<Vec<f32>>> = vec![Vec::new(); groups.len()];
-                        {
-                            let next = std::sync::atomic::AtomicUsize::new(0);
-                            let collected: Mutex<Vec<(usize, Result<Vec<Vec<f32>>, String>)>> =
-                                Mutex::new(Vec::with_capacity(groups.len()));
-                            let nthreads = embed_concurrency().min(groups.len()).max(1);
-                            std::thread::scope(|s| {
-                                for _ in 0..nthreads {
-                                    s.spawn(|| loop {
-                                        let i = next.fetch_add(1, Ordering::Relaxed);
-                                        if i >= groups.len() {
-                                            break;
-                                        }
-                                        let r = embed_texts(groups[i]);
-                                        collected.lock().unwrap().push((i, r));
-                                    });
-                                }
-                            });
-                            // 嵌入错误(断网/限速/TLS 闪断)**不再整体放弃**:几百 GB 的索引
-                            // 跑几小时,一次网络抖动就清零代价太大。此前已 DELETE 旧 chunk、未标
-                            // chunked=1 → 本文件留待下轮重试;优雅停在已索引处(认字腿+已成功的
-                            // 向量都已逐文件提交落库),报可重试。
-                            let mut embed_err: Option<String> = None;
-                            for (i, r) in collected.into_inner().unwrap() {
-                                match r {
-                                    Ok(mut vecs) => {
-                                        for v in vecs.iter_mut() {
-                                            normalize(v); // P1-3:入库归一化一次 → 查询退化成纯点积
-                                        }
-                                        all_vecs[i] = vecs;
-                                    }
-                                    Err(e) => {
-                                        embed_err = Some(e);
-                                        break;
-                                    }
-                                }
-                            }
-                            if let Some(e) = embed_err {
-                                stopped = format!("嵌入中断(可再点继续补建向量):{e}");
-                                break 'outer;
-                            }
+                        // 攒进跨文件缓冲(整文件的 chunk 一次性加入,seq 从 0 起,不跨 flush)。
+                        for (i, c) in chunks.into_iter().enumerate() {
+                            buf_keys.push((file_id, i as i64));
+                            buf_texts.push(c);
                         }
-                        // 写库:整文件单事务批量插入(seq = batch_i*EMBED_BATCH+i,顺序稳定)。
-                        conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-                        {
-                            let mut stmt = conn
-                                .prepare_cached(
-                                    "INSERT OR REPLACE INTO chunks(file_id,seq,text,dim,vec,model,bits)
-                                     VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                                )
-                                .map_err(|e| e.to_string())?;
-                            for (batch_i, group) in groups.iter().enumerate() {
-                                let vecs = &all_vecs[batch_i];
-                                for (i, (t, v)) in group.iter().zip(vecs.iter()).enumerate() {
-                                    stmt.execute(rusqlite::params![
-                                        file_id,
-                                        (batch_i * batch + i) as i64,
-                                        t,
-                                        v.len() as i64,
-                                        vec_to_blob(v),
-                                        model,        // P2-2 版本隔离
-                                        bits_of(v),   // P1-1 二值粗筛位
-                                    ])
-                                    .map_err(|e| e.to_string())?;
+                        buffered = true;
+                        // 攒够目标就 flush:嵌完落库,chunked=1 由 flush 内对涉及文件统一置位。
+                        // flush 自带事务 → 先提交批事务(把本批已做的轻量写落盘),成功后再开新批事务。
+                        if buf_texts.len() >= coalesce_target {
+                            conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+                            match flush_embed_buffer(&conn, &buf_keys, &buf_texts, &model, embed_batch()) {
+                                Ok(n) => chunks_added += n,
+                                Err(e) => {
+                                    // 整个 flush 放弃:涉及文件保持 chunked=0(旧 chunk 未动),下轮重试。
+                                    // 清空缓冲避免收尾 flush 再次撞同一错误。批事务已提交,无悬挂。
+                                    buf_keys.clear();
+                                    buf_texts.clear();
+                                    stopped = format!("嵌入中断(可再点继续补建向量):{e}");
+                                    break 'outer;
                                 }
                             }
+                            buf_keys.clear();
+                            buf_texts.clear();
+                            conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
                         }
-                        conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
-                        chunks_added += chunks.len() as u64;
                     }
                 }
-                // 不论是否嵌入(被分流跳过的也算「向量决策已完成」),标记 chunked=1 防重复选中。
-                conn.execute("UPDATE files SET chunked=1 WHERE id=?1", [file_id])
-                    .map_err(|e| e.to_string())?;
+                // 不可嵌入 / 空文本 / 无 chunk:向量决策已完成,当即标 chunked=1 防重复选中。
+                // 已进缓冲的文件不在此标记 —— 由 flush 成功后统一置位(失败则保持 0 重试)。
+                if !buffered {
+                    conn.execute("UPDATE files SET chunked=1 WHERE id=?1", [file_id])
+                        .map_err(|e| e.to_string())?;
+                }
             }
             files_done += 1;
             progress(files_done, chunks_added, &rel);
+        }
+        // 收批:预算/取消的内层 break 也走到这里,把本批已做的写落盘(幂等标记,提交多少算多少)。
+        conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+    }
+
+    // ── 收尾:把残留缓冲一次性落库 ──
+    // 正常/预算耗尽退出都要把攒着的 chunk 嵌完(否则这些文件白读白切,下轮重来)。
+    // 取消时丢弃:涉及文件保持 chunked=0,下轮重扫自然补上,不浪费网络。
+    if !cancelled() && !buf_texts.is_empty() {
+        match flush_embed_buffer(&conn, &buf_keys, &buf_texts, &model, embed_batch()) {
+            Ok(n) => chunks_added += n,
+            Err(e) => {
+                if stopped == "全部完成" {
+                    stopped = format!("嵌入中断(可再点继续补建向量):{e}");
+                }
+            }
         }
     }
 
@@ -580,10 +819,10 @@ pub fn build_index(
     // 别把「待补向量」(chunked=0)算成欠账,否则永远显示一堆 pending 误导用户。
     let pending_count_sql = match (embed_ok, lex_ok) {
         (true, true) => {
-            "SELECT COUNT(*) FROM files WHERE kind='text' AND size<=?1 AND (chunked=0 OR ftsed=0)"
+            "SELECT COUNT(*) FROM files WHERE kind='text' AND size<=?1 AND dup_of=0 AND (chunked=0 OR ftsed=0)"
         }
-        (false, true) => "SELECT COUNT(*) FROM files WHERE kind='text' AND size<=?1 AND ftsed=0",
-        _ => "SELECT COUNT(*) FROM files WHERE kind='text' AND size<=?1 AND chunked=0",
+        (false, true) => "SELECT COUNT(*) FROM files WHERE kind='text' AND size<=?1 AND dup_of=0 AND ftsed=0",
+        _ => "SELECT COUNT(*) FROM files WHERE kind='text' AND size<=?1 AND dup_of=0 AND chunked=0",
     };
     let files_pending: i64 = conn
         .query_row(pending_count_sql, [MAX_LEX_FILE_BYTES], |r| r.get(0))
@@ -638,6 +877,11 @@ pub fn build_index_full(progress: &dyn Fn(u64, u64, u64)) -> Result<IndexSummary
         }
         last_pending = s.files_pending;
     };
+    // 全量索引收尾自动去重/新压旧:指纹刚算齐是最佳时机,让「新压旧」无需用户手动触发即生效。
+    // 纯 SQL 分组打标 + 幂等,大库秒级;best-effort(失败不影响索引结果),取消时跳过。
+    if !cancelled() {
+        let _ = dedupe_scan(false);
+    }
     Ok(IndexSummary {
         files_done: total_files,
         chunks_added: total_chunks,
@@ -1311,6 +1555,260 @@ pub fn fable_index_repair() -> Result<RepairSummary, String> {
     repair_vectors()
 }
 
+// ───────────────────── 去重 / 新旧冲突(内容指纹驱动)─────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DedupeSummary {
+    /// 标记为「完全重复副本」的文件数(其 chunks/lex 已清、指向 canonical)。
+    pub exact_dups: u64,
+    /// 标记为「被同目录同名新版本压制」的旧文件数(检索时降权,不删)。
+    pub superseded: u64,
+    /// 因去重删掉的 chunk 数(省下的检索噪声 + 存储)。
+    pub chunks_pruned: u64,
+    /// 本次补算内容指纹的存量文件数(仅 backfill=true 时 >0)。
+    pub backfilled: u64,
+    /// 参与去重比较的带指纹文件数。
+    pub scanned: u64,
+    pub seconds: f64,
+    pub stopped: String,
+}
+
+/// relpath(以 '/' 分隔)的父目录段;顶层文件返回 ""。
+fn parent_dir(rel: &str) -> &str {
+    match rel.rfind('/') {
+        Some(i) => &rel[..i],
+        None => "",
+    }
+}
+
+/// 内容级去重 + 新压旧标记。**只动索引,绝不碰用户文件**。幂等可重跑:每次全量重算分组标记。
+/// - 精确去重:同 content_hash 分组,留 mtime 最新(平局取 relpath 最短)为 canonical,其余标 dup_of
+///   并删其 chunks/lex(检索时由融合层归并回 canonical)。
+/// - 新压旧:同 (root_id, 目录, ext, doc_key) 分组、内容互异,非最新版标 superseded_by=最新版
+///   (检索时降权,保留可达)。
+/// - backfill=true:先给存量「已索引但缺指纹」的文本文件补算 content_hash/doc_key(读文件,可取消)。
+fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
+    let started = std::time::Instant::now();
+    let conn = open_db()?;
+    let lex_on = lex_available(&conn);
+    let mut backfilled = 0u64;
+    let mut stopped = "完成".to_string();
+
+    // ── 可选:补算存量文件的内容指纹(索引早于本特性的库)──
+    if backfill {
+        let targets: Vec<(i64, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT f.id, r.path, f.relpath FROM files f JOIN roots r ON r.id=f.root_id
+                     WHERE f.kind='text' AND f.size<=?1 AND f.content_hash='' AND f.chunked=1
+                     LIMIT 100000",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([MAX_LEX_FILE_BYTES], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for (id, root, rel) in targets {
+            if cancelled() {
+                stopped = "已取消".into();
+                break;
+            }
+            let abs = super::reencode_fs_path(
+                &std::path::Path::new(&root).join(&rel).to_string_lossy(),
+            );
+            let Ok(bytes) = std::fs::read(&abs) else { continue };
+            if bytes.iter().take(4096).any(|&b| b == 0) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&bytes);
+            let chash = content_fingerprint(&text);
+            let name = std::path::Path::new(&rel)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let dkey = doc_key(&name);
+            let _ = conn.execute(
+                "UPDATE files SET content_hash=?1, doc_key=?2 WHERE id=?3",
+                rusqlite::params![chash, dkey, id],
+            );
+            backfilled += 1;
+        }
+    }
+
+    // ── 精确去重:同 content_hash 分组 ──
+    let rows: Vec<(i64, i64, String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, mtime, relpath, content_hash FROM files
+                 WHERE content_hash<>'' ORDER BY content_hash",
+            )
+            .map_err(|e| e.to_string())?;
+        let r = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        r.filter_map(|x| x.ok()).collect()
+    };
+    let scanned = rows.len() as u64;
+    let mut exact_dups = 0u64;
+    let mut chunks_pruned = 0u64;
+    let mut i = 0usize;
+    while i < rows.len() {
+        if cancelled() {
+            stopped = "已取消".into();
+            break;
+        }
+        let hash = &rows[i].3;
+        let mut j = i + 1;
+        while j < rows.len() && &rows[j].3 == hash {
+            j += 1;
+        }
+        let group = &rows[i..j];
+        i = j;
+        if group.len() < 2 {
+            // 单例:若此前被标 dup(孪生已删)→ 复活为 canonical,重建向量。
+            let id = group[0].0;
+            let _ = conn.execute(
+                "UPDATE files SET dup_of=0, chunked=CASE WHEN dup_of<>0 THEN 0 ELSE chunked END
+                 WHERE id=?1 AND dup_of<>0",
+                [id],
+            );
+            continue;
+        }
+        // canonical = mtime 最新,平局取 relpath 最短
+        let mut canon = &group[0];
+        for g in group {
+            if g.1 > canon.1 || (g.1 == canon.1 && g.2.len() < canon.2.len()) {
+                canon = g;
+            }
+        }
+        let canon_id = canon.0;
+        // canonical 必须 dup_of=0;若它此前是 dup(chunks 已删)→ chunked=0 触发重建。
+        let _ = conn.execute(
+            "UPDATE files SET dup_of=0, chunked=CASE WHEN dup_of<>0 THEN 0 ELSE chunked END WHERE id=?1",
+            [canon_id],
+        );
+        for g in group {
+            if g.0 == canon_id {
+                continue;
+            }
+            let _ = conn.execute(
+                "UPDATE files SET dup_of=?2, superseded_by=0 WHERE id=?1",
+                rusqlite::params![g.0, canon_id],
+            );
+            let pruned = conn
+                .execute("DELETE FROM chunks WHERE file_id=?1", [g.0])
+                .unwrap_or(0);
+            chunks_pruned += pruned as u64;
+            if lex_on {
+                let _ = conn.execute("DELETE FROM lex WHERE rowid=?1", [g.0]);
+            }
+            exact_dups += 1;
+        }
+    }
+
+    // ── 新压旧:同 (root_id, 目录, ext, doc_key) 分组,内容互异,非最新 mtime 者降权 ──
+    // 先整体清零(幂等),再全量重标;只在 dup_of=0(未被精确去重折叠)的文件间比较。
+    let _ = conn.execute("UPDATE files SET superseded_by=0 WHERE superseded_by<>0", []);
+    let mut superseded = 0u64;
+    if !cancelled() {
+        let srows: Vec<(i64, i64, i64, String, String, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, root_id, mtime, relpath, ext, doc_key, content_hash FROM files
+                     WHERE doc_key<>'' AND dup_of=0",
+                )
+                .map_err(|e| e.to_string())?;
+            let r = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            r.filter_map(|x| x.ok()).collect()
+        };
+        // 分组:key=(root_id, 目录, ext, doc_key) → Vec<(id, mtime, content_hash)>
+        let mut groups: std::collections::HashMap<
+            (i64, String, String, String),
+            Vec<(i64, i64, String)>,
+        > = std::collections::HashMap::new();
+        for (id, root_id, mtime, relpath, ext, dkey, chash) in srows {
+            let pdir = parent_dir(&relpath).to_string();
+            groups
+                .entry((root_id, pdir, ext, dkey))
+                .or_default()
+                .push((id, mtime, chash));
+        }
+        for (_key, mut members) in groups {
+            if members.len() < 2 || cancelled() {
+                continue;
+            }
+            members.sort_by(|a, b| b.1.cmp(&a.1)); // mtime 降序
+            let (newest_id, newest_mtime, newest_hash) =
+                (members[0].0, members[0].1, members[0].2.clone());
+            for m in members.iter().skip(1) {
+                // 仅压制「确实更旧(mtime 更小)且内容不同」的版本
+                if m.1 < newest_mtime && m.2 != newest_hash {
+                    let _ = conn.execute(
+                        "UPDATE files SET superseded_by=?2 WHERE id=?1",
+                        rusqlite::params![m.0, newest_id],
+                    );
+                    superseded += 1;
+                }
+            }
+        }
+    }
+
+    Ok(DedupeSummary {
+        exact_dups,
+        superseded,
+        chunks_pruned,
+        backfilled,
+        scanned,
+        seconds: started.elapsed().as_secs_f64(),
+        stopped,
+    })
+}
+
+/// 去重扫描(桌面 async + spawn_blocking 防主线程阻塞;与索引/盘点共用 INDEXING 闸)。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn fable_dedupe_scan(backfill: Option<bool>) -> Result<DedupeSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(_guard) = FlagGuard::acquire(&INDEXING) else {
+            return Err("索引任务进行中,稍后再去重".into());
+        };
+        CANCEL.store(false, Ordering::SeqCst);
+        dedupe_scan(backfill.unwrap_or(false))
+    })
+    .await
+    .map_err(|e| format!("任务调度失败: {e}"))?
+}
+#[cfg(not(feature = "desktop"))]
+pub fn fable_dedupe_scan(backfill: Option<bool>) -> Result<DedupeSummary, String> {
+    let Some(_guard) = FlagGuard::acquire(&INDEXING) else {
+        return Err("索引任务进行中,稍后再去重".into());
+    };
+    CANCEL.store(false, Ordering::SeqCst);
+    dedupe_scan(backfill.unwrap_or(false))
+}
+
 // ───────────────────── 本地嵌入引擎(寓言计划「本地模型下载」)─────────────────────
 //
 // 报告点名的头号提速杠杆 = 启用本地 ONNX 嵌入/重排,绕开云 API 限速(35/秒 → 受本地核数限,
@@ -1417,6 +1915,100 @@ pub fn fable_local_embed_set_enabled(on: bool) -> Result<LocalEmbedStatus, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_fingerprint_is_stable_and_content_sensitive() {
+        let a = content_fingerprint("同一份内容");
+        let b = content_fingerprint("同一份内容");
+        let c = content_fingerprint("换了内容");
+        assert_eq!(a, b, "相同内容指纹必须一致");
+        assert_ne!(a, c, "不同内容指纹必须不同");
+        assert!(a.starts_with("f:"), "全文哈希前缀 f:");
+        assert_eq!(a.len(), 2 + 32, "f: + 32 hex");
+    }
+
+    #[test]
+    fn chunk_header_builds_bracketed_context() {
+        let h = chunk_header_for("项目/合同/2023年度报告.docx");
+        assert!(h.starts_with("【") && h.ends_with("】\n"));
+        assert!(h.contains("2023年度报告.docx"));
+        assert!(h.contains("合同"), "含父目录名");
+        // 顶层文件无父目录段,只放文件名
+        let top = chunk_header_for("readme.txt");
+        assert!(top.contains("readme.txt") && !top.contains(" · "));
+    }
+
+    #[test]
+    fn doc_key_folds_version_noise() {
+        // 同一份资料的不同版本 → 同 key
+        let base = doc_key("季度报告.docx");
+        assert_eq!(doc_key("季度报告 v2.docx"), base);
+        assert_eq!(doc_key("季度报告 final.docx"), base);
+        assert_eq!(doc_key("季度报告(1).docx"), base);
+        assert_eq!(doc_key("季度报告_副本.docx"), base);
+        assert_eq!(doc_key("季度报告-20230101.pdf"), base, "扩展名不进 key,日期被剪");
+        // 不同资料 → 不同 key
+        assert_ne!(doc_key("季度报告.docx"), doc_key("年度预算.docx"));
+        // 年份是有意义的 4 位数字,不当副本序号剪掉
+        assert_ne!(doc_key("报告 2023.docx"), doc_key("报告 2024.docx"));
+        // 文件名本身就是噪声时不塌成空 key
+        assert!(!doc_key("v2.docx").is_empty());
+    }
+
+    /// 去重 + 新压旧端到端(默认 `#[ignore]`,单独跑避开进程级 DB 竞争):
+    /// `cargo test --manifest-path src-tauri/Cargo.toml --lib dedupe_scan_e2e -- --ignored --exact --nocapture`
+    #[test]
+    #[ignore]
+    fn dedupe_scan_e2e() {
+        let base = std::env::temp_dir().join(format!("polaris_dedupe_{}", std::process::id()));
+        let db = base.join("fable_test.db");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("POLARIS_FABLE_DB", &db);
+        let conn = open_db().unwrap();
+        conn.execute("INSERT INTO roots(id, path) VALUES(1, '/r')", []).unwrap();
+        let ins = |id: i64, rel: &str, name: &str, mtime: i64, hash: &str, dkey: &str| {
+            conn.execute(
+                "INSERT INTO files(id, root_id, relpath, name, ext, kind, size, mtime, chunked, ftsed, seen, content_hash, doc_key)
+                 VALUES(?1,1,?2,?3,'txt','text',10,?4,1,1,1,?5,?6)",
+                rusqlite::params![id, rel, name, mtime, hash, dkey],
+            )
+            .unwrap();
+        };
+        // 完全重复:同 hash、mtime 不同 → canonical = 最新(id=2),id=1 标 dup_of=2 且 chunk 被清。
+        ins(1, "a/report.txt", "report.txt", 100, "f:aaa", "report");
+        ins(2, "b/report.txt", "report.txt", 200, "f:aaa", "report");
+        conn.execute(
+            "INSERT INTO chunks(file_id,seq,text,dim,vec) VALUES(1,0,'x',1,x'00')",
+            [],
+        )
+        .unwrap();
+        // 新压旧:同目录(c)同 ext 同 doc_key、内容互异、mtime 不同 → id=3 被 id=4 压制。
+        ins(3, "c/plan.txt", "plan.txt", 100, "f:old", "plan");
+        ins(4, "c/plan_v2.txt", "plan_v2.txt", 200, "f:new", "plan");
+
+        let sum = dedupe_scan(false).unwrap();
+
+        let col = |id: i64, c: &str| -> i64 {
+            conn.query_row(&format!("SELECT {c} FROM files WHERE id=?1"), [id], |r| r.get(0))
+                .unwrap()
+        };
+        let nchunks = |fid: i64| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM chunks WHERE file_id=?1", [fid], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(col(1, "dup_of"), 2, "旧副本指向最新 canonical");
+        assert_eq!(col(2, "dup_of"), 0, "canonical 自身 dup_of=0");
+        assert_eq!(nchunks(1), 0, "副本的 chunk 被清");
+        assert_eq!(sum.exact_dups, 1);
+        assert_eq!(col(3, "superseded_by"), 4, "旧版被新版压制");
+        assert_eq!(col(4, "superseded_by"), 0, "新版不被压制");
+        assert_eq!(sum.superseded, 1);
+
+        drop(conn);
+        std::env::remove_var("POLARIS_FABLE_DB");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn normalize_makes_unit_length() {

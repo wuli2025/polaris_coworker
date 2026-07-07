@@ -1,0 +1,1099 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 15.66kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust:1-slim-bookworm
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/node:20-slim
+#3 DONE 2.4s
+
+#2 [internal] load metadata for docker.io/library/rust:1-slim-bookworm
+#2 DONE 2.4s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 661B done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 DONE 0.0s
+
+#6 [server  1/11] FROM docker.io/library/rust:1-slim-bookworm@sha256:c8a94a78f67ec8c4d474ec7f71e0720f21eb7e584e158daec0874cafa7c30e4d
+#6 resolve docker.io/library/rust:1-slim-bookworm@sha256:c8a94a78f67ec8c4d474ec7f71e0720f21eb7e584e158daec0874cafa7c30e4d 0.1s done
+#6 DONE 0.1s
+
+#7 [web 1/9] FROM docker.io/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
+#7 resolve docker.io/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
+#7 resolve docker.io/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 0.1s done
+#7 DONE 0.1s
+
+#5 [internal] load build context
+#5 transferring context: 543.65kB 0.1s done
+#5 DONE 0.1s
+
+#8 [server  6/11] COPY src-tauri/crates ./src-tauri/crates
+#8 CACHED
+
+#9 [server  5/11] COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs ./src-tauri/
+#9 CACHED
+
+#10 [server  4/11] RUN mkdir -p /usr/local/cargo/     && printf '%s\n'         '[source.crates-io]'         'replace-with = "ustc"'         ''         '[source.ustc]'         'registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"'         ''         '[net]'         'git-fetch-with-cli = true'         > /usr/local/cargo/config.toml
+#10 CACHED
+
+#11 [server  2/11] RUN apt-get update && apt-get install -y --no-install-recommends         build-essential pkg-config ca-certificates git         autoconf automake libtool     && rm -rf /var/lib/apt/lists/*
+#11 CACHED
+
+#12 [server  3/11] WORKDIR /build
+#12 CACHED
+
+#13 [server  7/11] RUN mkdir -p src-tauri/src/bin     && echo 'fn main(){}' > src-tauri/src/bin/polaris-server.rs     && echo 'fn main(){}' > src-tauri/src/bin/polaris-forge.rs     && echo '' > src-tauri/src/main.rs     && echo '' > src-tauri/src/lib.rs     && cargo build --profile release-fast         --manifest-path src-tauri/Cargo.toml         --bin polaris-server --no-default-features --features server     ; rm -rf src-tauri/src
+#13 CACHED
+
+#14 [runtime  2/25] RUN apt-get update && apt-get install -y --no-install-recommends         bash git ca-certificates curl python3 python3-pip python3-venv python-is-python3 ripgrep         tini gosu     && rm -rf /var/lib/apt/lists/*     && npm config set registry https://registry.npmmirror.com     && npm install -g @anthropic-ai/claude-code     && npm cache clean --force
+#14 CACHED
+
+#15 [runtime  3/25] RUN pip install --no-cache-dir --break-system-packages         -i https://pypi.tuna.tsinghua.edu.cn/simple python-pptx pypdf     || pip install --no-cache-dir --break-system-packages python-pptx pypdf
+#15 CACHED
+
+#16 [runtime 11/25] RUN sed -i 's/\r$//' /usr/local/bin/xvfb-wrap     && chmod +x /usr/local/bin/xvfb-wrap
+#16 CACHED
+
+#17 [runtime  8/25] COPY docker/chromium-headless /usr/local/bin/chromium-headless
+#17 CACHED
+
+#18 [runtime  7/25] RUN if [ "0" = "1" ]; then         apt-get update && apt-get install -y --no-install-recommends             chromium             ffmpeg             libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2             libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1             libpango-1.0-0 libcairo2 libasound2             xvfb x11-utils procps         && rm -rf /var/lib/apt/lists/* ;     else         echo "[build] POLARIS_RENDER=0 → slim 镜像(无渲染栈)" ;     fi
+#18 CACHED
+
+#19 [runtime  9/25] RUN chmod +x /usr/local/bin/chromium-headless
+#19 CACHED
+
+#20 [runtime  6/25] RUN if [ "0" = "1" ]; then         set -e;         apt-get update;         apt-get install -y --no-install-recommends             fonts-noto-cjk fonts-noto-color-emoji fontconfig;         { pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir --break-system-packages fonttools brotli 2>/dev/null             || pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir fonttools brotli             || echo "[subset] fonttools 装不上,跳过子集(保留全语种)"; };         mkdir -p /out;         python3 /docker/subset_cjk.py || echo "[subset] 子集失败,降级全语种 102MB";         if [ -n "$(ls -A /out 2>/dev/null)" ]; then             mkdir -p /usr/share/fonts/truetype/noto-cjk-subset;             cp /out/*.woff2 /usr/share/fonts/truetype/noto-cjk-subset/;             echo "[subset] SC 字体子集已落 /usr/share/fonts/truetype/noto-cjk-subset/";         fi;         fc-cache -f > /dev/null 2>&1 || true;         fc-list :lang=zh | grep -q .             || { echo "FATAL: full 镜像 fc-list :lang=zh 为空 — 中文字体没装上,拒出镜像(否则截图全豆腐块)"; exit 1; };         rm -rf /var/lib/apt/lists/*;     fi
+#20 CACHED
+
+#21 [runtime  4/25] COPY docker/font-subset-chars.txt /docker/font-subset-chars.txt
+#21 CACHED
+
+#22 [runtime 10/25] COPY docker-xvfb-wrap.sh /usr/local/bin/xvfb-wrap
+#22 CACHED
+
+#23 [runtime  5/25] COPY docker/subset_cjk.py /docker/subset_cjk.py
+#23 CACHED
+
+#24 [runtime 12/25] COPY VERSION /app/VERSION
+#24 CACHED
+
+#25 [runtime 13/25] RUN echo "stress-cjk-onto" > /app/VERSION.bak     && if [ "$(cat /app/VERSION | tr -d '[:space:]')" = "dev" ] || [ -z "$(cat /app/VERSION)" ]; then          echo "stress-cjk-onto" > /app/VERSION;        fi
+#25 ...
+
+#26 [server  8/11] COPY src-tauri/src ./src-tauri/src
+#26 DONE 0.2s
+
+#27 [server  9/11] COPY src-tauri/assets ./src-tauri/assets
+#27 DONE 0.1s
+
+#25 [runtime 13/25] RUN echo "stress-cjk-onto" > /app/VERSION.bak     && if [ "$(cat /app/VERSION | tr -d '[:space:]')" = "dev" ] || [ -z "$(cat /app/VERSION)" ]; then          echo "stress-cjk-onto" > /app/VERSION;        fi
+#25 DONE 0.3s
+
+#28 [runtime 14/25] RUN install -m 0755 -d /etc/apt/keyrings     && curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian/gpg -o /etc/apt/keyrings/docker.asc     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian bookworm stable"         > /etc/apt/sources.list.d/docker.list     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin     && rm -rf /var/lib/apt/lists/*
+#28 ...
+
+#29 [server 10/11] COPY src-tauri/resources ./src-tauri/resources
+#29 DONE 0.2s
+
+#30 [server 11/11] RUN touch src-tauri/src/main.rs src-tauri/src/lib.rs     && cargo build --profile release-fast         --manifest-path src-tauri/Cargo.toml         --bin polaris-server --bin polaris-forge --no-default-features --features server     && cp src-tauri/target/release-fast/polaris-server /usr/local/bin/polaris-server     && cp src-tauri/target/release-fast/polaris-forge /usr/local/bin/polaris-forge
+#30 0.887     Updating `ustc` index
+#30 ...
+
+#28 [runtime 14/25] RUN install -m 0755 -d /etc/apt/keyrings     && curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian/gpg -o /etc/apt/keyrings/docker.asc     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian bookworm stable"         > /etc/apt/sources.list.d/docker.list     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin     && rm -rf /var/lib/apt/lists/*
+#28 1.628 Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+#28 1.821 Get:2 https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian bookworm InRelease [46.6 kB]
+#28 2.053 Get:3 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+#28 2.097 Get:4 https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian bookworm/stable amd64 Packages [72.4 kB]
+#28 2.454 Get:5 http://deb.debian.org/debian-security bookworm-security InRelease [48.0 kB]
+#28 4.656 Get:6 http://deb.debian.org/debian bookworm/main amd64 Packages [8790 kB]
+#28 5.728 Get:7 http://deb.debian.org/debian bookworm-updates/main amd64 Packages [6924 B]
+#28 6.310 Get:8 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [311 kB]
+#28 6.351 Fetched 9482 kB in 5s (1837 kB/s)
+#28 6.351 Reading package lists...
+#28 6.830 Reading package lists...
+#28 7.328 Building dependency tree...
+#28 7.462 Reading state information...
+#28 7.594 Suggested packages:
+#28 7.594   docker-model-plugin
+#28 7.594 Recommended packages:
+#28 7.594   docker-buildx-plugin
+#28 7.614 The following NEW packages will be installed:
+#28 7.615   docker-ce-cli docker-compose-plugin
+#28 8.617 0 upgraded, 2 newly installed, 0 to remove and 11 not upgraded.
+#28 8.617 Need to get 24.9 MB of archives.
+#28 8.617 After this operation, 78.2 MB of additional disk space will be used.
+#28 8.617 Get:1 https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian bookworm/stable amd64 docker-ce-cli amd64 5:29.5.3-1~debian.12~bookworm [16.8 MB]
+#28 12.09 Get:2 https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian bookworm/stable amd64 docker-compose-plugin amd64 5.1.4-1~debian.12~bookworm [8127 kB]
+#28 ...
+
+#30 [server 11/11] RUN touch src-tauri/src/main.rs src-tauri/src/lib.rs     && cargo build --profile release-fast         --manifest-path src-tauri/Cargo.toml         --bin polaris-server --bin polaris-forge --no-default-features --features server     && cp src-tauri/target/release-fast/polaris-server /usr/local/bin/polaris-server     && cp src-tauri/target/release-fast/polaris-forge /usr/local/bin/polaris-forge
+#30 12.34  Downloading crates ...
+#30 13.95   Downloaded adler2 v2.0.1 (registry `ustc`)
+#30 13.95   Downloaded adobe-cmap-parser v0.4.1 (registry `ustc`)
+#30 14.41   Downloaded aes v0.9.0 (registry `ustc`)
+#30 14.61   Downloaded anyhow v1.0.102 (registry `ustc`)
+#30 14.64   Downloaded async-trait v0.1.89 (registry `ustc`)
+#30 14.66   Downloaded ahash v0.8.12 (registry `ustc`)
+#30 14.69   Downloaded async-tungstenite v0.32.1 (registry `ustc`)
+#30 ...
+
+#28 [runtime 14/25] RUN install -m 0755 -d /etc/apt/keyrings     && curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian/gpg -o /etc/apt/keyrings/docker.asc     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian bookworm stable"         > /etc/apt/sources.list.d/docker.list     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin     && rm -rf /var/lib/apt/lists/*
+#28 13.71 debconf: delaying package configuration, since apt-utils is not installed
+#28 13.73 Fetched 24.9 MB in 6s (4193 kB/s)
+#28 13.76 Selecting previously unselected package docker-ce-cli.
+#28 13.76 (Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 11807 files and directories currently installed.)
+#28 13.80 Preparing to unpack .../docker-ce-cli_5%3a29.5.3-1~debian.12~bookworm_amd64.deb ...
+#28 13.81 Unpacking docker-ce-cli (5:29.5.3-1~debian.12~bookworm) ...
+#28 14.24 Selecting previously unselected package docker-compose-plugin.
+#28 14.25 Preparing to unpack .../docker-compose-plugin_5.1.4-1~debian.12~bookworm_amd64.deb ...
+#28 14.26 Unpacking docker-compose-plugin (5.1.4-1~debian.12~bookworm) ...
+#28 14.75 Setting up docker-compose-plugin (5.1.4-1~debian.12~bookworm) ...
+#28 14.78 Setting up docker-ce-cli (5:29.5.3-1~debian.12~bookworm) ...
+#28 DONE 14.9s
+
+#30 [server 11/11] RUN touch src-tauri/src/main.rs src-tauri/src/lib.rs     && cargo build --profile release-fast         --manifest-path src-tauri/Cargo.toml         --bin polaris-server --bin polaris-forge --no-default-features --features server     && cp src-tauri/target/release-fast/polaris-server /usr/local/bin/polaris-server     && cp src-tauri/target/release-fast/polaris-forge /usr/local/bin/polaris-forge
+#30 14.74   Downloaded atoi_simd v0.17.0 (registry `ustc`)
+#30 14.75   Downloaded audiopus v0.2.0 (registry `ustc`)
+#30 14.75   Downloaded atomic-waker v1.1.2 (registry `ustc`)
+#30 14.76   Downloaded axum-core v0.4.5 (registry `ustc`)
+#30 14.77   Downloaded bitflags v1.3.2 (registry `ustc`)
+#30 14.77   Downloaded bit-set v0.8.0 (registry `ustc`)
+#30 14.82   Downloaded fallible-iterator v0.3.0 (registry `ustc`)
+#30 ...
+
+#31 [runtime 15/25] COPY update.sh /usr/local/bin/update.sh
+#31 DONE 0.1s
+
+#30 [server 11/11] RUN touch src-tauri/src/main.rs src-tauri/src/lib.rs     && cargo build --profile release-fast         --manifest-path src-tauri/Cargo.toml         --bin polaris-server --bin polaris-forge --no-default-features --features server     && cp src-tauri/target/release-fast/polaris-server /usr/local/bin/polaris-server     && cp src-tauri/target/release-fast/polaris-forge /usr/local/bin/polaris-forge
+#30 14.82   Downloaded bit-vec v0.8.0 (registry `ustc`)
+#30 14.96   Downloaded aes v0.8.4 (registry `ustc`)
+#30 14.96   Downloaded bitflags v2.11.1 (registry `ustc`)
+#30 14.98   Downloaded block-buffer v0.10.4 (registry `ustc`)
+#30 15.02   Downloaded block-padding v0.3.3 (registry `ustc`)
+#30 15.02   Downloaded block-buffer v0.12.0 (registry `ustc`)
+#30 15.02   Downloaded bs58 v0.5.1 (registry `ustc`)
+#30 15.03   Downloaded bytecount v0.6.9 (registry `ustc`)
+#30 15.04   Downloaded byteorder v1.5.0 (registry `ustc`)
+#30 15.09   Downloaded cff-parser v0.1.0 (registry `ustc`)
+#30 15.09   Downloaded bytemuck v1.25.0 (registry `ustc`)
+#30 15.13   Downloaded camino v1.2.2 (registry `ustc`)
+#30 15.14   Downloaded bzip2 v0.6.1 (registry `ustc`)
+#30 15.15   Downloaded byteorder-lite v0.1.0 (registry `ustc`)
+#30 15.16   Downloaded cargo_toml v0.22.3 (registry `ustc`)
+#30 15.16   Downloaded cargo-platform v0.1.9 (registry `ustc`)
+#30 15.18   Downloaded cargo_metadata v0.19.2 (registry `ustc`)
+#30 15.20   Downloaded base64 v0.22.1 (registry `ustc`)
+#30 ...
+
+#32 [runtime 16/25] RUN sed -i 's/\r$//' /usr/local/bin/update.sh     && chmod +x /usr/local/bin/update.sh
+#32 DONE 0.4s
+
+#30 [server 11/11] RUN touch src-tauri/src/main.rs src-tauri/src/lib.rs     && cargo build --profile release-fast         --manifest-path src-tauri/Cargo.toml         --bin polaris-server --bin polaris-forge --no-default-features --features server     && cp src-tauri/target/release-fast/polaris-server /usr/local/bin/polaris-server     && cp src-tauri/target/release-fast/polaris-forge /usr/local/bin/polaris-forge
+#30 15.24   Downloaded aho-corasick v1.1.4 (registry `ustc`)
+#30 15.25   Downloaded cfb v0.7.3 (registry `ustc`)
+#30 15.29   Downloaded cbc v0.1.2 (registry `ustc`)
+#30 15.34   Downloaded bytes v1.11.1 (registry `ustc`)
+#30 15.35   Downloaded chromiumoxide v0.9.1 (registry `ustc`)
+#30 15.35   Downloaded cfg-if v1.0.4 (registry `ustc`)
+#30 15.35   Downloaded axum v0.7.9 (registry `ustc`)
+#30 15.38   Downloaded cc v1.2.62 (registry `ustc`)
+#30 15.40   Downloaded calamine v0.35.0 (registry `ustc`)
+#30 15.44   Downloaded chromiumoxide_pdl v0.9.1 (registry `ustc`)
+#30 15.66   Downloaded cipher v0.4.4 (registry `ustc`)
+#30 15.66   Downloaded chromiumoxide_types v0.9.1 (registry `ustc`)
+#30 15.95   Downloaded color_quant v1.1.0 (registry `ustc`)
+#30 15.95   Downloaded cmov v0.5.3 (registry `ustc`)
+#30 16.35   Downloaded autocfg v1.5.1 (registry `ustc`)
+#30 16.44   Downloaded codepage v0.1.2 (registry `ustc`)
+#30 16.44   Downloaded constant_time_eq v0.4.2 (registry `ustc`)
+#30 16.47   Downloaded const-oid v0.10.2 (registry `ustc`)
+#30 16.48   Downloaded cpubits v0.1.1 (registry `ustc`)
+#30 16.48   Downloaded bumpalo v3.20.3 (registry `ustc`)
+#30 16.49   Downloaded crypto-common v0.2.2 (registry `ustc`)
+#30 16.49   Downloaded cipher v0.5.2 (registry `ustc`)
+#30 16.53   Downloaded cpufeatures v0.3.0 (registry `ustc`)
+#30 16.53   Downloaded crypto-common v0.1.7 (registry `ustc`)
+#30 16.53   Downloaded cpufeatures v0.2.17 (registry `ustc`)
+#30 16.55   Downloaded crc32fast v1.5.0 (registry `ustc`)
+#30 16.56   Downloaded cssparser v0.36.0 (registry `ustc`)
+#30 16.62   Downloaded audiopus_sys v0.1.8 (registry `ustc`)
+#30 16.77   Downloaded chrono v0.4.44 (registry `ustc`)
+#30 16.82   Downloaded ctor-proc-macro v0.0.7 (registry `ustc`)
+#30 16.82   Downloaded cssparser-macros v0.6.1 (registry `ustc`)
+#30 16.91   Downloaded darling_core v0.23.0 (registry `ustc`)
+#30 17.01   Downloaded darling_macro v0.23.0 (registry `ustc`)
+#30 17.01   Downloaded darling v0.23.0 (registry `ustc`)
+#30 17.01   Downloaded debug_unsafe v0.1.4 (registry `ustc`)
+#30 17.01   Downloaded dasp_sample v0.11.0 (registry `ustc`)
+#30 17.01   Downloaded ctor v0.8.0 (registry `ustc`)
+#30 17.02   Downloaded chromiumoxide_cdp v0.9.1 (registry `ustc`)
+#30 17.04   Downloaded ctutils v0.4.2 (registry `ustc`)
+#30 17.05   Downloaded deranged v0.5.8 (registry `ustc`)
+#30 17.07   Downloaded derive_more-impl v2.1.1 (registry `ustc`)
+#30 17.12   Downloaded derive_more v2.1.1 (registry `ustc`)
+#30 17.13   Downloaded directories v5.0.1 (registry `ustc`)
+#30 17.13   Downloaded dasp_frame v0.11.0 (registry `ustc`)
+#30 17.14   Downloaded data-encoding v2.11.0 (registry `ustc`)
+#30 17.14   Downloaded deflate64 v0.1.12 (registry `ustc`)
+#30 17.14   Downloaded digest v0.11.3 (registry `ustc`)
+#30 17.14   Downloaded digest v0.10.7 (registry `ustc`)
+#30 17.93   Downloaded dirs v6.0.0 (registry `ustc`)
+#30 17.98   Downloaded dirs-sys v0.4.1 (registry `ustc`)
+#30 18.03   Downloaded dirs-sys v0.5.0 (registry `ustc`)
+#30 18.17   Downloaded displaydoc v0.2.5 (registry `ustc`)
+#30 18.43   Downloaded dom_query v0.27.0 (registry `ustc`)
+#30 18.46   Downloaded dtor-proc-macro v0.0.6 (registry `ustc`)
+#30 18.46   Downloaded dtor v0.3.0 (registry `ustc`)
+#30 18.48   Downloaded dtoa v1.0.11 (registry `ustc`)
+#30 18.49   Downloaded dtoa-short v0.3.5 (registry `ustc`)
+#30 18.52   Downloaded ecb v0.1.2 (registry `ustc`)
+#30 18.52   Downloaded dyn-clone v1.0.20 (registry `ustc`)
+#30 18.60   Downloaded embed-resource v3.0.9 (registry `ustc`)
+#30 18.64   Downloaded ebur128 v0.1.10 (registry `ustc`)
+#30 18.64   Downloaded dunce v1.0.5 (registry `ustc`)
+#30 18.70   Downloaded either v1.16.0 (registry `ustc`)
+#30 18.73   Downloaded errno v0.3.14 (registry `ustc`)
+#30 18.75   Downloaded fallible-streaming-iterator v0.1.9 (registry `ustc`)
+#30 18.75   Downloaded equivalent v1.0.2 (registry `ustc`)
+#30 18.76   Downloaded extended v0.1.0 (registry `ustc`)
+#30 18.76   Downloaded erased-serde v0.4.10 (registry `ustc`)
+#30 18.87   Downloaded fast-float2 v0.2.3 (registry `ustc`)
+#30 18.90   Downloaded fnv v1.0.7 (registry `ustc`)
+#30 18.93   Downloaded fastrand v2.4.1 (registry `ustc`)
+#30 18.94   Downloaded find-msvc-tools v0.1.9 (registry `ustc`)
+#30 18.94   Downloaded fdeflate v0.3.7 (registry `ustc`)
+#30 18.95   Downloaded euclid v0.20.14 (registry `ustc`)
+#30 18.96   Downloaded form_urlencoded v1.2.2 (registry `ustc`)
+#30 18.98   Downloaded futures-channel v0.3.32 (registry `ustc`)
+#30 19.00   Downloaded flate2 v1.1.9 (registry `ustc`)
+#30 19.07   Downloaded foldhash v0.2.0 (registry `ustc`)
+#30 19.08   Downloaded futures-macro v0.3.32 (registry `ustc`)
+#30 19.08   Downloaded futures-executor v0.3.32 (registry `ustc`)
+#30 19.08   Downloaded futures-io v0.3.32 (registry `ustc`)
+#30 19.10   Downloaded futures v0.3.32 (registry `ustc`)
+#30 19.11   Downloaded futures-core v0.3.32 (registry `ustc`)
+#30 19.26   Downloaded futures-sink v0.3.32 (registry `ustc`)
+#30 19.27   Downloaded futures-task v0.3.32 (registry `ustc`)
+#30 19.27   Downloaded encoding_rs v0.8.35 (registry `ustc`)
+#30 19.29   Downloaded futures-util v0.3.32 (registry `ustc`)
+#30 19.31   Downloaded memchr v2.8.0 (registry `ustc`)
+#30 19.33   Downloaded generic-array v0.14.7 (registry `ustc`)
+#30 19.42   Downloaded futures-timer v3.0.4 (registry `ustc`)
+#30 19.46   Downloaded getrandom v0.4.2 (registry `ustc`)
+#30 19.51   Downloaded getrandom v0.2.17 (registry `ustc`)
+#30 19.58   Downloaded getrandom v0.3.4 (registry `ustc`)
+#30 19.63   Downloaded gif v0.14.2 (registry `ustc`)
+#30 19.74   Downloaded hashlink v0.9.1 (registry `ustc`)
+#30 19.78   Downloaded heck v0.5.0 (registry `ustc`)
+#30 19.83   Downloaded hex v0.4.3 (registry `ustc`)
+#30 19.87   Downloaded hmac v0.13.0 (registry `ustc`)
+#30 19.87   Downloaded glob v0.3.3 (registry `ustc`)
+#30 19.88   Downloaded http-body v1.0.1 (registry `ustc`)
+#30 19.90   Downloaded httpdate v1.0.3 (registry `ustc`)
+#30 19.90   Downloaded http-range-header v0.4.2 (registry `ustc`)
+#30 19.92   Downloaded httparse v1.10.1 (registry `ustc`)
+#30 19.97   Downloaded hashbrown v0.14.5 (registry `ustc`)
+#30 19.97   Downloaded http-body-util v0.1.3 (registry `ustc`)
+#30 19.97   Downloaded hashbrown v0.12.3 (registry `ustc`)
+#30 19.98   Downloaded hybrid-array v0.4.12 (registry `ustc`)
+#30 20.01   Downloaded hashbrown v0.17.1 (registry `ustc`)
+#30 20.04   Downloaded html5ever v0.38.0 (registry `ustc`)
+#30 20.04   Downloaded iana-time-zone v0.1.65 (registry `ustc`)
+#30 20.05   Downloaded http v1.4.0 (registry `ustc`)
+#30 20.07   Downloaded icu_properties v2.2.0 (registry `ustc`)
+#30 20.09   Downloaded ident_case v1.0.1 (registry `ustc`)
+#30 20.10   Downloaded icu_collections v2.2.0 (registry `ustc`)
+#30 20.11   Downloaded hyper-util v0.1.20 (registry `ustc`)
+#30 20.16   Downloaded icu_provider v2.2.0 (registry `ustc`)
+#30 20.17   Downloaded include_dir v0.7.4 (registry `ustc`)
+#30 20.17   Downloaded icu_locale_core v2.2.0 (registry `ustc`)
+#30 20.18   Downloaded icu_normalizer_data v2.2.0 (registry `ustc`)
+#30 20.19   Downloaded hyper v1.9.0 (registry `ustc`)
+#30 20.20   Downloaded icu_normalizer v2.2.0 (registry `ustc`)
+#30 20.21   Downloaded idna_adapter v1.2.2 (registry `ustc`)
+#30 20.21   Downloaded include_dir_macros v0.7.4 (registry `ustc`)
+#30 20.22   Downloaded icu_properties_data v2.2.0 (registry `ustc`)
+#30 20.24   Downloaded image-webp v0.2.4 (registry `ustc`)
+#30 20.24   Downloaded idna v1.1.0 (registry `ustc`)
+#30 20.28   Downloaded image v0.25.10 (registry `ustc`)
+#30 20.30   Downloaded indexmap v1.9.3 (registry `ustc`)
+#30 21.05   Downloaded indexmap v2.14.0 (registry `ustc`)
+#30 21.08   Downloaded inout v0.2.2 (registry `ustc`)
+#30 21.16   Downloaded infer v0.19.0 (registry `ustc`)
+#30 21.22   Downloaded ipnet v2.12.0 (registry `ustc`)
+#30 21.30   Downloaded itoa v1.0.18 (registry `ustc`)
+#30 21.30   Downloaded inout v0.1.4 (registry `ustc`)
+#30 21.34   Downloaded jobserver v0.1.34 (registry `ustc`)
+#30 21.49   Downloaded lzma-rust2 v0.16.3 (registry `ustc`)
+#30 21.52   Downloaded num-conv v0.2.2 (registry `ustc`)
+#30 21.52   Downloaded lazy_static v1.5.0 (registry `ustc`)
+#30 21.52   Downloaded jsonptr v0.6.3 (registry `ustc`)
+#30 21.54   Downloaded json-patch v3.0.1 (registry `ustc`)
+#30 21.71   Downloaded semver v1.0.28 (registry `ustc`)
+#30 21.87   Downloaded parking_lot_core v0.9.12 (registry `ustc`)
+#30 21.94   Downloaded pbkdf2 v0.13.0 (registry `ustc`)
+#30 22.11   Downloaded libbz2-rs-sys v0.2.5 (registry `ustc`)
+#30 22.24   Downloaded percent-encoding v2.3.2 (registry `ustc`)
+#30 22.24   Downloaded pdf-extract v0.10.0 (registry `ustc`)
+#30 22.26   Downloaded phf_codegen v0.13.1 (registry `ustc`)
+#30 22.27   Downloaded phf_generator v0.13.1 (registry `ustc`)
+#30 22.30   Downloaded litemap v0.8.2 (registry `ustc`)
+#30 22.34   Downloaded lock_api v0.4.14 (registry `ustc`)
+#30 22.43   Downloaded phf v0.13.1 (registry `ustc`)
+#30 22.44   Downloaded phf_macros v0.13.1 (registry `ustc`)
+#30 22.44   Downloaded phf_shared v0.13.1 (registry `ustc`)
+#30 22.49   Downloaded matchit v0.7.3 (registry `ustc`)
+#30 22.50   Downloaded markup5ever v0.38.0 (registry `ustc`)
+#30 22.63   Downloaded pin-project-lite v0.2.17 (registry `ustc`)
+#30 22.69   Downloaded log v0.4.29 (registry `ustc`)
+#30 22.83   Downloaded pkg-config v0.3.33 (registry `ustc`)
+#30 22.89   Downloaded potential_utf v0.1.5 (registry `ustc`)
+#30 22.89   Downloaded plist v1.9.0 (registry `ustc`)
+#30 22.90   Downloaded powerfmt v0.2.0 (registry `ustc`)
+#30 22.91   Downloaded mime v0.3.17 (registry `ustc`)
+#30 22.92   Downloaded md-5 v0.10.6 (registry `ustc`)
+#30 22.92   Downloaded postscript v0.14.1 (registry `ustc`)
+#30 22.93   Downloaded ppv-lite86 v0.2.21 (registry `ustc`)
+#30 22.96   Downloaded precomputed-hash v0.1.1 (registry `ustc`)
+#30 22.96   Downloaded ppmd-rust v1.4.0 (registry `ustc`)
+#30 23.01   Downloaded proc-macro2 v1.0.106 (registry `ustc`)
+#30 23.02   Downloaded primal-check v0.3.4 (registry `ustc`)
+#30 23.02   Downloaded mime_guess v2.0.5 (registry `ustc`)
+#30 23.06   Downloaded nasm-rs v0.3.2 (registry `ustc`)
+#30 23.07   Downloaded new_debug_unreachable v1.0.6 (registry `ustc`)
+#30 23.15   Downloaded multer v3.1.0 (registry `ustc`)
+#30 23.16   Downloaded nom_locate v5.0.0 (registry `ustc`)
+#30 23.20   Downloaded num-traits v0.2.19 (registry `ustc`)
+#30 23.20   Downloaded num-integer v0.1.46 (registry `ustc`)
+#30 23.25   Downloaded num-complex v0.4.6 (registry `ustc`)
+#30 23.26   Downloaded rand_chacha v0.3.1 (registry `ustc`)
+#30 23.26   Downloaded quick-error v2.0.1 (registry `ustc`)
+#30 23.27   Downloaded openh264 v0.9.3 (registry `ustc`)
+#30 23.27   Downloaded rand_core v0.6.4 (registry `ustc`)
+#30 23.28   Downloaded rand_chacha v0.9.0 (registry `ustc`)
+#30 23.29   Downloaded once_cell v1.21.4 (registry `ustc`)
+#30 23.30   Downloaded parking_lot v0.12.5 (registry `ustc`)
+#30 23.31   Downloaded option-ext v0.2.0 (registry `ustc`)
+#30 23.35   Downloaded miniz_oxide v0.8.9 (registry `ustc`)
+#30 23.38   Downloaded quote v1.0.45 (registry `ustc`)
+#30 23.38   Downloaded rand_core v0.9.5 (registry `ustc`)
+#30 23.40   Downloaded rangemap v1.7.1 (registry `ustc`)
+#30 23.40   Downloaded ref-cast v1.0.25 (registry `ustc`)
+#30 23.40   Downloaded ref-cast-impl v1.0.25 (registry `ustc`)
+#30 23.44   Downloaded qrcode v0.14.1 (registry `ustc`)
+#30 23.44   Downloaded rand v0.8.6 (registry `ustc`)
+#30 23.47   Downloaded mio v1.2.0 (registry `ustc`)
+#30 23.49   Downloaded nom v8.0.0 (registry `ustc`)
+#30 23.53   Downloaded moxcms v0.8.1 (registry `ustc`)
+#30 23.58   Downloaded png v0.18.1 (registry `ustc`)
+#30 23.60   Downloaded rand v0.9.4 (registry `ustc`)
+#30 23.64   Downloaded regex v1.12.3 (registry `ustc`)
+#30 23.65   Downloaded pom v1.1.0 (registry `ustc`)
+#30 23.69   Downloaded quick-xml v0.39.4 (registry `ustc`)
+#30 23.73   Downloaded pinyin v0.10.0 (registry `ustc`)
+#30 24.00   Downloaded regex-automata v0.4.14 (registry `ustc`)
+#30 24.12   Downloaded pxfm v0.1.29 (registry `ustc`)
+#30 24.32   Downloaded libc v0.2.186 (registry `ustc`)
+#30 24.38   Downloaded openh264-sys2 v0.9.6 (registry `ustc`)
+#30 25.56   Downloaded libsqlite3-sys v0.30.1 (registry `ustc`)
+#30 26.16   Downloaded lopdf v0.38.0 (registry `ustc`)
+#30 26.27   Downloaded regex-lite v0.1.9 (registry `ustc`)
+#30 26.69   Downloaded rustc-hash v2.1.2 (registry `ustc`)
+#30 26.75   Downloaded rustc_version v0.4.1 (registry `ustc`)
+#30 26.82   Downloaded rustversion v1.0.22 (registry `ustc`)
+#30 26.82   Downloaded same-file v1.0.6 (registry `ustc`)
+#30 26.82   Downloaded rustls-pki-types v1.14.1 (registry `ustc`)
+#30 26.86   Downloaded rusqlite v0.32.1 (registry `ustc`)
+#30 26.89   Downloaded scopeguard v1.2.0 (registry `ustc`)
+#30 26.99   Downloaded serde_json v1.0.150 (registry `ustc`)
+#30 27.00   Downloaded schemars_derive v0.8.22 (registry `ustc`)
+#30 27.01   Downloaded schemars v0.8.22 (registry `ustc`)
+#30 27.03   Downloaded rustls-webpki v0.103.13 (registry `ustc`)
+#30 27.03   Downloaded ryu v1.0.23 (registry `ustc`)
+#30 27.04   Downloaded serde-untagged v0.1.9 (registry `ustc`)
+#30 27.06   Downloaded serde_core v1.0.228 (registry `ustc`)
+#30 27.09   Downloaded serde_spanned v1.1.1 (registry `ustc`)
+#30 27.09   Downloaded serde_derive_internals v0.29.1 (registry `ustc`)
+#30 27.10   Downloaded reqwest v0.13.3 (registry `ustc`)
+#30 27.11   Downloaded schemars v0.9.0 (registry `ustc`)
+#30 27.13   Downloaded serde_urlencoded v0.7.1 (registry `ustc`)
+#30 27.13   Downloaded serde_path_to_error v0.1.20 (registry `ustc`)
+#30 27.13   Downloaded schemars v1.2.1 (registry `ustc`)
+#30 27.15   Downloaded safe_arch v0.7.4 (registry `ustc`)
+#30 27.16   Downloaded servo_arc v0.4.3 (registry `ustc`)
+#30 27.18   Downloaded serde v1.0.228 (registry `ustc`)
+#30 27.18   Downloaded serde_derive v1.0.228 (registry `ustc`)
+#30 27.19   Downloaded shlex v1.3.0 (registry `ustc`)
+#30 27.19   Downloaded sha1 v0.11.0 (registry `ustc`)
+#30 27.19   Downloaded serde_with_macros v3.20.0 (registry `ustc`)
+#30 27.20   Downloaded selectors v0.36.1 (registry `ustc`)
+#30 27.26   Downloaded regex-syntax v0.8.10 (registry `ustc`)
+#30 27.28   Downloaded serde_with v3.20.0 (registry `ustc`)
+#30 27.30   Downloaded rustfft v6.4.1 (registry `ustc`)
+#30 27.32   Downloaded rustls v0.23.40 (registry `ustc`)
+#30 27.44   Downloaded ring v0.17.14 (registry `ustc`)
+#30 27.51   Downloaded slab v0.4.12 (registry `ustc`)
+#30 27.51   Downloaded signal-hook-registry v1.4.8 (registry `ustc`)
+#30 27.51   Downloaded simd-adler32 v0.3.9 (registry `ustc`)
+#30 27.53   Downloaded sha2 v0.11.0 (registry `ustc`)
+#30 27.53   Downloaded sha2 v0.10.9 (registry `ustc`)
+#30 27.54   Downloaded siphasher v1.0.3 (registry `ustc`)
+#30 27.55   Downloaded sha1 v0.10.6 (registry `ustc`)
+#30 27.73   Downloaded smallvec v1.15.1 (registry `ustc`)
+#30 27.92   Downloaded stable_deref_trait v1.2.1 (registry `ustc`)
+#30 27.95   Downloaded string_cache v0.9.0 (registry `ustc`)
+#30 27.99   Downloaded socket2 v0.6.3 (registry `ustc`)
+#30 28.00   Downloaded spin v0.9.8 (registry `ustc`)
+#30 28.04   Downloaded stringprep v0.1.5 (registry `ustc`)
+#30 28.05   Downloaded strsim v0.11.1 (registry `ustc`)
+#30 28.09   Downloaded strength_reduce v0.2.4 (registry `ustc`)
+#30 28.10   Downloaded symphonia v0.6.0 (registry `ustc`)
+#30 28.12   Downloaded symphonia-bundle-flac v0.6.0 (registry `ustc`)
+#30 28.19   Downloaded symphonia-bundle-mp3 v0.6.0 (registry `ustc`)
+#30 28.21   Downloaded symphonia-codec-aac v0.6.0 (registry `ustc`)
+#30 28.23   Downloaded symphonia-codec-vorbis v0.6.0 (registry `ustc`)
+#30 28.25   Downloaded symphonia-codec-adpcm v0.6.0 (registry `ustc`)
+#30 28.27   Downloaded string_cache_codegen v0.6.1 (registry `ustc`)
+#30 28.27   Downloaded symphonia-codec-alac v0.6.0 (registry `ustc`)
+#30 28.27   Downloaded symphonia-codec-pcm v0.6.0 (registry `ustc`)
+#30 28.28   Downloaded subtle v2.6.1 (registry `ustc`)
+#30 28.34   Downloaded symphonia-format-mkv v0.6.0 (registry `ustc`)
+#30 28.44   Downloaded symphonia-common v0.6.0 (registry `ustc`)
+#30 28.44   Downloaded symphonia-format-riff v0.6.0 (registry `ustc`)
+#30 28.45   Downloaded symphonia-format-ogg v0.6.0 (registry `ustc`)
+#30 28.48   Downloaded symphonia-metadata v0.6.0 (registry `ustc`)
+#30 28.50   Downloaded tauri-build v2.6.2 (registry `ustc`)
+#30 28.56   Downloaded synstructure v0.13.2 (registry `ustc`)
+#30 28.56   Downloaded sync_wrapper v1.0.2 (registry `ustc`)
+#30 28.58   Downloaded tendril v0.5.0 (registry `ustc`)
+#30 28.59   Downloaded thiserror v1.0.69 (registry `ustc`)
+#30 28.68   Downloaded thiserror v2.0.18 (registry `ustc`)
+#30 28.69   Downloaded time-core v0.1.8 (registry `ustc`)
+#30 28.69   Downloaded thiserror-impl v2.0.18 (registry `ustc`)
+#30 28.70   Downloaded tauri-winres v0.3.6 (registry `ustc`)
+#30 28.71   Downloaded time-macros v0.2.27 (registry `ustc`)
+#30 28.74   Downloaded thiserror-impl v1.0.69 (registry `ustc`)
+#30 28.78   Downloaded urlpattern v0.3.0 (registry `ustc`)
+#30 28.81   Downloaded utf-8 v0.7.6 (registry `ustc`)
+#30 28.86   Downloaded symphonia-core v0.6.0 (registry `ustc`)
+#30 28.87   Downloaded url v2.5.8 (registry `ustc`)
+#30 28.88   Downloaded tauri-utils v2.9.2 (registry `ustc`)
+#30 28.92   Downloaded time v0.3.47 (registry `ustc`)
+#30 28.95   Downloaded tinyvec v1.11.0 (registry `ustc`)
+#30 28.95   Downloaded syn v2.0.117 (registry `ustc`)
+#30 29.04   Downloaded tinystr v0.8.3 (registry `ustc`)
+#30 29.35   Downloaded tokio-tungstenite v0.24.0 (registry `ustc`)
+#30 29.36   Downloaded tokio-macros v2.7.0 (registry `ustc`)
+#30 29.38   Downloaded tinyvec_macros v0.1.1 (registry `ustc`)
+#30 29.42   Downloaded toml v0.9.12+spec-1.1.0 (registry `ustc`)
+#30 29.48   Downloaded toml v1.1.2+spec-1.1.0 (registry `ustc`)
+#30 29.52   Downloaded toml_datetime v0.7.5+spec-1.1.0 (registry `ustc`)
+#30 29.57   Downloaded toml_datetime v1.1.1+spec-1.1.0 (registry `ustc`)
+#30 29.58   Downloaded tower-service v0.3.3 (registry `ustc`)
+#30 29.63   Downloaded tokio-util v0.7.18 (registry `ustc`)
+#30 29.65   Downloaded transpose v0.2.3 (registry `ustc`)
+#30 29.65   Downloaded toml_parser v1.1.2+spec-1.1.0 (registry `ustc`)
+#30 29.65   Downloaded tower-layer v0.3.3 (registry `ustc`)
+#30 29.66   Downloaded tracing-attributes v0.1.31 (registry `ustc`)
+#30 29.67   Downloaded toml_writer v1.1.1+spec-1.1.0 (registry `ustc`)
+#30 29.71   Downloaded tracing-core v0.1.36 (registry `ustc`)
+#30 29.76   Downloaded tower-http v0.6.11 (registry `ustc`)
+#30 29.77   Downloaded try-lock v0.2.5 (registry `ustc`)
+#30 29.78   Downloaded tower v0.5.3 (registry `ustc`)
+#30 29.79   Downloaded type1-encoding-parser v0.1.1 (registry `ustc`)
+#30 29.80   Downloaded tungstenite v0.24.0 (registry `ustc`)
+#30 29.85   Downloaded unic-char-property v0.9.0 (registry `ustc`)
+#30 29.86   Downloaded typeid v1.0.3 (registry `ustc`)
+#30 29.87   Downloaded unic-char-range v0.9.0 (registry `ustc`)
+#30 29.89   Downloaded unic-ucd-version v0.9.0 (registry `ustc`)
+#30 29.90   Downloaded unic-common v0.9.0 (registry `ustc`)
+#30 29.93   Downloaded tungstenite v0.28.0 (registry `ustc`)
+#30 29.96   Downloaded typed-path v0.12.3 (registry `ustc`)
+#30 29.98   Downloaded unic-ucd-ident v0.9.0 (registry `ustc`)
+#30 29.98   Downloaded unicode-bidi v0.3.18 (registry `ustc`)
+#30 29.99   Downloaded unicase v2.9.0 (registry `ustc`)
+#30 29.99   Downloaded ttf-parser v0.25.1 (registry `ustc`)
+#30 30.01   Downloaded typenum v1.20.0 (registry `ustc`)
+#30 30.07   Downloaded unicode-ident v1.0.24 (registry `ustc`)
+#30 30.08   Downloaded zstd v0.13.3 (registry `ustc`)
+#30 30.08   Downloaded untrusted v0.9.0 (registry `ustc`)
+#30 30.08   Downloaded unicode-properties v0.1.4 (registry `ustc`)
+#30 30.12   Downloaded unicode-normalization v0.1.25 (registry `ustc`)
+#30 30.16   Downloaded tracing v0.1.44 (registry `ustc`)
+#30 30.22   Downloaded tokio v1.52.3 (registry `ustc`)
+#30 30.30   Downloaded zstd-safe v7.2.4 (registry `ustc`)
+#30 30.65   Downloaded ureq v2.12.1 (registry `ustc`)
+#30 30.67   Downloaded utf8_iter v1.0.4 (registry `ustc`)
+#30 30.74   Downloaded walkdir v2.5.0 (registry `ustc`)
+#30 30.85   Downloaded version_check v0.9.5 (registry `ustc`)
+#30 30.92   Downloaded web_atoms v0.2.4 (registry `ustc`)
+#30 30.92   Downloaded want v0.3.1 (registry `ustc`)
+#30 30.96   Downloaded webpki-roots v0.26.11 (registry `ustc`)
+#30 31.05   Downloaded weezl v0.1.12 (registry `ustc`)
+#30 31.16   Downloaded uuid v1.23.1 (registry `ustc`)
+#30 31.17   Downloaded which v8.0.3 (registry `ustc`)
+#30 31.19   Downloaded yoke v0.8.2 (registry `ustc`)
+#30 31.20   Downloaded yoke-derive v0.8.2 (registry `ustc`)
+#30 31.21   Downloaded writeable v0.6.3 (registry `ustc`)
+#30 31.27   Downloaded zerofrom v0.1.8 (registry `ustc`)
+#30 31.30   Downloaded zerofrom-derive v0.1.7 (registry `ustc`)
+#30 31.34   Downloaded wide v0.7.33 (registry `ustc`)
+#30 31.34   Downloaded zeroize v1.8.2 (registry `ustc`)
+#30 31.35   Downloaded zerovec-derive v0.11.3 (registry `ustc`)
+#30 31.41   Downloaded zopfli v0.8.3 (registry `ustc`)
+#30 31.44   Downloaded vcpkg v0.2.15 (registry `ustc`)
+#30 31.49   Downloaded zmij v1.0.21 (registry `ustc`)
+#30 31.50   Downloaded zerotrie v0.2.4 (registry `ustc`)
+#30 31.52   Downloaded winnow v1.0.3 (registry `ustc`)
+#30 31.53   Downloaded zerovec v0.11.6 (registry `ustc`)
+#30 31.54   Downloaded zune-core v0.5.1 (registry `ustc`)
+#30 31.55   Downloaded webpki-roots v1.0.7 (registry `ustc`)
+#30 31.56   Downloaded zune-jpeg v0.5.15 (registry `ustc`)
+#30 31.56   Downloaded zip v7.2.0 (registry `ustc`)
+#30 31.57   Downloaded zip v8.6.0 (registry `ustc`)
+#30 31.58   Downloaded winnow v0.7.15 (registry `ustc`)
+#30 31.59   Downloaded zlib-rs v0.6.3 (registry `ustc`)
+#30 31.60   Downloaded zerocopy v0.8.48 (registry `ustc`)
+#30 31.84   Downloaded zstd-sys v2.0.16+zstd.1.5.7 (registry `ustc`)
+#30 32.12    Compiling proc-macro2 v1.0.106
+#30 32.12    Compiling quote v1.0.45
+#30 32.12    Compiling unicode-ident v1.0.24
+#30 32.12    Compiling libc v0.2.186
+#30 32.12    Compiling cfg-if v1.0.4
+#30 32.12    Compiling autocfg v1.5.1
+#30 32.12    Compiling log v0.4.29
+#30 32.13    Compiling typenum v1.20.0
+#30 32.13    Compiling serde_core v1.0.228
+#30 32.15    Compiling version_check v0.9.5
+#30 32.15    Compiling memchr v2.8.0
+#30 32.15    Compiling smallvec v1.15.1
+#30 32.15    Compiling shlex v1.3.0
+#30 32.18    Compiling find-msvc-tools v0.1.9
+#30 32.30    Compiling itoa v1.0.18
+#30 32.43    Compiling bitflags v2.11.1
+#30 32.98    Compiling stable_deref_trait v1.2.1
+#30 32.99    Compiling icu_normalizer_data v2.2.0
+#30 32.99    Compiling siphasher v1.0.3
+#30 33.03    Compiling icu_properties_data v2.2.0
+#30 33.13    Compiling zmij v1.0.21
+#30 33.28    Compiling phf_shared v0.13.1
+#30 33.29    Compiling pin-project-lite v0.2.17
+#30 33.30    Compiling zerocopy v0.8.48
+#30 33.38    Compiling bytemuck v1.25.0
+#30 33.75    Compiling fastrand v2.4.1
+#30 33.96    Compiling bytes v1.11.1
+#30 34.03    Compiling phf_generator v0.13.1
+#30 34.03    Compiling futures-core v0.3.32
+#30 34.10    Compiling generic-array v0.14.7
+#30 34.32    Compiling once_cell v1.21.4
+#30 34.57    Compiling strength_reduce v0.2.4
+#30 34.68    Compiling pkg-config v0.3.33
+#30 34.87    Compiling num-traits v0.2.19
+#30 34.96    Compiling futures-sink v0.3.32
+#30 35.05    Compiling serde v1.0.228
+#30 35.51    Compiling lazy_static v1.5.0
+#30 35.60    Compiling http v1.4.0
+#30 35.85    Compiling crypto-common v0.1.7
+#30 36.07    Compiling syn v2.0.117
+#30 36.10    Compiling futures-channel v0.3.32
+#30 36.43    Compiling jobserver v0.1.34
+#30 36.61    Compiling zeroize v1.8.2
+#30 36.61    Compiling parking_lot_core v0.9.12
+#30 36.74    Compiling num-integer v0.1.46
+#30 36.78    Compiling num-complex v0.4.6
+#30 37.09    Compiling errno v0.3.14
+#30 37.17    Compiling phf_codegen v0.13.1
+#30 37.43    Compiling cc v1.2.62
+#30 37.50    Compiling transpose v0.2.3
+#30 37.58    Compiling primal-check v0.3.4
+#30 37.68    Compiling futures-io v0.3.32
+#30 37.78    Compiling futures-task v0.3.32
+#30 38.04    Compiling litemap v0.8.2
+#30 38.12    Compiling rustfft v6.4.1
+#30 38.13    Compiling thiserror v2.0.18
+#30 38.18    Compiling writeable v0.6.3
+#30 38.41    Compiling slab v0.4.12
+#30 38.46    Compiling signal-hook-registry v1.4.8
+#30 38.60    Compiling mio v1.2.0
+#30 38.69    Compiling socket2 v0.6.3
+#30 38.92    Compiling block-buffer v0.10.4
+#30 39.21    Compiling hybrid-array v0.4.12
+#30 39.86    Compiling httparse v1.10.1
+#30 39.99    Compiling utf8_iter v1.0.4
+#30 40.11    Compiling crc32fast v1.5.0
+#30 40.45    Compiling thiserror v1.0.69
+#30 40.51    Compiling simd-adler32 v0.3.9
+#30 40.78    Compiling digest v0.10.7
+#30 41.07    Compiling scopeguard v1.2.0
+#30 41.11    Compiling regex-lite v0.1.9
+#30 41.23    Compiling cpufeatures v0.2.17
+#30 41.38    Compiling new_debug_unreachable v1.0.6
+#30 41.46    Compiling lock_api v0.4.14
+#30 41.60    Compiling getrandom v0.2.17
+#30 41.64    Compiling string_cache_codegen v0.6.1
+#30 42.02    Compiling serde_json v1.0.150
+#30 42.05    Compiling precomputed-hash v0.1.1
+#30 42.10    Compiling same-file v1.0.6
+#30 42.15    Compiling adler2 v2.0.1
+#30 42.17    Compiling getrandom v0.3.4
+#30 42.20    Compiling winnow v1.0.3
+#30 42.41    Compiling miniz_oxide v0.8.9
+#30 42.41    Compiling walkdir v2.5.0
+#30 42.43    Compiling parking_lot v0.12.5
+#30 42.62    Compiling serde_spanned v1.1.1
+#30 42.92    Compiling crypto-common v0.2.2
+#30 43.24    Compiling toml_parser v1.1.2+spec-1.1.0
+#30 43.51    Compiling strsim v0.11.1
+#30 44.24    Compiling toml_writer v1.1.1+spec-1.1.0
+#30 44.28    Compiling percent-encoding v2.3.2
+#30 44.29    Compiling zlib-rs v0.6.3
+#30 44.94    Compiling ident_case v1.0.1
+#30 45.21    Compiling string_cache v0.9.0
+#30 45.61    Compiling ppv-lite86 v0.2.21
+#30 45.75    Compiling web_atoms v0.2.4
+#30 45.82    Compiling semver v1.0.28
+#30 45.83    Compiling http-body v1.0.1
+#30 45.99    Compiling tracing-core v0.1.36
+#30 46.76    Compiling utf-8 v0.7.6
+#30 46.80    Compiling cmov v0.5.3
+#30 46.88    Compiling typeid v1.0.3
+#30 47.00    Compiling dtoa v1.0.11
+#30 47.05    Compiling tendril v0.5.0
+#30 47.22    Compiling dtoa-short v0.3.5
+#30 47.33    Compiling ctutils v0.4.2
+#30 47.45    Compiling form_urlencoded v1.2.2
+#30 47.56    Compiling rand_core v0.9.5
+#30 47.90    Compiling toml_datetime v1.1.1+spec-1.1.0
+#30 47.98    Compiling uuid v1.23.1
+#30 48.01    Compiling block-buffer v0.12.0
+#30 48.24    Compiling selectors v0.36.1
+#30 48.37    Compiling block-padding v0.3.3
+#30 48.38    Compiling aho-corasick v1.1.4
+#30 48.63    Compiling synstructure v0.13.2
+#30 48.91    Compiling darling_core v0.23.0
+#30 49.47    Compiling indexmap v1.9.3
+#30 49.60    Compiling encoding_rs v0.8.35
+#30 50.14    Compiling unic-common v0.9.0
+#30 50.45    Compiling flate2 v1.1.9
+#30 50.75    Compiling const-oid v0.10.2
+#30 50.76    Compiling powerfmt v0.2.0
+#30 51.73    Compiling anyhow v1.0.102
+#30 52.06    Compiling regex-syntax v0.8.10
+#30 52.29    Compiling mime v0.3.17
+#30 53.18    Compiling unic-char-range v0.9.0
+#30 53.46    Compiling camino v1.2.2
+#30 53.52    Compiling tower-service v0.3.3
+#30 53.64    Compiling erased-serde v0.4.10
+#30 54.19    Compiling unic-char-property v0.9.0
+#30 54.47    Compiling deranged v0.5.8
+#30 54.56    Compiling digest v0.11.3
+#30 54.81    Compiling unic-ucd-version v0.9.0
+#30 54.91    Compiling inout v0.1.4
+#30 55.14    Compiling toml v1.1.2+spec-1.1.0
+#30 55.15    Compiling serde_derive_internals v0.29.1
+#30 55.19    Compiling rand_chacha v0.9.0
+#30 56.51    Compiling symphonia-core v0.6.0
+#30 56.85    Compiling zstd-sys v2.0.16+zstd.1.5.7
+#30 57.72    Compiling ring v0.17.14
+#30 58.13    Compiling sha1 v0.10.6
+#30 58.16    Compiling sync_wrapper v1.0.2
+#30 58.39    Compiling servo_arc v0.4.3
+#30 58.43    Compiling num-conv v0.2.2
+#30 58.80    Compiling bit-vec v0.8.0
+#30 58.86    Compiling tower-layer v0.3.3
+#30 59.27    Compiling regex-automata v0.4.14
+#30 59.55    Compiling schemars v0.8.22
+#30 59.58    Compiling equivalent v1.0.2
+#30 59.73    Compiling atomic-waker v1.1.2
+#30 59.90    Compiling byteorder v1.5.0
+#30 60.17    Compiling fnv v1.0.7
+#30 60.35    Compiling data-encoding v2.11.0
+#30 60.41    Compiling rustc-hash v2.1.2
+#30 60.83    Compiling httpdate v1.0.3
+#30 60.86    Compiling hashbrown v0.17.1
+#30 61.71    Compiling unicase v2.9.0
+#30 62.06    Compiling time-core v0.1.8
+#30 62.55    Compiling try-lock v0.2.5
+#30 63.05    Compiling hashbrown v0.12.3
+#30 63.14    Compiling indexmap v2.14.0
+#30 64.96    Compiling symphonia-metadata v0.6.0
+#30 65.14    Compiling want v0.3.1
+#30 65.51    Compiling time v0.3.47
+#30 66.70    Compiling mime_guess v2.0.5
+#30 67.73    Compiling symphonia-common v0.6.0
+#30 67.96    Compiling regex v1.12.3
+#30 68.09    Compiling cfb v0.7.3
+#30 69.10    Compiling bit-set v0.8.0
+#30 71.08    Compiling rand v0.9.4
+#30 72.18    Compiling cipher v0.4.4
+#30 72.67    Compiling unic-ucd-ident v0.9.0
+#30 72.69    Compiling rustc_version v0.4.1
+#30 72.84    Compiling http-body-util v0.1.3
+#30 73.24    Compiling rand_core v0.6.4
+#30 73.37    Compiling toml_datetime v0.7.5+spec-1.1.0
+#30 73.39    Compiling rustls-pki-types v1.14.1
+#30 73.59    Compiling quick-xml v0.39.4
+#30 74.00    Compiling nasm-rs v0.3.2
+#30 74.09    Compiling ahash v0.8.12
+#30 74.20    Compiling option-ext v0.2.0
+#30 74.37    Compiling foldhash v0.2.0
+#30 74.92    Compiling tinyvec_macros v0.1.1
+#30 74.98    Compiling base64 v0.22.1
+#30 75.81    Compiling cpufeatures v0.3.0
+#30 75.85    Compiling ctor-proc-macro v0.0.7
+#30 76.27    Compiling winnow v0.7.15
+#30 77.42    Compiling dunce v1.0.5
+#30 78.23    Compiling dyn-clone v1.0.20
+#30 78.56    Compiling ctor v0.8.0
+#30 78.74    Compiling openh264-sys2 v0.9.6
+#30 80.43    Compiling toml v0.9.12+spec-1.1.0
+#30 80.88    Compiling tinyvec v1.11.0
+#30 82.01    Compiling dirs-sys v0.5.0
+#30 83.06    Compiling rand_chacha v0.3.1
+#30 83.16    Compiling embed-resource v3.0.9
+#30 83.29    Compiling serde-untagged v0.1.9
+#30 84.00    Compiling infer v0.19.0
+#30 84.79    Compiling audiopus_sys v0.1.8
+#30 85.22    Compiling rustversion v1.0.22
+#30 86.38    Compiling zstd-safe v7.2.4
+#30 86.46    Compiling vcpkg v0.2.15
+#30 86.56    Compiling bumpalo v3.20.3
+#30 86.73    Compiling ipnet v2.12.0
+#30 86.78    Compiling glob v0.3.3
+#30 87.21    Compiling untrusted v0.9.0
+#30 87.40    Compiling weezl v0.1.12
+#30 87.70    Compiling zopfli v0.8.3
+#30 89.74    Compiling tauri-winres v0.3.6
+#30 89.85    Compiling rand v0.8.6
+#30 90.69    Compiling dirs v6.0.0
+#30 90.95    Compiling unicode-normalization v0.1.25
+#30 91.73    Compiling inout v0.2.2
+#30 91.89    Compiling safe_arch v0.7.4
+#30 91.93    Compiling multer v3.1.0
+#30 92.15    Compiling nom v8.0.0
+#30 92.37    Compiling http-range-header v0.4.2
+#30 92.42    Compiling libsqlite3-sys v0.30.1
+#30 93.01    Compiling heck v0.5.0
+#30 93.06    Compiling dasp_sample v0.11.0
+#30 93.35    Compiling either v1.16.0
+#30 93.67    Compiling getrandom v0.4.2
+#30 93.69    Compiling ebur128 v0.1.10
+#30 93.69    Compiling unicode-bidi v0.3.18
+#30 93.87    Compiling unicode-properties v0.1.4
+#30 94.02    Compiling bytecount v0.6.9
+#30 94.16    Compiling rustls v0.23.40
+#30 94.35    Compiling typed-path v0.12.3
+#30 94.38    Compiling extended v0.1.0
+#30 94.59    Compiling pom v1.1.0
+#30 94.62    Compiling symphonia-format-riff v0.6.0
+#30 95.63    Compiling stringprep v0.1.5
+#30 96.35    Compiling dasp_frame v0.11.0
+#30 96.51    Compiling wide v0.7.33
+#30 96.55    Compiling cipher v0.5.2
+#30 96.81    Compiling rustls-webpki v0.103.13
+#30 96.85    Compiling hashbrown v0.14.5
+#30 98.04    Compiling sha2 v0.11.0
+#30 99.44    Compiling nom_locate v5.0.0
+#30 99.60    Compiling webpki-roots v1.0.7
+#30 99.63    Compiling aes v0.8.4
+#30 99.78    Compiling ecb v0.1.2
+#30 99.93    Compiling cbc v0.1.2
+#30 100.1    Compiling symphonia-format-ogg v0.6.0
+#30 100.1    Compiling symphonia-codec-alac v0.6.0
+#30 100.8    Compiling symphonia-bundle-flac v0.6.0
+#30 101.1    Compiling symphonia-codec-vorbis v0.6.0
+#30 101.4    Compiling symphonia-codec-aac v0.6.0
+#30 101.4    Compiling symphonia-format-mkv v0.6.0
+#30 101.8    Compiling symphonia-codec-pcm v0.6.0
+#30 101.9    Compiling symphonia-codec-adpcm v0.6.0
+#30 102.3    Compiling symphonia-bundle-mp3 v0.6.0
+#30 102.8    Compiling hmac v0.13.0
+#30 103.1    Compiling sha2 v0.10.9
+#30 103.5    Compiling md-5 v0.10.6
+#30 103.7    Compiling fdeflate v0.3.7
+#30 103.8    Compiling zerofrom-derive v0.1.7
+#30 105.6    Compiling yoke-derive v0.8.2
+#30 105.6    Compiling zerovec-derive v0.11.3
+#30 105.7    Compiling displaydoc v0.2.5
+#30 106.4    Compiling serde_derive v1.0.228
+#30 106.7    Compiling futures-macro v0.3.32
+#30 107.2    Compiling thiserror-impl v2.0.18
+#30 108.2    Compiling tokio-macros v2.7.0
+#30 110.9    Compiling thiserror-impl v1.0.69
+#30 110.9    Compiling phf_macros v0.13.1
+#30 116.0    Compiling tracing-attributes v0.1.31
+#30 118.5    Compiling cssparser-macros v0.6.1
+#30 121.1    Compiling tokio v1.52.3
+#30 121.3    Compiling phf v0.13.1
+#30 121.4    Compiling futures-util v0.3.32
+#30 123.1    Compiling derive_more-impl v2.1.1
+#30 123.4    Compiling darling_macro v0.23.0
+#30 123.7    Compiling cssparser v0.36.0
+#30 126.4    Compiling zerofrom v0.1.8
+#30 126.7    Compiling markup5ever v0.38.0
+#30 126.9    Compiling schemars_derive v0.8.22
+#30 127.0    Compiling html5ever v0.38.0
+#30 127.3    Compiling async-trait v0.1.89
+#30 127.9    Compiling tungstenite v0.24.0
+#30 127.9    Compiling yoke v0.8.2
+#30 128.2    Compiling zerovec v0.11.6
+#30 128.5    Compiling zerotrie v0.2.4
+#30 129.7    Compiling tinystr v0.8.3
+#30 130.3    Compiling potential_utf v0.1.5
+#30 130.4    Compiling icu_locale_core v2.2.0
+#30 130.6    Compiling icu_collections v2.2.0
+#30 132.2    Compiling darling v0.23.0
+#30 132.3    Compiling serde_with_macros v3.20.0
+#30 133.0    Compiling icu_provider v2.2.0
+#30 134.3    Compiling icu_properties v2.2.0
+#30 134.8    Compiling icu_normalizer v2.2.0
+#30 136.7    Compiling derive_more v2.1.1
+#30 136.9    Compiling idna_adapter v1.2.2
+#30 137.1    Compiling idna v1.1.0
+#30 139.6    Compiling url v2.5.8
+#30 139.7    Compiling jsonptr v0.6.3
+#30 141.4    Compiling cargo-platform v0.1.9
+#30 141.7    Compiling urlpattern v0.3.0
+#30 142.3    Compiling cargo_metadata v0.19.2
+#30 142.4    Compiling json-patch v3.0.1
+#30 144.5    Compiling dom_query v0.27.0
+#30 144.6    Compiling tracing v0.1.44
+#30 145.0    Compiling plist v1.9.0
+#30 145.4    Compiling tower v0.5.3
+#30 145.6    Compiling hyper v1.9.0
+#30 146.6    Compiling chromiumoxide_types v0.9.1
+#30 147.2    Compiling cargo_toml v0.22.3
+#30 147.3    Compiling tokio-util v0.7.18
+#30 147.7    Compiling hyper-util v0.1.20
+#30 148.7    Compiling tower-http v0.6.11
+#30 149.1    Compiling chromiumoxide_pdl v0.9.1
+#30 149.7    Compiling tungstenite v0.28.0
+#30 151.6    Compiling serde_with v3.20.0
+#30 151.6    Compiling futures-executor v0.3.32
+#30 152.7    Compiling ryu v1.0.23
+#30 152.7    Compiling byteorder-lite v0.1.0
+#30 153.1    Compiling cpubits v0.1.1
+#30 153.1    Compiling bitflags v1.3.2
+#30 153.2    Compiling spin v0.9.8
+#30 153.3    Compiling pxfm v0.1.29
+#30 153.4    Compiling debug_unsafe v0.1.4
+#30 153.5    Compiling libbz2-rs-sys v0.2.5
+#30 153.6    Compiling subtle v2.6.1
+#30 153.8    Compiling rangemap v1.7.1
+#30 154.0    Compiling color_quant v1.1.0
+#30 154.3    Compiling zune-core v0.5.1
+#30 154.6    Compiling tauri-utils v2.9.2
+#30 154.8    Compiling pinyin v0.10.0
+#30 154.8    Compiling ttf-parser v0.25.1
+#30 155.0    Compiling quick-error v2.0.1
+#30 155.1    Compiling image-webp v0.2.4
+#30 157.4    Compiling zune-jpeg v0.5.15
+#30 157.5    Compiling bzip2 v0.6.1
+#30 157.9    Compiling gif v0.14.2
+#30 158.0    Compiling moxcms v0.8.1
+#30 159.9    Compiling lopdf v0.38.0
+#30 160.1    Compiling axum-core v0.4.5
+#30 161.1    Compiling dirs-sys v0.4.1
+#30 161.7    Compiling atoi_simd v0.17.0
+#30 162.4    Compiling aes v0.9.0
+#30 164.0    Compiling serde_urlencoded v0.7.1
+#30 164.3    Compiling futures v0.3.32
+#30 164.3    Compiling reqwest v0.13.3
+#30 164.5    Compiling chromiumoxide_cdp v0.9.1
+#30 165.6    Compiling async-tungstenite v0.32.1
+#30 166.3    Compiling tokio-tungstenite v0.24.0
+#30 166.8    Compiling zstd v0.13.3
+#30 167.0    Compiling png v0.18.1
+#30 167.9    Compiling symphonia v0.6.0
+#30 169.3    Compiling pbkdf2 v0.13.0
+#30 169.4    Compiling lzma-rust2 v0.16.3
+#30 170.1    Compiling webpki-roots v0.26.11
+#30 170.3    Compiling hashlink v0.9.1
+#30 171.0    Compiling zip v7.2.0
+#30 172.7    Compiling type1-encoding-parser v0.1.1
+#30 173.5    Compiling adobe-cmap-parser v0.4.1
+#30 175.7    Compiling tauri-build v2.6.2
+#30 175.9    Compiling sha1 v0.11.0
+#30 177.0    Compiling codepage v0.1.2
+#30 177.1    Compiling serde_path_to_error v0.1.20
+#30 177.4    Compiling audiopus v0.2.0
+#30 177.6    Compiling include_dir_macros v0.7.4
+#30 178.4    Compiling euclid v0.20.14
+#30 178.6    Compiling which v8.0.3
+#30 179.3    Compiling cff-parser v0.1.0
+#30 179.4    Compiling constant_time_eq v0.4.2
+#30 179.4    Compiling fallible-streaming-iterator v0.1.9
+#30 179.5    Compiling deflate64 v0.1.12
+#30 179.6    Compiling iana-time-zone v0.1.65
+#30 179.7    Compiling ppmd-rust v1.4.0
+#30 180.5    Compiling futures-timer v3.0.4
+#30 180.6    Compiling postscript v0.14.1
+#30 180.7    Compiling fallible-iterator v0.3.0
+#30 180.9    Compiling matchit v0.7.3
+#30 180.9    Compiling fast-float2 v0.2.3
+#30 181.3    Compiling calamine v0.35.0
+#30 181.5    Compiling axum v0.7.9
+#30 182.1    Compiling pdf-extract v0.10.0
+#30 182.3    Compiling zip v8.6.0
+#30 182.9    Compiling chrono v0.4.44
+#30 187.8    Compiling include_dir v0.7.4
+#30 188.6    Compiling ureq v2.12.1
+#30 189.4    Compiling image v0.25.10
+#30 190.3    Compiling directories v5.0.1
+#30 191.1    Compiling polaris-core v0.2.2 (/build/src-tauri/crates/polaris-core)
+#30 192.1    Compiling qrcode v0.14.1
+#30 201.9    Compiling openh264 v0.9.3
+#30 203.5    Compiling polaris-forge-codec v0.1.0 (/build/src-tauri/crates/forge-codec)
+#30 204.0 warning: unused variable: `cfg`
+#30 204.0   --> crates/forge-codec/src/encoder.rs:52:16
+#30 204.0    |
+#30 204.0 52 |     pub fn new(cfg: EncodeConfig) -> Result<Self> {
+#30 204.0    |                ^^^ help: if this is intentional, prefix it with an underscore: `_cfg`
+#30 204.0    |
+#30 204.0    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+#30 204.0 
+#30 204.8 warning: `polaris-forge-codec` (lib) generated 1 warning (run `cargo fix --lib -p polaris-forge-codec` to apply 1 suggestion)
+#30 212.0    Compiling rusqlite v0.32.1
+#30 213.6    Compiling polaris-app v1.3.1 (/build/src-tauri)
+#30 241.1    Compiling chromiumoxide v0.9.1
+#30 284.3 warning: variable does not need to be mutable
+#30 284.3     --> src/kb.rs:2788:9
+#30 284.3      |
+#30 284.3 2788 |     let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
+#30 284.3      |         ----^^^^
+#30 284.3      |         |
+#30 284.3      |         help: remove this `mut`
+#30 284.3      |
+#30 284.3      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+#30 284.3 
+#30 285.0 warning: constant `NODE_INSTALL_SCRIPT` is never used
+#30 285.0     --> src/doctor.rs:1171:7
+#30 285.0      |
+#30 285.0 1171 | const NODE_INSTALL_SCRIPT: &str = r#"
+#30 285.0      |       ^^^^^^^^^^^^^^^^^^^
+#30 285.0      |
+#30 285.0      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+#30 285.0 
+#30 285.0 warning: function `synth_linux_espeak` is never used
+#30 285.0    --> src/forge_tts.rs:265:4
+#30 285.0     |
+#30 285.0 265 | fn synth_linux_espeak(text: &str, out_mp3: &str) -> Result<Value, String> {
+#30 285.0     |    ^^^^^^^^^^^^^^^^^^
+#30 285.0 
+#30 285.0 warning: constant `CODE_EXTS` is never used
+#30 285.0    --> src/fable/inventory.rs:114:18
+#30 285.0     |
+#30 285.0 114 | pub(crate) const CODE_EXTS: &[&str] = &[
+#30 285.0     |                  ^^^^^^^^^
+#30 285.0 
+#30 285.0 warning: function `exts_for_lang` is never used
+#30 285.0    --> src/fable/inventory.rs:124:15
+#30 285.0     |
+#30 285.0 124 | pub(crate) fn exts_for_lang(label: &str) -> Vec<&'static str> {
+#30 285.0     |               ^^^^^^^^^^^^^
+#30 285.0 
+#30 285.0 warning: function `kind_for_media_lang` is never used
+#30 285.0    --> src/fable/inventory.rs:129:15
+#30 285.0     |
+#30 285.0 129 | pub(crate) fn kind_for_media_lang(label: &str) -> Option<&'static str> {
+#30 285.0     |               ^^^^^^^^^^^^^^^^^^^
+#30 285.0 
+#30 303.3 warning: `polaris-app` (lib) generated 6 warnings (run `cargo fix --lib -p polaris-app` to apply 1 suggestion)
+#30 306.0     Finished `release-fast` profile [optimized] target(s) in 5m 05s
+#30 DONE 306.2s
+
+#33 [web 7/9] COPY public ./public
+#33 CACHED
+
+#34 [web 3/9] RUN npm config set registry https://registry.npmmirror.com
+#34 CACHED
+
+#35 [web 8/9] COPY src ./src
+#35 CACHED
+
+#36 [web 6/9] COPY tsconfig.json tsconfig.node.json vite.config.ts index.html ./
+#36 CACHED
+
+#37 [web 2/9] WORKDIR /app
+#37 CACHED
+
+#38 [web 4/9] COPY package.json package-lock.json ./
+#38 CACHED
+
+#39 [web 5/9] RUN npm ci
+#39 CACHED
+
+#40 [web 9/9] RUN npx vite build
+#40 CACHED
+
+#41 [runtime 17/25] COPY --from=server /usr/local/bin/polaris-server /usr/local/bin/polaris-server
+#41 DONE 0.1s
+
+#42 [runtime 18/25] COPY --from=server /usr/local/bin/polaris-forge  /usr/local/bin/polaris-forge
+#42 DONE 0.1s
+
+#43 [runtime 19/25] COPY --from=web    /app/dist /srv/web
+#43 DONE 0.3s
+
+#44 [runtime 20/25] COPY src-tauri/resources /app/resources
+#44 DONE 0.1s
+
+#45 [runtime 21/25] COPY src-tauri/assets/feishu_bridge.mjs          /opt/feishu-bridge/bridge.mjs
+#45 DONE 0.1s
+
+#46 [runtime 22/25] COPY src-tauri/assets/feishu_bridge_package.json /opt/feishu-bridge/package.json
+#46 DONE 0.1s
+
+#47 [runtime 23/25] RUN cd /opt/feishu-bridge     && npm install --no-audit --no-fund --registry=https://registry.npmmirror.com     && npm cache clean --force
+#47 13.69 
+#47 13.69 added 48 packages in 13s
+#47 13.77 npm warn using --force Recommended protections disabled.
+#47 DONE 14.0s
+
+#48 [runtime 24/25] COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+#48 DONE 0.1s
+
+#49 [runtime 25/25] RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh     && chmod +x /usr/local/bin/docker-entrypoint.sh
+#49 DONE 0.3s
+
+#50 exporting to image
+#50 exporting layers
+#50 exporting layers 2.9s done
+#50 exporting manifest sha256:a7ecb28e1ec1f27b1505c0d5a358db0725554fb3ed5093892b91977215bad41c 0.0s done
+#50 exporting config sha256:f83dee56b77f96d3a87627f6e1d37acbfe1f39db48d4a4533a12e5ddf9b354f4 0.0s done
+#50 exporting attestation manifest sha256:43b387a359688479a70f7b2973141820ba140df00f22a9d7429b5d2fae5bf97e
+#50 exporting attestation manifest sha256:43b387a359688479a70f7b2973141820ba140df00f22a9d7429b5d2fae5bf97e 0.1s done
+#50 exporting manifest list sha256:b69c050c012002eb43d25519f1edaa003304839320ffe5db1d994bdc21012936 0.0s done
+#50 naming to docker.io/library/polaris-web:stress
+#50 naming to docker.io/library/polaris-web:stress done
+#50 unpacking to docker.io/library/polaris-web:stress
+#50 unpacking to docker.io/library/polaris-web:stress 1.0s done
+#50 DONE 4.2s

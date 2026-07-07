@@ -631,15 +631,8 @@ const sortedProjects = computed(() => {
 
 <style scoped>
 .sb {
-  /* 仿 Codex：比主区略深一档的暖米，无分割线靠色差分区；中部透一点点更亮的暖光 */
-  background: linear-gradient(
-    180deg,
-    var(--bg-side) 0%,
-    var(--bg-side) 32%,
-    var(--bg-side-mid) 50%,
-    var(--bg-side) 68%,
-    var(--bg-side) 100%
-  );
+  /* 低视觉污染稿：比主区略深一档的中性灰白, 纯平无渐变, 无分割线靠色差分区 */
+  background: var(--bg-side);
   border-right: none;
   display: flex;
   flex-direction: column;

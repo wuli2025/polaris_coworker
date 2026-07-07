@@ -142,7 +142,7 @@ headless_chrome = { version = "1.0", default-features = false, optional = true }
 
 # 原生标题栏染色（titlebar.rs）：Win11 DwmSetWindowAttribute 让标题栏随主题与框面同色
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_NetworkManagement_WNet", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_NetworkManagement_WNet", "Win32_System_SystemInformation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
 
 [features]
 default = ["desktop"]

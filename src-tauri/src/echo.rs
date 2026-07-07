@@ -307,9 +307,45 @@ pub fn echo_distill_conversation(app: AppHandle, conv_id: String) -> Result<(), 
     Ok(())
 }
 
-/// 今天未忽略的晨报建议(对话框顶部展示用)。
+/// 「清空上下文」(对话框右下角): 先快照文字稿 → 清空消息(立即生效) → 后台按做梦规则
+/// 把快照蒸馏入库(反馈线/稳定偏好/项目级决策进 memory/, 寒暄与一次性细节自动 SKIP)。
+/// 返回清掉的消息数。正在做梦/沉淀时拒绝并**不清空** —— 否则快照没人消费, 有价值内容白丢。
 #[cfg_attr(feature = "desktop", tauri::command)]
+pub fn echo_clear_context(app: AppHandle, conv_id: String) -> Result<usize, String> {
+    if DREAMING.swap(true, Ordering::SeqCst) {
+        return Err("正在沉淀记忆中, 请稍候几秒再清空".into());
+    }
+    // 先快照: 清空之后 transcript_of 就取不到内容了
+    let snapshot = crate::conv::transcript_of(&conv_id);
+    let removed = crate::conv::clear_messages(&conv_id);
+    match snapshot {
+        Some(t) => {
+            std::thread::spawn(move || {
+                let result = distill_and_write(&app, std::slice::from_ref(&t));
+                finish_job(&app, result, false);
+            });
+        }
+        None => DREAMING.store(false, Ordering::SeqCst), // 空对话没东西可沉淀
+    }
+    Ok(removed)
+}
+
+/// 今天未忽略的晨报建议(对话框顶部展示用)。
+/// 桌面端 async + spawn_blocking:读 briefing JSON 是磁盘 IO,首帧就会被调到,
+/// 不该同步跑在主线程。server flavor dispatch 本就在 spawn_blocking 中,保持同步直调。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn echo_briefing_today() -> Vec<Suggestion> {
+    tauri::async_runtime::spawn_blocking(echo_briefing_today_sync)
+        .await
+        .unwrap_or_default()
+}
+#[cfg(not(feature = "desktop"))]
 pub fn echo_briefing_today() -> Vec<Suggestion> {
+    echo_briefing_today_sync()
+}
+
+fn echo_briefing_today_sync() -> Vec<Suggestion> {
     read_briefing(&local_day()).into_iter().filter(|s| !s.dismissed).collect()
 }
 

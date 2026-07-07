@@ -28,6 +28,7 @@ import {
   type MorningReport,
   type ReviewComment,
   type TaskCard,
+  type TaskMessage,
 } from "../api";
 
 const USER_KEY = "polaris.collab.user.v1";
@@ -393,20 +394,32 @@ export const useCollabStore = defineStore("collab", () => {
   const checksByTask = ref<Record<number, CheckRun[]>>({});
   /** 当前项目检查档位(code/creative/off;空 = 尚未从任何 checks 响应取到) */
   const checkProfile = ref<string>("");
+  /** 当前项目检查技能 id(空 = 未取到;后端回落默认 project-check-default) */
+  const checkSkill = ref<string>("");
   async function refreshChecks(taskId: number) {
     try {
       const r = await collabApi.checks(taskId);
       checksByTask.value = { ...checksByTask.value, [taskId]: r.runs };
       if (r.profile) checkProfile.value = r.profile;
+      if (r.checkSkill) checkSkill.value = r.checkSkill;
     } catch {
       /* 主机旧版无此端点/网络抖动 → 静默,不打扰看板 */
     }
   }
-  async function setCheckProfile(profile: string) {
+  async function setCheckProfile(profile: string, skill?: string) {
     const pid = currentProjectId.value;
     if (!pid) throw new Error("请先选择项目");
-    await collabApi.checksSetProfile(pid, profile);
-    checkProfile.value = profile;
+    await collabApi.checksSetProfile(pid, profile, skill);
+    if (profile) checkProfile.value = profile; // 空串 = 本次只改技能
+    if (skill !== undefined) checkSkill.value = skill;
+  }
+
+  // ── 任务级对话:最新一条推送(TaskChat 面板 watch 它增量追加) ──
+  const lastTaskMessage = ref<TaskMessage | null>(null);
+  function onTaskMessage(p: unknown) {
+    const m = p as TaskMessage | null;
+    if (m && typeof m.id === "number" && typeof m.task_id === "number")
+      lastTaskMessage.value = m;
   }
 
   // ── 项目动态时间线(项目主页概览 tab) ──
@@ -481,6 +494,7 @@ export const useCollabStore = defineStore("collab", () => {
   let unEsc: (() => void) | null = null;
   let unMorning: (() => void) | null = null;
   let unCheck: (() => void) | null = null;
+  let unMsg: (() => void) | null = null;
   let directWs: WebSocket | null = null;
   let directWsTimer: ReturnType<typeof setTimeout> | null = null;
   let subscribed = false;
@@ -532,6 +546,7 @@ export const useCollabStore = defineStore("collab", () => {
     unEsc = await listen("collab:escalate", onEscalate);
     unMorning = await listen("collab:morning", onMorning);
     unCheck = await listen("collab:check", onCheckEvent);
+    unMsg = await listen("collab:task_message", onTaskMessage);
   }
 
   /** 桌面模式直连远端主机 /ws(带 token),断线 2s 自动重连 */
@@ -555,6 +570,7 @@ export const useCollabStore = defineStore("collab", () => {
           else if (topic === "collab:escalate") onEscalate(payload);
           else if (topic === "collab:morning") onMorning(payload);
           else if (topic === "collab:check") onCheckEvent(payload);
+          else if (topic === "collab:task_message") onTaskMessage(payload);
         } catch {
           /* 忽略坏帧 */
         }
@@ -584,7 +600,8 @@ export const useCollabStore = defineStore("collab", () => {
     unEsc?.();
     unMorning?.();
     unCheck?.();
-    unTask = unEsc = unMorning = unCheck = null;
+    unMsg?.();
+    unTask = unEsc = unMorning = unCheck = unMsg = null;
     // 登出/卸载时清掉挂起的去抖定时器,防 teardown 后仍触发一轮无主刷新
     if (taskRefreshTimer) {
       clearTimeout(taskRefreshTimer);
@@ -655,8 +672,11 @@ export const useCollabStore = defineStore("collab", () => {
     // 检查工作流
     checksByTask,
     checkProfile,
+    checkSkill,
     refreshChecks,
     setCheckProfile,
+    // 任务级对话
+    lastTaskMessage,
     createTask,
     claim,
     submit,

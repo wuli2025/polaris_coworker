@@ -100,8 +100,9 @@ export async function checkForUpdate(): Promise<void> {
   autoChecked = true;
   await ensureCurrentVersion();
   await ensureSubscribed();
-  // 0s 立即一次，随后 4s/12s/30s 退避重试（覆盖冷启动到网络就绪的常见窗口）。
-  const delays = [0, 4000, 12000, 30000];
+  // 首查错峰推迟 5s（避开首帧 IPC 突发——启动检查更新不抢开屏后的第一波命令），
+  // 随后 4s/12s/30s 退避重试（覆盖冷启动到网络就绪的常见窗口）。
+  const delays = [5000, 4000, 12000, 30000];
   for (const wait of delays) {
     if (wait) await new Promise((r) => setTimeout(r, wait));
     try {

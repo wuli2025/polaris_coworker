@@ -16,7 +16,7 @@ import {
   UsersRound,
   X,
 } from "@lucide/vue";
-import { isTauri } from "../../tauri";
+import { invoke, isTauri } from "../../tauri";
 import { parseShareCode } from "./api";
 import { useCollabStore } from "./stores/collab";
 import TaskBoard from "./TaskBoard.vue";
@@ -37,6 +37,36 @@ onMounted(() => {
       }
     });
   }
+});
+
+// ── P2P 隧道状态徽标(桌面版:轮询 collab_tunnel_status,断线/重连一目了然) ──
+interface TunnelStatus {
+  running: boolean;
+  state?: string; // stopped|connecting|connected|reconnecting
+  latency_ms?: number | null;
+  last_error?: string;
+  connections?: number;
+}
+const tunnel = ref<TunnelStatus | null>(null);
+const TUNNEL_LABEL: Record<string, string> = {
+  connected: "隧道已连",
+  connecting: "隧道连接中",
+  reconnecting: "隧道重连中",
+  stopped: "隧道未启",
+};
+function pollTunnel() {
+  if (!isTauri) return;
+  void invoke<TunnelStatus>("collab_tunnel_status")
+    .then((s) => {
+      tunnel.value = s ?? null;
+    })
+    .catch(() => {
+      tunnel.value = null;
+    });
+}
+onMounted(() => {
+  pollTunnel();
+  if (isTauri) setInterval(pollTunnel, 10_000);
 });
 
 // ── 一键当主机(桌面版):本机起协作服务 → 直接进初始化/登录 ──
@@ -372,6 +402,19 @@ const MAIN_TABS: { key: AuthTab; label: string }[] = [
       <aside class="left">
         <div class="me">
           <span class="me-name">{{ displayName }}</span>
+          <span
+            v-if="tunnel?.running"
+            class="tun-badge"
+            :class="tunnel.state || 'connected'"
+            :title="
+              (TUNNEL_LABEL[tunnel.state || ''] || '隧道') +
+              (tunnel.latency_ms != null ? ` · ${tunnel.latency_ms}ms` : '') +
+              (tunnel.last_error ? ` · ${tunnel.last_error}` : '')
+            "
+          >
+            <Plug :size="10" :stroke-width="2" />
+            {{ tunnel.latency_ms != null ? `${tunnel.latency_ms}ms` : (TUNNEL_LABEL[tunnel.state || ""] || "P2P") }}
+          </span>
           <span class="me-role" :class="{ owner: collab.isOwner }">
             <Crown v-if="collab.isOwner" :size="11" :stroke-width="2" />
             {{ collab.isOwner ? "管理者" : "成员" }}
@@ -664,6 +707,15 @@ const MAIN_TABS: { key: AuthTab; label: string }[] = [
   background: var(--selection-bg); padding: 2px 7px; border-radius: 20px; flex-shrink: 0;
 }
 .me-role.owner { color: #b8860b; background: color-mix(in srgb, #b8860b 12%, transparent); }
+.tun-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 10.5px; padding: 2px 7px; border-radius: 20px; flex-shrink: 0;
+  color: #15803d; background: color-mix(in srgb, #22c55e 14%, transparent);
+}
+.tun-badge.connecting, .tun-badge.reconnecting {
+  color: #b45309; background: color-mix(in srgb, #f59e0b 14%, transparent);
+}
+.tun-badge.stopped { color: var(--muted); background: var(--selection-bg); }
 .me .icon-btn { margin-left: auto; }
 .icon-btn {
   border: none; background: none; color: var(--muted); cursor: pointer;

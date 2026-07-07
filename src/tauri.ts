@@ -1134,6 +1134,8 @@ export interface Skill {
   installed?: boolean;
   /** 是否可删除（物理存在于用户目录，可卸载） */
   removable?: boolean;
+  /** 市场分组（按人群/用途），如「开发编程」「财务会计」 */
+  category?: string;
 }
 
 export const skills = {
@@ -1300,6 +1302,10 @@ export const convApi = {
   /** 回声层:把单条对话立刻沉淀为记忆(后台跑,进度走 echo:dream 事件) */
   distillConversation: (convId: string) =>
     invoke<void>("echo_distill_conversation", { convId }),
+  /** 清空上下文:清空该对话全部消息(对话保留);旧内容后台自动按做梦规则沉淀入记忆库。
+   *  返回清掉的消息数。正在沉淀时后端会拒绝(不清空),报错文案可直接展示。 */
+  clearContext: (convId: string) =>
+    invoke<number>("echo_clear_context", { convId }),
   renameConversation: (conversationId: string, title: string) =>
     invoke<void>("conv_rename_conversation", { conversationId, title }),
   getMessages: async (conversationId: string) =>
@@ -1543,6 +1549,8 @@ export interface CodexStatus {
   authPath: string;
 }
 export interface CodexDeviceLogin {
+  /** auto = 回环一键授权(轮询 codexLoginPoll); device = 设备码流程(轮询 codexPollLogin) */
+  mode: "auto" | "device";
   deviceCode: string;
   userCode: string;
   verificationUri: string;
@@ -1551,6 +1559,11 @@ export interface CodexDeviceLogin {
 }
 export interface CodexPollResult {
   status: "pending" | "ok";
+}
+/** 回环一键授权轮询结果 (claude/codex 共用) */
+export interface LoginPollResult {
+  status: "idle" | "pending" | "ok" | "failed";
+  message: string;
 }
 export interface CodexProxyInfo {
   running: boolean;
@@ -1562,6 +1575,8 @@ export interface ClaudeAuthStatus {
   credPath: string;
 }
 export interface ClaudeLoginStart {
+  /** auto = 回环一键授权(轮询 claudeLoginPoll); manual = 手工回贴授权码 */
+  mode: "auto" | "manual";
   authorizeUrl: string;
   verifier: string;
   state: string;
@@ -1582,12 +1597,19 @@ export const provider = {
   codexStartLogin: () => invoke<CodexDeviceLogin>("codex_start_login"),
   codexPollLogin: (deviceCode: string, userCode: string) =>
     invoke<CodexPollResult>("codex_poll_login", { deviceCode, userCode }),
+  /** 回环一键授权(auto 模式)的进度轮询 / 取消 */
+  codexLoginPoll: () => invoke<LoginPollResult>("codex_login_poll"),
+  codexLoginCancel: () => invoke<void>("codex_login_cancel"),
   codexProxyInfo: () => invoke<CodexProxyInfo>("codex_proxy_info"),
-  // Claude 官方订阅 OAuth(PKCE):start 开浏览器并回 verifier/state;finish 回贴授权码换 token
+  // Claude 官方订阅 OAuth(PKCE):桌面端 start 默认回环一键授权(浏览器点 Authorize 即完成),
+  // forceManual/端口被占时回落手工回贴 —— finish 回贴授权码换 token
   claudeAuthStatus: () => invoke<ClaudeAuthStatus>("claude_oauth_status"),
-  claudeStartLogin: () => invoke<ClaudeLoginStart>("claude_start_login"),
+  claudeStartLogin: (forceManual = false) =>
+    invoke<ClaudeLoginStart>("claude_start_login", { forceManual }),
   claudeFinishLogin: (pasted: string, verifier: string, state: string) =>
     invoke<ClaudeAuthStatus>("claude_finish_login", { pasted, verifier, state }),
+  claudeLoginPoll: () => invoke<LoginPollResult>("claude_login_poll"),
+  claudeLoginCancel: () => invoke<void>("claude_login_cancel"),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -1965,6 +1987,7 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return { installed: false, loggedIn: false, authPath: "(browser-only)" };
     case "codex_start_login":
       return {
+        mode: "device",
         deviceCode: "stub-device",
         userCode: "WXYZ-1234",
         verificationUri: "https://auth.openai.com/codex/device",
@@ -1973,10 +1996,17 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       };
     case "codex_poll_login":
       return { status: "ok" };
+    case "codex_login_poll":
+    case "claude_login_poll":
+      return { status: "idle", message: "" };
+    case "codex_login_cancel":
+    case "claude_login_cancel":
+      return undefined;
     case "claude_oauth_status":
       return { loggedIn: false, credPath: "(browser-only)" };
     case "claude_start_login":
       return {
+        mode: "manual",
         authorizeUrl: "https://claude.ai/oauth/authorize?code=true",
         verifier: "stub-verifier",
         state: "stub-state",

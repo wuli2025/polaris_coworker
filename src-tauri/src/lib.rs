@@ -88,10 +88,18 @@ pub fn run() {
             std::panic::set_hook(Box::new(move |info| {
                 let msg = format!("[panic] {info}");
                 eprintln!("{msg}");
+                let log_path = std::env::temp_dir().join("polaris-panics.log");
+                // 滚动: 7×24 一年只 append 会无限膨胀 → >5MiB 轮转成 .1(覆盖旧 .1)。
+                // Windows 上 rename 目标存在会失败, 先删旧 .1 再转。全程 best-effort。
+                if std::fs::metadata(&log_path).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false) {
+                    let bak = std::env::temp_dir().join("polaris-panics.log.1");
+                    let _ = std::fs::remove_file(&bak);
+                    let _ = std::fs::rename(&log_path, &bak);
+                }
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(std::env::temp_dir().join("polaris-panics.log"))
+                    .open(log_path)
                 {
                     use std::io::Write;
                     let ts = std::time::SystemTime::now()
@@ -127,6 +135,7 @@ pub fn run() {
                 skills::seed_browser_use_skill();
                 skills::seed_wechat_typesetter_skill();
                 skills::seed_wechat_tasks_skill();
+                skills::seed_project_check_skill();
             });
             // 注：此前这里会为「早期播种过毛主席资料库」的老用户补装 consult-mao 技能。
             // 现「请教毛主席」默认隐藏 —— 只在用户主动安装「毛主席」名人资料包时才装该技能，
@@ -147,6 +156,15 @@ pub fn run() {
             fable::init();
             // 协作主机自启:上次点过「设为主机」就静默续上(不阻塞启动)。
             collab::hosting::auto_start_if_enabled(h.clone());
+            // 开发实例窗口标题带 (Dev+版本): 与已安装正式版(同为 polaris-app.exe,
+            // 还可能是改牌分发)一眼区分, 测试时不点混窗口。仅 debug 构建, 发版不受影响。
+            #[cfg(debug_assertions)]
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_title(&format!(
+                    "北极星 · Polaris (Dev {})",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -158,6 +176,8 @@ pub fn run() {
             collab::commands::collab_outbox_queue,
             collab::commands::collab_outbox_pending,
             collab::commands::collab_outbox_mark_sent,
+            collab::commands::collab_outbox_flush,
+            collab::commands::collab_scope_status,
             collab::commands::collab_device_node_id,
             collab::commands::collab_tunnel_connect,
             collab::commands::collab_tunnel_status,
@@ -298,9 +318,13 @@ pub fn run() {
             provider::codex_status,
             provider::codex_start_login,
             provider::codex_poll_login,
+            provider::codex_login_poll,
+            provider::codex_login_cancel,
             provider::claude_oauth_status,
             provider::claude_start_login,
             provider::claude_finish_login,
+            provider::claude_login_poll,
+            provider::claude_login_cancel,
             codex_proxy::codex_proxy_info,
             // Forge 跨平台渲染能力 preflight（能出 PPT/视频吗、缺啥降级，三平台各报各的阶梯）
             forge::forge_preflight,
@@ -360,6 +384,7 @@ pub fn run() {
             echo::echo_set,
             echo::echo_dream_now,
             echo::echo_distill_conversation,
+            echo::echo_clear_context,
             echo::echo_briefing_today,
             echo::echo_briefing_dismiss,
             echo::echo_briefing_run,
@@ -416,6 +441,9 @@ pub fn run() {
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 chat::kill_all_children();
+                // 对话状态强制落盘:append_message 走「脏标记 + 500ms 合并落盘」,
+                // 退出瞬间可能还有最近半秒的消息只在内存里 —— 这里补一刀(不脏则零开销)。
+                conv::flush();
                 feishu::shutdown_on_exit(); // 回收飞书 node 桥,防其 autoReconnect 空转成孤儿烧 CPU
                 // 释放全局键盘热键监听:置 ENABLED=false,退出时不再处理热键事件
                 //(rdev::listen 无法干净中止是已知限制,置闸 + 进程退出即可接受的清理)。

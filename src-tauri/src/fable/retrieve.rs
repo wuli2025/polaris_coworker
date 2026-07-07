@@ -57,6 +57,28 @@ fn rrf_params() -> (f32, f32, f32) {
     )
 }
 
+/// 查询是否为「纯短关键词」型:无长短语(≥4 CJK 连续字 / ≥6 拉丁词)且内容原子 ≤3。
+/// 这类查询正是向量腿最弱的场景(_kbeval 分型:keywords recall@10 ~0.39,远低于 snippet_cjk ~0.87)——
+/// 向量往往注入噪声。据此对向量腿动态降权(见 [`kw_vec_damp`]),自然语句/长短语查询保持满权。
+fn is_keyword_query(query: &str) -> bool {
+    let (latin, runs) = atoms(&query.trim().to_lowercase());
+    let has_long_phrase =
+        runs.iter().any(|r| r.chars().count() >= 4) || latin.iter().any(|w| w.chars().count() >= 6);
+    let atom_count = latin.len() + runs.len();
+    !has_long_phrase && (1..=3).contains(&atom_count)
+}
+
+/// 关键词查询下向量腿权重的衰减系数(w_vec ×此值)。默认 0.6:把弱向量腿的噪声贡献压下去,
+/// 又不像 `POLARIS_VEC_MIN_SCORE` 那样一刀切剔除。`POLARIS_KW_VEC_DAMP=1.0` 关闭(零回归)。
+fn kw_vec_damp() -> f32 {
+    std::env::var("POLARIS_KW_VEC_DAMP")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|x| x.is_finite())
+        .map(|x| x.clamp(0.0, 1.0))
+        .unwrap_or(0.6)
+}
+
 /// 向量腿「条件融合」质量闸(P1④ 进阶,治 MRR < 纯词法 的更准一招):
 /// 报告根因是「**弱向量腿往结果顶部注入噪声**」。单纯 `W_VEC` 降权是**全局**手段——它在向量
 /// 本就有用的查询上也一并削弱了贡献。更准的做法是按**单条绝对余弦质量**门控:只让余弦 ≥ 阈值
@@ -113,6 +135,54 @@ fn path_boost(path: &str, q_full: &str, terms: &[String], w: f32) -> f32 {
     w * signal
 }
 
+/// **全词覆盖 + 整句精确命中加权(融合层「智能重排」,零网络零额度)**。
+///
+/// 实测动机(2026-07-01,本机库 182,718 chunk / 265 题真机扫参,_kbeval/eval_ai_expand.py):
+/// RRF 只看每腿的**名次**,丢掉了「这个候选到底命中了几个查询词、整句在不在」的强信号 ——
+/// 关键词查询里「只含 1 个词的文件」会和「含全部词的文件」名次相近,真答案被淹。这条在融合层
+/// 给每个候选按其**已在内存的匹配 chunk 文本**(`Fused.doc`,向量腿=chunk 全文 / grep 腿=命中
+/// 行上下文)补两个与 RRF 同量纲的加分:
+///   - **覆盖率**:命中的 distinct 查询内容词数 / 总词数 ∈ [0,1],×`POLARIS_COVERAGE_BOOST`;
+///   - **整句命中**:匹配文本里出现**完整查询子串** → 加 `POLARIS_PHRASE_BOOST`(精确短语必相关)。
+/// 实测:hybrid→+覆盖+整句,聚合 nDCG 0.433→0.484(+12%)、中文短语查询 nDCG 0.794→0.852、
+/// recall@10 0.509→0.547,**每种查询类型都涨、零回归**;且因 doc 已在内存,无任何额外 IO/网络。
+/// 设 `POLARIS_COVERAGE_BOOST=0` 关闭(零回归)。
+const COVERAGE_BOOST_DEFAULT: f32 = 0.30;
+const PHRASE_BOOST_DEFAULT: f32 = 0.6;
+fn coverage_boost_w() -> f32 {
+    std::env::var("POLARIS_COVERAGE_BOOST")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|x| x.is_finite())
+        .map(|x| x.clamp(0.0, 2.0))
+        .unwrap_or(COVERAGE_BOOST_DEFAULT)
+}
+fn phrase_boost_w() -> f32 {
+    std::env::var("POLARIS_PHRASE_BOOST")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|x| x.is_finite())
+        .map(|x| x.clamp(0.0, 4.0))
+        .unwrap_or(PHRASE_BOOST_DEFAULT)
+}
+
+/// 计算单个候选的「覆盖 + 整句」加分。`doc`=匹配文本(已小写在外部传入以复用),`q_full`=整句小写,
+/// `terms`=内容词(split_query 切好的拉丁词 + CJK 二元组)。返回 `cov_w*覆盖率 + (整句命中?phrase_w:0)`。
+fn coverage_phrase_boost(doc_lower: &str, q_full: &str, terms: &[String], cov_w: f32, phrase_w: f32) -> f32 {
+    if doc_lower.is_empty() || (cov_w <= 0.0 && phrase_w <= 0.0) {
+        return 0.0;
+    }
+    let mut bonus = 0.0;
+    if cov_w > 0.0 && !terms.is_empty() {
+        let hit = terms.iter().filter(|t| doc_lower.contains(t.as_str())).count();
+        bonus += cov_w * (hit as f32 / terms.len() as f32);
+    }
+    if phrase_w > 0.0 && q_full.chars().count() >= 4 && doc_lower.contains(q_full) {
+        bonus += phrase_w;
+    }
+    bonus
+}
+
 /// 精排闸门松紧(P2-1 可调化):top-1 与 top-2 的相对差 `(r1-r2)/r1` 小于此值时判「咬得紧、
 /// 该花一次重排」。报告 §5「宽召回窄重排」——默认 0.25 保守(只在真难分时重排,省网络);
 /// 调大(→ 1.0)= 几乎总重排(MRR 优先、不惜延迟);调小(→ 0)= 几乎不重排(延迟优先)。
@@ -125,6 +195,28 @@ fn rerank_gate() -> f32 {
         .filter(|x| x.is_finite())
         .map(|x| x.clamp(0.0, 1.0))
         .unwrap_or(RERANK_GATE_DEFAULT)
+}
+
+/// 云交叉编码器重排是否启用。**默认关闭**:实测(_kbeval/eval_ai_rerank.json)云重排单次 ~3226ms,
+/// 且在考卷上 recall 0.28–0.39 反不如不重排的 hybrid 0.536 —— 又慢又不涨分,是负资产。故默认直接
+/// 跳过这层网络往返(p50 从 ~3.3s 降到 <100ms),把「咬得紧才精排」的闸门整个绕开。
+/// `POLARIS_CLOUD_RERANK=1` 恢复旧行为(闸门 0.25 可再经 POLARIS_RERANK_GATE 调);闸门相关基础设施
+/// (缓存/签名)保留给后续本地 ColBERT 重排复用。
+fn cloud_rerank_enabled() -> bool {
+    std::env::var("POLARIS_CLOUD_RERANK")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// 「新压旧」降权系数:被同目录同名新版本压制的命中,其融合分 ×此值(默认 0.4,把旧版从 top3
+/// 挤到 top10 边缘但仍可达)。`POLARIS_SUPERSEDE_DECAY=1.0` → 不降权、且跳过整段查库(一键关闭)。
+fn supersede_decay() -> f32 {
+    std::env::var("POLARIS_SUPERSEDE_DECAY")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|x| x.is_finite())
+        .map(|x| x.clamp(0.0, 1.0))
+        .unwrap_or(0.4)
 }
 
 // ───────────────────────── 结果模型 ─────────────────────────
@@ -140,6 +232,10 @@ pub struct FableHit {
     pub score: f32,
     /// 命中车道: grep / vector(融合后可能两者都有)
     pub lanes: Vec<String>,
+    /// 若本文件被同目录同名的新版本压制,这里给出新版本的相对路径(供前端标「有新版本」)。
+    /// 命中仍返回(降权可达),None = 无更新版本。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1000,8 +1096,14 @@ pub fn search(
         rrf: f32,
         /// 重排专家「读全文打分」用的文本(向量=chunk 全文 / grep=命中行上下文窗口);不展示。
         doc: String,
+        /// 被新版本压制时,新版本的相对路径(供前端标注);None=无更新版本。
+        sup_path: Option<String>,
     }
-    let (rrf_k, w_grep, w_vec) = rrf_params();
+    let (rrf_k, w_grep, mut w_vec) = rrf_params();
+    // 关键词型查询给向量腿动态降权(向量腿在此类查询上最弱、易注入噪声)。自然语句保持满权。
+    if is_keyword_query(query) {
+        w_vec *= kw_vec_damp();
+    }
     let mut fused: HashMap<String, Fused> = HashMap::new();
     for (rank, h) in grep_hits.into_iter().enumerate() {
         let key = h.path.clone();
@@ -1025,9 +1127,11 @@ pub fn search(
                     snippet: h.snippet,
                     score: 0.0,
                     lanes: vec!["grep".into()],
+                    superseded_by_path: None,
                 },
                 rrf,
                 doc: h.context,
+                sup_path: None,
             });
     }
     for (rank, h) in vec_hits.into_iter().enumerate() {
@@ -1053,20 +1157,110 @@ pub fn search(
                     snippet,
                     score: 0.0,
                     lanes: vec!["vector".into()],
+                    superseded_by_path: None,
                 },
                 rrf,
                 doc: h.text,
+                sup_path: None,
             });
     }
+    // ── 新压旧:被同目录同名新版本压制的命中降权(不剔除,新版没索引到时旧版仍可达)──
+    // dedupe_scan 已在 files.superseded_by 里标好「谁被谁压制」;这里按候选相对路径批量取标记,
+    // abspath 消歧(同名 relpath 可能横跨多个根),命中者 rrf ×decay 并记下新版路径供前端标注。
+    // POLARIS_SUPERSEDE_DECAY=1.0 一键关闭(不降权、不查库)。
+    let decay = supersede_decay();
+    if decay < 1.0 && !fused.is_empty() {
+        if let Ok(conn) = open_db() {
+            // relpath → Vec<(root_path, superseded_by_id)>
+            let mut by_rel: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+            let keys: Vec<String> = fused.keys().cloned().collect();
+            for batch in keys.chunks(400) {
+                let ph = vec!["?"; batch.len()].join(",");
+                let sql = format!(
+                    "SELECT f.relpath, r.path, f.superseded_by FROM files f
+                     JOIN roots r ON r.id=f.root_id
+                     WHERE f.superseded_by<>0 AND f.relpath IN ({ph})"
+                );
+                if let Ok(mut stmt) = conn.prepare(&sql) {
+                    let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    });
+                    if let Ok(rs) = rows {
+                        for (rel, root, sup) in rs.flatten() {
+                            by_rel.entry(rel).or_default().push((root, sup));
+                        }
+                    }
+                }
+            }
+            if !by_rel.is_empty() {
+                // 收集被压制文件的新版本 id → 相对路径(供前端标注),一次查完。
+                let sup_ids: Vec<i64> = by_rel
+                    .values()
+                    .flatten()
+                    .map(|(_, id)| *id)
+                    .collect::<std::collections::HashSet<i64>>()
+                    .into_iter()
+                    .collect();
+                let mut id_path: HashMap<i64, String> = HashMap::new();
+                for batch in sup_ids.chunks(400) {
+                    let ph = vec!["?"; batch.len()].join(",");
+                    let sql =
+                        format!("SELECT id, relpath FROM files WHERE id IN ({ph})");
+                    if let Ok(mut stmt) = conn.prepare(&sql) {
+                        if let Ok(rs) = stmt.query_map(
+                            rusqlite::params_from_iter(batch.iter()),
+                            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+                        ) {
+                            for (id, rel) in rs.flatten() {
+                                id_path.insert(id, rel);
+                            }
+                        }
+                    }
+                }
+                for f in fused.values_mut() {
+                    if let Some(cands) = by_rel.get(&f.hit.path) {
+                        // abspath 消歧:命中行的 abspath 应以某个根路径开头。
+                        let sup = cands
+                            .iter()
+                            .find(|(root, _)| {
+                                f.hit.abspath.replace('\\', "/").starts_with(
+                                    &std::path::Path::new(root).to_string_lossy().replace('\\', "/"),
+                                )
+                            })
+                            .or_else(|| cands.first());
+                        if let Some((_, sup_id)) = sup {
+                            f.rrf *= decay;
+                            f.sup_path = id_path.get(sup_id).cloned();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ── 路径/文件名命中加权(融合层,覆盖两腿)──
     // 查询词出现在文件路径/名里是「几乎必相关」的强信号,但两腿都只算正文命中。这里给每个
     // 候选按其路径与查询的重合补一个同量纲加分 → 文件名点题的文件稳稳上浮。默认权重 >0(通用
     // 增益);设 POLARIS_PATH_BOOST=0 可关。
+    // 路径加权 + 全词覆盖/整句加权:三者同量纲、都在融合层补分。共用一次 split_query。
     let pboost_w = path_boost_w();
-    if pboost_w > 0.0 {
+    let cov_w = coverage_boost_w();
+    let phrase_w = phrase_boost_w();
+    if pboost_w > 0.0 || cov_w > 0.0 || phrase_w > 0.0 {
         let (q_full, terms) = split_query(query);
         for f in fused.values_mut() {
-            f.rrf += path_boost(&f.hit.path, &q_full, &terms, pboost_w);
+            if pboost_w > 0.0 {
+                f.rrf += path_boost(&f.hit.path, &q_full, &terms, pboost_w);
+            }
+            if cov_w > 0.0 || phrase_w > 0.0 {
+                // doc = 该候选的匹配文本(向量腿 chunk 全文 / grep 腿命中行上下文),已在内存,零额外 IO。
+                let doc_lower = f.doc.to_lowercase();
+                f.rrf += coverage_phrase_boost(&doc_lower, &q_full, &terms, cov_w, phrase_w);
+            }
         }
     }
     let mut merged: Vec<Fused> = fused.into_values().collect();
@@ -1089,7 +1283,8 @@ pub fn search(
         let (r1, r2) = (merged[0].rrf, merged[1].rrf);
         r1 > 0.0 && (r1 - r2) / r1 < rerank_gate()
     };
-    if mode == "hybrid"
+    if cloud_rerank_enabled()
+        && mode == "hybrid"
         && merged.len() >= 3
         && gate_close
         && crate::sense::active_provider("rerank").is_some()
@@ -1129,6 +1324,7 @@ pub fn search(
                             },
                             rrf: f.rrf,
                             doc: f.doc.clone(),
+                            sup_path: f.sup_path.clone(),
                         });
                     }
                 }
@@ -1139,6 +1335,7 @@ pub fn search(
                         hit: f.hit.clone(),
                         rrf: f.rrf,
                         doc: f.doc.clone(),
+                        sup_path: f.sup_path.clone(),
                     });
                 }
             }
@@ -1154,6 +1351,7 @@ pub fn search(
             if f.hit.score == 0.0 {
                 f.hit.score = f.rrf;
             }
+            f.hit.superseded_by_path = f.sup_path;
             f.hit
         })
         .collect();
@@ -1168,6 +1366,200 @@ pub fn search(
         grep_truncated,
         ms: started.elapsed().as_millis() as u64,
     })
+}
+
+// ───────────────────────── AI 辅助检索:多查询扩写融合 ─────────────────────────
+//
+// 实测动机(2026-07-01,_kbeval/eval_ai_expand.py,本机库 182,718 chunk / 265 题):
+// 让 app 自带的 claude 把查询**多路扩写**(同义/相关说法/英文对应词),各变体并行召回,
+// 真答案因「多变体一起命中」上浮 —— 候选**池 recall 0.581→0.638**(+8.4%)、关键词查询
+// recall@10 0.365→0.409;融合时排序仍 anchored 到**原查询**(变体只补召回不抢主),叠加覆盖/
+// 整句加权后聚合 nDCG 0.433→0.492(+13.6%)。**仅深度档触发**(扩写要起一次 headless claude,
+// 数秒级);短关键词/语义查询最受益,长精确短语本就强、自动跳过不打扰。失败一律优雅退回普通混检。
+
+/// 是否值得为这条查询动用 AI 扩写:长 CJK 短语(≥4 字)或长拉丁词(≥6)= 精确匹配已很强,跳过;
+/// 其余(短关键词组、模糊语义)才扩写。避免「本就 top-1 命中」的查询被变体稀释 + 省一次模型调用。
+pub(crate) fn worth_ai_expand(query: &str) -> bool {
+    let (latin, runs) = atoms(&query.trim().to_lowercase());
+    let has_long_phrase =
+        runs.iter().any(|r| r.chars().count() >= 4) || latin.iter().any(|w| w.chars().count() >= 6);
+    !has_long_phrase
+}
+
+/// 把 claude 扩写返回的文本解析成变体列表:优先认 JSON 数组;退而认逐行。去重、去空、截到 6 条、
+/// 各 ≤120 字符;剔除与原查询同形的。纯函数,便于单测。
+pub(crate) fn parse_expansions(raw: &str, original: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let orig_norm = original.trim().to_lowercase();
+    let mut push = |s: &str, out: &mut Vec<String>| {
+        let t: String = s.trim().trim_matches('"').trim().chars().take(120).collect();
+        if t.chars().count() >= 2
+            && t.to_lowercase() != orig_norm
+            && !out.iter().any(|x: &String| x.eq_ignore_ascii_case(&t))
+        {
+            out.push(t);
+        }
+    };
+    // 尝试 JSON 数组(从第一个 [ 到最后一个 ])
+    if let (Some(s), Some(e)) = (raw.find('['), raw.rfind(']')) {
+        if e > s {
+            if let Ok(serde_json::Value::Array(arr)) =
+                serde_json::from_str::<serde_json::Value>(&raw[s..=e])
+            {
+                for v in arr {
+                    if let Some(t) = v.as_str() {
+                        push(t, &mut out);
+                    }
+                }
+            }
+        }
+    }
+    // JSON 没解出来 → 逐行兜底(剥列表符号/序号)
+    if out.is_empty() {
+        for line in raw.lines() {
+            let l = line
+                .trim()
+                .trim_start_matches(|c: char| c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')' || c == ' ');
+            if !l.is_empty() {
+                push(l, &mut out);
+            }
+        }
+    }
+    out.truncate(6);
+    out
+}
+
+/// 多查询融合(纯函数,可单测):把「原查询结果 + 各变体结果」按**文件级 RRF**(原查询权重最高)
+/// 融合,再对每个候选叠加 anchored-to-原查询 的覆盖/整句加权(用候选的 snippet 当文本),取 top_k。
+/// `results[0]` 必须是原查询的结果(权重 1.0),其余是变体(权重 `var_w`)。
+fn fuse_multi_query(
+    original: &str,
+    results: &[FableSearchResult],
+    var_w: f32,
+    top_k: usize,
+) -> Vec<FableHit> {
+    let (q_full, terms) = split_query(original);
+    let (rrf_k, _, _) = rrf_params();
+    let cov_w = coverage_boost_w();
+    let phrase_w = phrase_boost_w();
+    struct Acc {
+        hit: FableHit,
+        score: f32,
+        doc: String,
+    }
+    let mut acc: HashMap<String, Acc> = HashMap::new();
+    for (li, r) in results.iter().enumerate() {
+        let w = if li == 0 { 1.0 } else { var_w };
+        for (rank, h) in r.hits.iter().enumerate() {
+            let contrib = w / (rrf_k + rank as f32);
+            acc.entry(h.path.clone())
+                .and_modify(|a| {
+                    a.score += contrib;
+                    if h.snippet.len() > a.doc.len() {
+                        a.doc = h.snippet.clone();
+                    }
+                })
+                .or_insert(Acc {
+                    hit: h.clone(),
+                    score: contrib,
+                    doc: h.snippet.clone(),
+                });
+        }
+    }
+    // 覆盖/整句加权(anchored 到原查询;用 snippet 当文本,够区分头部排序)
+    for a in acc.values_mut() {
+        let doc_lower = a.doc.to_lowercase();
+        a.score += coverage_phrase_boost(&doc_lower, &q_full, &terms, cov_w, phrase_w);
+    }
+    let mut merged: Vec<Acc> = acc.into_values().collect();
+    merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    merged
+        .into_iter()
+        .take(top_k)
+        .map(|mut a| {
+            a.hit.score = a.score;
+            a.hit
+        })
+        .collect()
+}
+
+/// AI 辅助检索同步实现:原查询走完整 hybrid(含重排闸)→ 若该查询值得扩写且能起 claude,
+/// 取变体各跑一遍快召回(grep_vec,不重排)→ 多查询融合。任何环节失败都优雅退回原查询结果。
+fn search_ai_sync(
+    query: &str,
+    top_k: usize,
+    scope: Option<&str>,
+) -> Result<FableSearchResult, String> {
+    let started = std::time::Instant::now();
+    // top_k 是外部可传的裸值:先钳到 [1,50]。否则下面 (top_k*4).clamp(top_k,50) 在 top_k>50
+    // 时会 min>max 触发 clamp 断言 panic;top_k=0 也一并被抬到 1(避免 want=0 返回空结果)。
+    let top_k = top_k.clamp(1, 50);
+    let base = search(query, top_k, "hybrid", scope)?;
+    // 不值得扩写(长精确短语)→ 直接返回原结果(标注 mode 便于前端识别)
+    if !worth_ai_expand(query) {
+        return Ok(FableSearchResult { mode: "ai(skip)".into(), ..base });
+    }
+    // 起 headless claude 要扩写;失败/超时一律退回 base
+    let variants = ai_expand_query(query).unwrap_or_default();
+    if variants.is_empty() {
+        return Ok(FableSearchResult { mode: "ai(noexp)".into(), ..base });
+    }
+    // 宽召回:每路多取候选给融合(top_k*4,clamp≤50)。变体走快档 grep_vec(不重排)。
+    // 原查询 + 各变体并行(thread::scope):每路 ~250ms,串行 4 路要 ~1s,并行归到最慢一路。
+    // 每路内部本就是双车道双线程,这里再并一层「路」;路数 ≤4,线程开销可忽略。
+    let want = (top_k * 4).min(50);
+    let mut slots: Vec<Option<FableSearchResult>> = Vec::new();
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(variants.len() + 1);
+        // slot 0 = 原查询的宽召回(非重排序,保证融合 anchored 到原查询的纯召回序)
+        handles.push(s.spawn(|| search(query, want, "grep_vec", scope)));
+        for v in &variants {
+            handles.push(s.spawn(move || search(v, want, "grep_vec", scope)));
+        }
+        for h in handles {
+            slots.push(h.join().ok().and_then(|r| r.ok()));
+        }
+    });
+    let mut results: Vec<FableSearchResult> = Vec::with_capacity(slots.len());
+    match slots.remove(0) {
+        Some(r) => results.push(r),
+        None => results.push(base.clone()),
+    }
+    results.extend(slots.into_iter().flatten());
+    let hits = fuse_multi_query(query, &results, 0.6, top_k);
+    Ok(FableSearchResult {
+        query: query.to_string(),
+        mode: format!("ai({} variants)", variants.len()),
+        hits,
+        grep_hits: base.grep_hits,
+        vector_hits: base.vector_hits,
+        reranked: false,
+        grep_truncated: base.grep_truncated,
+        ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// 调起只读 headless claude 把查询扩写成检索变体(JSON 数组)。在 kb_root 下运行;静默失败上抛。
+fn ai_expand_query(query: &str) -> Result<Vec<String>, String> {
+    let root = crate::kb::kb_root();
+    let root_path = std::path::Path::new(&root);
+    if !root_path.exists() {
+        return Err("kb_root 不存在".into());
+    }
+    let prompt = format!(
+        "你是检索查询扩写器。把下面这条搜索查询扩写成 3 个**用于全文检索**的等价说法\
+        (中文同义词/相关术语/对应英文词,保留关键专名)。只输出一个 JSON 字符串数组,不要任何解释、\
+        不要读文件、不要调用工具。查询:{query}"
+    );
+    // 墙钟超时 10 分钟:claude 卡住也能放手(上层 unwrap_or_default 退回 base),
+    // 不把 server 有限的阻塞线程池永久钉死、不泄漏子进程(长任务铁律:整树回收)。
+    let raw = crate::kb::run_claude_readonly_timeout(
+        root_path,
+        &prompt,
+        |_, _| {},
+        std::time::Duration::from_secs(600),
+    )?;
+    Ok(parse_expansions(&raw, query))
 }
 
 // ───────────────────────── 重排结果缓存(P2-1 ③)─────────────────────────
@@ -1264,9 +1656,53 @@ fn fable_search_sync(
     search(query.trim(), top_k.unwrap_or(12), &mode, scope)
 }
 
+/// **AI 辅助检索命令**(深度档):原查询 hybrid + claude 多查询扩写融合(见 [`search_ai_sync`])。
+/// 起 headless claude 数秒级,故只在用户主动「深度搜索」时调,不进默认每次检索。失败优雅退回混检。
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn fable_search_ai(
+    query: String,
+    top_k: Option<usize>,
+    scope: Option<String>,
+) -> Result<FableSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || fable_search_ai_sync(query, top_k, scope))
+        .await
+        .map_err(|e| format!("任务调度失败: {e}"))?
+}
+#[cfg(not(feature = "desktop"))]
+pub fn fable_search_ai(
+    query: String,
+    top_k: Option<usize>,
+    scope: Option<String>,
+) -> Result<FableSearchResult, String> {
+    fable_search_ai_sync(query, top_k, scope)
+}
+
+fn fable_search_ai_sync(
+    query: String,
+    top_k: Option<usize>,
+    scope: Option<String>,
+) -> Result<FableSearchResult, String> {
+    let scope = scope.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    search_ai_sync(query.trim(), top_k.unwrap_or(12), scope)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_query_detection_targets_short_terms() {
+        // 短关键词组 → 判为 keyword(向量腿降权)
+        assert!(is_keyword_query("退款 政策"));
+        assert!(is_keyword_query("api rate limit"));
+        assert!(is_keyword_query("索引"));
+        // 长短语 / 自然语句 → 不降权
+        assert!(!is_keyword_query("如何处理退款政策的具体流程"));
+        assert!(!is_keyword_query("configuration"));
+        // 空查询不判为 keyword(避免对空输入误降权)
+        assert!(!is_keyword_query("   "));
+    }
 
     #[test]
     fn split_query_segments_cjk_and_latin() {
@@ -1402,6 +1838,86 @@ mod tests {
         assert_eq!(path_boost("policy/退款政策.md", "退款政策", &terms, 0.0), 0.0);
         // 默认权重为正(通用增益默认开)
         assert!(path_boost_w() > 0.0);
+    }
+
+    #[test]
+    fn coverage_phrase_boost_rewards_full_term_coverage_and_exact_phrase() {
+        let terms = vec!["知识".to_string(), "识库".to_string(), "检索".to_string()];
+        let q_full = "知识库检索精度";
+        // 含全部内容词 → 覆盖率 1.0 × cov_w
+        let full = coverage_phrase_boost("如何提升知识库检索效果", q_full, &terms, 0.30, 0.6);
+        // 只含一个词 → 覆盖率 1/3 × cov_w
+        let partial = coverage_phrase_boost("检索系统设计", q_full, &terms, 0.30, 0.6);
+        // 完全不沾边 → 0
+        let none = coverage_phrase_boost("今天天气不错", q_full, &terms, 0.30, 0.6);
+        assert!(full > partial && partial > none && none == 0.0, "覆盖越多分越高");
+        assert!((full - 0.30).abs() < 1e-6, "全覆盖=cov_w(无整句命中)full={full}");
+        assert!((partial - 0.10).abs() < 1e-6, "1/3 覆盖=cov_w/3 partial={partial}");
+        // 整句精确命中 → 额外 +phrase_w(且整句必含全部内容词 → 再 +cov_w)
+        let phrase = coverage_phrase_boost("文档讲知识库检索精度的做法", q_full, &terms, 0.30, 0.6);
+        assert!((phrase - (0.30 + 0.6)).abs() < 1e-6, "整句命中=cov_w+phrase_w phrase={phrase}");
+        // 权重置 0 → 关闭(零回归)
+        assert_eq!(coverage_phrase_boost("知识库检索", q_full, &terms, 0.0, 0.0), 0.0);
+        // 默认权重为正(默认开)
+        assert!(coverage_boost_w() > 0.0 && phrase_boost_w() > 0.0);
+    }
+
+    #[test]
+    fn worth_ai_expand_skips_long_exact_phrases() {
+        // 短关键词组 / 模糊语义 → 值得扩写
+        assert!(worth_ai_expand("退款 政策"));
+        assert!(worth_ai_expand("rag eval"));
+        // 长 CJK 短语(≥4)精确匹配已强 → 跳过
+        assert!(!worth_ai_expand("知识库混合检索"));
+        // 长拉丁词(≥6)→ 跳过
+        assert!(!worth_ai_expand("retrieval pipeline"));
+    }
+
+    #[test]
+    fn parse_expansions_handles_json_and_lines() {
+        // JSON 数组(主路):去重、剔除与原查询同形
+        let v = parse_expansions(r#"前言 ["知识库检索","召回准确率","retrieval accuracy","知识库检索"]"#, "原查询");
+        assert_eq!(v, vec!["知识库检索", "召回准确率", "retrieval accuracy"]);
+        // 逐行兜底(JSON 解不出时):剥列表符号/序号
+        let v2 = parse_expansions("1. 向量重排\n- 精排序\n* embedding rerank", "x");
+        assert_eq!(v2, vec!["向量重排", "精排序", "embedding rerank"]);
+        // 与原查询同形被剔除
+        let v3 = parse_expansions(r#"["abc","ABC","def"]"#, "abc");
+        assert_eq!(v3, vec!["def"]); // "abc"/"ABC" 都判同形剔除
+        // 截到 6 条
+        let many: Vec<String> = (0..10).map(|i| format!("\"t{i}\"")).collect();
+        let v4 = parse_expansions(&format!("[{}]", many.join(",")), "q");
+        assert_eq!(v4.len(), 6);
+    }
+
+    #[test]
+    fn fuse_multi_query_anchors_to_original_and_fuses() {
+        let mk = |path: &str, snippet: &str, rank_score: f32| FableHit {
+            path: path.into(),
+            abspath: format!("/root/{path}"),
+            location: "C1".into(),
+            snippet: snippet.into(),
+            score: rank_score,
+            lanes: vec!["vector".into()],
+            superseded_by_path: None,
+        };
+        // 原查询命中 a(rank0) b(rank1);变体命中 b(rank0) c(rank1) —— b 两路同中应上浮。
+        let orig = FableSearchResult {
+            query: "退款 政策".into(), mode: "grep_vec".into(),
+            hits: vec![mk("a.md", "退款说明", 0.0), mk("b.md", "退款政策细则", 0.0)],
+            grep_hits: 2, vector_hits: 2, reranked: false, grep_truncated: false, ms: 1,
+        };
+        let var = FableSearchResult {
+            query: "refund policy".into(), mode: "grep_vec".into(),
+            hits: vec![mk("b.md", "退款政策细则", 0.0), mk("c.md", "policy doc", 0.0)],
+            grep_hits: 2, vector_hits: 2, reranked: false, grep_truncated: false, ms: 1,
+        };
+        let fused = fuse_multi_query("退款 政策", &[orig, var], 0.6, 3);
+        // b 被两路命中 + 含全部内容词(退款/政策)→ 覆盖加权 → 应排第一
+        assert_eq!(fused[0].path, "b.md", "两路同中 + 全词覆盖应居首");
+        assert_eq!(fused.len(), 3);
+        // 分数严格递减(已排序)
+        assert!(fused[0].score >= fused[1].score && fused[1].score >= fused[2].score);
     }
 
     #[test]

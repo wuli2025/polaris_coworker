@@ -208,13 +208,58 @@ static PERSIST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 fn persist() {
     // 先拿落盘锁再取快照: 保证写入顺序与快照顺序一致, 文件终态不会停留在旧快照上。
     let _g = PERSIST_LOCK.lock();
-    let st = STATE.read();
     let path = STATE_PATH.read().clone();
     if path.as_os_str().is_empty() {
         return;
     }
-    if let Ok(txt) = serde_json::to_string_pretty(&*st) {
-        let _ = atomic_write_state(&path, &txt);
+    // 锁序纪律: 只在序列化期间持 STATE 读锁, 序列化成字符串后立刻放锁再写盘 ——
+    // 磁盘慢 (机械盘/杀软扫描) 时不把 append_message 的写锁堵在 IO 后面。
+    // to_string 而非 to_string_pretty: 这文件不是给人手读的, 一年后几十 MB 的
+    // state 少一半体积和大量缩进拼接时间, 高频落盘路径上是纯赚。
+    let txt = {
+        let st = STATE.read();
+        match serde_json::to_string(&*st) {
+            Ok(t) => t,
+            Err(_) => return,
+        }
+    };
+    let _ = atomic_write_state(&path, &txt);
+}
+
+// ── 高频路径合并落盘(7×24 长稳): append_message 每条消息都整文件重写是 O(历史总量),
+// 一年后 state.json 几十 MB → 每次发消息可感卡顿。改为「脏标记 + 后台 flusher 每 500ms
+// 合并落盘」; 结构性操作(建/删/改名对话、项目、归档等)仍立即 persist 不变。
+// 崩溃最坏丢最近 500ms 的消息(可接受); 正常退出由 lib.rs 退出链调 flush() 兜底。
+static DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FLUSHER_START: std::sync::Once = std::sync::Once::new();
+static FLUSHER_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn mark_dirty() {
+    use std::sync::atomic::Ordering;
+    DIRTY.store(true, Ordering::Release);
+    FLUSHER_START.call_once(|| {
+        let ok = std::thread::Builder::new()
+            .name("conv-flusher".into())
+            .spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if DIRTY.swap(false, Ordering::AcqRel) {
+                    persist();
+                }
+            })
+            .is_ok();
+        FLUSHER_OK.store(ok, Ordering::Release);
+    });
+    // flusher 线程起不来(极端资源枯竭)→ 退回旧行为同步落盘, 绝不让消息只活在内存里。
+    if !FLUSHER_OK.load(Ordering::Acquire) && DIRTY.swap(false, Ordering::AcqRel) {
+        persist();
+    }
+}
+
+/// 强制把挂起的脏数据落盘。App 退出链(lib.rs RunEvent::Exit*)调用, 补上 flusher
+/// 最后不足 500ms 窗口内的消息; 不脏则零开销。
+pub fn flush() {
+    if DIRTY.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        persist();
     }
 }
 
@@ -344,7 +389,8 @@ pub fn append_message(conversation_id: &str, role: &str, content: &str) -> Resul
             created_at: now,
         });
     }
-    persist();
+    // 高频路径: 不立即整文件重写, 标脏交给后台 flusher 500ms 合并落盘(见 mark_dirty)。
+    mark_dirty();
     Ok(id)
 }
 
@@ -701,6 +747,25 @@ pub(crate) fn stale_unfinished_transcripts(
             (format!("{}(几个月前 · 疑未收尾)", c.title), body)
         })
         .collect()
+}
+
+/// 清空一条对话的全部消息(对话本身保留, 标题/项目绑定不动)——「清空上下文」用。
+/// 返回清掉的消息数。产物文件不动: 它们在磁盘上, 路径编码着 conv_id, 与消息表无关。
+pub fn clear_messages(conversation_id: &str) -> usize {
+    let mut st = STATE.write();
+    let before = st.messages.len();
+    st.messages.retain(|m| m.conversation_id != conversation_id);
+    let removed = before - st.messages.len();
+    if removed > 0 {
+        for c in st.conversations.iter_mut() {
+            if c.id == conversation_id {
+                c.updated_at = now_ms();
+            }
+        }
+    }
+    drop(st);
+    persist();
+    removed
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]

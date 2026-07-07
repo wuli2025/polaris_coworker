@@ -19,6 +19,13 @@ pub fn run_with_timeout(mut cmd: std::process::Command, secs: u64, what: &str) -
     use std::io::{BufRead, BufReader};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+    // unix(mac/Linux): 把子进程置为新进程组组长, 超时时可 killpg 带走它扇出的整棵子孙
+    // (chromium 的渲染/GPU 子进程、ffmpeg 的子代理), 否则只 child.kill() 会留孤儿挂死。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     // 捕获 stderr(失败时带上,便于诊断「缺库/编解码器没装/字体缺失」等),stdout 仍丢弃。
     let mut child = cmd
         .stdin(std::process::Stdio::null())
@@ -56,6 +63,12 @@ pub fn run_with_timeout(mut cmd: std::process::Command, secs: u64, what: &str) -
             Ok(Some(status)) => break Ok(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    // unix: 先 killpg 整组(child 是组长, 见 spawn 前 process_group(0)), 带走子孙;
+                    // 再 child.kill() 兜底。Windows 无进程组, 仅 child.kill()(单进程, 现状不变)。
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::killpg(child.id() as i32, libc::SIGKILL);
+                    }
                     let _ = child.kill();
                     let _ = child.wait(); // kill 后管道关闭,reader 线程随之结束
                     break Err(format!("{what} 超时({secs}s)被终止"));

@@ -65,6 +65,36 @@ pub fn set_project_profile(project_id: i64, profile: &str) -> Result<(), String>
     Ok(())
 }
 
+/// 项目的检查技能 id。空 = 默认内置「项目检测」技能(project-check-default)。
+pub fn project_check_skill(project_id: i64) -> String {
+    let id: String = open_db()
+        .ok()
+        .and_then(|c| {
+            c.query_row("SELECT check_skill FROM projects WHERE id=?1", [project_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+        })
+        .unwrap_or_default();
+    if id.trim().is_empty() {
+        crate::skills::PROJECT_CHECK_ID.to_string()
+    } else {
+        id.trim().to_string()
+    }
+}
+
+/// 设检查技能:必须是本机已安装且声明了检查协议的技能(或空=回到默认)。
+pub fn set_project_check_skill(project_id: i64, skill_id: &str) -> Result<(), String> {
+    let skill_id = skill_id.trim();
+    if !skill_id.is_empty() {
+        crate::skills::resolve_check_skill(skill_id)?; // 不合法/未安装直接拒,不留到跑检查才炸
+    }
+    let conn = open_db()?;
+    conn.execute("UPDATE projects SET check_skill=?1 WHERE id=?2", params![skill_id, project_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 读某轮检查结果。
 pub fn list(task_id: i64, round: i64) -> Result<Vec<CheckRun>, String> {
     let conn = open_db()?;
@@ -142,6 +172,15 @@ pub fn run_for_task(
     if profile == "off" {
         return Ok(());
     }
+    // 全局安全阀:检查会在主机上执行仓库自带的构建(npm run build 跑 package.json 脚本;cargo check
+    // 运行 build.rs 与 proc-macro)—— 本质是「运行不可信代码」。默认仍开(团队 CI 语义,push 者已是
+    // 邀请进来的可信成员),但主机管理员可用 POLARIS_CHECKS_DISABLED=1 一键全关,彻底断掉这条 RCE 路径。
+    if std::env::var("POLARIS_CHECKS_DISABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
     // 全局排队:一次只跑一轮(主机不是 CI 农场);同卡重跑也被天然互斥。
     let _run = RUN_LOCK.lock();
     sweep_stale_running();
@@ -202,29 +241,87 @@ fn run_steps(wt: &Path, task_id: i64, round: i64, profile: &str, emit: &dyn Fn()
     // 增量语义:密钥/大文件只审分支改动的文件 —— 老仓库 main 上的存量大素材/历史密钥
     // 不该挡住每一张卡(那会逼人人 force,闸门形同虚设)。构建类检查仍是全树(编译本来就是整体)。
     let diff = changed_files(wt);
-    // ① 密钥扫描 + ② 大文件闸:所有档位都跑(creative 只是上限放宽)。
+    // ① 密钥扫描 + ② 大文件闸:所有档位都跑(creative 只是上限放宽)。不可关的前置硬闸。
     step(task_id, round, "密钥扫描", emit, || secret_scan(wt, diff.as_deref()));
     let max_mb: u64 = if profile == "creative" { 500 } else { 50 };
     step(task_id, round, "大文件闸", emit, || big_file_scan(wt, max_mb, diff.as_deref()));
+    // ③ 地盘越界闸:改动必须落在任务卡 scope 内(所有档位;卡没圈 scope 则跳过)。
+    let card = super::tasks::get(task_id).ok();
+    let scope_csv = card.as_ref().map(|c| c.scope.clone()).unwrap_or_default();
+    step(task_id, round, "地盘越界", emit, || scope_gate(diff.as_deref(), &scope_csv));
     if profile == "creative" {
         return Ok(()); // 视频/游戏素材仓:不跑构建/静态检查
     }
-    // ③ 工具链检查(探测到什么跑什么;工具缺失=skipped)。
-    if wt.join("Cargo.toml").exists() {
-        step(task_id, round, "cargo check", emit, || shell_step(wt, "cargo", &["check", "--quiet"]));
-    }
-    if wt.join("package.json").exists() {
-        for script in ["lint", "typecheck", "build"] {
-            if npm_script_exists(wt, script) {
-                let name = format!("npm run {script}");
-                step(task_id, round, &name, emit, || shell_step(wt, "npm", &["run", script]));
-            }
-        }
-    }
-    if wt.join("pyproject.toml").exists() || wt.join("ruff.toml").exists() {
-        step(task_id, round, "ruff check", emit, || shell_step(wt, "ruff", &["check", "."]));
-    }
+    // ④ 项目检测:执行项目指定的检查技能(默认内置 project-check-default,把原先
+    // 硬编码的 cargo/npm/ruff 探测搬进了技能脚本)。技能缺失/坏协议 = fail,不静默放行。
+    let project_id = card.as_ref().map(|c| c.project_id).unwrap_or(0);
+    let skill_id = project_check_skill(project_id);
+    step(task_id, round, "项目检测", emit, || skill_check_step(wt, task_id, profile, &skill_id));
     Ok(())
+}
+
+/// 地盘越界闸:分支改动文件 ∉ 任务 scope 前缀 → fail。scope 空=卡没圈地盘,跳过;
+/// diff 拿不到(如无 main)也跳过(增量语义没得比,不误伤)。确定性路径比对,无 AI。
+fn scope_gate(diff: Option<&[String]>, scope_csv: &str) -> (String, String) {
+    let prefixes: Vec<String> = scope_csv
+        .split(',')
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if prefixes.is_empty() {
+        return ("skipped".into(), "任务卡未圈定 scope,跳过越界检查".into());
+    }
+    let Some(files) = diff else {
+        return ("skipped".into(), "拿不到分支增量(仓库无 main?),跳过越界检查".into());
+    };
+    let outside: Vec<&String> = files
+        .iter()
+        .filter(|f| !prefixes.iter().any(|p| **f == *p || f.starts_with(&format!("{p}/"))))
+        .take(20)
+        .collect();
+    if outside.is_empty() {
+        ("pass".into(), format!("改动均在任务地盘内(scope: {})", prefixes.join(", ")))
+    } else {
+        (
+            "fail".into(),
+            format!(
+                "以下改动越出任务地盘(scope: {}):\n{}",
+                prefixes.join(", "),
+                outside.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+            ),
+        )
+    }
+}
+
+/// 项目检测:按检查协议执行技能入口脚本。退出码 0=pass 非 0=fail;超时=fail(防死循环
+/// 绕过);技能缺失/协议坏=fail(闸门默认是拦,不静默放行)。脚本只从主机本机技能目录读。
+fn skill_check_step(wt: &Path, task_id: i64, profile: &str, skill_id: &str) -> (String, String) {
+    let entry = match crate::skills::resolve_check_skill(skill_id) {
+        Ok(e) => e,
+        Err(e) => return ("fail".into(), e),
+    };
+    let entry_s = entry.entry.to_string_lossy().to_string();
+    let (prog, args): (&str, Vec<&str>) = if entry.windows {
+        ("powershell", vec!["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &entry_s])
+    } else {
+        ("sh", vec![&entry_s])
+    };
+    let wt_s = wt.to_string_lossy().to_string();
+    let tid = task_id.to_string();
+    let envs: Vec<(&str, &str)> = vec![
+        ("POLARIS_CHECK_DIR", wt_s.as_str()),
+        ("POLARIS_CHECK_PROFILE", profile),
+        ("POLARIS_TASK_ID", tid.as_str()),
+    ];
+    match run_prog_env(wt, prog, &args, &envs, entry.timeout_secs) {
+        Ok((true, out)) => ("pass".into(), format!("技能 {skill_id} 通过\n{}", tail(&out))),
+        Ok((false, out)) => ("fail".into(), format!("技能 {skill_id} 判不通过\n{}", tail(&out))),
+        Err(e) if e.contains("timeout") => (
+            "fail".into(),
+            format!("技能 {skill_id} 超时({}s)未跑完,判失败(防卡死绕过)", entry.timeout_secs),
+        ),
+        Err(e) => ("fail".into(), format!("技能 {skill_id} 无法执行: {e}")),
+    }
 }
 
 /// 单步骨架:先落 running(前端能看到进度),跑完覆写终态。
@@ -245,48 +342,9 @@ fn step(task_id: i64, round: i64, name: &str, emit: &dyn Fn(), f: impl FnOnce() 
     emit();
 }
 
-/// 工具是否可用。Windows 走 `where`(定位 .cmd/.exe,locale 无关、精确);其它平台交给
-/// run_prog 的 spawn 失败路径识别(Command::new 直调,缺失即 Err)。
-/// 为什么不靠退出码/输出串:实测 `cmd /C <缺失>` 退 1(非 9009),且 not-found 文案随系统
-/// 语言变化;而真失败(如 rust "cannot find value")也退 1 —— 靠串匹配会把真失败误判成
-/// 跳过=假放行(比误伤更危险)。`where` 是唯一可靠信号。
-fn tool_present(prog: &str) -> bool {
-    if !cfg!(windows) {
-        return true; // Unix:run_prog 直调 Command::new(prog),缺失走 spawn Err 分支
-    }
-    Command::new("where")
-        .arg(prog)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// (status, output)。工具不存在 → skipped。
-fn shell_step(cwd: &Path, prog: &str, args: &[&str]) -> (String, String) {
-    if !tool_present(prog) {
-        return ("skipped".into(), format!("工具缺失(未安装 {prog}),跳过判定"));
-    }
-    match run_prog(cwd, prog, args, STEP_TIMEOUT) {
-        Ok((true, out)) => ("pass".into(), tail(&out)),
-        Ok((false, out)) => ("fail".into(), tail(&out)),
-        // 超时 = fail,不是 skipped!工具已 tool_present 预检存在,却跑不完 —— 恶意/坏分支可
-        // 把 `npm build` 改成死循环,超时若判 skipped 会被 all_green 当绿放行(实测绕过)。
-        // 安全闸的默认必须是「拦」,真需要超长构建的项目走 owner force。
-        Err(e) if e.contains("timeout") => ("fail".into(), format!("超时({STEP_TIMEOUT}s)未跑完,判失败(防卡死绕过)")),
-        // 走到这里的 Err 基本是 spawn 失败(tool_present 已挡住缺失);属环境瞬时问题,跳过不误伤。
-        Err(e) => ("skipped".into(), format!("无法执行,跳过: {e}")),
-    }
-}
-
-fn npm_script_exists(wt: &Path, script: &str) -> bool {
-    std::fs::read_to_string(wt.join("package.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("scripts")?.get(script).map(|_| true))
-        .unwrap_or(false)
-}
+// 注:原 tool_present/shell_step/npm_script_exists(硬编码工具链探测)已整体搬进
+// 内置「项目检测」技能的 check.ps1/check.sh —— 探测规则改脚本即可,不再改 Rust。
+// 工具缺失=脚本内跳过该项(不误伤);超时/技能缺失=fail(闸门默认拦)语义保留在 skill_check_step。
 
 /// git 命令(在 repo 目录)。返回 (成功?, 合并输出)。
 fn run_cmd(repo: &Path, args: &[&str], timeout: u64) -> Result<(bool, String), String> {
@@ -304,10 +362,20 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<St
     })
 }
 
-/// 跨平台起进程 + 超时 kill。Windows 上 npm/npx/ruff 多为 .cmd/.exe,统一走 cmd /C。
 fn run_prog(cwd: &Path, prog: &str, args: &[&str], timeout: u64) -> Result<(bool, String), String> {
-    // Windows 上 npm/npx/ruff 多为 .cmd,须走 cmd /C 才找得到;git/cargo 是真 .exe 直调。
-    let used_cmd = cfg!(windows) && prog != "git" && prog != "cargo";
+    run_prog_env(cwd, prog, args, &[], timeout)
+}
+
+/// 跨平台起进程 + 超时 kill。Windows 上 npm/npx/ruff 多为 .cmd/.exe,统一走 cmd /C。
+fn run_prog_env(
+    cwd: &Path,
+    prog: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: u64,
+) -> Result<(bool, String), String> {
+    // Windows 上 npm/npx/ruff 多为 .cmd,须走 cmd /C 才找得到;git/cargo/powershell 是真 .exe 直调。
+    let used_cmd = cfg!(windows) && prog != "git" && prog != "cargo" && prog != "powershell";
     let mut cmd = if used_cmd {
         let mut c = Command::new("cmd");
         c.arg("/C").arg(prog).args(args);
@@ -317,6 +385,9 @@ fn run_prog(cwd: &Path, prog: &str, args: &[&str], timeout: u64) -> Result<(bool
         c.args(args);
         c
     };
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     let mut child = cmd
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -499,6 +570,23 @@ mod tests {
         assert!(elapsed < 15, "应在 ~2s 超时附近返回,而非等满 30s(实际 {elapsed}s)");
     }
 
+    /// 地盘越界闸纯函数路径:界内 pass、越界 fail 且列出文件、空 scope / 无 diff 跳过。
+    #[test]
+    fn scope_gate_paths() {
+        let files = vec!["src/a.rs".to_string(), "docs/b.md".to_string()];
+        let (st, _) = super::scope_gate(Some(&files), "src, docs");
+        assert_eq!(st, "pass");
+        let (st, out) = super::scope_gate(Some(&files), "src");
+        assert_eq!(st, "fail");
+        assert!(out.contains("docs/b.md"), "应列出越界文件: {out}");
+        // 前缀必须按路径段匹配:srcx/ 不算 src/ 界内。
+        let tricky = vec!["srcx/evil.rs".to_string()];
+        let (st, _) = super::scope_gate(Some(&tricky), "src");
+        assert_eq!(st, "fail");
+        assert_eq!(super::scope_gate(Some(&files), "").0, "skipped");
+        assert_eq!(super::scope_gate(None, "src").0, "skipped");
+    }
+
     #[test]
     fn checks_run_for_task_profiles() {
         let _g = TEST_LOCK.lock().unwrap();
@@ -548,15 +636,22 @@ mod tests {
         let sha = round_sha(1, 0).expect("本轮应记下 SHA");
         assert_eq!(sha.len(), 40, "应是完整 commit sha: {sha}");
 
-        // creative 档:clear_round 后重跑,只剩两项(不跑构建/静态检查)。
+        // 地盘越界:测试卡没圈 scope → 跳过(不误伤)。
+        let gate = runs.iter().find(|r| r.name == "地盘越界").expect("缺地盘越界项");
+        assert_eq!(gate.status, "skipped", "无 scope 应跳过: {}", gate.output);
+        // 项目检测(code 档才有):技能存在与否都必须有终态记录,绝不静默消失。
+        let sk = runs.iter().find(|r| r.name == "项目检测").expect("缺项目检测项");
+        assert!(sk.status == "pass" || sk.status == "fail", "项目检测应有终态: {}", sk.status);
+
+        // creative 档:clear_round 后重跑,只剩三项(不跑项目检测/构建类)。
         run_for_task(&repo, "feat/t1", 1, 0, "creative", &|| {}).unwrap();
         let runs = list(1, 0).unwrap();
-        assert_eq!(runs.len(), 2, "creative 档只留密钥扫描+大文件闸");
-        assert!(runs.iter().all(|r| r.name == "密钥扫描" || r.name == "大文件闸"));
+        assert_eq!(runs.len(), 3, "creative 档只留密钥扫描+大文件闸+地盘越界");
+        assert!(runs.iter().all(|r| r.name == "密钥扫描" || r.name == "大文件闸" || r.name == "地盘越界"));
 
         // off 档:直接返回,不清也不写。
         run_for_task(&repo, "feat/t1", 1, 0, "off", &|| {}).unwrap();
-        assert_eq!(list(1, 0).unwrap().len(), 2);
+        assert_eq!(list(1, 0).unwrap().len(), 3);
 
         // 档位读写 + 非法值拒绝。
         assert_eq!(project_profile(1), "code");

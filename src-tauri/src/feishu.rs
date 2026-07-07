@@ -359,8 +359,9 @@ pub fn feishu_open_console() -> Result<(), String> {
     let url = console_url(&cfg);
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
+        // rundll32 不解析 &,URL 原样透传(cmd start 会在 & 处截断 query 参数)
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
             .spawn()
             .map_err(|e| e.to_string())?;
     }

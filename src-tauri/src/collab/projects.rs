@@ -21,6 +21,8 @@ pub struct Project {
     pub open_count: i64,
     /// 待验收任务数(review)——同上。
     pub review_count: i64,
+    /// 管理者放行的全项目共享可见路径(CSV)。协作者开工时并入稀疏集,人人可见这些目录。
+    pub shared_scope: String,
 }
 
 fn row_to_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
@@ -35,10 +37,23 @@ fn row_to_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
         team_id: r.get(7)?,
         open_count: 0,
         review_count: 0,
+        shared_scope: r.get(8)?,
     })
 }
 
-const COLS: &str = "id,name,repo,lead_expert_id,charter_path,created_at,archived,team_id";
+const COLS: &str = "id,name,repo,lead_expert_id,charter_path,created_at,archived,team_id,shared_scope";
+
+/// 设共享可见路径(CSV)。can_admin 校验在调用侧(http 层)。
+pub fn set_shared_scope(project_id: i64, shared_scope: &str, actor: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "UPDATE projects SET shared_scope=?1 WHERE id=?2",
+        params![shared_scope.trim(), project_id],
+    )
+    .map_err(|e| e.to_string())?;
+    db::audit(actor, "project.shared_scope", &project_id.to_string(), shared_scope.trim());
+    Ok(())
+}
 
 pub fn create(name: &str, repo: &str, team_id: Option<i64>, owner_user_id: i64, actor: &str) -> Result<Project, String> {
     let name = name.trim();

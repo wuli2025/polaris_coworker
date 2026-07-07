@@ -1,0 +1,28 @@
+
+> polaris-app@1.7.1 tauri:dev
+> tauri dev
+
+
+> polaris-app@1.7.1 dev
+> vite
+
+
+  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m673[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m1421[22m/[39m
+  [32m➜[39m  [1mNetwork[22m: [36mhttp://198.18.0.1:[1m1421[22m/[39m
+  [32m➜[39m  [1mNetwork[22m: [36mhttp://100.126.0.21:[1m1421[22m/[39m
+  [32m➜[39m  [1mNetwork[22m: [36mhttp://192.168.1.23:[1m1421[22m/[39m
+  [32m➜[39m  [1mNetwork[22m: [36mhttp://172.19.16.1:[1m1421[22m/[39m
+[2m19:08:13[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2m董事会_付费转化与营收报告_2025-01_2026-06.html[22m
+[2m19:45:07[22m [36m[1m[vite][22m[39m changed tsconfig file detected: D:\polaris\polaris-app\marketing-site\tsconfig.json - Clearing cache and forcing full-reload to ensure TypeScript is compiled with updated config values.
+[2m19:54:37[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/server/app/index.html[22m
+[2m19:54:37[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/export/404.html[22m
+[2m19:54:38[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/export/500.html[22m
+[2m19:54:38[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/export/500.html[22m
+[2m19:54:38[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/server/app/_not-found.html[22m
+[2m19:54:38[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/server/pages/404.html[22m
+[2m19:54:38[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/server/pages/404.html[22m
+[2m19:54:38[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/server/pages/500.html[22m
+[2m19:54:38[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/export/500.html[22m
+[2m19:54:38[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mmarketing-site/.next/export/404.html[22m
