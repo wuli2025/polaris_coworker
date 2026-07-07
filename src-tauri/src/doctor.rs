@@ -28,30 +28,17 @@
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
 #[cfg(not(feature = "desktop"))]
 use crate::host::AppHandle;
 
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// 给从 GUI 进程拉起的子进程加 `CREATE_NO_WINDOW`, 免得每次探测都闪一个黑色控制台窗口。
-#[cfg_attr(not(windows), allow(unused_variables))]
-fn no_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-}
+use crate::runtime::procs::no_window;
 
 // ───────────────────────── 视图模型 ─────────────────────────
 
@@ -130,8 +117,8 @@ pub struct EnvStreamEvent {
     pub message: Option<String>,
 }
 
-static CHILDREN: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, Child>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+// 子进程池收口到 runtime::procs::CHILDREN(与 chat 共池,req_id 前缀 env- 不冲突)。
+use crate::runtime::procs::CHILDREN;
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn next_req_id() -> String {
@@ -1734,7 +1721,7 @@ pub fn env_update_claude(app: AppHandle) -> Result<String, String> {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_cancel(req_id: String) -> Result<(), String> {
-    if let Some(mut child) = CHILDREN.lock().remove(&req_id) {
+    if let Some(mut child) = CHILDREN.remove(&req_id) {
         let _ = child.kill();
     }
     Ok(())
@@ -1829,7 +1816,7 @@ fn stream_install(app: AppHandle, req_id: String, mut cmd: Command, fix_path_aft
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    CHILDREN.lock().insert(req_id.clone(), child);
+    CHILDREN.insert(req_id.clone(), child);
 
     // stderr 线程
     if let Some(stderr) = stderr {
@@ -1879,7 +1866,7 @@ fn stream_install(app: AppHandle, req_id: String, mut cmd: Command, fix_path_aft
             }
         }
 
-        let child_opt = CHILDREN.lock().remove(&req_id);
+        let child_opt = CHILDREN.remove(&req_id);
         let success = if let Some(mut child) = child_opt {
             child.wait().map(|s| s.success()).unwrap_or(false)
         } else {

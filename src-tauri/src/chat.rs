@@ -30,20 +30,7 @@ use tauri::{AppHandle, Emitter};
 use crate::host::AppHandle;
 use walkdir::WalkDir;
 
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// 给从 GUI 进程拉起的子进程加 `CREATE_NO_WINDOW`：宿主是窗口子系统、本身没有控制台，
-/// 直接 spawn 控制台子系统的 claude.exe / docker.exe 会被分配一个新控制台 → 每次发消息
-/// 都弹一个黑色终端窗口。加这个标志让它隐藏式运行，用户看不到终端。
-#[cfg_attr(not(windows), allow(unused_variables))]
-fn no_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-}
+use crate::runtime::procs::no_window;
 
 pub fn init(_app: &AppHandle) -> Result<(), anyhow::Error> {
     Ok(())
@@ -200,14 +187,9 @@ pub struct ChatStreamEvent {
 
 // ───────────────────────── State ─────────────────────────
 
-static CHILDREN: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, Child>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-/// 「取消挂起」标记: chat_send 已改为后台线程拼 prompt + spawn(见 chat_send_pipeline),
-/// 用户的 stop 可能在 child 注册进 CHILDREN **之前**到达 —— 此时 chat_cancel 找不到
-/// child, 就把 req_id 记到这里; 后台管线在 spawn 前 / reader 挂接后各查一次, 有标记
-/// 即放弃或按正常取消路径杀掉, 保证「spawn 完成前点停止」不会漏杀。
-static PENDING_CANCEL: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
+// 子进程池 + 「取消挂起」标记已收口到 runtime::procs::CHILDREN(与 doctor 共池,
+// req_id 前缀不同不冲突);「spawn 完成前点停止」的窄窗口语义见 ChildRegistry 文档。
+use crate::runtime::procs::{kill_tree, CHILDREN};
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 单轮 assistant 文本落库缓冲上限 (字节): 防 claude 异常死循环狂打输出把内存撑爆。
@@ -285,7 +267,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
                 },
             );
             // 失败收尾时顺手清掉可能残留的「取消挂起」标记, 防 PENDING_CANCEL 积攒。
-            PENDING_CANCEL.lock().remove(&bg_req);
+            CHILDREN.take_cancel(&bg_req);
         }
     });
 
@@ -298,7 +280,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
 /// done), 只是全部从后台线程 emit。fast / work / 创作模式统一走这一条管线。
 fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Result<(), String> {
     // 用户在管线开跑前就点了停止 → 直接放弃(前端 cancel 路径已自行收尾 UI, 不发事件)。
-    if PENDING_CANCEL.lock().remove(req_id) {
+    if CHILDREN.take_cancel(req_id) {
         return Ok(());
     }
 
@@ -642,7 +624,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
 
     // spawn 前再查一次「取消挂起」: 上面拼 prompt + KB 召回可能耗时数秒, 期间用户可能
     // 已点停止 —— 有标记就直接放弃, 连子进程都不起。
-    if PENDING_CANCEL.lock().remove(req_id) {
+    if CHILDREN.take_cancel(req_id) {
         return Ok(());
     }
 
@@ -673,7 +655,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
         .take()
         .ok_or_else(|| "claude 子进程没有 stderr".to_string())?;
 
-    CHILDREN.lock().insert(req_id.to_string(), child);
+    CHILDREN.insert(req_id.to_string(), child);
 
     // 「最近一次活动」时间戳: stdout/stderr 每产出一行就刷新(见下面两个 reader 线程)。
     // 看门狗据此判「空闲挂死」而非「绝对超时」—— 正在活跃流式输出的长任务(批量 PPT/
@@ -891,7 +873,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
         batcher.flush(&app_out, &req_out, conv_id_thread.as_deref());
 
         // 等子进程退出, 检查 exit code (不能持锁 wait, 否则 chat_cancel 死锁)
-        let child_opt = CHILDREN.lock().remove(&req_out);
+        let child_opt = CHILDREN.remove(&req_out);
         let exit_msg: Option<String> = if let Some(mut child) = child_opt {
             // 有界等待: 卡死的孙进程 (占着管道不退) 绝不能把这个读线程永久钉住,
             // 否则一年里每次卡死都泄漏一个 ~2MB 栈的线程 → 终将 OOM。
@@ -1033,15 +1015,15 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
             },
         );
         // 本轮已终态: 清掉可能残留的「取消挂起」标记(如 stop 恰在收尾窗口内到达), 防积攒。
-        PENDING_CANCEL.lock().remove(&req_out);
+        CHILDREN.take_cancel(&req_out);
     });
 
     // stop 在「spawn 后、child 注册进 CHILDREN 前」的窄窗口内到达的兜底: 那一刻
     // chat_cancel 找不到 child 只能打标记, 这里(reader 线程已挂接后)补一次检查 ——
     // 有标记就按正常取消路径杀掉; stdout 随之关闭, reader 线程照常发 done 收尾,
     // 且 child 已先从 CHILDREN 摘除 → 不会发「异常退出」error(与 chat_cancel 同款语义)。
-    if PENDING_CANCEL.lock().remove(req_id) {
-        if let Some(mut c) = CHILDREN.lock().remove(req_id) {
+    if CHILDREN.take_cancel(req_id) {
+        if let Some(mut c) = CHILDREN.remove(req_id) {
             kill_tree(c.id());
             let _ = c.kill();
             let _ = c.wait();
@@ -1053,7 +1035,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn chat_cancel(req_id: String) -> Result<(), String> {
-    if let Some(mut child) = CHILDREN.lock().remove(&req_id) {
+    if let Some(mut child) = CHILDREN.remove(&req_id) {
         kill_tree(child.id()); // 先杀整树: claude 扇出的 python/node/dev server 等子孙
         let _ = child.kill(); // 再杀 claude 本体 (taskkill /T 通常已带走它, 这步兜底)
         let _ = child.wait(); // reap, 防 Unix 僵尸进程泄漏
@@ -1061,7 +1043,7 @@ pub fn chat_cancel(req_id: String) -> Result<(), String> {
         // chat_send 已改为后台线程拼 prompt + spawn: stop 可能在 child 注册进 CHILDREN
         // 之前到达。打「取消挂起」标记, 后台管线在 spawn 前 / reader 挂接后各查一次,
         // 有标记即放弃 spawn 或立刻杀掉刚起的 child(见 chat_send_pipeline)。
-        PENDING_CANCEL.lock().insert(req_id);
+        CHILDREN.mark_cancel(req_id);
     }
     Ok(())
 }
@@ -1076,37 +1058,6 @@ pub fn chat_build_manifest(conversation_id: Option<String>) -> Option<Value> {
     serde_json::from_str::<Value>(&txt).ok()
 }
 
-/// App 退出 (关窗 / 主动退出) 时回收所有在飞的 claude 子进程, 连同它们扇出的整棵进程树。
-/// 否则用户在 claude 跑长任务 (起 dev server / Task 扇出) 时直接关 App, claude 及其子孙
-/// 会变孤儿继续在后台占端口/CPU/写文件。由 lib.rs 的 RunEvent 钩子调用。
-pub fn kill_all_children() {
-    let mut map = CHILDREN.lock();
-    for (_id, mut child) in map.drain() {
-        kill_tree(child.id());
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-}
-
-/// 按 PID kill 整个进程树。claude 在 Bash/PowerShell/Task 工具下会拉起 python/node/dev server
-/// 等子进程, 只 kill claude 本体会留孤儿占着端口。与 project.rs::kill_tree 同策略。
-fn kill_tree(pid: u32) {
-    #[cfg(windows)]
-    {
-        let mut cmd = Command::new("taskkill");
-        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
-        no_window(&mut cmd);
-        let _ = cmd.output();
-    }
-    #[cfg(not(windows))]
-    {
-        // 杀进程组 (shell -c 起的子孙); 失败再退化为 kill 单进程。
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{}", pid)])
-            .output()
-            .or_else(|_| Command::new("kill").arg(pid.to_string()).output());
-    }
-}
 
 /// 看门狗深检采样: root 进程树(含 root)的子孙数 + 整树累计 CPU 时间。
 /// cpu 单位各平台不同(Windows 100ns / Linux jiffies / mac 秒), 只用于跨采样单调比较。

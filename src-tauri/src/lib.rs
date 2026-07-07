@@ -18,6 +18,7 @@ pub mod expert;
 pub mod echo;
 pub mod project;
 pub mod provider;
+pub mod runtime;
 pub mod scan;
 pub mod sense;
 pub mod skills;
@@ -425,7 +426,7 @@ pub fn run() {
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
-                chat::kill_all_children();
+                runtime::procs::CHILDREN.kill_all();
                 // 对话状态强制落盘:append_message 走「脏标记 + 500ms 合并落盘」,
                 // 退出瞬间可能还有最近半秒的消息只在内存里 —— 这里补一刀(不脏则零开销)。
                 conv::flush();
