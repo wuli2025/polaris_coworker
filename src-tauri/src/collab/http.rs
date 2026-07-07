@@ -231,9 +231,13 @@ async fn collab_redeem(Json(v): Json<Value>) -> Response {
 async fn collab_ticket(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
     let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
     if role_rank(&ctx.role) < 3 { return forbid(); }
+    // 分享码 = 裸码 + 主机可达地址(启动时探测/环境覆写);成员端粘一串即入伙。
+    let advertise = state.advertise.read().clone();
     let out = tokio::task::spawn_blocking(move || {
         let role = { let r = s_of(&v, "role"); if r.is_empty() { "collaborator".into() } else { r } };
-        crate::collab::identity::create_ticket(&role, &s_of(&v, "note")).and_then(|t| ok(t))
+        let t = crate::collab::identity::create_ticket(&role, &s_of(&v, "note"))?;
+        let share = crate::collab::identity::encode_share_code(&t.code, &advertise);
+        ok(json!({ "code": t.code, "role": t.role, "expires_at": t.expires_at, "share": share }))
     })
     .await;
     unwrap_api(out)
