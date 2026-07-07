@@ -1,10 +1,30 @@
 //! 多人协作 HTTP 路由 —— 双壳共用(Docker server 壳 merge;桌面 hosting 内嵌)。
-//! Task 2 会把 server.rs 里的全部 collab handler 迁进来;本文件先立地基:
-//! CollabState / 分享码地址探测 / collab_router 骨架。
+//!
+//! 从 server.rs 整体迁入(逻辑零改动,只把状态从 AppState 换成 CollabState):
+//! 鉴权胶水(AuthCtx/resolve_auth/角色闸)+ 全部 /api/collab/* handler + /git/* 反代
+//! + WS 推流循环。server 壳经 `collab_router(state, false)` merge 复用;桌面
+//! 「一键当主机」(collab/hosting.rs)经 `collab_router(state, true)` 内嵌并自带 /ws。
+//!
+//! 双轨鉴权(向后兼容):
+//!  ① 多用户会话(collab):token 命中 sessions 表 → 得到具体用户与角色,命令过角色闸。
+//!  ② 传统全局口令 POLARIS_AUTH_TOKEN:命中即视为 owner(机器管理员,单人 Docker 场景)。
+//!  协作启用后(users 表非空)未带任何有效凭据 → 拒绝;未启用协作则维持旧语义。
 
-use crate::host::AppHandle;
-use axum::Router;
+use crate::host::{AppHandle, Event};
+use axum::{
+    body::Body,
+    extract::{ws::Message, ws::WebSocket, Query, State, WebSocketUpgrade},
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// 协作面状态:与 server::AppState 解耦,桌面内嵌时独立构造。
 #[derive(Clone)]
@@ -54,19 +74,1216 @@ pub fn detect_advertise_urls(port: u16) -> Vec<String> {
     out
 }
 
+// ───────────────────────── 鉴权 ─────────────────────────
+
+/// 一次请求的鉴权结果:是谁、什么角色。
+#[derive(Clone)]
+pub struct AuthCtx {
+    pub user_id: i64, // 0 = 合成身份(全局口令 admin / 本机单人 local)
+    pub username: String,
+    pub role: String, // owner|collaborator|visitor|lead
+}
+
+pub fn bearer_of(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s).to_string())
+        .or_else(|| {
+            headers
+                .get("x-polaris-token")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
+}
+
+/// token(header 或 ws query) → AuthCtx。None = 未授权。
+pub fn resolve_auth(auth_token: &Option<String>, token: Option<&str>) -> Option<AuthCtx> {
+    // 轨② 全局口令 = owner。
+    if let Some(expected) = auth_token.as_ref() {
+        if token == Some(expected.as_str()) {
+            return Some(AuthCtx { user_id: 0, username: "admin".into(), role: "owner".into() });
+        }
+    }
+    // 轨① 会话 token。
+    if let Some(t) = token {
+        if let Ok(u) = crate::collab::auth::check_session(t) {
+            return Some(AuthCtx { user_id: u.id, username: u.username, role: u.role });
+        }
+    }
+    // 双轨都没命中:只有「协作未启用且未设口令」才放行(本机单人开发场景)。
+    let collab_on = crate::collab::auth::is_bootstrap().map(|b| !b).unwrap_or(false);
+    if !collab_on && auth_token.is_none() {
+        return Some(AuthCtx { user_id: 0, username: "local".into(), role: "owner".into() });
+    }
+    None
+}
+
+pub fn auth_ctx(state: &CollabState, headers: &HeaderMap) -> Option<AuthCtx> {
+    resolve_auth(&state.auth_token, bearer_of(headers).as_deref())
+}
+
+pub fn role_rank(role: &str) -> u8 {
+    match role {
+        "owner" => 3,
+        "lead" | "collaborator" => 2,
+        "visitor" => 1,
+        _ => 0,
+    }
+}
+
+// ───────────────────────── 小工具 ─────────────────────────
+
+fn s_of(v: &Value, k: &str) -> String {
+    v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+fn i_of(v: &Value, k: &str) -> Option<i64> {
+    v.get(k).and_then(|x| x.as_i64())
+}
+
+fn forbid() -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({"error":"需要 owner 权限"}))).into_response()
+}
+
+pub fn err_resp(e: String) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response()
+}
+
+pub fn ok<T: Serialize>(t: T) -> Result<Value, String> {
+    serde_json::to_value(t).map_err(|e| e.to_string())
+}
+
+/// spawn_blocking 结果 → HTTP 响应(业务错误 → 400 而非 500,便于前端展示)。
+fn unwrap_api(out: Result<Result<Value, String>, tokio::task::JoinError>) -> Response {
+    match out {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+        Err(e) => err_resp(format!("内部任务失败: {e}")),
+    }
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+// ───────────────────────── /api/collab 账号与会话 ─────────────────────────
+//
+// 登录发生在隧道之内(v8 第八节):这些端点本身不再叠全局口令,密码与会话即凭据。
+// bootstrap 仅在零账号时可用;admin/* 全部要求 owner 会话。
+
+/// 首启建 owner(仅零账号时放行,防抢注)。
+async fn collab_bootstrap(Json(v): Json<Value>) -> Response {
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        if !crate::collab::auth::is_bootstrap()? {
+            return Err("已初始化,不能重复建 owner".into());
+        }
+        let u = crate::collab::auth::create_user(&s_of(&v, "username"), &s_of(&v, "password"), "owner", &s_of(&v, "displayName"))?;
+        let (_, token) = crate::collab::auth::login(&u.username, &s_of(&v, "password"), &s_of(&v, "deviceId"))?;
+        Ok(json!({"user": u, "token": token}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn collab_login(Json(v): Json<Value>) -> Response {
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let (u, token) = crate::collab::auth::login(&s_of(&v, "username"), &s_of(&v, "password"), &s_of(&v, "deviceId"))?;
+        Ok(json!({"user": u, "token": token}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn collab_logout(headers: HeaderMap) -> Response {
+    let token = bearer_of(&headers).unwrap_or_default();
+    let out = tokio::task::spawn_blocking(move || crate::collab::auth::logout(&token).map(|_| json!({"ok": true}))).await;
+    unwrap_api(out)
+}
+
+async fn collab_me(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    match auth_ctx(&state, &headers) {
+        Some(ctx) => Json(json!({"username": ctx.username, "role": ctx.role})).into_response(),
+        None => (StatusCode::UNAUTHORIZED, Json(json!({"error":"未登录"}))).into_response(),
+    }
+}
+
+/// 票据兑换 → 建账号+登记设备+签会话(入伙的应用层部分;隧道层白名单在 P2 接入)。
+async fn collab_redeem(Json(v): Json<Value>) -> Response {
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let (u, token) = crate::collab::identity::redeem_ticket(
+            &s_of(&v, "code"), &s_of(&v, "username"), &s_of(&v, "password"),
+            &s_of(&v, "displayName"), &s_of(&v, "deviceName"), &s_of(&v, "nodeId"),
+        )?;
+        Ok(json!({"user": u, "token": token}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn collab_ticket(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(move || {
+        let role = { let r = s_of(&v, "role"); if r.is_empty() { "collaborator".into() } else { r } };
+        crate::collab::identity::create_ticket(&role, &s_of(&v, "note")).and_then(|t| ok(t))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn collab_users(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(|| crate::collab::auth::list_users().and_then(ok)).await;
+    unwrap_api(out)
+}
+
+async fn collab_user_disable(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(move || {
+        let id = v.get("userId").and_then(|x| x.as_i64()).ok_or("缺 userId")?;
+        let dis = v.get("disabled").and_then(|x| x.as_bool()).unwrap_or(true);
+        crate::collab::auth::set_user_disabled(id, dis).map(|_| json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn collab_devices(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(|| crate::collab::identity::list_devices().and_then(ok)).await;
+    unwrap_api(out)
+}
+
+async fn collab_device_revoke(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(move || {
+        crate::collab::identity::revoke_device(&s_of(&v, "deviceId")).map(|_| json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+// ── GitHub 式注册与团队 ──
+
+/// 开放注册:只要账号密码(默认开;POLARIS_OPEN_SIGNUP=0 可关回票据制)。
+async fn collab_signup(Json(v): Json<Value>) -> Response {
+    let closed = std::env::var("POLARIS_OPEN_SIGNUP").map(|s| s == "0" || s.eq_ignore_ascii_case("false")).unwrap_or(false);
+    if closed {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"本主机关闭了开放注册,请找管理员要邀请票据"}))).into_response();
+    }
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let u = crate::collab::auth::create_user(&s_of(&v, "username"), &s_of(&v, "password"), "collaborator", &s_of(&v, "displayName"))?;
+        let (_, token) = crate::collab::auth::login(&u.username, &s_of(&v, "password"), &s_of(&v, "deviceId"))?;
+        Ok(json!({"user": u, "token": token}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 用户名搜索(拉人自动补全)。登录即可用,只回不敏感字段。
+async fn collab_user_search(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(_ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let kw = q.get("q").cloned().unwrap_or_default();
+    let out = tokio::task::spawn_blocking(move || crate::collab::teams::search_users(&kw).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+async fn team_list(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let out = tokio::task::spawn_blocking(move || crate::collab::teams::list_mine(ctx.user_id).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+/// 建团队:任何登录用户(访问者除外)。
+async fn team_create(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 2 { return forbid(); }
+    let out = tokio::task::spawn_blocking(move || {
+        crate::collab::teams::create(&s_of(&v, "name"), ctx.user_id, &ctx.username).and_then(ok)
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 团队管理权:全局 owner 或该团队 owner。
+fn is_team_admin(ctx: &AuthCtx, team_id: i64) -> bool {
+    role_rank(&ctx.role) >= 3 || crate::collab::teams::my_role(team_id, ctx.user_id).as_deref() == Some("owner")
+}
+
+async fn team_members_api(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(tid) = q.get("teamId").and_then(|s| s.parse::<i64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 teamId"}))).into_response();
+    };
+    // 团队成员可看成员列表
+    if role_rank(&ctx.role) < 3 && crate::collab::teams::my_role(tid, ctx.user_id).is_none() {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"你不在该团队"}))).into_response();
+    }
+    let out = tokio::task::spawn_blocking(move || crate::collab::teams::members(tid).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+/// 按用户名拉人(GitHub 式邀请)。团队 owner 专属。
+async fn team_member_add(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(tid) = i_of(&v, "teamId") else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 teamId"}))).into_response();
+    };
+    if !is_team_admin(&ctx, tid) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"只有团队管理者能拉人"}))).into_response();
+    }
+    let out = tokio::task::spawn_blocking(move || {
+        let name = crate::collab::teams::add_member_by_username(tid, &s_of(&v, "username"), &s_of(&v, "role"), &ctx.username)?;
+        Ok(json!({"ok": true, "username": name}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn team_member_remove(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let (Some(tid), Some(uid)) = (i_of(&v, "teamId"), i_of(&v, "userId")) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 teamId/userId"}))).into_response();
+    };
+    // 自己可以退出;移除别人要团队管理权
+    if uid != ctx.user_id && !is_team_admin(&ctx, tid) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"只有团队管理者能移除成员"}))).into_response();
+    }
+    let out = tokio::task::spawn_blocking(move || {
+        crate::collab::teams::remove_member(tid, uid, &ctx.username).map(|_| json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+// ── 账号镜像(云端双存) ──
+
+/// 主机侧:导出加密镜像(owner)。返回 blob,调用方可 POST 给云端 /mirror/store。
+async fn mirror_export_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(|| crate::collab::account_store::export_blob().map(|b| json!({"blob": b}))).await;
+    unwrap_api(out)
+}
+
+/// 云端侧:保管密文(owner 会话或全局口令)。云端解不开,只做保管。
+async fn mirror_store_api(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(move || {
+        crate::collab::account_store::store_remote_blob(&s_of(&v, "blob")).map(|ver| json!({"ok": true, "version": ver}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn mirror_pull_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(|| {
+        crate::collab::account_store::load_blob().map(|o| match o {
+            Some((ver, blob)) => json!({"version": ver, "blob": blob}),
+            None => json!({"version": 0, "blob": null}),
+        })
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 恢复(空库 + 持有 host.key 的机器上才可能成功;account_store 内部还有防覆盖闸)。
+async fn mirror_restore_api(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    // 特例:灾后恢复时本机往往一个账号都没有(auth_ctx 在零账号+无口令时给合成 owner)。
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(move || {
+        crate::collab::account_store::restore_blob(&s_of(&v, "blob")).map(|n| json!({"ok": true, "restored": n}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+// ── 项目与任务卡 ──
+//
+// 权限模型(确定性两问):① 全局角色够不够(role_rank);② 是不是项目成员
+// (project_members 表;全局 owner 与合成 owner 免查——他们是主机管理员)。
+
+/// 项目成员校验:owner 直通;其余必须在成员表。
+fn ensure_member(ctx: &AuthCtx, project_id: i64) -> Result<(), Response> {
+    if role_rank(&ctx.role) >= 3 {
+        return Ok(());
+    }
+    if crate::collab::projects::member_role(project_id, ctx.user_id).is_some() {
+        return Ok(());
+    }
+    Err((StatusCode::FORBIDDEN, Json(json!({"error":"你不是该项目成员"}))).into_response())
+}
+
+/// 建项目:挂团队时团队 owner 即可(GitHub 式);独立项目仍需全局 owner。
+async fn project_create(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let team_id = i_of(&v, "teamId");
+    let allowed = match team_id {
+        Some(tid) => is_team_admin(&ctx, tid),
+        None => role_rank(&ctx.role) >= 3,
+    };
+    if !allowed {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"挂团队的项目需团队管理者;独立项目需主机管理员"}))).into_response();
+    }
+    let out = tokio::task::spawn_blocking(move || {
+        crate::collab::projects::create(&s_of(&v, "name"), &s_of(&v, "repo"), team_id, ctx.user_id, &ctx.username).and_then(ok)
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn project_list(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let is_owner = role_rank(&ctx.role) >= 3;
+    let out = tokio::task::spawn_blocking(move || crate::collab::projects::list_for(ctx.user_id, is_owner).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+async fn project_members(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 projectId"}))).into_response();
+    };
+    if let Err(r) = ensure_member(&ctx, pid) { return r; }
+    let out = tokio::task::spawn_blocking(move || crate::collab::projects::members(pid).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+/// 加项目成员:项目/团队管理者即可;支持 userId 或 username(GitHub 式搜索拉人)。
+async fn project_member_add(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(pid) = i_of(&v, "projectId") else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 projectId"}))).into_response();
+    };
+    let global_owner = role_rank(&ctx.role) >= 3;
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        if !crate::collab::projects::can_admin(pid, ctx.user_id, global_owner) {
+            return Err("只有项目/团队管理者能加成员".into());
+        }
+        let role = { let r = s_of(&v, "role"); if r.is_empty() { "collaborator".into() } else { r } };
+        if let Some(uid) = i_of(&v, "userId") {
+            crate::collab::projects::add_member(pid, uid, &role, &ctx.username)?;
+        } else {
+            let uname = s_of(&v, "username");
+            if uname.is_empty() {
+                return Err("缺 userId 或 username".into());
+            }
+            crate::collab::projects::add_member_by_username(pid, &uname, &role, &ctx.username)?;
+        }
+        Ok(json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn project_set_lead(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let global_owner = role_rank(&ctx.role) >= 3;
+    let out = tokio::task::spawn_blocking(move || {
+        let pid = i_of(&v, "projectId").ok_or("缺 projectId")?;
+        if !crate::collab::projects::can_admin(pid, ctx.user_id, global_owner) {
+            return Err("只有项目/团队管理者能任命主 Agent".into());
+        }
+        let expert = s_of(&v, "expertId");
+        let expert = if expert.is_empty() { None } else { Some(expert) };
+        crate::collab::projects::set_lead(pid, expert.as_deref(), &ctx.username).map(|_| json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn task_list(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 projectId"}))).into_response();
+    };
+    if let Err(r) = ensure_member(&ctx, pid) { return r; }
+    let out = tokio::task::spawn_blocking(move || crate::collab::tasks::list(pid).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+/// 任务卡变更统一广播(看板实时刷新)。项目级事件,广播即可;个人定向流走 emit_to。
+fn emit_task(state: &CollabState, card: &crate::collab::tasks::TaskCard) {
+    let _ = state.app.emit("collab:task", card);
+}
+
+async fn task_create(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(pid) = i_of(&v, "projectId") else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 projectId"}))).into_response();
+    };
+    if role_rank(&ctx.role) < 2 { return forbid(); }
+    if let Err(r) = ensure_member(&ctx, pid) { return r; }
+    let st = state.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        let card = crate::collab::tasks::create(pid, &s_of(&v, "title"), &s_of(&v, "body"), &s_of(&v, "scope"), &s_of(&v, "criteria"), &ctx.username)?;
+        emit_task(&st, &card);
+        ok(card)
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 卡操作通用骨架:取卡→项目成员校验→执行→广播。
+macro_rules! task_op {
+    ($fn_name:ident, $body:expr) => {
+        async fn $fn_name(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+            let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+            if role_rank(&ctx.role) < 2 { return forbid(); }
+            let Some(tid) = i_of(&v, "taskId") else {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 taskId"}))).into_response();
+            };
+            let pid = match tokio::task::spawn_blocking(move || crate::collab::tasks::get(tid).map(|c| c.project_id)).await {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+                Err(e) => return err_resp(e.to_string()),
+            };
+            if let Err(r) = ensure_member(&ctx, pid) { return r; }
+            let st = state.clone();
+            let op: fn(i64, &AuthCtx, &Value, &CollabState) -> Result<Value, String> = $body;
+            let out = tokio::task::spawn_blocking(move || op(tid, &ctx, &v, &st)).await;
+            unwrap_api(out)
+        }
+    };
+}
+
+task_op!(task_claim, |tid, ctx, _v, st| {
+    let card = crate::collab::tasks::claim(tid, ctx.user_id, &ctx.username)?;
+    emit_task(st, &card);
+    ok(card)
+});
+
+task_op!(task_submit, |tid, ctx, v, st| {
+    let card = crate::collab::tasks::submit(tid, i_of(v, "prId"), &ctx.username)?;
+    emit_task(st, &card);
+    ok(card)
+});
+
+task_op!(task_review, |tid, ctx, v, st| {
+    // 验收权=项目/团队管理者(协作者不能给自己验收)。asLead 也只能由管理者触发——
+    // 落档 actor 记 lead:<expert>,且额外过 lead.rs 三问(任命/授权位/预算)。
+    let card = crate::collab::tasks::get(tid)?;
+    if !crate::collab::projects::can_admin(card.project_id, ctx.user_id, role_rank(&ctx.role) >= 3) {
+        return Err("只有项目/团队管理者能验收".into());
+    }
+    let pass = v.get("pass").and_then(|x| x.as_bool()).ok_or("缺 pass")?;
+    let comments = v.get("comments").map(|c| c.to_string()).unwrap_or_else(|| "[]".into());
+    let as_lead = v.get("asLead").and_then(|x| x.as_bool()).unwrap_or(false);
+    let outc = if as_lead {
+        crate::collab::lead::lead_review(card.project_id, tid, pass, &comments)?
+    } else {
+        crate::collab::tasks::review(tid, &ctx.username, pass, &comments)?
+    };
+    emit_task(st, &outc.card);
+    if outc.escalated {
+        // 打回熔断:抄送 owner(飞书通道接入前先走面板事件)。
+        let _ = st.app.emit("collab:escalate", serde_json::json!({"taskId": tid, "round": outc.card.round}));
+    }
+    ok(outc)
+});
+
+task_op!(task_archive, |tid, ctx, _v, st| {
+    let card = crate::collab::tasks::archive(tid, &ctx.username)?;
+    emit_task(st, &card);
+    ok(card)
+});
+
+task_op!(task_cancel, |tid, ctx, _v, st| {
+    let card = crate::collab::tasks::cancel(tid, &ctx.username)?;
+    emit_task(st, &card);
+    ok(card)
+});
+
+async fn task_rounds(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(tid) = q.get("taskId").and_then(|s| s.parse::<i64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 taskId"}))).into_response();
+    };
+    let pid = match tokio::task::spawn_blocking(move || crate::collab::tasks::get(tid).map(|c| c.project_id)).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+        Err(e) => return err_resp(e.to_string()),
+    };
+    if let Err(r) = ensure_member(&ctx, pid) { return r; }
+    let out = tokio::task::spawn_blocking(move || crate::collab::tasks::rounds(tid).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+// ── 主 Agent 授权位 + 晨会 ──
+
+async fn lead_grants_get(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 projectId"}))).into_response();
+    };
+    if let Err(r) = ensure_member(&ctx, pid) { return r; }
+    let out = tokio::task::spawn_blocking(move || crate::collab::lead::get_grants(pid).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+/// 授权位只有项目/团队管理者能改——这是"owner 可随时收权/降档"的落点。
+async fn lead_grants_set(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let global_owner = role_rank(&ctx.role) >= 3;
+    let out = tokio::task::spawn_blocking(move || {
+        let pid = i_of(&v, "projectId").ok_or("缺 projectId")?;
+        if !crate::collab::projects::can_admin(pid, ctx.user_id, global_owner) {
+            return Err("只有项目/团队管理者能改主 Agent 授权位".into());
+        }
+        let g: crate::collab::lead::LeadGrants =
+            serde_json::from_value(v.get("grants").cloned().ok_or("缺 grants")?).map_err(|e| e.to_string())?;
+        crate::collab::lead::set_grants(pid, &g, &ctx.username).map(|_| json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+async fn lead_morning(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 projectId"}))).into_response();
+    };
+    if let Err(r) = ensure_member(&ctx, pid) { return r; }
+    let out = tokio::task::spawn_blocking(move || crate::collab::lead::morning_report(pid).and_then(ok)).await;
+    unwrap_api(out)
+}
+
+/// 主 Agent 改派(指挥件②):管理者触发,真正的授权判定在 lead.rs 三问(须 can_reassign 位)。
+async fn lead_assign_api(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let st = state.clone();
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let tid = i_of(&v, "taskId").ok_or("缺 taskId")?;
+        let uid = i_of(&v, "userId").ok_or("缺 userId")?;
+        let card = crate::collab::tasks::get(tid)?;
+        if !crate::collab::projects::can_admin(card.project_id, ctx.user_id, role_rank(&ctx.role) >= 3) {
+            return Err("只有项目/团队管理者能触发主 Agent 改派".into());
+        }
+        let card = crate::collab::lead::lead_assign(card.project_id, tid, uid)?;
+        emit_task(&st, &card);
+        ok(card)
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 主 Agent 催办(指挥件⑥):盘出超期无动静的卡并留痕,返回催办清单。
+async fn lead_nudge_api(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let pid = i_of(&v, "projectId").ok_or("缺 projectId")?;
+        if !crate::collab::projects::can_admin(pid, ctx.user_id, role_rank(&ctx.role) >= 3) {
+            return Err("只有项目/团队管理者能触发催办".into());
+        }
+        let hours = i_of(&v, "staleHours").unwrap_or(48).max(1);
+        crate::collab::lead::lead_nudge(pid, hours).and_then(ok)
+    })
+    .await;
+    unwrap_api(out)
+}
+
+// ── 主 Agent AI ──
+
+async fn lead_model_get(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let mut cfg = crate::collab::lead_ai::load_cfg();
+    // 密钥脱敏:只回是否已配置。
+    if !cfg.api_key.is_empty() {
+        cfg.api_key = "•••".into();
+    }
+    Json(serde_json::to_value(cfg).unwrap_or_default()).into_response()
+}
+
+async fn lead_model_set(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let mut cfg: crate::collab::lead_ai::LeadModelCfg =
+            serde_json::from_value(v).map_err(|e| e.to_string())?;
+        // 前端传 ••• 表示保留原密钥。
+        if cfg.api_key == "•••" {
+            cfg.api_key = crate::collab::lead_ai::load_cfg().api_key;
+        }
+        crate::collab::lead_ai::save_cfg(&cfg)?;
+        Ok(json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 拆卡:goal → 草案;dispatch=true 且授权允许时直接建卡(仍是四要素强制)。
+async fn lead_ai_decompose(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 2 { return forbid(); }
+    let st = state.clone();
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let pid = i_of(&v, "projectId").ok_or("缺 projectId")?;
+        if role_rank(&ctx.role) < 3 && crate::collab::projects::member_role(pid, ctx.user_id).is_none() {
+            return Err("你不是该项目成员".into());
+        }
+        let drafts = crate::collab::lead_ai::ai_decompose(pid, &s_of(&v, "goal"), &s_of(&v, "memberHint"))?;
+        let dispatch = v.get("dispatch").and_then(|x| x.as_bool()).unwrap_or(false)
+            && crate::collab::lead::get_grants(pid)?.auto_dispatch;
+        let mut created = Vec::new();
+        if dispatch {
+            for d in &drafts {
+                if d.title.starts_with("待澄清") {
+                    continue; // 拆不动的不硬拆,留给 owner
+                }
+                if let Ok(card) = crate::collab::lead::lead_create_task(pid, &d.title, &d.body, &d.scope, &d.criteria) {
+                    emit_task(&st, &card);
+                    created.push(card);
+                }
+            }
+        }
+        Ok(json!({"drafts": drafts, "created": created}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 验收草稿:自动取任务分支相对 main 的 diff 喂给模型,产出意见草稿(不落状态机)。
+async fn lead_ai_review(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 2 { return forbid(); }
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let tid = i_of(&v, "taskId").ok_or("缺 taskId")?;
+        let card = crate::collab::tasks::get(tid)?;
+        if role_rank(&ctx.role) < 3 && crate::collab::projects::member_role(card.project_id, ctx.user_id).is_none() {
+            return Err("你不是该项目成员".into());
+        }
+        let repo = project_repo_path(card.project_id)?;
+        let diff = std::process::Command::new("git")
+            .arg("-C").arg(&repo)
+            .args(["diff", &format!("main...{}", card.branch)])
+            .output()
+            .map_err(|e| format!("取 diff 失败: {e}"))?;
+        let diff_text = String::from_utf8_lossy(&diff.stdout).to_string();
+        let draft = crate::collab::lead_ai::ai_review(card.project_id, tid, &diff_text)?;
+        ok(draft)
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 冲突融合草案(指挥件④的 AI 侧):对单个冲突块起草融合文本。
+/// 只产草案不落任何东西——落地须经 merge/resolve(人工确认后先落 PR 分支)。
+async fn lead_ai_fuse(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 2 { return forbid(); }
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let tid = i_of(&v, "taskId").ok_or("缺 taskId")?;
+        let file = s_of(&v, "file");
+        let block_idx = i_of(&v, "blockIndex").ok_or("缺 blockIndex")? as usize;
+        if file.is_empty() {
+            return Err("缺 file".into());
+        }
+        let card = crate::collab::tasks::get(tid)?;
+        if role_rank(&ctx.role) < 3 && crate::collab::projects::member_role(card.project_id, ctx.user_id).is_none() {
+            return Err("你不是该项目成员".into());
+        }
+        let repo = project_repo_path(card.project_id)?;
+        let blocks = crate::collab::mergectl::conflict_blocks(&repo, "main", &card.branch, &file)?;
+        let b = blocks.get(block_idx).ok_or("冲突块不存在(态势可能已变化,请刷新)")?;
+        let context = format!("文件 {file} 第 {}–{} 行,任务卡:{}", b.start_line, b.end_line, card.title);
+        let text = crate::collab::lead_ai::ai_fuse(card.project_id, &b.ours, &b.theirs, &context)?;
+        Ok(json!({"text": text}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+// ── 合并闸门 ──
+//
+// 三级闸(v8 5.3):① 机器闸=merge_trial 干净 + 提交者是项目成员;② 验收闸=卡上
+// 最新一轮 verdict=pass;③ 放行闸=owner 亲点,或主 Agent 有 can_merge 位。
+
+/// 项目仓库的本地路径(v1:projects.repo 存主机侧权威仓库路径)。
+fn project_repo_path(project_id: i64) -> Result<std::path::PathBuf, String> {
+    let p = crate::collab::projects::get(project_id)?;
+    if p.repo.trim().is_empty() {
+        return Err("项目未配置仓库路径".into());
+    }
+    let path = std::path::PathBuf::from(p.repo.trim());
+    if !path.join(".git").exists() && !path.join("HEAD").exists() {
+        return Err(format!("仓库路径不存在或不是 git 仓库: {}", path.display()));
+    }
+    Ok(path)
+}
+
+/// 冲突试算(无副作用,任何成员可跑)。入参 taskId;分支取卡上记录。
+async fn merge_trial_api(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let tid = i_of(&v, "taskId").ok_or("缺 taskId")?;
+        let card = crate::collab::tasks::get(tid)?;
+        if role_rank(&ctx.role) < 3 && crate::collab::projects::member_role(card.project_id, ctx.user_id).is_none() {
+            return Err("你不是该项目成员".into());
+        }
+        if card.branch.is_empty() {
+            return Err("任务尚未开分支".into());
+        }
+        let repo = project_repo_path(card.project_id)?;
+        let trial = crate::collab::mergectl::merge_trial(&repo, "main", &card.branch)?;
+        let (behind, ahead) = crate::collab::mergectl::behind_count(&repo, "main", &card.branch)?;
+        let overlap = crate::collab::mergectl::scope_overlap(&repo, "main", &card.branch, &card.scope)?;
+        // 冲突时顺带给出每个文件的结构化冲突块(裁决台数据源)。
+        let mut blocks = serde_json::Map::new();
+        if !trial.clean {
+            for f in trial.conflict_files.iter().take(20) {
+                if let Ok(b) = crate::collab::mergectl::conflict_blocks(&repo, "main", &card.branch, f) {
+                    blocks.insert(f.clone(), serde_json::to_value(b).unwrap_or(Value::Null));
+                }
+            }
+        }
+        Ok(json!({
+            "clean": trial.clean,
+            "conflictFiles": trial.conflict_files,
+            "behind": behind, "ahead": ahead,
+            "scopeOverlap": overlap,
+            "conflictBlocks": blocks,
+        }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 冲突裁决落地:逐块处置(采纳某侧/融合草案)一次性落成任务分支上的合并提交。
+/// 管理者专属——融合草案(含 AI 起草)必须由人在这里确认才会落分支,且永不直写 main。
+async fn merge_resolve_api(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let tid = i_of(&v, "taskId").ok_or("缺 taskId")?;
+        let card = crate::collab::tasks::get(tid)?;
+        if !crate::collab::projects::can_admin(card.project_id, ctx.user_id, role_rank(&ctx.role) >= 3) {
+            return Err("只有项目/团队管理者能落地裁决".into());
+        }
+        if card.state != "review" {
+            return Err("任务不在待验收状态,不能裁决".into());
+        }
+        if card.branch.is_empty() {
+            return Err("任务尚未开分支".into());
+        }
+        let resolutions: std::collections::HashMap<String, Vec<crate::collab::mergectl::BlockResolution>> =
+            serde_json::from_value(v.get("resolutions").cloned().ok_or("缺 resolutions")?)
+                .map_err(|e| format!("resolutions 结构不符: {e}"))?;
+        let repo = project_repo_path(card.project_id)?;
+        let oid = crate::collab::mergectl::resolve_conflicts(&repo, "main", &card.branch, &resolutions, &ctx.username)?;
+        Ok(json!({"ok": true, "commit": oid}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// squash 合并放行:走满三级闸,合并后推进状态机+广播。
+async fn merge_squash_api(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let st = state.clone();
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let tid = i_of(&v, "taskId").ok_or("缺 taskId")?;
+        let card = crate::collab::tasks::get(tid)?;
+        // 放行闸:owner 直通;主 Agent 路径走 lead_approve_merge(查 can_merge 位);
+        // 其余角色一律拒绝——协作者不能给自己放行。
+        let as_lead = v.get("asLead").and_then(|x| x.as_bool()).unwrap_or(false);
+        let can_admin = crate::collab::projects::can_admin(card.project_id, ctx.user_id, role_rank(&ctx.role) >= 3);
+        let actor = if can_admin && !as_lead {
+            ctx.username.clone()
+        } else if as_lead {
+            crate::collab::lead::lead_approve_merge(card.project_id, tid)?;
+            format!("lead(申请人:{})", ctx.username)
+        } else {
+            return Err("合并放行需要 owner,或已授权的主 Agent".into());
+        };
+        // 验收闸:最新一轮必须 pass。
+        let rounds = crate::collab::tasks::rounds(tid)?;
+        if rounds.last().map(|r| r.verdict.as_str()) != Some("pass") {
+            return Err("验收闸未过:最新一轮验收不是通过".into());
+        }
+        if card.state != "review" {
+            return Err("任务不在待验收状态".into());
+        }
+        // 机器闸 + 执行(squash_merge 内部会重跑试算,不干净即拒)。
+        let repo = project_repo_path(card.project_id)?;
+        let title = format!("#{} {}", card.id, card.title);
+        let oid = crate::collab::mergectl::squash_merge(&repo, "main", &card.branch, &title, &actor)?;
+        let merged = crate::collab::tasks::mark_merged(tid, &actor)?;
+        emit_task(&st, &merged);
+        Ok(json!({"ok": true, "commit": oid, "card": merged}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 以卡回滚:revert 一个 squash 提交=整卡撤销。项目/团队管理者专属(主 Agent 只能"申请")。
+async fn merge_revert_api(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let global_owner = role_rank(&ctx.role) >= 3;
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let pid = i_of(&v, "projectId").ok_or("缺 projectId")?;
+        if !crate::collab::projects::can_admin(pid, ctx.user_id, global_owner) {
+            return Err("只有项目/团队管理者能回滚".into());
+        }
+        let oid = s_of(&v, "commit");
+        if oid.is_empty() {
+            return Err("缺 commit".into());
+        }
+        let repo = project_repo_path(pid)?;
+        let new_oid = crate::collab::mergectl::revert_card(&repo, &oid, &ctx.username)?;
+        Ok(json!({"ok": true, "commit": new_oid}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+// ── iroh 隧道控制 ──
+
+async fn tunnel_status_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(_ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    #[cfg(feature = "collab-net")]
+    {
+        return Json(crate::collab::tunnel::status()).into_response();
+    }
+    #[cfg(not(feature = "collab-net"))]
+    Json(json!({"running": false, "unavailable": "本构建未启用 collab-net(iroh) 功能"})).into_response()
+}
+
+async fn tunnel_start_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    #[cfg(feature = "collab-net")]
+    {
+        crate::collab::tunnel::start_host_blocking_thread();
+        return Json(json!({"ok": true})).into_response();
+    }
+    #[cfg(not(feature = "collab-net"))]
+    (StatusCode::NOT_IMPLEMENTED, Json(json!({"error":"本构建未启用 collab-net 功能"}))).into_response()
+}
+
+/// RelayMap 动态下发(v8 7.3 第2项):改中继只动主机一处,全员自动生效。
+async fn tunnel_relays_api(State(state): State<CollabState>, headers: HeaderMap, Json(_v): Json<Value>) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    #[cfg(feature = "collab-net")]
+    {
+        return match crate::collab::tunnel::apply_relay_config(_v) {
+            Ok(_) => Json(json!({"ok": true})).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+        };
+    }
+    #[cfg(not(feature = "collab-net"))]
+    (StatusCode::NOT_IMPLEMENTED, Json(json!({"error":"本构建未启用 collab-net 功能"}))).into_response()
+}
+
+// ── Gitea 托管与 /git/* 反代 ──
+
+async fn gitea_status_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(_ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    Json(crate::collab::gitea::status()).into_response()
+}
+
+async fn gitea_start_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    let out = tokio::task::spawn_blocking(|| crate::collab::gitea::start().map(|_| json!({"ok": true}))).await;
+    unwrap_api(out)
+}
+
+async fn gitea_stop_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    if role_rank(&ctx.role) < 3 { return forbid(); }
+    crate::collab::gitea::stop();
+    Json(json!({"ok": true})).into_response()
+}
+
+/// git smart HTTP 反代(v8 2.3):git 客户端 Basic 认证 = Polaris 用户名 + 会话 token,
+/// 验过后**替换**为该用户的 Gitea 访问令牌再转发 localhost:3000。效果:隧道放行表
+/// 只有 8080 一个端口,权限两道闸(Polaris 会话 + Gitea 仓库协作者位),Gitea 对外隐身。
+/// v1 为缓冲式转发(与 /api/invoke 的 512MB 上限一致);超大仓库首拉建议 LFS 分批。
+async fn git_proxy(
+    State(state): State<CollabState>,
+    axum::extract::Path(rest): axum::extract::Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // ① 验会话:Basic username:token(git 客户端) 或 Bearer(程序化调用)。
+    let ctx = 'auth: {
+        if let Some(basic) = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Basic "))
+        {
+            use base64::Engine;
+            if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(basic) {
+                if let Ok(s) = String::from_utf8(raw) {
+                    if let Some((user, pass)) = s.split_once(':') {
+                        if let Some(c) = resolve_auth(&state.auth_token, Some(pass)) {
+                            if c.username == user || c.role == "owner" {
+                                break 'auth Some(c);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        } else {
+            auth_ctx(&state, &headers)
+        }
+    };
+    let Some(ctx) = ctx else {
+        // 401 + WWW-Authenticate 让 git 客户端弹出凭据询问。
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"polaris-git\"")],
+            "认证失败:用户名=Polaris 账号,密码=会话 token",
+        )
+            .into_response();
+    };
+    if role_rank(&ctx.role) < 2 {
+        return (StatusCode::FORBIDDEN, "访问者角色无 git 读写权").into_response();
+    }
+
+    // ② 换发凭据并转发。
+    let port: u16 = std::env::var("POLARIS_GITEA_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(3000);
+    let qs = if q.is_empty() {
+        String::new()
+    } else {
+        let enc: Vec<String> = q.iter().map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v))).collect();
+        format!("?{}", enc.join("&"))
+    };
+    // Docker compose 下 Gitea 是独立容器(服务名 gitea);单机托管则是 127.0.0.1。
+    let gitea_host = std::env::var("POLARIS_GITEA_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let url = format!("http://{gitea_host}:{port}/{rest}{qs}");
+    let username = ctx.username.clone();
+    let m = method.as_str().to_string();
+    let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let body_vec = body.to_vec();
+
+    let out = tokio::task::spawn_blocking(move || -> Result<(u16, String, Vec<u8>), String> {
+        // 每用户 Gitea 凭据(首次自动开号+发 token)。
+        crate::collab::gitea::ensure_user(&username)?;
+        let token = crate::collab::gitea::user_token(&username)?;
+        let mut req = ureq::request(&m, &url)
+            .set("Authorization", &format!("token {token}"))
+            .timeout(std::time::Duration::from_secs(600));
+        if let Some(ct) = &ct {
+            req = req.set("Content-Type", ct);
+        }
+        if let Some(a) = &accept {
+            req = req.set("Accept", a);
+        }
+        // git 协议体是二进制;gzip 让 ureq 自行协商。
+        let resp = if body_vec.is_empty() && (m == "GET" || m == "HEAD") {
+            req.call()
+        } else {
+            req.send_bytes(&body_vec)
+        };
+        let resp = match resp {
+            Ok(r) => r,
+            Err(ureq::Error::Status(_, r)) => r, // 保留上游错误码语义
+            Err(e) => return Err(format!("转发 Gitea 失败: {e}")),
+        };
+        let status = resp.status();
+        let ctype = resp.content_type().to_string();
+        let mut buf = Vec::new();
+        use std::io::Read;
+        resp.into_reader()
+            .take(2 * 1024 * 1024 * 1024)
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("读上游响应失败: {e}"))?;
+        Ok((status, ctype, buf))
+    })
+    .await;
+
+    match out {
+        Ok(Ok((status, ctype, buf))) => {
+            let mut resp = Response::new(Body::from(buf));
+            *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            if let Ok(hv) = ctype.parse() {
+                resp.headers_mut().insert(header::CONTENT_TYPE, hv);
+            }
+            resp
+        }
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
+        Err(e) => err_resp(e.to_string()),
+    }
+}
+
+// ───────────────────────── WebSocket(emit 推流)─────────────────────────
+
+/// WS 推流循环(server 壳的全量 /ws 与桌面 hosting 的协作 /ws 共用)。
+/// audience 过滤:定向事件只投给受众本人;owner 全收(审计视角)。
+pub async fn ws_loop(socket: WebSocket, mut rx: broadcast::Receiver<Event>, ctx: AuthCtx) {
+    let (mut sender, mut receiver) = socket.split();
+    // 读侧:仅用于探测客户端关闭(前端浏览器模式不向后端 emit)。
+    let mut closed = tokio::spawn(async move { while let Some(Ok(_)) = receiver.next().await {} });
+    let is_owner = role_rank(&ctx.role) >= 3;
+
+    loop {
+        tokio::select! {
+            recv = rx.recv() => match recv {
+                Ok(ev) => {
+                    // 按用户过滤(方案硬伤2):定向事件只投给受众本人;owner 全收(审计视角)。
+                    if let Some(aud) = &ev.audience {
+                        if !is_owner && aud != &ctx.username {
+                            continue;
+                        }
+                    }
+                    let frame = json!({ "topic": ev.topic, "payload": ev.payload });
+                    if sender.send(Message::Text(frame.to_string())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue, // 落后则跳过旧帧
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _ = &mut closed => break,
+        }
+    }
+}
+
+/// 桌面 hosting 专用 /ws:走 collab 严格鉴权(会话 token / 全局口令 / 未启用时的
+/// 单人兜底),不用 server 壳那套宽松的基础面鉴权(那是给单人 Docker chat 流的)。
+async fn collab_ws_handler(
+    State(state): State<CollabState>,
+    Query(params): Query<HashMap<String, String>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let Some(ctx) = resolve_auth(&state.auth_token, params.get("token").map(String::as_str)) else {
+        return (StatusCode::UNAUTHORIZED, "未授权").into_response();
+    };
+    let rx = state.app.subscribe();
+    ws.on_upgrade(move |socket| ws_loop(socket, rx, ctx))
+}
+
+// ───────────────────────── 路由表 ─────────────────────────
+
 /// 协作路由。`with_ws=true` 时附带 /ws(桌面 hosting 用;server 壳自己有全量 /ws,传 false 防 merge 撞路由)。
-/// Task 2 迁入全部 /api/collab/* 与 /git/* 路由;本任务先返回空 Router 保证双壳编译。
 pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
-    let _ = with_ws; // Task 2 使用
-    Router::new().with_state(state)
+    let mut r = Router::new()
+        // 账号/会话/票据/设备(权限判定全走 collab.db 确定性授权表)
+        .route("/api/collab/bootstrap", post(collab_bootstrap))
+        .route("/api/collab/login", post(collab_login))
+        .route("/api/collab/logout", post(collab_logout))
+        .route("/api/collab/me", get(collab_me))
+        .route("/api/collab/redeem", post(collab_redeem))
+        // GitHub 式:开放注册 + 用户名搜索 + 团队(一人多团队,团队下挂项目)
+        .route("/api/collab/signup", post(collab_signup))
+        .route("/api/collab/users/search", get(collab_user_search))
+        .route("/api/collab/teams", get(team_list).post(team_create))
+        .route("/api/collab/team/members", get(team_members_api).post(team_member_add))
+        .route("/api/collab/team/member_remove", post(team_member_remove))
+        .route("/api/collab/admin/ticket", post(collab_ticket))
+        .route("/api/collab/admin/users", get(collab_users))
+        .route("/api/collab/admin/user_disable", post(collab_user_disable))
+        .route("/api/collab/admin/devices", get(collab_devices))
+        .route("/api/collab/admin/device_revoke", post(collab_device_revoke))
+        // 账号镜像:本地权威+云端密文兜底(零知识,解密钥永不出主机)
+        .route("/api/collab/mirror/export", post(mirror_export_api))
+        .route("/api/collab/mirror/store", post(mirror_store_api))
+        .route("/api/collab/mirror/pull", get(mirror_pull_api))
+        .route("/api/collab/mirror/restore", post(mirror_restore_api))
+        // 项目与任务卡(六态状态机;权限先过项目成员表)
+        .route("/api/collab/projects", get(project_list).post(project_create))
+        .route("/api/collab/project/members", get(project_members).post(project_member_add))
+        .route("/api/collab/project/lead", post(project_set_lead))
+        .route("/api/collab/tasks", get(task_list).post(task_create))
+        .route("/api/collab/task/claim", post(task_claim))
+        .route("/api/collab/task/submit", post(task_submit))
+        .route("/api/collab/task/review", post(task_review))
+        .route("/api/collab/task/rounds", get(task_rounds))
+        .route("/api/collab/task/archive", post(task_archive))
+        .route("/api/collab/task/cancel", post(task_cancel))
+        // 主 Agent:授权位 / 晨会 / 改派 / 催办 / 模型配置 / AI 拆卡·验收·融合
+        .route("/api/collab/lead/grants", get(lead_grants_get).post(lead_grants_set))
+        .route("/api/collab/lead/morning", get(lead_morning))
+        .route("/api/collab/lead/assign", post(lead_assign_api))
+        .route("/api/collab/lead/nudge", post(lead_nudge_api))
+        .route("/api/collab/lead/model", get(lead_model_get).post(lead_model_set))
+        .route("/api/collab/lead/ai/decompose", post(lead_ai_decompose))
+        .route("/api/collab/lead/ai/review", post(lead_ai_review))
+        .route("/api/collab/lead/ai/fuse", post(lead_ai_fuse))
+        // 合并闸门(冲突试算/裁决/squash 放行/以卡回滚)
+        .route("/api/collab/merge/trial", post(merge_trial_api))
+        .route("/api/collab/merge/resolve", post(merge_resolve_api))
+        .route("/api/collab/merge/squash", post(merge_squash_api))
+        .route("/api/collab/merge/revert", post(merge_revert_api))
+        // Gitea 托管(owner)与 git smart HTTP 反代(隧道只放行 8080 一个端口的关键)
+        .route("/api/collab/gitea/status", get(gitea_status_api))
+        .route("/api/collab/gitea/start", post(gitea_start_api))
+        .route("/api/collab/gitea/stop", post(gitea_stop_api))
+        .route("/git/*rest", axum::routing::any(git_proxy))
+        // iroh 隧道(collab-net 编译才有):主机侧监听 + 状态 + RelayMap 动态下发
+        .route("/api/collab/tunnel/status", get(tunnel_status_api))
+        .route("/api/collab/tunnel/start", post(tunnel_start_api))
+        .route("/api/collab/tunnel/relays", post(tunnel_relays_api));
+    if with_ws {
+        r = r.route("/ws", get(collab_ws_handler));
+    }
+    r.with_state(state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 自动探测与 env 覆写合在一个测试里跑:环境变量是进程级的,拆成两个测试
+    /// 会因并行执行互相污染(一个设着 POLARIS_ADVERTISE_URL,另一个恰好读到)。
     #[test]
-    fn advertise_env_override_wins() {
+    fn advertise_urls_autodetect_and_env_override() {
+        std::env::remove_var("POLARIS_ADVERTISE_URL");
+        for u in detect_advertise_urls(8484) {
+            assert!(u.starts_with("http://"));
+            assert!(!u.contains("127.0.0.1"));
+            assert!(u.ends_with(":8484"));
+        }
         std::env::set_var("POLARIS_ADVERTISE_URL", "http://nas.example:9000/, https://p.example");
         let urls = detect_advertise_urls(8484);
         std::env::remove_var("POLARIS_ADVERTISE_URL");
@@ -77,15 +1294,5 @@ mod tests {
                 "https://p.example".to_string()
             ]
         );
-    }
-
-    #[test]
-    fn advertise_autodetect_no_loopback() {
-        std::env::remove_var("POLARIS_ADVERTISE_URL");
-        for u in detect_advertise_urls(8484) {
-            assert!(u.starts_with("http://"));
-            assert!(!u.contains("127.0.0.1"));
-            assert!(u.ends_with(":8484"));
-        }
     }
 }

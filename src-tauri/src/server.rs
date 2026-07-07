@@ -9,16 +9,16 @@
 //! 设计要点：引擎模块（kb/chat/conv/...）源码与桌面版**完全相同**，仅外壳不同。
 
 use crate::host::{AppHandle, Event};
+use crate::collab::http::{bearer_of, err_resp, ok, role_rank, ws_loop, AuthCtx};
 use axum::{
     body::Body,
-    extract::{ws::Message, ws::WebSocket, DefaultBodyLimit, Multipart, Query, State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Multipart, Query, State, WebSocketUpgrade},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use tower_http::cors::CorsLayer;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -79,6 +79,13 @@ pub async fn serve() -> anyhow::Result<()> {
     crate::voice::init();
     crate::echo::start_scheduler(app.clone());
     crate::fable::init();
+    // 协作:晨会定时盘点(有主 Agent 的项目每天推 collab:morning 到面板)。
+    {
+        let app2 = app.clone();
+        crate::collab::lead::start_morning_scheduler(move |topic, v| {
+            let _ = app2.emit(topic, v);
+        });
+    }
 
     let auth_token = std::env::var("POLARIS_AUTH_TOKEN")
         .ok()
@@ -99,23 +106,42 @@ pub async fn serve() -> anyhow::Result<()> {
         web_dir: web_dir.clone(),
     };
 
-    let app_router = Router::new()
-        .route("/api/invoke", post(invoke))
-        .route("/api/upload", post(upload))
-        .route("/api/file", get(serve_file))
-        .route("/api/health", get(|| async { "ok" }))
-        .route("/api/status", get(status))
-        .route("/ws", get(ws_handler))
-        .fallback(get(spa_fallback))
-        // 上传整体进内存; 不设上限则单个大 body 直接 OOM 服务进程。512MB 足够覆盖
-        // 知识库/视频素材, 又挡掉恶意巨包。(/ws 流式不受此限, 上传走 multipart 受限)
-        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
-        .with_state(state);
-
     let port: u16 = std::env::var("POLARIS_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8080);
+    // 协作面状态(crate::collab::http,双壳共用):与 AppState 共享事件广播与口令;
+    // advertise = 票据分享码里带的「主机可达地址」,成员端凭码零填写入伙。
+    let collab_state = crate::collab::http::CollabState {
+        app: state.app.clone(),
+        auth_token: state.auth_token.clone(),
+        advertise: Arc::new(parking_lot::RwLock::new(
+            crate::collab::http::detect_advertise_urls(port),
+        )),
+    };
+
+    let app_router = Router::new()
+        .route("/api/invoke", post(invoke))
+        .route("/api/upload", post(upload))
+        .route("/api/file", get(serve_file))
+        .route("/api/health", get(health))
+        // /api/collab/* 与 /git/* 全部路由已抽至 crate::collab::http(双壳共用),
+        // 在下方 with_state 之后 merge 进来。
+        .route("/api/status", get(status))
+        .route("/ws", get(ws_handler))
+        .fallback(get(spa_fallback))
+        .with_state(state)
+        // 协作路由 merge 在 with_state 之后(collab_router 已自带状态,双方都是
+        // Router<()>),layer 在 merge 之后 → 下面的 body 上限与 CORS 同样罩住协作端点。
+        .merge(crate::collab::http::collab_router(collab_state, false))
+        // 上传整体进内存; 不设上限则单个大 body 直接 OOM 服务进程。512MB 足够覆盖
+        // 知识库/视频素材, 又挡掉恶意巨包。(/ws 流式不受此限, 上传走 multipart 受限)
+        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
+        // 桌面客户端(Tauri webview,源 http://tauri.localhost)连远端主机是跨源请求;
+        // 用 Bearer token 鉴权(非 cookie),故 permissive(允许任意 Origin、方法、头,
+        // 不放行凭证)即可,顺带自动处理 OPTIONS 预检。同源的 Docker/Web 前端不受影响。
+        .layer(CorsLayer::permissive());
+
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("[polaris-server] 监听 http://0.0.0.0:{port} (前端目录: {})", web_dir.display());
 
@@ -268,23 +294,73 @@ fn claude_config_status() -> Value {
 }
 
 // ───────────────────────── 鉴权 ─────────────────────────
+//
+// 双轨鉴权(向后兼容):
+//  ① 多用户会话(collab):token 命中 sessions 表 → 得到具体用户与角色,命令过角色闸。
+//  ② 传统全局口令 POLARIS_AUTH_TOKEN:命中即视为 owner(机器管理员,单人 Docker 场景)。
+//  协作启用后(users 表非空)未带任何有效凭据 → 拒绝;未启用协作则维持旧语义。
 
-fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
-    let Some(expected) = state.auth_token.as_ref() else {
-        return true; // 未设口令 → 放行
-    };
-    let got = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s).to_string())
-        .or_else(|| {
-            headers
-                .get("x-polaris-token")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-        });
-    got.as_deref() == Some(expected.as_str())
+// 鉴权胶水(AuthCtx/bearer_of/resolve_auth/auth_ctx/role_rank)已抽至 crate::collab::http
+// (双壳共用);此处仅保留基础应用面(对话/KB/文件)的宽松鉴权与命令角色闸。
+
+/// 基础应用面(对话/知识库/文件…)的鉴权,与 collab 面**分开**:
+/// 维持历史语义——没设全局口令就开放(合成 owner),避免"有人建了协作账号就把
+/// 整个 App 锁死"。真会话 token 仍会升级成真实身份并受命令角色闸约束。
+/// 多用户部署要连基础命令也强制登录时,设 POLARIS_REQUIRE_LOGIN=1。
+fn resolve_app_auth(state: &AppState, token: Option<&str>) -> Option<AuthCtx> {
+    // 全局口令命中 = owner(单人 Docker 管理员)。
+    if let Some(expected) = state.auth_token.as_ref() {
+        if token == Some(expected.as_str()) {
+            return Some(AuthCtx { user_id: 0, username: "admin".into(), role: "owner".into() });
+        }
+    }
+    // 带了有效会话 token → 用真实身份(多用户下据此过角色闸)。
+    if let Some(t) = token {
+        if let Ok(u) = crate::collab::auth::check_session(t) {
+            return Some(AuthCtx { user_id: u.id, username: u.username, role: u.role });
+        }
+    }
+    // 是否强制登录:设了全局口令,或显式打开 POLARIS_REQUIRE_LOGIN。
+    let require_login = state.auth_token.is_some()
+        || std::env::var("POLARIS_REQUIRE_LOGIN").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    if require_login {
+        return None; // 上面没拿到有效凭据 → 拒绝
+    }
+    // 开放模式:合成 owner(历史行为,单人场景全放行)。
+    Some(AuthCtx { user_id: 0, username: "local".into(), role: "owner".into() })
 }
+
+fn app_ctx(state: &AppState, headers: &HeaderMap) -> Option<AuthCtx> {
+    resolve_app_auth(state, bearer_of(headers).as_deref())
+}
+
+/// 基础面 401 判定(upload/file 等用)。
+fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
+    app_ctx(state, headers).is_some()
+}
+
+
+/// 命令 → 最低角色。默认协作者;敏感面(供应商密钥/配置/账号/系统)owner 专属;
+/// 纯读命令放给访问者。按前缀维护,不逐条枚举 200+ 命令。
+fn required_role(cmd: &str) -> u8 {
+    const OWNER_ONLY: &[&str] = &[
+        "provider_", "feishu_", "wecom_", "collab_admin_", "config_", "doctor_",
+        "media_account_", "nas_", "updater_",
+    ];
+    const VISITOR_OK: &[&str] = &[
+        "kb_search", "kb_list", "kb_read", "conv_list", "conv_get", "expert_teams",
+        "expert_team_get", "skills_list", "collab_me", "collab_task_list",
+    ];
+    if VISITOR_OK.iter().any(|p| cmd == *p || cmd.starts_with(p)) {
+        return 1;
+    }
+    if OWNER_ONLY.iter().any(|p| cmd.starts_with(p)) {
+        return 3;
+    }
+    2
+}
+
+// /api/collab/* 与 /git/* 的全部 handler、ws_loop 已抽至 crate::collab::http(双壳共用)。
 
 // ───────────────────────── /api/invoke 分发 ─────────────────────────
 
@@ -300,8 +376,12 @@ async fn invoke(
     headers: HeaderMap,
     Json(req): Json<InvokeReq>,
 ) -> Response {
-    if !check_auth(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"未授权 (口令错误)"}))).into_response();
+    let Some(ctx) = app_ctx(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"未授权 (口令错误或会话失效)"}))).into_response();
+    };
+    if role_rank(&ctx.role) < required_role(&req.cmd) {
+        crate::collab::db::audit(&ctx.username, "invoke.denied", &req.cmd, "角色不足");
+        return (StatusCode::FORBIDDEN, Json(json!({"error": format!("权限不足:命令 {} 需要更高角色", req.cmd)}))).into_response();
     }
     let cmd = req.cmd;
     let args = req.args;
@@ -321,7 +401,29 @@ async fn invoke(
     }
 
     // 其余命令同步执行，丢到阻塞线程池（内含 ureq 网络/文件 IO，勿阻塞 async worker）。
-    let out = tokio::task::spawn_blocking(move || dispatch_sync(&cmd, &args, app)).await;
+    // 必须设超时：阻塞池只有 64 线程，慢命令（df/目录遍历在僵死挂载上可无限挂）无超时
+    // 会一条条钉死线程，占满后 /api/invoke 整体假死而进程还「健康」。超时后线程本身
+    // 无法强杀（spawn_blocking 不可取消），但至少把 HTTP 侧放开、让前端拿到明确错误。
+    let timeout_secs: u64 = std::env::var("POLARIS_INVOKE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
+    let cmd_for_err = cmd.clone();
+    let fut = tokio::task::spawn_blocking(move || dispatch_sync(&cmd, &args, app));
+    // timeout_secs==0 = 显式关闭超时(与 POLARIS_CHAT_TIMEOUT_SECS 家规一致);直接喂 0 给
+    // tokio::time::timeout 会得到 Duration::ZERO,首次 poll 必超时,把整个 /api/invoke 打灭。
+    let out = if timeout_secs == 0 {
+        fut.await
+    } else {
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                return err_resp(format!(
+                    "命令 {cmd_for_err} 执行超时({timeout_secs}s)，已停止等待（任务可能仍在后台运行）"
+                ))
+            }
+        }
+    };
     match out {
         Ok(Ok(v)) => Json(v).into_response(),
         Ok(Err(e)) => err_resp(e),
@@ -329,13 +431,20 @@ async fn invoke(
     }
 }
 
-fn err_resp(e: String) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response()
+/// 健康检查连带自检阻塞线程池：池被慢命令占满时，服务对用户已经假死，
+/// 必须让 healthcheck 变红（纯 async 的 "ok" 会让 Docker 一直以为服务健康）。
+async fn health() -> Response {
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::task::spawn_blocking(|| ()),
+    )
+    .await;
+    match probe {
+        Ok(Ok(())) => "ok".into_response(),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "blocking pool saturated").into_response(),
+    }
 }
 
-fn ok<T: Serialize>(t: T) -> Result<Value, String> {
-    serde_json::to_value(t).map_err(|e| e.to_string())
-}
 
 // 参数提取器（前端 invoke 走 camelCase 键）
 fn req_str(a: &Value, k: &str) -> Result<String, String> {
@@ -511,6 +620,9 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "fable_lex_build_start" => ok(fable::index::fable_lex_build_start(app)?),
         "fable_index_optimize" => ok(fable::index::fable_index_optimize()?),
         "fable_index_repair" => ok(fable::index::fable_index_repair()?),
+        "fable_dedupe_scan" => {
+            ok(fable::index::fable_dedupe_scan(Some(bool_def(a, "backfill", false)))?)
+        }
         "fable_local_embed_status" => ok(fable::index::fable_local_embed_status()?),
         "fable_local_embed_download" => ok(fable::index::fable_local_embed_download(app)?),
         "fable_local_embed_set_enabled" => {
@@ -520,6 +632,11 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             req_str(a, "query")?,
             opt_usize(a, "topK"),
             opt_str(a, "mode"),
+            opt_str(a, "scope"),
+        )?),
+        "fable_search_ai" => ok(fable::retrieve::fable_search_ai(
+            req_str(a, "query")?,
+            opt_usize(a, "topK"),
             opt_str(a, "scope"),
         )?),
         "fable_eval" => ok(fable::eval::fable_eval(
@@ -890,37 +1007,15 @@ async fn ws_handler(
     Query(params): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // WS 鉴权走 query token（浏览器 WS 不便带自定义 header）。
-    if let Some(expected) = state.auth_token.as_ref() {
-        if params.get("token").map(String::as_str) != Some(expected.as_str()) {
-            return (StatusCode::UNAUTHORIZED, "未授权").into_response();
-        }
-    }
+    // WS 鉴权走 query token（浏览器 WS 不便带自定义 header）。基础面用宽松鉴权,
+    // 与 /api/invoke 一致:单人无口令场景照常连,多用户带会话 token 得真实身份。
+    let Some(ctx) = resolve_app_auth(&state, params.get("token").map(String::as_str)) else {
+        return (StatusCode::UNAUTHORIZED, "未授权").into_response();
+    };
     let rx = state.tx.subscribe();
-    ws.on_upgrade(move |socket| ws_loop(socket, rx))
+    ws.on_upgrade(move |socket| ws_loop(socket, rx, ctx))
 }
 
-async fn ws_loop(socket: WebSocket, mut rx: broadcast::Receiver<Event>) {
-    let (mut sender, mut receiver) = socket.split();
-    // 读侧：仅用于探测客户端关闭（前端浏览器模式不向后端 emit）。
-    let mut closed = tokio::spawn(async move { while let Some(Ok(_)) = receiver.next().await {} });
-
-    loop {
-        tokio::select! {
-            recv = rx.recv() => match recv {
-                Ok(ev) => {
-                    let frame = json!({ "topic": ev.topic, "payload": ev.payload });
-                    if sender.send(Message::Text(frame.to_string())).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue, // 落后则跳过旧帧
-                Err(broadcast::error::RecvError::Closed) => break,
-            },
-            _ = &mut closed => break,
-        }
-    }
-}
 
 // ───────────────────────── 文件上传（替代原生文件对话框）─────────────────────────
 
@@ -938,24 +1033,53 @@ async fn upload(
     if let Err(e) = std::fs::create_dir_all(&base) {
         return err_resp(format!("创建上传目录失败: {e}"));
     }
+    use tokio::io::AsyncWriteExt;
     let mut saved: Vec<Value> = Vec::new();
-    while let Ok(Some(field)) = multipart.next_field().await {
+    // 逐字段流式落盘：field.bytes() 会把整个文件（上限 512MB）全量缓冲进内存，
+    // 几个大文件并发上传就能把容器顶到 OOM；chunk 边收边写，内存占用恒定。
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            // 断连/畸形 multipart 不再静默当「全部成功」返回 200：
+            // 部分文件可能已落盘，必须明确报错让前端提示重传。
+            Err(e) => return err_resp(format!("上传流中断: {e}")),
+        };
         let fname = field
             .file_name()
             .map(sanitize_filename)
             .unwrap_or_else(|| "upload.bin".to_string());
-        let data = match field.bytes().await {
-            Ok(b) => b,
-            Err(e) => return err_resp(format!("读取上传字段失败: {e}")),
-        };
         let dst = unique_path(&base, &fname);
-        if let Err(e) = std::fs::write(&dst, &data) {
+        let mut f = match tokio::fs::File::create(&dst).await {
+            Ok(f) => f,
+            Err(e) => return err_resp(format!("创建上传文件失败: {e}")),
+        };
+        let mut size: u64 = 0;
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    size += chunk.len() as u64;
+                    if let Err(e) = f.write_all(&chunk).await {
+                        drop(f);
+                        let _ = tokio::fs::remove_file(&dst).await;
+                        return err_resp(format!("写入上传文件失败: {e}"));
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    drop(f);
+                    let _ = tokio::fs::remove_file(&dst).await;
+                    return err_resp(format!("读取上传字段失败: {e}"));
+                }
+            }
+        }
+        if let Err(e) = f.flush().await {
             return err_resp(format!("写入上传文件失败: {e}"));
         }
         saved.push(json!({
             "name": fname,
             "path": dst.to_string_lossy().replace('\\', "/"),
-            "size": data.len(),
+            "size": size,
         }));
     }
     Json(json!({ "files": saved })).into_response()
@@ -1036,25 +1160,40 @@ async fn serve_file(
     if !allowed.iter().any(|root| crate::kb::path_contains(root, &canon)) {
         return (StatusCode::FORBIDDEN, "路径不在允许范围").into_response();
     }
-    match tokio::fs::read(&canon).await {
-        Ok(bytes) => {
-            let ct = mime_for(&canon);
-            let mut resp = ([(header::CONTENT_TYPE, ct)], bytes).into_response();
-            if q.download.as_deref() == Some("1") {
-                let fname = canon
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("download");
-                // RFC 5987：filename* 用 UTF-8 百分号编码，兼容中文名。
-                let cd = format!("attachment; filename*=UTF-8''{}", pct_encode(fname));
-                if let Ok(v) = header::HeaderValue::from_str(&cd) {
-                    resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
-                }
+    // 流式响应：tokio::fs::read 会把整个文件读进内存，点开一个 2GB 视频就是 2GB
+    // 常驻分配，几个并发即可把容器顶到 OOM；改为 64KB 分块边读边发。
+    let file = match tokio::fs::File::open(&canon).await {
+        Ok(f) => f,
+        Err(_) => return (StatusCode::NOT_FOUND, "读取失败").into_response(),
+    };
+    let stream = futures_util::stream::unfold(file, |mut f| async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 64 * 1024];
+        match f.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(buf)), f))
             }
-            resp
+            Err(e) => Some((Err(e), f)),
         }
-        Err(_) => (StatusCode::NOT_FOUND, "读取失败").into_response(),
+    });
+    let mut resp = Body::from_stream(stream).into_response();
+    if let Ok(v) = header::HeaderValue::from_str(mime_for(&canon)) {
+        resp.headers_mut().insert(header::CONTENT_TYPE, v);
     }
+    if q.download.as_deref() == Some("1") {
+        let fname = canon
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("download");
+        // RFC 5987：filename* 用 UTF-8 百分号编码，兼容中文名。
+        let cd = format!("attachment; filename*=UTF-8''{}", pct_encode(fname));
+        if let Ok(v) = header::HeaderValue::from_str(&cd) {
+            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
+    resp
 }
 
 /// RFC 5987 百分号编码：unreserved 原样，其余按 UTF-8 字节转 %XX。
