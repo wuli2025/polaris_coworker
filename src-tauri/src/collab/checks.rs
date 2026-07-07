@@ -16,6 +16,22 @@ const STEP_TIMEOUT: u64 = 600;
 /// 输出只留尾部字节数(错误都在最后)。
 const OUTPUT_TAIL: usize = 16 * 1024;
 
+/// 全局串行锁:主机是台桌面机,N 个提交并发跑 N 个 cargo check 会把它轰趴;
+/// 排队跑(提交线程本来就各自阻塞在这)。顺带天然互斥了同卡重跑的结果交错。
+static RUN_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// 僵尸清理:上一次进程被杀/主机重启时卡在 running 的行,超过 30 分钟判「被中断」,
+/// 否则那张卡的检查永远显示转圈、闸门永远不放行。每次开跑前顺手清一遍(全局)。
+fn sweep_stale_running() {
+    if let Ok(conn) = open_db() {
+        let _ = conn.execute(
+            "UPDATE check_runs SET status='skipped', output='检查被中断(主机重启或进程被杀),请重跑', ended_at=?1
+             WHERE status='running' AND started_at < ?2",
+            params![now(), now() - 1800],
+        );
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 pub struct CheckRun {
     pub name: String,
@@ -71,6 +87,18 @@ pub fn all_green(task_id: i64, round: i64) -> Result<bool, String> {
     Ok(runs.iter().all(|r| r.status == "pass" || r.status == "skipped"))
 }
 
+/// 该轮检查针对的分支提交(SHA)。合并闸用它对比当前分支头:检查过了之后又推
+/// 新提交(GitHub 是按 commit 查,我们按轮查,这里补上防陈旧)→ 要求重跑。
+pub fn round_sha(task_id: i64, round: i64) -> Option<String> {
+    let conn = open_db().ok()?;
+    conn.query_row(
+        "SELECT sha FROM check_runs WHERE task_id=?1 AND round=?2 AND sha!='' LIMIT 1",
+        params![task_id, round],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
 fn record(task_id: i64, round: i64, r: &CheckRun) {
     if let Ok(conn) = open_db() {
         let _ = conn.execute(
@@ -98,7 +126,16 @@ pub fn run_for_task(
     if profile == "off" {
         return Ok(());
     }
+    // 全局排队:一次只跑一轮(主机不是 CI 农场);同卡重跑也被天然互斥。
+    let _run = RUN_LOCK.lock();
+    sweep_stale_running();
     clear_round(task_id, round);
+    // 钉住本轮检查针对的提交:合并闸拿它对比分支头,防「检查后又推新提交」的陈旧窗口。
+    let sha = run_cmd(repo, &["rev-parse", branch], STEP_TIMEOUT)
+        .ok()
+        .filter(|(ok, _)| *ok)
+        .map(|(_, s)| s.trim().to_string())
+        .unwrap_or_default();
     // 临时 worktree(检完即删;失败也尽力清)。
     let wt = std::env::temp_dir().join(format!("polaris-check-{task_id}-{round}-{}", std::process::id()));
     let wts = wt.to_string_lossy().to_string();
@@ -115,14 +152,41 @@ pub fn run_for_task(
     let result = run_steps(&wt, task_id, round, profile, emit);
     let _ = run_cmd(repo, &["worktree", "remove", "--force", &wts], STEP_TIMEOUT);
     let _ = std::fs::remove_dir_all(&wt);
+    // 统一补 sha(running 行没有终态前闸门本来就不放行,末尾一次性盖章足够)。
+    if !sha.is_empty() {
+        if let Ok(conn) = open_db() {
+            let _ = conn.execute(
+                "UPDATE check_runs SET sha=?1 WHERE task_id=?2 AND round=?3",
+                params![sha, task_id, round],
+            );
+        }
+    }
     result
 }
 
+/// 分支相对 main 的改动文件表(GitHub 语义:只审「这个分支引入了什么」)。
+/// 拿不到(如仓库没有 main)→ None = 回退全树扫描。
+fn changed_files(wt: &Path) -> Option<Vec<String>> {
+    let (ok, out) = run_cmd(wt, &["diff", "--name-only", "main...HEAD"], STEP_TIMEOUT).ok()?;
+    if !ok {
+        return None;
+    }
+    Some(
+        out.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+    )
+}
+
 fn run_steps(wt: &Path, task_id: i64, round: i64, profile: &str, emit: &dyn Fn()) -> Result<(), String> {
+    // 增量语义:密钥/大文件只审分支改动的文件 —— 老仓库 main 上的存量大素材/历史密钥
+    // 不该挡住每一张卡(那会逼人人 force,闸门形同虚设)。构建类检查仍是全树(编译本来就是整体)。
+    let diff = changed_files(wt);
     // ① 密钥扫描 + ② 大文件闸:所有档位都跑(creative 只是上限放宽)。
-    step(task_id, round, "密钥扫描", emit, || secret_scan(wt));
+    step(task_id, round, "密钥扫描", emit, || secret_scan(wt, diff.as_deref()));
     let max_mb: u64 = if profile == "creative" { 500 } else { 50 };
-    step(task_id, round, "大文件闸", emit, || big_file_scan(wt, max_mb));
+    step(task_id, round, "大文件闸", emit, || big_file_scan(wt, max_mb, diff.as_deref()));
     if profile == "creative" {
         return Ok(()); // 视频/游戏素材仓:不跑构建/静态检查
     }
@@ -252,9 +316,46 @@ fn tail(s: &str) -> String {
     format!("…(截前略)…\n{}", &s[i..])
 }
 
+/// 待扫文件集:有 diff 表就只扫分支改动(GitHub 语义);拿不到 diff 回退全树。
+/// 统一产出 (绝对路径, 相对展示名) 列表,已过滤目录/删除项/.git/node_modules/target。
+fn scan_targets(wt: &Path, diff: Option<&[String]>) -> Vec<(std::path::PathBuf, String)> {
+    let mut out = Vec::new();
+    match diff {
+        Some(files) => {
+            for rel in files {
+                let p = wt.join(rel);
+                if p.is_file() {
+                    out.push((p, rel.clone()));
+                }
+            }
+        }
+        None => {
+            for entry in walkdir::WalkDir::new(wt)
+                .into_iter()
+                .filter_entry(|e| {
+                    let n = e.file_name().to_string_lossy();
+                    n != ".git" && n != "node_modules" && n != "target"
+                })
+                .flatten()
+            {
+                if entry.file_type().is_file() {
+                    let rel = entry
+                        .path()
+                        .strip_prefix(wt)
+                        .unwrap_or(entry.path())
+                        .display()
+                        .to_string();
+                    out.push((entry.path().to_path_buf(), rel));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 密钥扫描:轻量正则内置(开源 gitleaks 的常见模式子集,不引外部依赖)。
-/// 只扫文本文件、单文件≤2MB;命中即 fail 并指出文件。
-fn secret_scan(wt: &Path) -> (String, String) {
+/// 只扫文本文件、单文件≤2MB;命中即 fail 并指出文件。diff 模式只审分支改动。
+fn secret_scan(wt: &Path, diff: Option<&[String]>) -> (String, String) {
     let pats: &[(&str, &str)] = &[
         ("AWS AccessKey", r"AKIA[0-9A-Z]{16}"),
         ("私钥块", r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"),
@@ -264,44 +365,48 @@ fn secret_scan(wt: &Path) -> (String, String) {
     ];
     let res: Vec<regex::Regex> = pats.iter().filter_map(|(_, p)| regex::Regex::new(p).ok()).collect();
     let mut hits = Vec::new();
-    for entry in walkdir::WalkDir::new(wt)
-        .into_iter()
-        .filter_entry(|e| e.file_name().to_string_lossy() != ".git" && e.file_name().to_string_lossy() != "node_modules" && e.file_name().to_string_lossy() != "target")
-        .flatten()
-    {
-        if !entry.file_type().is_file() { continue; }
-        let Ok(md) = entry.metadata() else { continue };
-        if md.len() > 2 * 1024 * 1024 { continue; }
-        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue }; // 非 UTF-8(二进制)自动跳过
+    'files: for (path, rel) in scan_targets(wt, diff) {
+        let Ok(md) = path.metadata() else { continue };
+        if md.len() > 2 * 1024 * 1024 {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else { continue }; // 非 UTF-8(二进制)自动跳过
         for (i, re) in res.iter().enumerate() {
             if re.is_match(&text) {
-                hits.push(format!("{} → {}", pats[i].0, entry.path().strip_prefix(wt).unwrap_or(entry.path()).display()));
-                if hits.len() >= 20 { break; }
+                hits.push(format!("{} → {}", pats[i].0, rel));
+                if hits.len() >= 20 {
+                    break 'files;
+                }
             }
         }
-        if hits.len() >= 20 { break; }
     }
-    if hits.is_empty() { ("pass".into(), "未发现疑似密钥".into()) } else { ("fail".into(), hits.join("\n")) }
+    let scope = if diff.is_some() { "分支改动" } else { "全仓" };
+    if hits.is_empty() {
+        ("pass".into(), format!("未发现疑似密钥(范围:{scope})"))
+    } else {
+        ("fail".into(), hits.join("\n"))
+    }
 }
 
-/// 大文件闸:超过上限的文件列出来。creative 档上限放宽(素材仓)。
-fn big_file_scan(wt: &Path, max_mb: u64) -> (String, String) {
+/// 大文件闸:超过上限的文件列出来。creative 档上限放宽(素材仓);diff 模式只审分支改动
+/// —— main 上的存量大素材不挡新卡。
+fn big_file_scan(wt: &Path, max_mb: u64, diff: Option<&[String]>) -> (String, String) {
     let cap = max_mb * 1024 * 1024;
     let mut hits = Vec::new();
-    for entry in walkdir::WalkDir::new(wt)
-        .into_iter()
-        .filter_entry(|e| e.file_name().to_string_lossy() != ".git")
-        .flatten()
-    {
-        if !entry.file_type().is_file() { continue; }
-        if let Ok(md) = entry.metadata() {
+    for (path, rel) in scan_targets(wt, diff) {
+        if let Ok(md) = path.metadata() {
             if md.len() > cap {
-                hits.push(format!("{}({} MB)", entry.path().strip_prefix(wt).unwrap_or(entry.path()).display(), md.len() / 1024 / 1024));
-                if hits.len() >= 20 { break; }
+                hits.push(format!("{rel}({} MB)", md.len() / 1024 / 1024));
+                if hits.len() >= 20 {
+                    break;
+                }
             }
         }
     }
-    if hits.is_empty() { ("pass".into(), format!("无 >{max_mb}MB 文件")) } else {
+    let scope = if diff.is_some() { "分支改动" } else { "全仓" };
+    if hits.is_empty() {
+        ("pass".into(), format!("无 >{max_mb}MB 文件(范围:{scope})"))
+    } else {
         ("fail".into(), format!("超过 {max_mb}MB 上限:\n{}", hits.join("\n")))
     }
 }
@@ -334,15 +439,17 @@ mod tests {
         let repo = std::env::temp_dir().join(format!("collab-checks-repo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init"]);
+        git(&repo, &["init", "-b", "main"]); // 显式 main:diff 增量语义按 main...HEAD 算
         git(&repo, &["config", "user.email", "t@test.local"]);
         git(&repo, &["config", "user.name", "tester"]);
+        // 假 key 拼接构造,避免本仓库自己被密钥扫描类工具误报。
+        let key = format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP");
         std::fs::write(repo.join("README.md"), "hello").unwrap();
+        // main 上的「历史遗留密钥」:增量语义下不该挡新分支的卡(不是这张卡引入的)。
+        std::fs::write(repo.join("legacy.txt"), format!("old = {key}\n")).unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-m", "init"]);
         git(&repo, &["checkout", "-b", "feat/t1"]);
-        // 假 key 拼接构造,避免本仓库自己被密钥扫描类工具误报。
-        let key = format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP");
         std::fs::write(repo.join("leak.txt"), format!("aws_id = {key}\n")).unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-m", "leak"]);
@@ -353,9 +460,17 @@ mod tests {
         let sec = runs.iter().find(|r| r.name == "密钥扫描").expect("缺密钥扫描项");
         assert_eq!(sec.status, "fail", "假 AWS key 应被抓到: {}", sec.output);
         assert!(sec.output.contains("leak.txt"), "输出应指出文件: {}", sec.output);
+        assert!(
+            !sec.output.contains("legacy.txt"),
+            "main 上的历史密钥不该挡这张卡(增量语义): {}",
+            sec.output
+        );
         let big = runs.iter().find(|r| r.name == "大文件闸").expect("缺大文件闸项");
         assert_eq!(big.status, "pass");
         assert!(!all_green(1, 0).unwrap(), "有 fail 不该全绿");
+        // SHA 钉住:本轮记录应带分支头提交。
+        let sha = round_sha(1, 0).expect("本轮应记下 SHA");
+        assert_eq!(sha.len(), 40, "应是完整 commit sha: {sha}");
 
         // creative 档:clear_round 后重跑,只剩两项(不跑构建/静态检查)。
         run_for_task(&repo, "feat/t1", 1, 0, "creative", &|| {}).unwrap();

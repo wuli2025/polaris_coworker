@@ -1073,14 +1073,33 @@ async fn merge_squash_api(State(state): State<CollabState>, headers: HeaderMap, 
         if card.state != "review" {
             return Err("任务不在待验收状态".into());
         }
-        // 检查闸(GitHub required checks 式):最新一轮检查须全绿。
-        // profile=off 或项目没配仓库(跑不了)不拦;owner 可 force 强推(留痕审计)。
+        // 先解析仓库:没配仓库时给出真实原因,而不是误报「检查闸未过」。
+        let repo = project_repo_path(card.project_id)?;
+        // 检查闸(GitHub required checks 式):最新一轮检查须全绿,且**分支头没变**
+        // (检查过后又推新提交=陈旧检查;GitHub 按 commit 查,我们按轮+SHA 补齐语义)。
+        // profile=off 不拦;owner 可 force 强推(留痕审计)。
         // force 只认 can_admin 分支——as_lead 路径不许 force(主 Agent 无权跳检查)。
         let force = can_admin && !as_lead && v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
         let profile = crate::collab::checks::project_profile(card.project_id);
         if profile != "off" && !force {
             match crate::collab::checks::all_green(tid, card.round) {
-                Ok(true) => {}
+                Ok(true) => {
+                    // SHA 陈旧比对:记录为空(老数据)放行兼容;比对不上要求重跑。
+                    if let Some(checked_sha) = crate::collab::checks::round_sha(tid, card.round) {
+                        let head = std::process::Command::new("git")
+                            .arg("-C").arg(&repo)
+                            .args(["rev-parse", &card.branch])
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                        if let Some(head) = head {
+                            if head != checked_sha {
+                                return Err("检查闸未过:检查之后分支又有新提交(检查已陈旧),请重跑检查或重新送验".into());
+                            }
+                        }
+                    }
+                }
                 Ok(false) => return Err("检查闸未过:本轮检查未全绿(或未跑完)。owner 可带 force 强推".into()),
                 Err(_) => {}
             }
@@ -1089,7 +1108,6 @@ async fn merge_squash_api(State(state): State<CollabState>, headers: HeaderMap, 
             crate::collab::db::audit(&ctx.username, "merge.force", &tid.to_string(), "跳过检查闸强推");
         }
         // 机器闸 + 执行(squash_merge 内部会重跑试算,不干净即拒)。
-        let repo = project_repo_path(card.project_id)?;
         let title = format!("#{} {}", card.id, card.title);
         let oid = crate::collab::mergectl::squash_merge(&repo, "main", &card.branch, &title, &actor)?;
         let merged = crate::collab::tasks::mark_merged(tid, &actor)?;

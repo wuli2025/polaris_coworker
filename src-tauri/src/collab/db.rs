@@ -199,6 +199,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 
         -- 任务卡检查工作流(GitHub status checks 式):每轮提交跑一组检查。
         -- status: pass|fail|skipped|running。output 只留尾部(防爆库)。
+        -- sha = 本轮检查针对的分支头提交(合并闸对比它防「检查后又推新提交」的陈旧窗口)。
         CREATE TABLE IF NOT EXISTS check_runs(
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -206,6 +207,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             name       TEXT NOT NULL,
             status     TEXT NOT NULL,
             output     TEXT NOT NULL DEFAULT '',
+            sha        TEXT NOT NULL DEFAULT '',
             started_at INTEGER NOT NULL,
             ended_at   INTEGER NOT NULL DEFAULT 0
         );
@@ -244,6 +246,19 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if !has_profile {
         conn.execute("ALTER TABLE projects ADD COLUMN check_profile TEXT NOT NULL DEFAULT 'code'", [])
             .map_err(|e| format!("补 check_profile 列失败: {e}"))?;
+    }
+
+    // 增量列:check_runs.sha —— 今日早版建过无 sha 的表(未发版但开发库存在),探测补齐。
+    let has_sha: bool = conn
+        .prepare("PRAGMA table_info(check_runs)")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(1))
+                .map(|rows| rows.flatten().any(|c| c == "sha"))
+        })
+        .unwrap_or(false);
+    if !has_sha {
+        conn.execute("ALTER TABLE check_runs ADD COLUMN sha TEXT NOT NULL DEFAULT ''", [])
+            .map_err(|e| format!("补 check_runs.sha 列失败: {e}"))?;
     }
     Ok(())
 }
