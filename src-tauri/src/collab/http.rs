@@ -680,6 +680,22 @@ async fn task_rounds(
     unwrap_api(out)
 }
 
+/// 项目动态时间线(GitHub activity feed 式,项目主页概览 tab 数据源)。
+async fn collab_activity(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+    let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 projectId"}))).into_response();
+    };
+    if let Err(r) = ensure_member(&ctx, pid) { return r; }
+    let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30).clamp(1, 100);
+    let out = tokio::task::spawn_blocking(move || crate::collab::tasks::activity(pid, limit).and_then(ok)).await;
+    unwrap_api(out)
+}
+
 // ── 主 Agent 授权位 + 晨会 ──
 
 async fn lead_grants_get(
@@ -1276,6 +1292,7 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/collab/task/rounds", get(task_rounds))
         .route("/api/collab/task/archive", post(task_archive))
         .route("/api/collab/task/cancel", post(task_cancel))
+        .route("/api/collab/activity", get(collab_activity))
         // 主 Agent:授权位 / 晨会 / 改派 / 催办 / 模型配置 / AI 拆卡·验收·融合
         .route("/api/collab/lead/grants", get(lead_grants_get).post(lead_grants_set))
         .route("/api/collab/lead/morning", get(lead_morning))
