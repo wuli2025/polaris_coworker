@@ -294,8 +294,9 @@ fn encode_images(
         args.push(a.to_string());
     }
     args.extend([
-        "-vsync".into(),
-        "vfr".into(),
+        // 不再传 `-vsync vfr`:concat 每帧带 duration,下面的 `-r fps` 已把幻灯片重采样成恒定帧率
+        //(每页按其 duration 展示)。ffmpeg≥5 会把「非 CFR 的 -vsync/-fps_mode」与显式 `-r` 判为
+        // 矛盾直接报 "Error opening output file"(fx 帧序列路只用 -r 故一直正常)——去掉即修复。
         // 偶数宽高(libx264/yuv420p 要求)+ sRGB→BT.709 真矩阵转换(out_color_matrix)避免偏色发灰
         //(架构文档§06⑤);下面再打 BT.709 标签使矩阵与标签一致,规避 Remotion「只打标签不转换」的坑。
         "-vf".into(),

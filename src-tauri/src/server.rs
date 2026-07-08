@@ -532,6 +532,8 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "kb_lint" => ok(kb::kb_lint()),
         "kb_enrich_links" => ok(kb::kb_enrich_links(app)?),
         "kb_dedup" => ok(kb::kb_dedup(app)?),
+        "kb_scan_sources" => ok(kb::kb_scan_sources()),
+        "kb_quarantine" => ok(kb::kb_quarantine(req_str(a, "relPath")?)?),
         "kb_pack_list" => ok(kb::kb_pack_list()),
         "kb_pack_install" => ok(kb::kb_pack_install(app, req_str(a, "id")?)?),
         "kb_pack_remove" => ok(kb::kb_pack_remove(req_str(a, "id")?)?),

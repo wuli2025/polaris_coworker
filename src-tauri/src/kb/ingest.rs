@@ -339,8 +339,13 @@ pub(crate) fn ingest_convert_write(root: &Path, src: &Path, raw_dir: &Path) -> R
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "untitled".into());
             let dst = unique_path(raw_dir, &stem, "md");
-            // 顶部补一个标题,便于 KB 索引与预览
-            let titled = format!("# {stem}\n\n{md}");
+            // 顶部补一个标题便于 KB 索引与预览;但转换结果若已自带 H1(源本就是带 `# 标题` 的
+            // markdown,或 converter 已产出标题)就不再叠加,避免正文顶部出现两行重复的 `# 标题`。
+            let titled = if md.trim_start().starts_with("# ") {
+                md
+            } else {
+                format!("# {stem}\n\n{md}")
+            };
             fs::write(&dst, titled).map_err(|e| e.to_string())?;
             Ok(rel_of(root, &dst))
         }

@@ -9,6 +9,10 @@ const MAX_GREP_FILES: i64 = 20_000;
 const MAX_GREP_TOTAL_BYTES: u64 = 800 * 1024 * 1024;
 /// FTS 倒排命中后,最多回读多少个候选文件做精确算分 + 抽行(按 bm25 相关度优先)。
 const FTS_CAND_LIMIT: i64 = 400;
+/// 短词补召(≤2 码点,只能走无索引的前置通配 LIKE 全表子串扫)的墙钟预算(秒)。
+/// 稀有短词会扫完整张 lex(数十万文档正文)达数十秒 → 到点中断、以部分候选降级,
+/// 把「单条短词查询拖垮整个 server」的历史超时雪崩压成有界代价。
+const SHORT_LIKE_BUDGET_SECS: u64 = 6;
 
 pub(crate) struct GrepHit {
     pub(crate) path: String,
@@ -168,36 +172,79 @@ pub(crate) fn grep_lane(query: &str) -> Result<(Vec<GrepHit>, bool), String> {
     // 优先 lex LIKE:读 DB 页(OS 缓存,快)、覆盖**全部**已索引文件,命中后只回读这几百个文件;
     // 比扫 2 万个磁盘文件快一两个数量级(实测 ~1s → 数十 ms)。
     let mut like_cand: Vec<(String, String, i64)> = Vec::new();
+    let mut short_truncated = false;
     if lex_ok && has_short_terms(&q_full) {
         let shorts: Vec<&String> = terms
             .iter()
             .filter(|t| t.chars().count() <= 2)
             .take(8)
             .collect();
-        let mut stmt = conn
-            .prepare(
-                "SELECT r.path, f.relpath, f.size FROM lex l
-                 JOIN files f ON f.id=l.rowid JOIN roots r ON r.id=f.root_id
-                 WHERE l.body LIKE ?1 LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
-        for t in shorts {
-            // 检索词只含 CJK / 字母数字(atoms 已过滤),不含 LIKE 元字符,直接拼 %term%。
-            let pat = format!("%{t}%");
-            let rows = stmt
-                .query_map(rusqlite::params![pat, FTS_CAND_LIMIT], |r| {
+        // 命中多的短词很快撞满 LIMIT 就停;稀有短词会扫完整张 lex(数十万文档正文)达数十秒。
+        // 挂一个墙钟预算:另起计时线程,到点 conn.interrupt() 中断当前扫描(SQLITE_INTERRUPT →
+        // query_map 迭代随即停止,已取到的即部分候选),把最坏代价从「拖垮整个 server」压成
+        // 「有界降级、少量漏召」。sqlite3_interrupt 只影响其返回前正在跑的语句 —— 故务必在跑
+        // 后续磁盘兜底查询**之前** join 掉计时线程,确保中断不会误伤本连接的下一条查询。
+        // 长词 FTS(有索引,<1s)不受影响。
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHORT_LIKE_BUDGET_SECS);
+        let handle = conn.get_interrupt_handle();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done_timer = done.clone();
+        let fired_timer = fired.clone();
+        let timer = std::thread::spawn(move || {
+            while std::time::Instant::now() < deadline {
+                if done_timer.load(Ordering::Relaxed) {
+                    return; // 扫描提前完成,不必等满预算,也不触发中断
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            handle.interrupt();
+            fired_timer.store(true, Ordering::Relaxed); // 真正打了中断 → 结果可能不全
+        });
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT r.path, f.relpath, f.size FROM lex l
+                     JOIN files f ON f.id=l.rowid JOIN roots r ON r.id=f.root_id
+                     WHERE l.body LIKE ?1 LIMIT ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            for t in shorts {
+                if std::time::Instant::now() >= deadline {
+                    short_truncated = true;
+                    break;
+                }
+                // 检索词只含 CJK / 字母数字(atoms 已过滤),不含 LIKE 元字符,直接拼 %term%。
+                let pat = format!("%{t}%");
+                let rows = match stmt.query_map(rusqlite::params![pat, FTS_CAND_LIMIT], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, i64>(2)?,
                     ))
-                })
-                .map_err(|e| e.to_string())?;
-            for row in rows.flatten() {
-                if seen.insert((row.0.clone(), row.1.clone())) {
-                    like_cand.push(row);
+                }) {
+                    Ok(rows) => rows,
+                    // 中断(超预算)即当作部分候选收工,不把 SQLITE_INTERRUPT 冒泡成整条检索失败。
+                    Err(_) => {
+                        short_truncated = true;
+                        break;
+                    }
+                };
+                for row in rows.flatten() {
+                    if seen.insert((row.0.clone(), row.1.clone())) {
+                        like_cand.push(row);
+                    }
                 }
             }
+        }
+        // 通知计时线程收工并 join:保证 interrupt() 要么没发生、要么已完全返回,
+        // 后续磁盘兜底查询绝不会被这次中断波及。
+        done.store(true, Ordering::Relaxed);
+        let _ = timer.join();
+        // 计时线程真打了中断(哪怕是在 query_map 迭代中途)→ 短词候选不全,标记降级。
+        if fired.load(Ordering::Relaxed) {
+            short_truncated = true;
         }
     }
 
@@ -249,5 +296,6 @@ pub(crate) fn grep_lane(query: &str) -> Result<(Vec<GrepHit>, bool), String> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     hits.truncate(60);
-    Ok((hits, truncated))
+    // 短词补召被预算截断也算「结果可能不全」,并入 truncated 让上层/前端可提示降级。
+    Ok((hits, truncated || short_truncated))
 }

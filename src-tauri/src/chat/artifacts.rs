@@ -16,6 +16,9 @@ use walkdir::WalkDir;
 /// `<!--POLARIS_ARTIFACTS:["C:/a/b.html"]-->`, 重载历史时由前端解析并隐藏。
 pub const ARTIFACT_MARKER_PREFIX: &str = "<!--POLARIS_ARTIFACTS:";
 
+/// artifact_search 全量遍历的墙钟预算(秒):超时以已收集的部分命中返回,防产物量大时拖垮调用方。
+const ARTIFACT_SEARCH_BUDGET_SECS: u64 = 8;
+
 /// 对话框文件 chip 只展示用户能直接打开的常见成品格式。
 /// 脚本 / 源码 / 配置 / 锁文件等中间产物一律不进对话框(应用类成品整体归并成
 /// 一个「应用文件夹」chip, 见 packaged_project_root), 免得干扰用户。
@@ -533,11 +536,21 @@ fn artifact_search_sync(query: String) -> Vec<ArtifactSearchHit> {
         return Vec::new();
     }
     let mut hits: Vec<ArtifactSearchHit> = Vec::new();
-    for root in conversation_roots() {
+    // 全量遍历所有 conversations/<id>/outputs 并逐个读文本文件:产物攒多后可拖到数十秒,
+    // 逼近/超过命令超时上限(历史「artifact_search 挂死」同族隐患)。给一个墙钟预算,超时即以
+    // 已收集的部分命中收工,把最坏代价压成有界——宁可少召回,不可拖垮调用方。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(ARTIFACT_SEARCH_BUDGET_SECS);
+    let mut checked: u32 = 0;
+    'roots: for root in conversation_roots() {
         if !root.exists() {
             continue;
         }
         for w in WalkDir::new(&root).into_iter().flatten() {
+            // 每扫 128 个条目查一次预算(Instant 很廉价,分批只为省到极致);超时跳出所有根。
+            checked = checked.wrapping_add(1);
+            if checked % 128 == 0 && std::time::Instant::now() >= deadline {
+                break 'roots;
+            }
             if !w.file_type().is_file() {
                 continue;
             }

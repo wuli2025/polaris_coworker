@@ -189,6 +189,9 @@ pub fn run() {
             kb::kb_lint,
             kb::kb_enrich_links,
             kb::kb_dedup,
+            // 信源安全:提示词注入痕迹扫描 + 命中文件隔离(纯规则,只读扫描/移动到隔离区）
+            kb::kb_scan_sources,
+            kb::kb_quarantine,
             // 名人资料包（下载到自己的资料库，附带配套 skill）
             kb::kb_pack_list,
             kb::kb_pack_install,

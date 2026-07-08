@@ -37,6 +37,8 @@ pub struct KbThreatReport {
     pub medium: usize,
     pub low: usize,
     pub hits: Vec<KbThreatHit>,
+    /// 扫描是否因超时(大 KB 根)提前收工:true 时上面各计数只覆盖已扫部分,前端应提示「未扫完」。
+    pub truncated: bool,
 }
 
 pub(crate) struct ThreatPat {
@@ -150,11 +152,22 @@ pub fn kb_scan_sources() -> KbThreatReport {
     }
     const MAX_HITS: usize = 500;
     const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024; // 跳过超大文件(正文注入不会藏在 4MB+ 文件里)
+    // 墙钟预算:大 KB 根(实测数万文件/GB 级)全量扫可超分钟级,逼近命令超时上限。到点收工、
+    // 标记 truncated,把这条手动安全扫描压成有界(宁可漏扫尾部,不可拖垮调用方/挂死请求)。
+    const SCAN_BUDGET_SECS: u64 = 25;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(SCAN_BUDGET_SECS);
+    let mut walked: u32 = 0;
     const TEXT_EXT: &[&str] = &[
         "md", "markdown", "txt", "text", "html", "htm", "json", "csv", "yaml", "yml", "xml", "rst",
     ];
     let mut flagged: HashSet<String> = HashSet::new();
     for entry in WalkDir::new(&root).into_iter().flatten() {
+        // 每遍历 256 个条目查一次预算(WalkDir 目录项也计数,含被跳过的非文本/大文件)。
+        walked = walked.wrapping_add(1);
+        if walked % 256 == 0 && std::time::Instant::now() >= deadline {
+            report.truncated = true;
+            break;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
