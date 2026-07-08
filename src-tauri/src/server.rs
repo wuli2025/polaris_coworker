@@ -394,6 +394,22 @@ struct InvokeReq {
     args: Value,
 }
 
+/// 把命令错误串按「客户端错误 vs 服务端错误」映射到合适的 HTTP 状态码,而非一律 500:
+/// 未知命令→404、参数缺失/类型错/解析失败→400,其余(真正的执行/IO/内部失败)→500。
+/// 否则客户端会把「永久性坏请求」当 5xx 反复重试,监控里的 5xx 也被这类客户端错误污染。
+/// 纯前缀/子串启发:这些串只由 dispatch 的未知命令分支与请求参数提取层(req_str 等)产生。
+fn invoke_err_resp(e: String) -> Response {
+    let status = if e.starts_with("未知命令") {
+        StatusCode::NOT_FOUND
+    } else if e.contains("参数") && (e.contains("缺少") || e.contains("解析失败") || e.contains("无效"))
+    {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(json!({ "error": e }))).into_response()
+}
+
 async fn invoke(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -417,9 +433,9 @@ async fn invoke(
         return match parsed {
             Ok(a) => match crate::chat::chat_send(app, a).await {
                 Ok(req_id) => Json(json!(req_id)).into_response(),
-                Err(e) => err_resp(e),
+                Err(e) => invoke_err_resp(e),
             },
-            Err(e) => err_resp(format!("chat_send 参数解析失败: {e}")),
+            Err(e) => invoke_err_resp(format!("chat_send 参数解析失败: {e}")),
         };
     }
 
@@ -441,15 +457,24 @@ async fn invoke(
         match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {
             Ok(joined) => joined,
             Err(_) => {
-                return err_resp(format!(
-                    "命令 {cmd_for_err} 执行超时({timeout_secs}s)，已停止等待（任务可能仍在后台运行）"
-                ))
+                // 命令超时是服务端未能及时完成,语义上是网关超时(504),不是客户端错误也不是崩溃。
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(json!({
+                        "error": format!(
+                            "命令 {cmd_for_err} 执行超时({timeout_secs}s)，已停止等待（任务可能仍在后台运行）"
+                        )
+                    })),
+                )
+                    .into_response();
             }
         }
     };
     match out {
         Ok(Ok(v)) => Json(v).into_response(),
-        Ok(Err(e)) => err_resp(e),
+        // 未知命令→404、参数错→400、其余执行/IO 错→500(见 invoke_err_resp)。
+        Ok(Err(e)) => invoke_err_resp(e),
+        // spawn_blocking join 失败(线程 panic 等)是真正的内部故障 → 500。
         Err(e) => err_resp(format!("内部任务失败: {e}")),
     }
 }
@@ -609,6 +634,16 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             ok(echo::echo_distill_conversation(app, req_str(a, "convId")?)?)
         }
         "echo_clear_context" => ok(echo::echo_clear_context(app, req_str(a, "convId")?)?),
+        // Figma 往返桥（回程拉取）
+        "figma_pull" => ok(figma_bridge::figma_pull(
+            req_str(a, "file")?,
+            req_str(a, "token")?,
+        )?),
+        "figma_export_svgs" => ok(figma_bridge::figma_export_svgs(
+            req_str(a, "file")?,
+            vec_str(a, "ids"),
+            req_str(a, "token")?,
+        )?),
         "echo_briefing_today" => ok(echo::echo_briefing_today()),
         "echo_briefing_dismiss" => ok(echo::echo_briefing_dismiss(req_str(a, "id")?)),
         "echo_briefing_run" => ok(echo::echo_briefing_run(app)?),
