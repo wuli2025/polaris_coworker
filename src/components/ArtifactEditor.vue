@@ -20,12 +20,14 @@ import {
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
   Layers, LayoutList, EyeOff, Lock, LockOpen, ChevronDown,
-  Hand, Frame,
+  Hand, Frame, Group, Ungroup,
 } from "@lucide/vue";
 import { marked } from "marked";
 import { sanitizeHtml } from "../lib/sanitize";
 import { useArtifactsStore } from "../stores/artifacts";
 import { DECK_THEMES } from "../lib/deckThemes";
+import { figmaApi, openUrl } from "../tauri";
+import { collectVectorIds, figmaFrameToHtml } from "../lib/figmaPull";
 
 const artifacts = useArtifactsStore();
 
@@ -108,6 +110,56 @@ let marqueeMoved = false;
 type Tool = "select" | "hand" | "text" | "rect" | "ellipse" | "line";
 const tool = ref<Tool>("select");
 let draw: { x0: number; y0: number } | null = null;
+// 右键上下文菜单（zone 坐标）
+const ctx = ref<{ x: number; y: number } | null>(null);
+const canUngroup = computed(() => !!selEl.value?.hasAttribute("data-group"));
+const zoneEl = ref<HTMLElement | null>(null);
+// Alt+悬停间距标注
+let lastHover: HTMLElement | null = null;
+
+// ── Figma 往返桥: 去程复制 HTML 走 html.to.design 插件, 回程 REST 拉回替换画布 ──
+const figmaOpen = ref(false);
+const figmaLink = ref<string>(localStorage.getItem("polaris.figma.link") ?? "");
+// PAT 只留内存:localStorage 会被同源 artifact 脚本(iframe allow-scripts+allow-same-origin)读走外传
+const figmaToken = ref<string>("");
+const figmaBusy = ref(false);
+const figmaErr = ref("");
+const figmaCopied = ref(false);
+async function figmaCopyHtml() {
+  figmaErr.value = "";
+  const out = !isTextDoc.value && mode.value === "visual" ? serialize() : html.value;
+  try {
+    await navigator.clipboard.writeText(out);
+    figmaCopied.value = true;
+    setTimeout(() => (figmaCopied.value = false), 2000);
+  } catch {
+    figmaErr.value = "复制失败：切到「源码」模式手动全选复制也一样";
+  }
+}
+async function figmaPullBack() {
+  figmaErr.value = "";
+  const link = figmaLink.value.trim();
+  const token = figmaToken.value.trim();
+  if (!link) { figmaErr.value = "先粘贴 Figma 文件链接"; return; }
+  if (!token) { figmaErr.value = "需要 Figma 访问令牌：Figma 头像 → Settings → Security → Personal access tokens"; return; }
+  figmaBusy.value = true;
+  try {
+    localStorage.setItem("polaris.figma.link", link);
+    // 不落盘 token(见上:同源 artifact 可读 localStorage)
+    const data = await figmaApi.pull(link, token);
+    const ids = collectVectorIds(data.doc);
+    const svgs = ids.length ? await figmaApi.exportSvgs(link, ids, token) : {};
+    const res = figmaFrameToHtml(data, svgs);
+    // 替换画布工作副本（可 Ctrl+Z 回退到 Figma 化之前, Ctrl+S 才真正落盘）
+    reloadFrom(res.html, null);
+    artifacts.markDirty(true);
+    figmaOpen.value = false;
+  } catch (e: any) {
+    figmaErr.value = e?.message ?? String(e);
+  } finally {
+    figmaBusy.value = false;
+  }
+}
 // 效果（不透明度 / 阴影）
 const selEffects = ref<{ opacity: number; shadow: string }>({ opacity: 100, shadow: "none" });
 
@@ -141,8 +193,8 @@ const canRedo = computed(() => hIndex.value < history.value.length - 1);
 let historyTimer = 0;
 let restoring = false;
 
-// ── 元素剪贴板（deck 对象编辑：Ctrl+C/V/D）──
-let elClipboard: string | null = null;
+// ── 元素剪贴板（Ctrl+C/X/V/D, 支持多选整组复制）: ref 是为了右键菜单「粘贴」禁用态响应 ──
+const elClipboard = ref<string[] | null>(null);
 
 // ── 查找替换（源码模式 / Markdown / 纯文本，Ctrl+F）──
 const findOpen = ref(false);
@@ -179,6 +231,8 @@ let clickGuard: ((e: MouseEvent) => void) | null = null;
 let scrollHandler: (() => void) | null = null;
 let keyUpGuard: ((e: KeyboardEvent) => void) | null = null;
 let wheelGuard: ((e: WheelEvent) => void) | null = null;
+let ctxGuard: ((e: MouseEvent) => void) | null = null;
+let pasteGuard: ((e: ClipboardEvent) => void) | null = null;
 
 function detectDeck() {
   const d = doc();
@@ -202,7 +256,7 @@ function buildThumb(n: number): string {
   const d = doc();
   if (!d) return "";
   const root = d.documentElement.cloneNode(true) as HTMLElement;
-  root.querySelectorAll("#__ed, #__obj, #__objcss, #__gv, #__gh, #__rb, script").forEach((e) => e.remove());
+  root.querySelectorAll("#__ed, #__obj, #__objcss, #__gv, #__gh, #__rb, #__meas, script").forEach((e) => e.remove());
   root.querySelectorAll("[contenteditable]").forEach((e) => e.removeAttribute("contenteditable"));
   root.querySelectorAll(".__hov, .__msel").forEach((e) => e.classList.remove("__hov", "__msel"));
   root.querySelectorAll<HTMLElement>(".slide").forEach((s, i) => {
@@ -276,20 +330,43 @@ function onFrameLoad() {
       return;
     }
     if (e.code === "Space") { panHeld.value = true; e.preventDefault(); e.stopPropagation(); return; }
+    // Alt 按住且正悬停在别的元素上 → 立刻显示间距标注（Figma 测距）
+    if (e.key === "Alt") {
+      if (selEl.value && lastHover && lastHover !== selEl.value) {
+        drawMeasure(selEl.value.getBoundingClientRect(), lastHover.getBoundingClientRect());
+      }
+      e.preventDefault(); // 别让 Alt 把焦点带去菜单
+      return;
+    }
     // Figma 式工具快捷键: V 选择 / H 抓手 / T 文本 / R 矩形 / O 圆 / L 线
     if (!e.ctrlKey && !e.metaKey && !e.altKey && designOn.value) {
       const tk: Record<string, Tool> = { v: "select", h: "hand", t: "text", r: "rect", o: "ellipse", l: "line" };
       const tt = tk[e.key.toLowerCase()];
       if (tt) { setTool(tt); e.preventDefault(); e.stopPropagation(); return; }
+      // ] / [ = 上移/下移一层（z 序微调）
+      if (selEl.value && (e.key === "]" || e.key === "[")) {
+        zStep(e.key === "]");
+        e.preventDefault(); e.stopPropagation();
+        return;
+      }
     }
+    if (e.key === "Escape" && ctx.value) { ctx.value = null; e.stopPropagation(); return; }
     if (e.key === "Escape" && tool.value !== "select") { setTool("select"); e.stopPropagation(); return; }
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
     if (mod && k === "a" && designOn.value) { selectAllEls(); e.preventDefault(); e.stopPropagation(); return; }
+    // Ctrl+G 编组 / Ctrl+Shift+G 取消编组
+    if (mod && k === "g" && designOn.value) {
+      if (e.shiftKey) ungroupSel();
+      else groupSel();
+      e.preventDefault(); e.stopPropagation();
+      return;
+    }
     if (mod && k === "z") { if (e.shiftKey) redo(); else undo(); e.preventDefault(); e.stopPropagation(); return; }
     if (mod && k === "y") { redo(); e.preventDefault(); e.stopPropagation(); return; }
     if (selEl.value) {
       if (mod && k === "c") { copyEl(); e.preventDefault(); e.stopPropagation(); return; }
+      if (mod && k === "x") { cutEl(); e.preventDefault(); e.stopPropagation(); return; }
       if (mod && k === "d") { duplicateEl(); e.preventDefault(); e.stopPropagation(); return; }
       if (e.key.startsWith("Arrow")) {
         const s = e.shiftKey ? 10 : 1;
@@ -302,7 +379,10 @@ function onFrameLoad() {
       if (e.key === "Escape") { clearSel(); e.stopPropagation(); return; }
       if (e.key === "Delete") { fmtDelete(); e.stopPropagation(); return; }
     }
-    if (mod && k === "v") { pasteEl(); e.preventDefault(); e.stopPropagation(); }
+    if (mod && k === "v") {
+      // 有元素剪贴板 → 贴元素; 否则放行原生 paste（贴系统剪贴板里的截图/图片, 由 paste 监听接住）
+      if (elClipboard.value?.length) { pasteEl(); e.preventDefault(); e.stopPropagation(); }
+    }
   };
   d.addEventListener("keydown", keyGuard, true);
   // 阻止 deck 自带点击翻页（编辑时点字不该翻页）
@@ -323,9 +403,26 @@ function onFrameLoad() {
   // 长网页在 iframe 里滚动时，选中框（fixed 定位）要跟着刷新
   scrollHandler = () => { refreshSel(); updateBubble(); };
   d.addEventListener("scroll", scrollHandler, true);
-  // 空格抓手松开（按下在 keyGuard 里）
-  keyUpGuard = (e: KeyboardEvent) => { if (e.code === "Space") panHeld.value = false; };
+  // 空格抓手松开（按下在 keyGuard 里）; Alt 松开收起测距标注
+  keyUpGuard = (e: KeyboardEvent) => {
+    if (e.code === "Space") panHeld.value = false;
+    if (e.key === "Alt") clearMeasure();
+  };
   d.addEventListener("keyup", keyUpGuard, true);
+  // 右键 = Figma 式上下文菜单（复制/粘贴/层级/编组/锁定…）
+  ctxGuard = (e: MouseEvent) => {
+    if (mode.value !== "visual" || !designOn.value) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const pick = selectableFrom(e.target as HTMLElement);
+    if (pick && !allSels.value.includes(pick)) selectEl(pick);
+    else if (!pick) clearSel();
+    openCtxAt(e.clientX, e.clientY);
+  };
+  d.addEventListener("contextmenu", ctxGuard, true);
+  // 系统剪贴板贴图: 复制截图后 Ctrl+V 直接落到画布中央
+  pasteGuard = (e: ClipboardEvent) => onPasteClipboard(e);
+  d.addEventListener("paste", pasteGuard, true);
   // Ctrl+滚轮落在 iframe 里时不会冒泡到父画布 → 在 iframe 文档里接住, 换算回画布坐标做锚点缩放
   wheelGuard = (e: WheelEvent) => {
     if (!e.ctrlKey) return;
@@ -437,6 +534,10 @@ function ensureOverlay(): HTMLElement | null {
       #__gh{position:fixed;left:0;right:0;height:0;border-top:calc(1px/var(--edscale)) solid #f24822;z-index:2147483599;pointer-events:none;display:none;}
       .__msel{outline:calc(1.5px/var(--edscale)) solid #0d99ff!important;outline-offset:0;}
       #__rb{position:fixed;border:calc(1px/var(--edscale)) solid rgba(13,153,255,.9);background:rgba(13,153,255,.08);z-index:2147483601;pointer-events:none;display:none;}
+      #__meas{position:fixed;inset:0;pointer-events:none;z-index:2147483602;display:none;}
+      #__meas .__mlh{position:absolute;height:calc(1px/var(--edscale));background:#f24822;display:none;}
+      #__meas .__mlv{position:absolute;width:calc(1px/var(--edscale));background:#f24822;display:none;}
+      #__meas .__mt{position:absolute;transform:translate(-50%,-50%);background:#f24822;color:#fff;font:500 calc(10.5px/var(--edscale))/1.6 -apple-system,'Segoe UI',sans-serif;padding:calc(1px/var(--edscale)) calc(5px/var(--edscale));border-radius:calc(3px/var(--edscale));white-space:nowrap;display:none;font-variant-numeric:tabular-nums;}
     `;
     d.head?.appendChild(st);
   }
@@ -447,6 +548,14 @@ function ensureOverlay(): HTMLElement | null {
       g.id = gid;
       d.body?.appendChild(g);
     }
+  }
+  // Alt+悬停间距标注: 两条红线 + 两个数字标签（Figma 式测距）
+  if (!d.getElementById("__meas")) {
+    const m = d.createElement("div");
+    m.id = "__meas";
+    m.innerHTML =
+      '<div class="__mlh"></div><div class="__mlv"></div><span class="__mt"></span><span class="__mt"></span>';
+    d.body?.appendChild(m);
   }
   let box = d.getElementById("__obj");
   if (!box) {
@@ -612,6 +721,8 @@ function showGuides(v: boolean, h: boolean, x = 0, y = 0) {
 }
 
 function startMove(e: PointerEvent) {
+  // Alt+拖 = 拖出副本（Figma 手感）: 先原位克隆整组选中, 把选中换成副本再开拖
+  if (e.altKey && selEl.value) duplicateForAltDrag();
   const el = selEl.value;
   if (!el) return;
   const t = getTranslate(el);
@@ -671,6 +782,11 @@ function onDocPointerMove(e: PointerEvent) {
   const el = selEl.value;
   let dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
   if (drag.kind === "move") {
+    // Shift+拖 = 锁定水平/垂直轴（按位移大的方向走直线）
+    if (e.shiftKey) {
+      if (Math.abs(dx) > Math.abs(dy)) dy = 0;
+      else dx = 0;
+    }
     // Figma 式智能吸附: 移动框的左/中/右(上/中/下)贴近任一参照线 ±5px 时吸附并亮红色参考线
     const SNAP = 5;
     let gx: number | null = null;
@@ -699,15 +815,27 @@ function onDocPointerMove(e: PointerEvent) {
     setTranslate(el, drag.tx0 + dx, drag.ty0 + dy);
     if (drag.others) for (const o of drag.others) setTranslate(o.el, o.tx0 + dx, o.ty0 + dy);
   } else {
-    let { tx0: tx, ty0: ty } = drag;
     let w = drag.w0, h = drag.h0;
     const d = drag.dir;
     if (d.includes("e")) w = drag.w0 + dx;
     if (d.includes("s")) h = drag.h0 + dy;
-    if (d.includes("w")) { w = drag.w0 - dx; tx = drag.tx0 + dx; }
-    if (d.includes("n")) { h = drag.h0 - dy; ty = drag.ty0 + dy; }
-    el.style.width = Math.max(24, w) + "px";
-    el.style.height = Math.max(20, h) + "px";
+    if (d.includes("w")) w = drag.w0 - dx;
+    if (d.includes("n")) h = drag.h0 - dy;
+    // Shift+角手柄 = 等比缩放（以变化幅度大的一边为准, Figma 手感）
+    if (e.shiftKey && d.length === 2) {
+      const kx = w / Math.max(1, drag.w0);
+      const ky = h / Math.max(1, drag.h0);
+      const k = Math.abs(kx - 1) > Math.abs(ky - 1) ? kx : ky;
+      w = drag.w0 * k;
+      h = drag.h0 * k;
+    }
+    w = Math.max(24, w);
+    h = Math.max(20, h);
+    // 西/北侧手柄: 位置随尺寸变化补偿, 保持对边不动
+    const tx = d.includes("w") ? drag.tx0 + (drag.w0 - w) : drag.tx0;
+    const ty = d.includes("n") ? drag.ty0 + (drag.h0 - h) : drag.ty0;
+    el.style.width = Math.round(w) + "px";
+    el.style.height = Math.round(h) + "px";
     setTranslate(el, tx, ty);
   }
   refreshSel();
@@ -732,12 +860,15 @@ function onDocPointerDown(e: PointerEvent) {
     }
     return;
   }
+  if (ctx.value) ctx.value = null; // 任何按下先收起右键菜单
+  clearMeasure();
   if (!designOn.value) return;
   // 画形状工具: 按下即开始拖出元素（Figma 式 draw-to-create）
   if (tool.value !== "select") { startDraw(e); return; }
   const t = e.target as HTMLElement;
   if (t.closest("#__obj")) return; // 点到手柄 → 各自处理
-  const pick = selectableFrom(t);
+  // Ctrl+点选 = 穿透到指针下最深的元素（Figma 深选）; 普通点选 = 语义块
+  const pick = e.ctrlKey || e.metaKey ? deepFrom(t) : selectableFrom(t);
   if (pick) {
     if (e.shiftKey) { selectEl(pick, true); return; } // Shift 追加/反选，不进入拖动
     if (!allSels.value.includes(pick)) selectEl(pick);
@@ -758,11 +889,19 @@ function onDocDblClick(e: PointerEvent) {
   (el as HTMLElement).focus?.();
 }
 function onDocMouseOver(e: MouseEvent) {
-  if (mode.value !== "visual" || !designOn.value || marquee || drag || panDrag) return;
+  if (mode.value !== "visual" || !designOn.value || marquee || drag || panDrag || draw) return;
+  if (tool.value !== "select") return; // 画形状/抓手时不做悬停高亮
   const d = doc(); if (!d) return;
   d.querySelectorAll(".__hov").forEach((x) => x.classList.remove("__hov"));
   const pick = selectableFrom(e.target as HTMLElement);
   if (pick && pick !== selEl.value) pick.classList.add("__hov");
+  // Alt+悬停 = 显示选中元素到悬停元素的间距标注（Figma 测距）
+  lastHover = pick;
+  if (e.altKey && selEl.value && pick && pick !== selEl.value) {
+    drawMeasure(selEl.value.getBoundingClientRect(), pick.getBoundingClientRect());
+  } else {
+    clearMeasure();
+  }
 }
 
 // 格式工具栏动作
@@ -812,25 +951,6 @@ function insertNode(el: HTMLElement, w: number, h: number | null) {
   artifacts.markDirty(true);
   rebuildThumbs();
   pushHistory();
-}
-function insertEl(kind: "text" | "rect" | "ellipse" | "line") {
-  const d = doc();
-  if (!d) return;
-  const el = d.createElement("div");
-  if (kind === "text") {
-    el.textContent = "双击编辑文字";
-    el.style.cssText = "font-size:40px;font-weight:700;line-height:1.25;color:#ffffff;text-shadow:0 1px 6px rgba(0,0,0,.25);";
-    insertNode(el, 480, null);
-  } else if (kind === "rect") {
-    el.style.cssText = "background:rgba(74,134,255,.85);border-radius:10px;";
-    insertNode(el, 280, 180);
-  } else if (kind === "ellipse") {
-    el.style.cssText = "background:rgba(74,134,255,.85);border-radius:50%;";
-    insertNode(el, 200, 200);
-  } else {
-    el.style.cssText = "background:#ffffff;border-radius:2px;";
-    insertNode(el, 420, 4);
-  }
 }
 function pickImage() { fileInput.value?.click(); }
 function onImagePicked(e: Event) {
@@ -915,27 +1035,58 @@ function redo() {
 }
 
 // ───────── 元素复制 / 粘贴 / 微调 / 一键对齐 ─────────
-function copyEl() { if (selEl.value) elClipboard = selEl.value.outerHTML; }
+function copyEl() {
+  if (allSels.value.length) elClipboard.value = allSels.value.map((el) => el.outerHTML);
+}
+function cutEl() {
+  if (!allSels.value.length) return;
+  copyEl();
+  fmtDelete();
+}
 function pasteEl() {
   const d = doc();
   const slide = activeSlide();
-  if (!d || !slide || !elClipboard) return;
-  const tpl = d.createElement("div");
-  tpl.innerHTML = elClipboard;
-  const el = tpl.firstElementChild as HTMLElement | null;
-  if (!el) return;
-  el.classList.remove("__hov");
-  el.removeAttribute("contenteditable");
-  // 粘贴进当前页并整体偏移一点，避免与原件完全重叠看不出来
-  const t = getTranslate(el);
-  setTranslate(el, t.tx + 18, t.ty + 18);
-  slide.appendChild(el);
-  selectEl(el);
+  if (!d || !slide || !elClipboard.value?.length) return;
+  const pasted: HTMLElement[] = [];
+  for (const html2 of elClipboard.value) {
+    const tpl = d.createElement("div");
+    tpl.innerHTML = html2;
+    const el = tpl.firstElementChild as HTMLElement | null;
+    if (!el) continue;
+    el.classList.remove("__hov", "__msel");
+    el.removeAttribute("contenteditable");
+    // 粘贴进当前页并整体偏移一点，避免与原件完全重叠看不出来
+    const t = getTranslate(el);
+    setTranslate(el, t.tx + 18, t.ty + 18);
+    slide.appendChild(el);
+    pasted.push(el);
+  }
+  if (!pasted.length) return;
+  selEl.value = pasted[0];
+  extraSels.value = pasted.slice(1);
+  syncSelClass();
+  refreshSel();
   artifacts.markDirty(true);
   rebuildThumbs();
   pushHistory();
 }
 function duplicateEl() { if (!selEl.value) return; copyEl(); pasteEl(); }
+/** Alt+拖副本: 原位克隆整组选中并把选中换成副本（随后由 startMove 拖走） */
+function duplicateForAltDrag() {
+  if (!selEl.value) return;
+  const map = new Map<HTMLElement, HTMLElement>();
+  for (const el of allSels.value) {
+    const c = el.cloneNode(true) as HTMLElement;
+    c.classList.remove("__hov", "__msel");
+    c.removeAttribute("contenteditable");
+    el.after(c);
+    map.set(el, c);
+  }
+  selEl.value = map.get(selEl.value)!;
+  extraSels.value = extraSels.value.map((x) => map.get(x)!);
+  syncSelClass();
+  artifacts.markDirty(true);
+}
 /** 方向键微调：1px，Shift=10px（多选时整组一起动） */
 function nudge(dx: number, dy: number) {
   if (!allSels.value.length || (!dx && !dy)) return;
@@ -1112,6 +1263,227 @@ function endMarquee(e: PointerEvent) {
   marqueeMoved = false;
 }
 
+// ── Figma 深选: Ctrl+点选穿透到指针下最深的元素 ──
+function deepFrom(t: HTMLElement): HTMLElement | null {
+  const slide = activeSlide();
+  if (!slide || !slide.contains(t) || t === slide) return null;
+  if (t.closest("[data-plk]")) return null;
+  if (isEditorNode(t)) return null;
+  return t;
+}
+
+// ── 编组 / 取消编组（Ctrl+G / Ctrl+Shift+G）──
+// 组 = 一个绝对定位的 div[data-group] 包住选中集合的外接框; 成员转组内绝对定位, 视觉位置不变。
+function groupSel() {
+  const d = doc();
+  const root = activeSlide();
+  // 过滤掉互为祖先的选择(把祖先留下会连孩子一起挪两次)
+  const els = allSels.value.filter((el) => !allSels.value.some((o) => o !== el && o.contains(el)));
+  if (!d || !root || els.length < 2) return;
+  if (getComputedStyle(root).position === "static") root.style.position = "relative";
+  const rr = root.getBoundingClientRect();
+  const rects = els.map((el) => el.getBoundingClientRect());
+  const minL = Math.min(...rects.map((r) => r.left));
+  const minT = Math.min(...rects.map((r) => r.top));
+  const maxR = Math.max(...rects.map((r) => r.right));
+  const maxB = Math.max(...rects.map((r) => r.bottom));
+  const g = d.createElement("div");
+  g.setAttribute("data-group", "1");
+  g.style.cssText = `position:absolute;left:${Math.round(minL - rr.left)}px;top:${Math.round(minT - rr.top)}px;width:${Math.round(maxR - minL)}px;height:${Math.round(maxB - minT)}px;`;
+  root.appendChild(g);
+  for (let i = 0; i < els.length; i++) {
+    const el = els[i];
+    const r = rects[i];
+    el.classList.remove("__msel", "__hov");
+    g.appendChild(el);
+    // translate 折算进组内 left/top, 冻结当前视觉几何
+    el.style.position = "absolute";
+    el.style.left = Math.round(r.left - minL) + "px";
+    el.style.top = Math.round(r.top - minT) + "px";
+    el.style.width = Math.round(r.width) + "px";
+    el.style.height = Math.round(r.height) + "px";
+    el.style.transform = "";
+    el.style.margin = "0";
+    el.style.boxSizing = "border-box";
+  }
+  selectEl(g);
+  artifacts.markDirty(true);
+  rebuildThumbs();
+  pushHistory();
+}
+function ungroupSel() {
+  const g = selEl.value;
+  if (!g || !g.hasAttribute("data-group") || !g.parentElement) return;
+  const t = getTranslate(g);
+  const gl = (parseFloat(g.style.left) || 0) + t.tx;
+  const gt = (parseFloat(g.style.top) || 0) + t.ty;
+  const kids = Array.from(g.children) as HTMLElement[];
+  for (const k of kids) {
+    k.style.left = Math.round((parseFloat(k.style.left) || 0) + gl) + "px";
+    k.style.top = Math.round((parseFloat(k.style.top) || 0) + gt) + "px";
+    g.before(k);
+  }
+  g.remove();
+  if (kids.length) {
+    selEl.value = kids[0];
+    extraSels.value = kids.slice(1);
+    syncSelClass();
+    refreshSel();
+  } else {
+    clearSel();
+  }
+  artifacts.markDirty(true);
+  rebuildThumbs();
+  pushHistory();
+}
+
+// ── 层级微调: ] 上移一层 / [ 下移一层（z-index 步进）──
+function zStep(upward: boolean) {
+  const el = selEl.value;
+  if (!el) return;
+  if (getComputedStyle(el).position === "static") el.style.position = "relative";
+  const z = parseInt(el.style.zIndex || getComputedStyle(el).zIndex) || 0;
+  el.style.zIndex = String(Math.max(0, z + (upward ? 1 : -1)));
+  afterFmt();
+}
+
+// ── Alt+悬停间距标注（Figma 测距）: 选中元素 ↔ 悬停元素之间的水平/垂直净距 ──
+function clearMeasure() {
+  const m = doc()?.getElementById("__meas") as HTMLElement | null;
+  if (m) m.style.display = "none";
+}
+function drawMeasure(sel: DOMRect, hov: DOMRect) {
+  const d = doc();
+  const m = d?.getElementById("__meas") as HTMLElement | null;
+  if (!d || !m) return;
+  const [lh, lv, th, tv] = Array.from(m.children) as HTMLElement[];
+  // 水平净距: 两框在 x 轴上不相交时, 量最近两条竖边
+  let hx0 = 0, hx1 = 0, hOn = false;
+  if (sel.right <= hov.left) { hx0 = sel.right; hx1 = hov.left; hOn = true; }
+  else if (hov.right <= sel.left) { hx0 = hov.right; hx1 = sel.left; hOn = true; }
+  // 垂直净距同理
+  let vy0 = 0, vy1 = 0, vOn = false;
+  if (sel.bottom <= hov.top) { vy0 = sel.bottom; vy1 = hov.top; vOn = true; }
+  else if (hov.bottom <= sel.top) { vy0 = hov.bottom; vy1 = sel.top; vOn = true; }
+  // 线画在两框重叠区中线上(无重叠用选中框中线)
+  const oy0 = Math.max(sel.top, hov.top), oy1 = Math.min(sel.bottom, hov.bottom);
+  const cy = oy0 < oy1 ? (oy0 + oy1) / 2 : (sel.top + sel.bottom) / 2;
+  const ox0 = Math.max(sel.left, hov.left), ox1 = Math.min(sel.right, hov.right);
+  const cx = ox0 < ox1 ? (ox0 + ox1) / 2 : (sel.left + sel.right) / 2;
+  const k = scale.value || 1;
+  if (hOn && hx1 - hx0 >= 1) {
+    lh.style.display = "block";
+    lh.style.left = hx0 + "px"; lh.style.top = cy + "px"; lh.style.width = hx1 - hx0 + "px";
+    th.style.display = "block";
+    th.style.left = (hx0 + hx1) / 2 + "px"; th.style.top = cy - 12 / k + "px";
+    th.textContent = String(Math.round(hx1 - hx0));
+  } else { lh.style.display = "none"; th.style.display = "none"; }
+  if (vOn && vy1 - vy0 >= 1) {
+    lv.style.display = "block";
+    lv.style.left = cx + "px"; lv.style.top = vy0 + "px"; lv.style.height = vy1 - vy0 + "px";
+    tv.style.display = "block";
+    tv.style.left = cx + 14 / k + "px"; tv.style.top = (vy0 + vy1) / 2 + "px";
+    tv.textContent = String(Math.round(vy1 - vy0));
+  } else { lv.style.display = "none"; tv.style.display = "none"; }
+  m.style.display = hOn || vOn ? "block" : "none";
+}
+
+// ── 右键上下文菜单 ──
+function openCtxAt(fx: number, fy: number) {
+  const st = stageEl.value;
+  const z = zoneEl.value;
+  if (!st || !z) return;
+  const sr = st.getBoundingClientRect();
+  const zr = z.getBoundingClientRect();
+  const x = sr.left - zr.left + fx * scale.value;
+  const y = sr.top - zr.top + fy * scale.value;
+  ctx.value = {
+    x: Math.max(4, Math.min(x, zr.width - 200)),
+    y: Math.max(4, Math.min(y, zr.height - 360)),
+  };
+}
+function ctxDo(fn: () => void) {
+  ctx.value = null;
+  fn();
+}
+function closeCtx() { ctx.value = null; }
+/** 右键菜单: 锁定选中元素（解锁去图层面板点锁图标） */
+function lockSel() {
+  const el = selEl.value;
+  if (!el) return;
+  el.setAttribute("data-plk", "1");
+  clearSel();
+  artifacts.markDirty(true);
+  pushHistory();
+}
+/** 右键菜单: 隐藏选中元素（重新显示去图层面板点眼睛） */
+function hideSel() {
+  const els = allSels.value;
+  if (!els.length) return;
+  els.forEach((el) => (el.style.display = "none"));
+  clearSel();
+  artifacts.markDirty(true);
+  rebuildThumbs();
+  pushHistory();
+}
+
+// ── 检查器 hex 色值输入 ──
+function normHex(v: string): string | null {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(v.trim());
+  return m ? "#" + m[1].toLowerCase() : null;
+}
+function fmtFillHex(e: Event) {
+  const h = normHex((e.target as HTMLInputElement).value);
+  const el = selEl.value;
+  if (!h || !el) return;
+  el.style.backgroundColor = h;
+  afterFmt();
+}
+function fmtColorHex(e: Event) {
+  const h = normHex((e.target as HTMLInputElement).value);
+  const el = selEl.value;
+  if (!h || !el) return;
+  el.style.color = h;
+  (el.style as any).webkitTextFillColor = h;
+  afterFmt();
+}
+
+// ── 系统剪贴板贴图: 复制截图/图片后 Ctrl+V 直接落画布（成 base64 内嵌 img）──
+function onPasteClipboard(e: ClipboardEvent) {
+  if (mode.value !== "visual" || isTextDoc.value || !designOn.value) return;
+  const ae = doc()?.activeElement as HTMLElement | null;
+  if (ae && (ae as any).isContentEditable) return; // 文字编辑中 → 原生贴字
+  const pae = document.activeElement;
+  if (pae && (pae.tagName === "INPUT" || pae.tagName === "TEXTAREA")) return; // 父页输入框 → 原生
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const it of Array.from(items)) {
+    if (!it.type.startsWith("image/")) continue;
+    const f = it.getAsFile();
+    if (!f) continue;
+    e.preventDefault();
+    const rd = new FileReader();
+    rd.onload = () => {
+      const src = rd.result as string;
+      const dd = doc();
+      if (!dd || !src) return;
+      const img = dd.createElement("img");
+      img.src = src;
+      img.style.cssText = "display:block;border-radius:8px;object-fit:contain;";
+      const probe = new Image();
+      probe.onload = () => {
+        const ratio = probe.naturalHeight / (probe.naturalWidth || 1);
+        const w = 420;
+        insertNode(img, w, Math.round(w * ratio) || 280);
+      };
+      probe.onerror = () => insertNode(img, 420, 280);
+      probe.src = src;
+    };
+    rd.readAsDataURL(f);
+    return;
+  }
+}
+
 // ── 画形状工具（Figma 式 draw-to-create）: 按下拖出矩形 → 松手生成元素并选中 ──
 function setTool(t: Tool) {
   tool.value = t;
@@ -1231,6 +1603,14 @@ const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "LINK", "META", "TITLE", "BR", "TE
 const VOID_TAGS = new Set(["img", "hr", "br", "input", "source", "svg", "video", "audio", "iframe", "canvas"]);
 function isEditorNode(el: Element): boolean {
   return (el.id || "").startsWith("__");
+}
+/** 图层行的类型图标（Figma 式: 文本 T / 图片 / 列表 / 表格 / 容器框） */
+function layerIcon(tag: string) {
+  if (["img", "svg", "picture", "video", "canvas"].includes(tag)) return ImageIcon;
+  if (["h1", "h2", "h3", "h4", "h5", "h6", "p", "span", "a", "li", "blockquote", "strong", "em", "label", "b", "i"].includes(tag)) return Type;
+  if (tag === "ul" || tag === "ol") return List;
+  if (tag === "table") return Table;
+  return Frame;
 }
 function layerLabelFor(el: HTMLElement): string {
   const t = el.tagName.toLowerCase();
@@ -1661,7 +2041,7 @@ function serialize(): string {
   const d = doc();
   if (!d) return html.value;
   const root = d.documentElement.cloneNode(true) as HTMLElement;
-  root.querySelectorAll("#__ed, #__obj, #__objcss, #__gv, #__gh, #__rb").forEach((e) => e.remove());
+  root.querySelectorAll("#__ed, #__obj, #__objcss, #__gv, #__gh, #__rb, #__meas").forEach((e) => e.remove());
   root.querySelectorAll("[contenteditable]").forEach((e) => e.removeAttribute("contenteditable"));
   root.querySelectorAll(".__hov, .__msel").forEach((e) => {
     e.classList.remove("__hov", "__msel");
@@ -1726,7 +2106,7 @@ function exit() {
 function computeFit() {
   const el = canvasEl.value;
   if (!el) return;
-  const pad = 48;
+  const pad = 100; // 画布 padding 44×2 + 呼吸空隙, 适应缩放时不出滚动条
   const fw = (el.clientWidth - pad) / 1280;
   const fh = (el.clientHeight - pad) / 720;
   fitScale.value = Math.max(0.15, Math.min(fw, fh));
@@ -1767,10 +2147,15 @@ function onKey(e: KeyboardEvent) {
     else if (k === "y") { e.preventDefault(); redo(); }
   }
 }
-function onWinKeyUp(e: KeyboardEvent) { if (e.code === "Space") panHeld.value = false; }
+function onWinKeyUp(e: KeyboardEvent) {
+  if (e.code === "Space") panHeld.value = false;
+  if (e.key === "Alt") clearMeasure();
+}
 onMounted(() => {
   window.addEventListener("keydown", onKey);
   window.addEventListener("keyup", onWinKeyUp);
+  window.addEventListener("paste", onPasteClipboard);
+  window.addEventListener("pointerdown", closeCtx);
   ro = new ResizeObserver(() => computeFit());
   if (canvasEl.value) ro.observe(canvasEl.value);
   hintTimer = window.setTimeout(() => (hintOn.value = false), 9000);
@@ -1778,6 +2163,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKey);
   window.removeEventListener("keyup", onWinKeyUp);
+  window.removeEventListener("paste", onPasteClipboard);
+  window.removeEventListener("pointerdown", closeCtx);
   ro?.disconnect();
   clearTimeout(hintTimer);
   const d = doc();
@@ -1789,6 +2176,8 @@ onBeforeUnmount(() => {
     if (scrollHandler) d.removeEventListener("scroll", scrollHandler, true);
     if (keyUpGuard) d.removeEventListener("keyup", keyUpGuard, true);
     if (wheelGuard) d.removeEventListener("wheel", wheelGuard, true);
+    if (ctxGuard) d.removeEventListener("contextmenu", ctxGuard, true);
+    if (pasteGuard) d.removeEventListener("paste", pasteGuard, true);
   }
 });
 
@@ -1808,8 +2197,10 @@ watch(
     history.value = [];
     hIndex.value = -1;
     findOpen.value = false;
-    elClipboard = null;
+    elClipboard.value = null;
     imgReplaceTarget = null;
+    ctx.value = null;
+    tool.value = "select";
     extraSels.value = [];
     layerRows.value = [];
     layerCollapsed.value = new Set();
@@ -1858,20 +2249,17 @@ watch(
         </label>
       </template>
 
-      <!-- 插入组：deck 和网页设计模式都能用（插入后即拖即拉，双击文本框改字） -->
-      <div v-if="!isTextDoc && mode === 'visual' && designOn" class="ed-ins">
-        <button class="ed-ic" title="插入文本框" @click="insertEl('text')"><Type :size="14" /></button>
-        <button class="ed-ic" title="插入矩形" @click="insertEl('rect')"><Square :size="14" /></button>
-        <button class="ed-ic" title="插入圆形" @click="insertEl('ellipse')"><Circle :size="14" /></button>
-        <button class="ed-ic" title="插入线条" @click="insertEl('line')"><Minus :size="14" /></button>
-        <button class="ed-ic" title="插入图片" @click="pickImage"><ImageIcon :size="14" /></button>
-      </div>
 
       <div v-if="!isTextDoc && mode === 'visual'" class="ed-zoom">
         <button class="ed-ic" title="缩小" @click="zoomOut"><ZoomOut :size="14" /></button>
         <button class="ed-pct" title="适应窗口" @click="zoomFit">{{ Math.round(scale * 100) }}%</button>
         <button class="ed-ic" title="放大" @click="zoomIn"><ZoomIn :size="14" /></button>
       </div>
+
+      <!-- Figma 往返: 送去 Figma 编辑 / 改完拉回来 -->
+      <button v-if="!isTextDoc" class="ed-pct ed-figma" title="接入 Figma 网页端：复制页面导入 Figma 自由编辑，改完一键拉回替换" @click="figmaOpen = true">
+        Figma
+      </button>
 
       <div class="ed-spacer" />
 
@@ -2018,8 +2406,8 @@ watch(
               <ChevronRight v-if="layerCollapsed.has(n.id)" :size="11" /><ChevronDown v-else :size="11" />
             </button>
             <span v-else class="ed-layer-caret ph" />
-            <span class="ed-layer-tag">{{ n.tag }}</span>
-            <span class="ed-layer-name" :title="n.label">{{ n.label }}</span>
+            <component :is="layerIcon(n.tag)" :size="11" class="ed-layer-ico" />
+            <span class="ed-layer-name" :title="n.tag + ' · ' + n.label">{{ n.label }}</span>
             <button class="ed-layer-act" :class="{ act: n.locked }" :title="n.locked ? '解锁' : '锁定（画布上不可选中）'" @click.stop="layerToggleLock(n)">
               <Lock v-if="n.locked" :size="11" /><LockOpen v-else :size="11" />
             </button>
@@ -2053,27 +2441,29 @@ watch(
         </div>
       </template>
 
-      <!-- 画布 -->
+      <!-- 画布区: 滚动画布 + 悬浮工具药丸/提示条（不随内容滚动） -->
+      <div v-if="!isTextDoc" v-show="mode === 'visual'" ref="zoneEl" class="ed-canvas-zone">
       <div
-        v-if="!isTextDoc"
-        v-show="mode === 'visual'"
         ref="canvasEl"
         class="ed-canvas"
-        :class="{ pan: panHeld }"
+        :class="{ pan: panHeld || tool === 'hand', draw: designOn && tool !== 'select' && tool !== 'hand' }"
         @scroll.passive="updateBubble"
         @wheel="onCanvasWheel"
         @pointerdown="onCanvasPointerDown"
         @pointermove="onCanvasPointerMove"
         @pointerup="onCanvasPointerUp"
       >
-        <div ref="stageEl" class="ed-stage" :style="stageStyle">
-          <iframe
-            ref="frame"
-            class="ed-frame"
-            :srcdoc="frameSrc"
-            sandbox="allow-scripts allow-same-origin"
-            @load="onFrameLoad"
-          />
+        <!-- 壳按缩放后尺寸占位, 里面的舞台从左上角等比缩放 → 放大后可滚到每个角落 -->
+        <div class="ed-stage-wrap" :style="stageWrapStyle">
+          <div ref="stageEl" class="ed-stage" :style="stageStyle">
+            <iframe
+              ref="frame"
+              class="ed-frame"
+              :srcdoc="frameSrc"
+              sandbox="allow-scripts allow-same-origin"
+              @load="onFrameLoad"
+            />
+          </div>
         </div>
         <!-- 浮动气泡工具栏（现代编辑器式）：选中画布文字时浮现在选区上方 -->
         <div
@@ -2117,10 +2507,50 @@ watch(
           <button class="ed-ic" title="插入链接" @click="execLink"><Link2 :size="14" /></button>
           <button class="ed-ic" title="清除格式" @click="exec('removeFormat')"><RemoveFormatting :size="14" /></button>
         </div>
-        <div class="ed-hint" :class="{ off: !hintOn }">
-          <Maximize :size="12" />
-          {{ designOn ? "单击选中 · Shift+点选/空白框选多选 · 双击改文字(图片=换图) · 空格+拖拽平移 · Ctrl+C/V/D · Del 删除 · Ctrl+Z 撤销一切" : "整页可直接改字 · 选中文字用上方工具栏改样式" }} · Ctrl+S 保存
-        </div>
+      </div>
+
+      <!-- 底部悬浮工具药丸（Figma UI3 式）: 选择/抓手 + 画文本/矩形/圆/线 + 图片 -->
+      <div v-if="designOn" class="ed-tools">
+        <button :class="{ on: tool === 'select' }" title="选择 (V)" @click="setTool('select')"><MousePointer2 :size="16" /></button>
+        <button :class="{ on: tool === 'hand' }" title="抓手平移 (H · 按住空格也行)" @click="setTool('hand')"><Hand :size="16" /></button>
+        <span class="ed-tools-sep" />
+        <button :class="{ on: tool === 'text' }" title="文本 (T) · 在画布上点击或拖拽放置" @click="setTool('text')"><Type :size="16" /></button>
+        <button :class="{ on: tool === 'rect' }" title="矩形 (R) · 拖拽画出" @click="setTool('rect')"><Square :size="16" /></button>
+        <button :class="{ on: tool === 'ellipse' }" title="圆 (O) · 拖拽画出" @click="setTool('ellipse')"><Circle :size="16" /></button>
+        <button :class="{ on: tool === 'line' }" title="线条 (L) · 拖拽画出" @click="setTool('line')"><Minus :size="16" /></button>
+        <span class="ed-tools-sep" />
+        <button title="插入图片" @click="pickImage"><ImageIcon :size="16" /></button>
+      </div>
+
+      <div class="ed-hint" :class="{ off: !hintOn }">
+        <Maximize :size="12" />
+        {{ designOn ? "单击选中 · Shift/框选多选 · Alt+拖=副本 · Alt+悬停=测距 · 右键菜单 · Ctrl+G 编组 · Ctrl+Z 撤销" : "整页可直接改字 · 选中文字用上方工具栏改样式" }} · Ctrl+S 保存
+      </div>
+
+      <!-- 右键上下文菜单（Figma 式） -->
+      <div v-if="ctx" class="ed-ctx" :style="{ left: ctx.x + 'px', top: ctx.y + 'px' }" @pointerdown.stop>
+        <template v-if="selEl">
+          <button @click="ctxDo(copyEl)"><span>复制</span><kbd>Ctrl C</kbd></button>
+          <button :disabled="!elClipboard?.length" @click="ctxDo(pasteEl)"><span>粘贴</span><kbd>Ctrl V</kbd></button>
+          <button @click="ctxDo(duplicateEl)"><span>创建副本</span><kbd>Ctrl D</kbd></button>
+          <button @click="ctxDo(cutEl)"><span>剪切</span><kbd>Ctrl X</kbd></button>
+          <div class="sep" />
+          <button @click="ctxDo(() => zStep(true))"><span>上移一层</span><kbd>]</kbd></button>
+          <button @click="ctxDo(() => zStep(false))"><span>下移一层</span><kbd>[</kbd></button>
+          <div v-if="allSels.length > 1 || canUngroup" class="sep" />
+          <button v-if="allSels.length > 1" @click="ctxDo(groupSel)"><span>编组</span><kbd>Ctrl G</kbd></button>
+          <button v-if="canUngroup" @click="ctxDo(ungroupSel)"><span>取消编组</span><kbd>Ctrl⇧G</kbd></button>
+          <div class="sep" />
+          <button @click="ctxDo(lockSel)"><span>锁定</span></button>
+          <button @click="ctxDo(hideSel)"><span>隐藏</span></button>
+          <div class="sep" />
+          <button class="danger" @click="ctxDo(fmtDelete)"><span>删除</span><kbd>Del</kbd></button>
+        </template>
+        <template v-else>
+          <button :disabled="!elClipboard?.length" @click="ctxDo(pasteEl)"><span>粘贴</span><kbd>Ctrl V</kbd></button>
+          <button @click="ctxDo(selectAllEls)"><span>全选</span><kbd>Ctrl A</kbd></button>
+        </template>
+      </div>
       </div>
 
       <!-- 源码 -->
@@ -2158,6 +2588,7 @@ watch(
             </div>
           </div>
           <div class="ep-acts">
+            <button title="编组 (Ctrl+G)：包成一个整体一起拖" @click="groupSel"><Group :size="14" /> 编组</button>
             <button class="danger" @click="fmtDelete"><Trash2 :size="14" /> 删除全部</button>
           </div>
         </template>
@@ -2165,18 +2596,9 @@ watch(
         <template v-else-if="selEl">
           <div class="ep-head"><span>元素格式</span><button class="ep-x" title="取消选中" @click="clearSel"><X :size="14" /></button></div>
 
-          <div class="ep-sec">
-            <div class="ep-label">对齐</div>
-            <div class="ep-btns">
-              <button :class="{ on: selStyle.align === 'left' }" title="左对齐" @click="fmtAlign('left')"><AlignLeft :size="15" /></button>
-              <button :class="{ on: selStyle.align === 'center' }" title="居中" @click="fmtAlign('center')"><AlignCenter :size="15" /></button>
-              <button :class="{ on: selStyle.align === 'right' }" title="右对齐" @click="fmtAlign('right')"><AlignRight :size="15" /></button>
-            </div>
-          </div>
-
-          <div class="ep-sec">
-            <div class="ep-label">对齐到页面</div>
-            <div class="ep-btns">
+          <!-- Figma 式: 顶部一排对齐图标(对齐到页面) -->
+          <div class="ep-sec ep-align-row">
+            <div class="ep-btns wide">
               <button title="左对齐到页面" @click="alignToPage('left')"><AlignStartVertical :size="15" /></button>
               <button title="水平居中" @click="alignToPage('hcenter')"><AlignCenterVertical :size="15" /></button>
               <button title="右对齐到页面" @click="alignToPage('right')"><AlignEndVertical :size="15" /></button>
@@ -2198,6 +2620,43 @@ watch(
           </div>
 
           <div class="ep-sec">
+            <div class="ep-label">外观</div>
+            <div class="ep-grid">
+              <label class="ep-field" title="不透明度 %"><span>透明</span><input type="number" min="0" max="100" :value="selEffects.opacity" @change="fmtOpacity(+($event.target as HTMLInputElement).value)" /></label>
+              <label class="ep-field" title="圆角 px"><span>圆角</span><input type="number" :value="selFill.radius" @change="fmtRadius(+($event.target as HTMLInputElement).value)" /></label>
+            </div>
+          </div>
+
+          <div class="ep-sec">
+            <div class="ep-label">填充</div>
+            <label class="ep-color">
+              <span>{{ selFill.hasBg ? "背景色" : "无填充" }}</span>
+              <span class="ep-fill-end">
+                <input class="ep-hex" :value="selFill.hasBg ? selFill.bg : ''" placeholder="#RRGGBB" spellcheck="false" @change="fmtFillHex" @click.prevent />
+                <span class="ep-color-sw" :style="{ background: selFill.hasBg ? selFill.bg : 'transparent' }"><input type="color" :value="selFill.bg" @input="fmtFill" /></span>
+                <button v-if="selFill.hasBg" class="ep-clear" title="清除填充" @click.prevent="fmtFillClear"><X :size="12" /></button>
+              </span>
+            </label>
+          </div>
+
+          <div class="ep-sec">
+            <div class="ep-label">描边</div>
+            <div class="ep-grid">
+              <label class="ep-color no-border">
+                <span class="ep-color-sw" :style="{ background: selFill.border }"><input type="color" :value="selFill.border" @input="fmtBorderColor" /></span>
+              </label>
+              <label class="ep-field" title="描边宽度 px"><span>宽</span><input type="number" :value="selFill.bw" @change="fmtBorderWidth(+($event.target as HTMLInputElement).value)" /></label>
+            </div>
+          </div>
+
+          <div class="ep-sec">
+            <div class="ep-label">阴影</div>
+            <select class="ep-font full" :value="selEffects.shadow" @change="fmtShadow">
+              <option v-for="s in SHADOWS" :key="s.n" :value="s.v">{{ s.n }}</option>
+            </select>
+          </div>
+
+          <div class="ep-sec">
             <div class="ep-label">文字</div>
             <div class="ep-row">
               <div class="ep-stepper">
@@ -2211,10 +2670,15 @@ watch(
                 <button :class="{ on: selStyle.underline }" title="下划线" @click="fmtUnderline"><Underline :size="15" /></button>
               </div>
             </div>
-            <label class="ep-color">
-              <span>文字颜色</span>
-              <span class="ep-color-sw" :style="{ background: selStyle.color }"><input type="color" :value="selStyle.color" @input="fmtColor" /></span>
-            </label>
+            <div class="ep-row">
+              <div class="ep-btns">
+                <button :class="{ on: selStyle.align === 'left' }" title="文字左对齐" @click="fmtAlign('left')"><AlignLeft :size="15" /></button>
+                <button :class="{ on: selStyle.align === 'center' }" title="文字居中" @click="fmtAlign('center')"><AlignCenter :size="15" /></button>
+                <button :class="{ on: selStyle.align === 'right' }" title="文字右对齐" @click="fmtAlign('right')"><AlignRight :size="15" /></button>
+              </div>
+              <span class="ep-color-sw" title="文字颜色" :style="{ background: selStyle.color }"><input type="color" :value="selStyle.color" @input="fmtColor" /></span>
+              <input class="ep-hex" :value="selStyle.color" placeholder="#RRGGBB" spellcheck="false" @change="fmtColorHex" />
+            </div>
             <label class="ep-color">
               <span>字体</span>
               <select class="ep-font" @change="fmtFontFamily">
@@ -2222,45 +2686,9 @@ watch(
                 <option v-for="f in FONTS" :key="f.v" :value="f.v">{{ f.n }}</option>
               </select>
             </label>
-          </div>
-
-          <div class="ep-sec">
-            <div class="ep-label">段落</div>
             <div class="ep-grid">
               <label class="ep-field"><span>行高</span><input type="number" step="0.1" :value="selPara.lh" @change="setPara('lh', +($event.target as HTMLInputElement).value)" /></label>
               <label class="ep-field"><span>字距</span><input type="number" :value="selPara.ls" @change="setPara('ls', +($event.target as HTMLInputElement).value)" /></label>
-            </div>
-          </div>
-
-          <div class="ep-sec">
-            <div class="ep-label">填充与描边</div>
-            <label class="ep-color">
-              <span>填充{{ selFill.hasBg ? "" : "（无）" }}</span>
-              <span class="ep-fill-end">
-                <span class="ep-color-sw" :style="{ background: selFill.hasBg ? selFill.bg : 'transparent' }"><input type="color" :value="selFill.bg" @input="fmtFill" /></span>
-                <button v-if="selFill.hasBg" class="ep-clear" title="清除填充" @click.prevent="fmtFillClear"><X :size="12" /></button>
-              </span>
-            </label>
-            <label class="ep-color">
-              <span>描边</span>
-              <span class="ep-color-sw" :style="{ background: selFill.border }"><input type="color" :value="selFill.border" @input="fmtBorderColor" /></span>
-            </label>
-            <div class="ep-grid">
-              <label class="ep-field"><span>边宽</span><input type="number" :value="selFill.bw" @change="fmtBorderWidth(+($event.target as HTMLInputElement).value)" /></label>
-              <label class="ep-field"><span>圆角</span><input type="number" :value="selFill.radius" @change="fmtRadius(+($event.target as HTMLInputElement).value)" /></label>
-            </div>
-          </div>
-
-          <div class="ep-sec">
-            <div class="ep-label">效果</div>
-            <div class="ep-grid">
-              <label class="ep-field"><span>透明</span><input type="number" min="0" max="100" :value="selEffects.opacity" @change="fmtOpacity(+($event.target as HTMLInputElement).value)" /></label>
-              <label class="ep-field">
-                <span>阴影</span>
-                <select class="ep-shadow" :value="selEffects.shadow" @change="fmtShadow">
-                  <option v-for="s in SHADOWS" :key="s.n" :value="s.v">{{ s.n }}</option>
-                </select>
-              </label>
             </div>
           </div>
 
@@ -2274,6 +2702,7 @@ watch(
 
           <div class="ep-acts">
             <button title="复制一份 (Ctrl+D)" @click="duplicateEl"><Copy :size="14" /> 复制</button>
+            <button v-if="canUngroup" title="取消编组 (Ctrl+Shift+G)" @click="ungroupSel"><Ungroup :size="14" /> 解组</button>
             <button v-if="selEl.tagName === 'IMG'" title="换一张图（位置尺寸不变）" @click="replaceImage"><ImageIcon :size="14" /> 换图</button>
             <button class="danger" @click="fmtDelete"><Trash2 :size="14" /> 删除元素</button>
           </div>
@@ -2285,6 +2714,48 @@ watch(
           <div class="ep-empty-s">选中后在这里改大小 / 位置 / 字号 / 颜色 / 对齐，<br>拖动移动、拖角缩放，双击改文字；<br>Shift+点选或空白处框选可多选</div>
         </div>
       </aside>
+    </div>
+
+    <!-- Figma 往返对话框 -->
+    <div v-if="figmaOpen" class="ed-figma-mask" @click.self="figmaOpen = false">
+      <div class="ed-figma-dlg">
+        <div class="fg-head">
+          <span>接入 Figma 网页端</span>
+          <button class="ep-x" title="关闭" @click="figmaOpen = false"><X :size="14" /></button>
+        </div>
+
+        <div class="fg-step">
+          <div class="fg-t">① 送去 Figma 编辑</div>
+          <p class="fg-p">
+            点「复制页面 HTML」→ 到 Figma 里运行社区插件 <b>html.to.design</b>（免费，网页端可用）→
+            选 <b>Paste HTML</b> 粘贴导入，页面就变成可自由编辑的 Figma 图层。
+          </p>
+          <div class="fg-row">
+            <button class="fg-btn primary" @click="figmaCopyHtml">{{ figmaCopied ? "已复制 ✓" : "复制页面 HTML" }}</button>
+            <button class="fg-btn" @click="openUrl('https://www.figma.com/community/plugin/1159123024924461424')">获取 html.to.design</button>
+            <button class="fg-btn" @click="openUrl('https://www.figma.com')">打开 Figma</button>
+          </div>
+        </div>
+
+        <div class="fg-step">
+          <div class="fg-t">② 改完拉回来</div>
+          <p class="fg-p">
+            粘贴 Figma 文件链接 + 访问令牌（Figma 头像 → Settings → Security → <b>Personal access tokens</b>，
+            只读权限即可，令牌只存在本机）。拉回会把文件里<b>面积最大的画框</b>转成页面替换当前画布——
+            视觉级还原，可 <b>Ctrl+Z</b> 撤销，<b>Ctrl+S</b> 才落盘。
+          </p>
+          <input v-model="figmaLink" class="fg-in" placeholder="https://www.figma.com/design/…" spellcheck="false" />
+          <input v-model="figmaToken" class="fg-in" type="password" placeholder="figd_… 访问令牌（自己的 Figma 账号生成，只存本机）" spellcheck="false" />
+          <div class="fg-row">
+            <button class="fg-btn primary" :disabled="figmaBusy" @click="figmaPullBack">
+              <Loader v-if="figmaBusy" :size="13" class="spin" />
+              {{ figmaBusy ? "拉取并转换中…（图片多会久一点）" : "拉回并替换画布" }}
+            </button>
+            <button class="fg-btn" title="打开 Figma 设置页 → Security → Personal access tokens → Generate new token" @click="openUrl('https://www.figma.com/settings')">去生成令牌</button>
+          </div>
+          <div v-if="figmaErr" class="fg-err">{{ figmaErr }}</div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -2346,11 +2817,6 @@ watch(
 .ed-find-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
 .ed-find-btn:disabled { opacity: .4; cursor: default; }
 
-/* 顶栏插入组（图标化并入主工具栏） */
-.ed-ins { display: inline-flex; align-items: center; gap: 2px; padding: 2px; background: var(--bg-soft); border-radius: 8px; }
-.ed-ins .ed-ic { border: none; background: transparent; }
-.ed-ins .ed-ic:hover:not(:disabled) { background: var(--panel); }
-
 /* 浮动气泡工具栏：跟随文字选区，玻璃质感 */
 .ed-bubble {
   position: absolute;
@@ -2397,7 +2863,8 @@ watch(
 .ed-layer-caret { width: 14px; height: 14px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; border: none; background: transparent; color: var(--muted); cursor: pointer; padding: 0; border-radius: 3px; }
 .ed-layer-caret:hover { background: var(--border-soft); }
 .ed-layer-caret.ph { pointer-events: none; }
-.ed-layer-tag { flex-shrink: 0; font-size: 10px; font-weight: 700; color: var(--dim); font-family: var(--mono); }
+.ed-layer-ico { flex-shrink: 0; color: var(--muted); }
+.ed-layer.on .ed-layer-ico { color: var(--primary); }
 .ed-layer-name { flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ed-layer-act { width: 18px; height: 18px; flex-shrink: 0; display: none; align-items: center; justify-content: center; border: none; background: transparent; color: var(--muted); cursor: pointer; padding: 0; border-radius: 4px; }
 .ed-layer:hover .ed-layer-act, .ed-layer-act.act { display: inline-flex; }
@@ -2424,20 +2891,58 @@ watch(
 .ed-rail-btn.danger:hover:not(:disabled) { border-color: var(--vermilion); color: var(--vermilion); }
 .ed-rail-btn:first-child { flex: 1; border-style: solid; justify-content: center; }
 
-/* 画布：纯白高级感（无格子，仅极淡顶光） */
-.ed-canvas { flex: 1; min-width: 0; position: relative; overflow: auto; display: flex; align-items: center; justify-content: center;
-  background: radial-gradient(120% 90% at 50% 0%, #fbfcfd 0%, #ffffff 55%); }
-/* 深色主题：画布底跟着变暗，白色舞台自然浮起，不再一整片刺眼白 */
+/* 画布区: 滚动画布 + 悬浮工具药丸（不随内容滚动） */
+.ed-canvas-zone { flex: 1; min-width: 0; position: relative; display: flex; }
+/* 画布：Figma 式中性平底 */
+.ed-canvas { flex: 1; min-width: 0; position: relative; overflow: auto; display: flex; padding: 44px; background: #eef0f2; }
 html[data-theme="dark"] .ed-canvas,
 html[data-theme="aurora-dark"] .ed-canvas {
-  background: radial-gradient(120% 90% at 50% 0%, #222327 0%, #1a1b1e 55%);
+  background: #1b1c1f;
 }
-/* 空格抓手：光标变抓手提示可平移 */
+/* 空格/抓手工具：光标变抓手；画形状工具：十字准星 */
 .ed-canvas.pan { cursor: grab; }
 .ed-canvas.pan:active { cursor: grabbing; }
-.ed-stage { flex-shrink: 0; transform-origin: center center; box-shadow: 0 18px 50px rgba(20,30,50,.16), 0 3px 10px rgba(20,30,50,.08); border-radius: 3px; overflow: hidden; background: #fff; }
+.ed-canvas.draw { cursor: crosshair; }
+/* 壳=缩放后的视觉尺寸(margin auto 居中, 超出可四向滚动); 舞台在壳内从左上角缩放 */
+.ed-stage-wrap { flex-shrink: 0; margin: auto; position: relative; overflow: hidden; border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, .06), 0 14px 44px rgba(15, 23, 42, .14), 0 2px 8px rgba(15, 23, 42, .08); background: #fff; }
+html[data-theme="dark"] .ed-stage-wrap,
+html[data-theme="aurora-dark"] .ed-stage-wrap { box-shadow: 0 0 0 1px rgba(255, 255, 255, .07), 0 14px 44px rgba(0, 0, 0, .5); }
+.ed-stage { transform-origin: top left; background: #fff; }
 .ed-frame { width: 1280px; height: 720px; border: none; display: block; background: #fff; }
-.ed-hint { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; background: color-mix(in srgb, var(--ink, #111) 82%, transparent); color: #fff; font-size: 11.5px; white-space: nowrap; pointer-events: none; transition: opacity .6s ease; }
+
+/* 底部悬浮工具药丸（Figma UI3 式）*/
+.ed-tools { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 46;
+  display: flex; align-items: center; gap: 2px; padding: 5px;
+  border-radius: 14px; border: 1px solid var(--hairline, var(--border-soft));
+  background: color-mix(in srgb, var(--panel) 90%, transparent);
+  backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  box-shadow: 0 12px 36px rgba(15, 25, 45, .2), 0 2px 8px rgba(15, 25, 45, .1); }
+.ed-tools button { width: 36px; height: 36px; display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: transparent; color: var(--text-2); border-radius: 10px; cursor: pointer; transition: background .12s, color .12s; }
+.ed-tools button:hover { background: var(--bg-soft); color: var(--text); }
+.ed-tools button.on { background: var(--primary); color: #fff; }
+.ed-tools-sep { width: 1px; height: 20px; background: var(--border-soft); margin: 0 4px; }
+
+.ed-hint { position: absolute; left: 50%; bottom: 78px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; background: color-mix(in srgb, var(--ink, #111) 82%, transparent); color: #fff; font-size: 11.5px; white-space: nowrap; pointer-events: none; transition: opacity .6s ease; z-index: 45; }
+
+/* 右键上下文菜单（Figma 式, 玻璃质感） */
+.ed-ctx { position: absolute; z-index: 60; min-width: 188px; padding: 5px;
+  border-radius: 12px; border: 1px solid var(--hairline, var(--border-soft));
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  box-shadow: 0 14px 44px rgba(15, 25, 45, .22), 0 3px 10px rgba(15, 25, 45, .12);
+  animation: ed-ctx-in .1s ease; }
+@keyframes ed-ctx-in { from { opacity: 0; transform: scale(.97); } }
+.ed-ctx button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  padding: 6px 10px; border: none; background: transparent; color: var(--text); font-size: 12.5px;
+  border-radius: 7px; cursor: pointer; text-align: left; }
+.ed-ctx button:hover:not(:disabled) { background: var(--primary); color: #fff; }
+.ed-ctx button:hover:not(:disabled) kbd { color: rgba(255, 255, 255, .75); }
+.ed-ctx button:disabled { opacity: .4; cursor: default; }
+.ed-ctx button.danger:hover { background: var(--vermilion); }
+.ed-ctx kbd { font-size: 10.5px; color: var(--dim); font-family: inherit; }
+.ed-ctx .sep { height: 1px; margin: 4px 8px; background: var(--border-soft); }
 /* 提示条 9 秒后自动淡出，不长期占画布视野 */
 .ed-hint.off { opacity: 0; }
 
@@ -2463,7 +2968,12 @@ html[data-theme="aurora-dark"] .ed-canvas {
 .ep-btns button:hover { background: var(--panel); color: var(--text); }
 .ep-btns button.on { background: var(--primary); color: #fff; }
 .ep-btns button:disabled { opacity: .35; cursor: default; }
-.ep-shadow { width: 100%; min-width: 0; border: none; background: transparent; color: var(--text); font-size: 12px; outline: none; cursor: pointer; }
+/* Figma 式顶部对齐排: 六钮均分一整行 */
+.ep-btns.wide { width: 100%; }
+.ep-btns.wide button { flex: 1; }
+.ep-align-row { padding-top: 10px; padding-bottom: 10px; }
+.ep-font.full { width: 100%; max-width: none; padding: 6px 8px; }
+.ep-color.no-border { border: none; background: transparent; padding: 4px 0; justify-content: center; }
 .ep-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .ep-field { display: flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
 .ep-field span { font-size: 11px; color: var(--muted); flex-shrink: 0; min-width: 12px; }
@@ -2478,6 +2988,9 @@ html[data-theme="aurora-dark"] .ed-canvas {
 .ep-color-sw input { position: absolute; inset: -4px; width: 200%; height: 200%; opacity: 0; cursor: pointer; }
 .ep-font { max-width: 118px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 12px; padding: 3px 4px; cursor: pointer; }
 .ep-fill-end { display: inline-flex; align-items: center; gap: 6px; }
+/* hex 色值输入（Figma 式） */
+.ep-hex { width: 66px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 11.5px; font-family: var(--mono); outline: none; }
+.ep-hex:focus { border-color: var(--primary); }
 .ep-clear { width: 22px; height: 18px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--muted); cursor: pointer; }
 .ep-clear:hover { border-color: var(--vermilion); color: var(--vermilion); }
 .ep-layer { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 7px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text-2); font-size: 12px; cursor: pointer; }
@@ -2489,6 +3002,26 @@ html[data-theme="aurora-dark"] .ed-canvas {
 .ep-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; padding: 40px 22px; text-align: center; color: var(--muted); }
 .ep-empty-t { font-size: 13px; color: var(--text-2); font-weight: 500; }
 .ep-empty-s { font-size: 11.5px; color: var(--dim); line-height: 1.6; }
+
+/* Figma 往返按钮 + 对话框 */
+.ed-figma { font-weight: 700; letter-spacing: .02em; }
+.ed-figma-mask { position: absolute; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center; background: rgba(15, 20, 30, .38); backdrop-filter: blur(3px); }
+.ed-figma-dlg { width: 520px; max-width: calc(100% - 48px); max-height: calc(100% - 48px); overflow-y: auto; border-radius: 16px; border: 1px solid var(--hairline, var(--border-soft)); background: var(--panel); box-shadow: 0 24px 80px rgba(10, 18, 35, .35); animation: ed-ctx-in .12s ease; }
+.fg-head { position: sticky; top: 0; display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border-soft); background: var(--panel); font-size: 14px; font-weight: 700; color: var(--text); }
+.fg-step { padding: 14px 18px; border-bottom: 1px solid var(--border-soft); }
+.fg-step:last-child { border-bottom: none; }
+.fg-t { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.fg-p { font-size: 12.5px; color: var(--text-2); line-height: 1.7; margin: 0 0 10px; }
+.fg-p b { color: var(--text); }
+.fg-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.fg-btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text-2); font-size: 12.5px; cursor: pointer; }
+.fg-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.fg-btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+.fg-btn.primary:hover:not(:disabled) { filter: brightness(1.07); color: #fff; }
+.fg-btn:disabled { opacity: .55; cursor: default; }
+.fg-in { width: 100%; margin-bottom: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 12.5px; outline: none; }
+.fg-in:focus { border-color: var(--primary); }
+.fg-err { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--vermilion-soft, rgba(220, 80, 50, .1)); color: var(--vermilion); font-size: 12px; line-height: 1.6; }
 
 .spin { animation: ed-spin .9s linear infinite; }
 @keyframes ed-spin { to { transform: rotate(360deg); } }

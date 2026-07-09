@@ -404,6 +404,12 @@ fn invoke_err_resp(e: String) -> Response {
     } else if e.contains("参数") && (e.contains("缺少") || e.contains("解析失败") || e.contains("无效"))
     {
         StatusCode::BAD_REQUEST
+    } else if e.contains("(403)") {
+        StatusCode::FORBIDDEN
+    } else if e.contains("(404)") {
+        StatusCode::NOT_FOUND
+    } else if e.contains("(429)") {
+        StatusCode::TOO_MANY_REQUESTS
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
@@ -535,6 +541,21 @@ fn vec_str(a: &Value, k: &str) -> Vec<String> {
         })
         .unwrap_or_default()
 }
+/// 必填字符串数组:缺失/非数组/元素非字符串都报 400,避免参数错被伪装成「空结果」
+fn req_vec_str(a: &Value, k: &str) -> Result<Vec<String>, String> {
+    let arr = a
+        .get(k)
+        .ok_or_else(|| format!("缺少数组参数 `{k}`"))?
+        .as_array()
+        .ok_or_else(|| format!("参数 `{k}` 无效:必须是字符串数组"))?;
+    arr.iter()
+        .map(|x| {
+            x.as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| format!("参数 `{k}` 无效:数组元素必须是字符串"))
+        })
+        .collect()
+}
 
 fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> {
     use crate::*;
@@ -641,7 +662,7 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         )?),
         "figma_export_svgs" => ok(figma_bridge::figma_export_svgs(
             req_str(a, "file")?,
-            vec_str(a, "ids"),
+            req_vec_str(a, "ids")?,
             req_str(a, "token")?,
         )?),
         "echo_briefing_today" => ok(echo::echo_briefing_today()),

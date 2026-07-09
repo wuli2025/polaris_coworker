@@ -10,6 +10,8 @@ pub mod doctor;
 pub mod forge;
 pub mod integrations;
 pub mod fable;
+// Figma 往返桥：REST 拉回节点树 + 图片/SVG 内嵌（去程走 html.to.design 插件）
+pub mod figma_bridge;
 pub mod infer;
 pub mod kb;
 pub mod palette;
@@ -374,6 +376,9 @@ pub fn run() {
             echo::echo_dream_now,
             echo::echo_distill_conversation,
             echo::echo_clear_context,
+            // Figma 往返桥
+            figma_bridge::figma_pull,
+            figma_bridge::figma_export_svgs,
             echo::echo_briefing_today,
             echo::echo_briefing_dismiss,
             echo::echo_briefing_run,

@@ -332,6 +332,28 @@ fn md_cell(s: &str) -> String {
 // ───────────────────────── PDF ─────────────────────────
 
 fn extract_pdf(path: &Path) -> Result<String, String> {
+    // 按页抽取:每页前插入 `[[page:N]]` 标记,下游分块器(fable/index/math.rs)据此把「pN」写进
+    // 块面包屑 → 检索命中带页码溯源。零新依赖(pdf-extract 0.10 自带 by_pages)。
+    // by_pages 在个别 PDF 上可能不稳/全空 → 回退整篇抽取(旧行为),保证不回归。
+    if let Ok(pages) = pdf_extract::extract_text_by_pages(path) {
+        if pages.iter().any(|p| !p.trim().is_empty()) {
+            let mut out = String::new();
+            for (i, page) in pages.iter().enumerate() {
+                let t = page.trim();
+                if t.is_empty() {
+                    continue; // 空白页不占页码标记,但页序号仍按物理页递增
+                }
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(&format!("[[page:{}]]\n\n{t}", i + 1));
+            }
+            let out = squeeze_blank_lines(&out);
+            if !out.trim().is_empty() {
+                return Ok(out);
+            }
+        }
+    }
     let text = pdf_extract::extract_text(path).map_err(|e| format!("PDF 抽取失败: {e}"))?;
     if text.trim().is_empty() {
         return Err("未抽取到文本（可能是扫描件 / 纯图片 PDF）".into());

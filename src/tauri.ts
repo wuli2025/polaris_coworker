@@ -1024,6 +1024,18 @@ export async function openUrl(url: string): Promise<void> {
 }
 
 // ──────────────────────────────────────────────────────────────
+// Figma 往返桥 — 去程 html.to.design 插件, 回程 REST 拉回转 HTML
+// ──────────────────────────────────────────────────────────────
+export const figmaApi = {
+  /** 拉取文件节点树 + 图片填充(已内嵌 data URI)。file 可以是完整 URL 或裸 key */
+  pull: (file: string, token: string) =>
+    invoke<{ doc: any; images: Record<string, string> }>("figma_pull", { file, token }),
+  /** 批量把矢量节点导出为 SVG data URI（id → dataUri） */
+  exportSvgs: (file: string, ids: string[], token: string) =>
+    invoke<Record<string, string>>("figma_export_svgs", { file, ids, token }),
+};
+
+// ──────────────────────────────────────────────────────────────
 // Artifacts module — 对话生成的成品文件，右侧抽屉预览
 // ──────────────────────────────────────────────────────────────
 export type ArtifactKind =

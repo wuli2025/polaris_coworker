@@ -2,55 +2,187 @@ use super::*;
 
 // ───────────────────────── chunker ─────────────────────────
 
-/// 段落聚合式切块:按空行聚段到 ~1600 字符;超长段硬切(200 字符重叠)。
-/// 全按 char 计数,杜绝多字节边界 panic。
+/// 结构感知切块:段落聚合到 ~1600 字符;超长段硬切(200 字符重叠);全按 char 计数杜绝多字节
+/// 边界 panic。相较旧「纯空行聚段」多做三件事,直接抬检索命中与溯源精度:
+///   ① Markdown 标题(`#`..`######`)是**硬边界** —— 不跨章节聚段,语义边界不再被切碎;
+///   ② 每块前缀面包屑「【章节 › 子节｜pN】」,把文件内**局部上下文**注进向量(利于「正文不点题、
+///      标题点题」的召回)、并让命中片段自带页码/章节溯源(前端零改动即可展示);
+///   ③ 消化 `[[page:N]]` 页码标记(convert.rs 从 PDF 抽取时注入)—— 只更新当前页、**不**强制断块,
+///      故不会把一页碎成多块,块以其**起始页**标注。
+/// 面包屑不占正文预算之外的语义(同嵌入空间);只影响新建/重建的 chunk,不触发全库重嵌。
 pub(crate) fn chunk_text(s: &str) -> Vec<String> {
     const TARGET: usize = 1600;
     const OVERLAP: usize = 200;
-    let mut chunks: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut cur_chars = 0usize;
-    let flush = |cur: &mut String, cur_chars: &mut usize, chunks: &mut Vec<String>| {
-        let t = cur.trim();
-        if t.chars().count() >= 24 {
-            chunks.push(t.to_string());
-        }
-        cur.clear();
-        *cur_chars = 0;
-    };
+
+    // ── 预解析:把段落归类成 页码标记 / 标题 / 正文 ──
+    enum Seg {
+        Page(u32),
+        Heading(usize, String),
+        Body(String),
+    }
+    let mut segs: Vec<Seg> = Vec::new();
     for para in s.split("\n\n") {
-        let plen = para.chars().count();
-        if plen > TARGET {
-            flush(&mut cur, &mut cur_chars, &mut chunks);
-            // 超长段:滑窗硬切
-            let cs: Vec<char> = para.chars().collect();
-            let mut start = 0usize;
-            while start < cs.len() {
-                let end = (start + TARGET).min(cs.len());
-                chunks.push(cs[start..end].iter().collect::<String>().trim().to_string());
-                if end == cs.len() {
-                    break;
-                }
-                start = end.saturating_sub(OVERLAP);
+        let t = para.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(n) = parse_page_marker(t) {
+            segs.push(Seg::Page(n));
+            continue;
+        }
+        let first_line = t.lines().next().unwrap_or("");
+        if let Some((level, title)) = parse_atx_heading(first_line) {
+            segs.push(Seg::Heading(level, title));
+            // 标题同段可能跟着正文(单换行),拆出来当独立正文段
+            let rest = t[first_line.len()..].trim();
+            if !rest.is_empty() {
+                segs.push(Seg::Body(rest.to_string()));
             }
             continue;
         }
-        if cur_chars + plen > TARGET {
-            flush(&mut cur, &mut cur_chars, &mut chunks);
-        }
-        if !cur.is_empty() {
-            cur.push_str("\n\n");
-        }
-        cur.push_str(para);
-        cur_chars += plen + 2;
+        segs.push(Seg::Body(t.to_string()));
+    }
+
+    // ── 聚段 ──
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_chars = 0usize;
+    let mut crumb = String::new(); // 当前 cur 首段进入时定格的面包屑
+    let mut section: Vec<String> = Vec::new(); // 标题栈,index = level-1
+    let mut page: Option<u32> = None;
+
+    let flush = |cur: &mut String, cur_chars: &mut usize, crumb: &str, chunks: &mut Vec<String>| {
+        push_chunk(crumb, cur, chunks);
+        cur.clear();
+        *cur_chars = 0;
+    };
+
+    for seg in segs {
         if chunks.len() >= MAX_CHUNKS_PER_FILE {
             break;
         }
+        match seg {
+            Seg::Page(n) => page = Some(n), // 只更新当前页,不断块
+            Seg::Heading(level, title) => {
+                flush(&mut cur, &mut cur_chars, &crumb, &mut chunks); // 标题是硬边界
+                section.truncate(level.saturating_sub(1));
+                while section.len() + 1 < level {
+                    section.push(String::new()); // 跳级标题补空位
+                }
+                section.push(title);
+            }
+            Seg::Body(b) => {
+                let plen = b.chars().count();
+                if plen > TARGET {
+                    flush(&mut cur, &mut cur_chars, &crumb, &mut chunks);
+                    let cr = make_crumb(&section, page);
+                    let cs: Vec<char> = b.chars().collect();
+                    let mut start = 0usize;
+                    while start < cs.len() {
+                        let end = (start + TARGET).min(cs.len());
+                        let piece: String = cs[start..end].iter().collect();
+                        push_chunk(&cr, &piece, &mut chunks);
+                        if end == cs.len() {
+                            break;
+                        }
+                        start = end.saturating_sub(OVERLAP);
+                    }
+                    continue;
+                }
+                if cur_chars + plen > TARGET {
+                    flush(&mut cur, &mut cur_chars, &crumb, &mut chunks);
+                }
+                if cur.is_empty() {
+                    crumb = make_crumb(&section, page); // 定格首段面包屑
+                } else {
+                    cur.push_str("\n\n");
+                }
+                cur.push_str(&b);
+                cur_chars += plen + 2;
+            }
+        }
     }
-    flush(&mut cur, &mut cur_chars, &mut chunks);
+    flush(&mut cur, &mut cur_chars, &crumb, &mut chunks);
     chunks.retain(|c| !c.is_empty());
     chunks.truncate(MAX_CHUNKS_PER_FILE);
     chunks
+}
+
+/// 解析 `[[page:N]]` 页码标记段(convert.rs 从 PDF 逐页抽取时注入)。
+fn parse_page_marker(t: &str) -> Option<u32> {
+    t.trim().strip_prefix("[[page:")?.strip_suffix("]]")?.trim().parse().ok()
+}
+
+/// 解析 ATX 标题行 `#`..`######`(须 `#` 后有空白,避免误判 `#话题标签`)。返回(层级, 标题文本)。
+fn parse_atx_heading(line: &str) -> Option<(usize, String)> {
+    let l = line.trim_start();
+    let hashes = l.chars().take_while(|&c| c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let after = &l[hashes..];
+    if !after.starts_with(' ') && !after.starts_with('\t') {
+        return None;
+    }
+    let title = after.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some((hashes, title.to_string()))
+    }
+}
+
+/// 由标题栈 + 页码拼面包屑「【章节 › 子节｜pN】」;都为空则返回空串(无前缀)。截到 96 字符。
+fn make_crumb(section: &[String], page: Option<u32>) -> String {
+    let path = section
+        .iter()
+        .filter(|t| !t.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" › ");
+    let mut parts: Vec<String> = Vec::new();
+    if !path.is_empty() {
+        parts.push(path);
+    }
+    if let Some(p) = page {
+        parts.push(format!("p{p}"));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    let mut inner = parts.join("｜");
+    if inner.chars().count() > 96 {
+        inner = inner.chars().take(96).collect();
+    }
+    format!("【{inner}】\n")
+}
+
+/// 给正文加面包屑前缀(面包屑为空则原样返回)。
+fn with_crumb(crumb: &str, content: &str) -> String {
+    if crumb.is_empty() {
+        content.to_string()
+    } else {
+        format!("{crumb}{content}")
+    }
+}
+
+/// 落一个 chunk:正文非空、且**成品(面包屑+正文)**≥24 字才入库。按成品长度而非纯正文卡门槛,
+/// 是为了不丢「标题点题、正文极短」的章节 —— 面包屑里的章节名本身是可检索内容,连同短正文一起
+/// 进向量,恰好补上「标题-only / 短条目」结构此前会被静默丢弃的语义召回(codex 审查发现的回归点)。
+fn push_chunk(crumb: &str, content: &str, chunks: &mut Vec<String>) {
+    let c = content.trim();
+    let n = c.chars().count();
+    if crumb.is_empty() {
+        // 无结构:沿用旧门槛,<24 字的裸文本当碎块丢弃。
+        if n >= 24 {
+            chunks.push(c.to_string());
+        }
+    } else {
+        // 有章节/页码面包屑:章节名本身即信号,短正文也保留(仅挡 <2 字的单字噪声)。
+        if n >= 2 {
+            chunks.push(with_crumb(crumb, c));
+        }
+    }
 }
 
 pub(crate) fn vec_to_blob(v: &[f32]) -> Vec<u8> {
@@ -199,6 +331,74 @@ pub fn embed_query(query: &str) -> Result<Vec<f32>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_splits_on_heading_and_prefixes_breadcrumb() {
+        let doc = "# 合同总则\n\n本合同由甲乙双方签订,内容涵盖各项条款约定细则。\n\n\
+                   ## 付款方式\n\n乙方应于每月五日前支付当期款项,逾期按日计息处理。";
+        let cs = chunk_text(doc);
+        assert_eq!(cs.len(), 2, "两个章节 → 硬边界切成两块");
+        assert!(cs[0].starts_with("【合同总则】\n"), "首块带章节面包屑: {}", cs[0]);
+        assert!(cs[1].starts_with("【合同总则 › 付款方式】\n"), "子节面包屑含父路径: {}", cs[1]);
+        assert!(cs[1].contains("逾期按日计息"), "正文保留");
+    }
+
+    #[test]
+    fn chunk_carries_page_marker_into_crumb_without_fragmenting() {
+        // 页码标记只更新当前页、不断块;块以起始页标注。
+        let doc = "[[page:3]]\n\n扫描件正文第一段落,足够长以越过二十四字最小长度门槛要求。\n\n\
+                   继续同页的第二段落文字,仍旧属于同一物理页面之内容范围。";
+        let cs = chunk_text(doc);
+        assert_eq!(cs.len(), 1, "同页两段聚成一块,不因页标记碎裂");
+        assert!(cs[0].starts_with("【p3】\n"), "块带起始页码: {}", cs[0]);
+    }
+
+    #[test]
+    fn chunk_heading_plus_page_combined_crumb() {
+        let doc = "[[page:5]]\n\n## 第二章 交付\n\n交付标准依照附件甲所列各项技术指标逐条进行验收并书面确认。";
+        let cs = chunk_text(doc);
+        assert_eq!(cs.len(), 1);
+        assert!(cs[0].starts_with("【第二章 交付｜p5】\n"), "章节+页码合并面包屑: {}", cs[0]);
+    }
+
+    #[test]
+    fn chunk_long_paragraph_hardsplit_keeps_crumb_and_overlap() {
+        let long: String = "甲".repeat(4000); // 单段远超 TARGET
+        let doc = format!("## 长章\n\n{long}");
+        let cs = chunk_text(&doc);
+        assert!(cs.len() >= 3, "4000 字应硬切多块: {}", cs.len());
+        assert!(cs.iter().all(|c| c.starts_with("【长章】\n")), "每片都带面包屑");
+    }
+
+    #[test]
+    fn chunk_no_structure_still_works_without_crumb() {
+        // 无标题无页码的纯文本:不加面包屑,行为等价旧「段落聚合」。
+        let doc = "普通一段文本内容,没有任何标题或页码标记出现在其中任何位置处。";
+        let cs = chunk_text(doc);
+        assert_eq!(cs.len(), 1);
+        assert!(!cs[0].starts_with("【"), "无结构不加面包屑: {}", cs[0]);
+    }
+
+    #[test]
+    fn chunk_short_body_under_heading_still_emitted() {
+        // 回归防护:标题点题、正文极短(<24字)时,靠面包屑补足成品长度 → 仍入向量,不丢语义召回。
+        let doc = "## 违约责任\n\n见附件三。";
+        let cs = chunk_text(doc);
+        assert_eq!(cs.len(), 1, "短正文+章节面包屑应保留: {cs:?}");
+        assert!(cs[0].starts_with("【违约责任】\n"));
+        assert!(cs[0].contains("见附件三"));
+        // 无面包屑的同等短正文仍按旧规则丢弃(纯噪声不入库)。
+        assert!(chunk_text("见附件三。").is_empty());
+    }
+
+    #[test]
+    fn atx_heading_requires_space_after_hashes() {
+        assert_eq!(parse_atx_heading("## 标题"), Some((2, "标题".to_string())));
+        assert_eq!(parse_atx_heading("#话题标签"), None, "无空白不是标题");
+        assert_eq!(parse_atx_heading("####### 七级"), None, "超六级不是标题");
+        assert_eq!(parse_page_marker("[[page:12]]"), Some(12));
+        assert_eq!(parse_page_marker("正文"), None);
+    }
 
     #[test]
     fn normalize_makes_unit_length() {
