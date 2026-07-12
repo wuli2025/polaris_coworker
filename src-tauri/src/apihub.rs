@@ -141,8 +141,11 @@ use polaris_protocol::{strict_args_enabled, Args, InvokeRequest};
 fn invoke_err_resp(e: String) -> Response {
     let status = if e.starts_with("未知命令") {
         StatusCode::NOT_FOUND
-    } else if e.contains("参数")
-        && (e.contains("缺少") || e.contains("解析失败") || e.contains("无效"))
+    } else if (e.contains("参数")
+        && (e.contains("缺少") || e.contains("解析失败") || e.contains("无效")))
+        // 非法枚举值(如 fable_search「mode 只接受 hybrid | grep | vector」)是客户端错误,
+        // 此前落进兜底 500(spot-check 揪出错误分类)。
+        || e.contains("只接受")
     {
         StatusCode::BAD_REQUEST
     } else if e.contains("(403)") {
@@ -151,6 +154,10 @@ fn invoke_err_resp(e: String) -> Response {
         StatusCode::NOT_FOUND
     } else if e.contains("(429)") {
         StatusCode::TOO_MANY_REQUESTS
+    } else if e.contains("insufficient") || e.contains("余额") {
+        // 上游供应商余额/额度失败(如云嵌入 403 account balance):外部依赖失败,
+        // 非本服务端 bug。映射 502 让客户端提示「换供应商/充值」而非报「服务器崩了」。
+        StatusCode::BAD_GATEWAY
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
