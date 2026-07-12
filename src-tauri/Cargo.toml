@@ -4,7 +4,7 @@
 # 跨板块只依赖 polaris-core 契约，可 `cargo test -p <板块>` 独立测试。
 # ═══════════════════════════════════════════════════════════════
 [workspace]
-members = ["crates/*", "crates/forge-codec"]
+members = ["crates/*"]
 resolver = "2"
 
 [package]
@@ -89,6 +89,9 @@ chacha20poly1305 = "0.10"
 # 多人协作组网隧道(v8 方案):iroh QUIC 打洞 + relay 兜底。编译极重,务必保持
 # optional,只随 collab-net feature 进来,永不进 default。
 iroh = { version = "1", optional = true }
+# 云机中继网关的 WS 反代:把手机的 /ws 双向 pump 到经隧道的桌面主机 /ws。
+# 0.24 与 axum 0.7 的 ws 同版本 → 复用已编译产物,零增量。只随 collab-net 进。
+tokio-tungstenite = { version = "0.24", optional = true }
 # 「聊天机器人」板块「扫码创建机器人」: 把飞书开放平台建应用 URL 编码成二维码 (SVG)。
 # default-features=false → 不拉重型 image crate, 只保留纯 Rust 的 svg 渲染。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -134,7 +137,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 #   feature:默认 + 截图 + serde_json(chromiumoxide 自动拉)
 chromiumoxide = { version = "=0.9.1", default-features = false }
 # headless_chrome 二选型,作 fallback tier2
-headless_chrome = { version = "1.0", default-features = false, optional = true }
+headless_chrome = { version = "1.0", default-features = false, features = ["offline"], optional = true }
 # 图像字节级处理(forge_pptx 流式写无需 image crate,本条仅 codec 板块用,留 polaris-forge-codec)
 # image = { version = "0.25", default-features = false, optional = true }
 # audio 解码(symphonia) + 编码(audiopus)+ 响度(ebur128)+ 字幕(cosmic-text)
@@ -179,7 +182,7 @@ voice-live = ["voice-asr", "dep:cpal", "dep:rdev", "dep:enigo"]
 local-embed = ["dep:fastembed"]
 # 多人协作组网隧道:iroh 打洞直连 + relay 兜底,把成员端 TCP 流量转发到主机 127.0.0.1:8080。
 # iroh 依赖树很大 → 默认不开,发多人协作版显式 `--features collab-net`。
-collab-net = ["dep:iroh"]
+collab-net = ["dep:iroh", "dep:tokio-tungstenite"]
 
 # server 二进制：浏览器前端 + REST/WS 后端（替代 Tauri 外壳）。
 # 构建：cargo build --release --bin polaris-server --no-default-features --features server
@@ -189,9 +192,12 @@ collab-net = ["dep:iroh"]
 # #[cfg(feature="server")] 门控,desktop 默认特性下 main 函数不存在),会
 # 报 does not exist。把整块 [[bin]] 注释掉 → bundler 完全看不到它,直接
 # 出包。Docker 真服务端等 v1.0.2 走 workspace 拆分再补(本版无 docker 镜像)。
+# 【临时启用·仅本机回归测试用】带 required-features 保护:desktop 默认构建不编它;
+# 发版/打桌面包前必须改回注释,否则 tauri bundler 会按 [[bin]] 列表 copy 它而报错。
 # [[bin]]
 # name = "polaris-server"
 # path = "src/bin/polaris-server.rs"
+# required-features = ["server"]
 
 # 桌面二进制保持默认（main.rs）。
 [[bin]]

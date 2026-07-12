@@ -169,8 +169,12 @@ pub fn build_team_doc(team: &ExpertTeam, lead: &ExpertCard, members: &[ExpertCar
 
     s.push_str("## 工作方式\n\n");
     s.push_str("1. **先拆子任务**：把目标拆成若干「子任务」，每个子任务才去召对应专家；简单任务不拆，直接干。\n");
-    s.push_str("2. **召集即解释**：召一个专家时，简述「为什么是 TA」（命中的需求点 + 补的能力维度）。\n");
-    s.push_str("3. **默认并行、紧耦合克制**：独立子任务可并行推进；有先后依赖的串行做，别假并行。\n");
+    s.push_str(
+        "2. **召集即解释**：召一个专家时，简述「为什么是 TA」（命中的需求点 + 补的能力维度）。\n",
+    );
+    s.push_str(
+        "3. **默认并行、紧耦合克制**：独立子任务可并行推进；有先后依赖的串行做，别假并行。\n",
+    );
     s.push_str("4. **单一收口**：多分支产出由你（领衔者）合并成一份交付，不堆砌半成品。\n\n");
 
     // 统一质量标尺 —— 只留可判定门槛, 不留清单回声; 领衔者收口即按此打回。
@@ -195,7 +199,12 @@ mod tests {
         let experts = crate::expert::all_experts_for_test();
         let ids: std::collections::HashSet<_> = experts.iter().map(|e| e.id.as_str()).collect();
         for team in all_teams() {
-            assert!(ids.contains(team.lead_id.as_str()), "{} 的 lead {} 不存在", team.id, team.lead_id);
+            assert!(
+                ids.contains(team.lead_id.as_str()),
+                "{} 的 lead {} 不存在",
+                team.id,
+                team.lead_id
+            );
             for m in &team.member_ids {
                 assert!(ids.contains(m.as_str()), "{} 的成员 {} 不存在", team.id, m);
             }

@@ -3,7 +3,8 @@
 
 use crate::claude_md;
 use crate::conv;
-use crate::kb;
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use crate::skills;
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -15,15 +16,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
-#[cfg(not(feature = "desktop"))]
-use crate::host::AppHandle;
 
 use crate::runtime::procs::no_window;
 
 use super::artifacts::*;
 use super::prompt::*;
 use super::types::*;
-
 
 /// 默认预授权的联网工具 (逗号分隔, 传给 `--allowedTools`)。
 /// 把内置 WebSearch / WebFetch 设为「联网搜索默认打开」: 任何权限模式都不再拦截,
@@ -86,7 +84,6 @@ const CREATIVE_SKILL_IDS: &[&str] = &[
     "image-gen",
 ];
 
-
 // ───────────────────────── State ─────────────────────────
 
 // 子进程池 + 「取消挂起」标记已收口到 runtime::procs::CHILDREN(与 doctor 共池,
@@ -113,6 +110,19 @@ fn next_req_id() -> String {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, String> {
+    if args.prompt.trim().is_empty() {
+        return Err("消息不能为空".into());
+    }
+    // HTTP body 上限是上传场景共用的 512MB，不能拿它当聊天输入上限；否则单请求即可让
+    // prompt 拼装/历史落盘/CLI 参数复制产生数倍内存峰值。2MiB 已远高于正常对话需要。
+    if args.prompt.len() > 2 * 1024 * 1024 {
+        return Err("消息过大，单次最多 2MB；请改为上传文件后让 AI 读取".into());
+    }
+    if let Some(cid) = args.conversation_id.as_deref() {
+        // 远程客户端(手机/中继)用本地生成的 convId,服务端 conv 表可能没有 → 自动建;
+        // 桌面 UI 先 conv_create 再发,走「已存在」分支,行为不变。
+        conv::ensure_writable_or_create(cid)?;
+    }
     let req_id = next_req_id();
 
     // 轻量同步部分到此为止: 只做 req_id 生成 + user 消息落历史(便宜, 且保证「先 user
@@ -121,7 +131,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     // reader 线程挂接 —— 全部挪进后台线程, chat_send 立即返回 req_id,
     // 用户「点发送 → 气泡出现响应」之间不再被这些活钉死。
     if let Some(cid) = &args.conversation_id {
-        let _ = conv::append_message(cid, "user", &args.prompt);
+        conv::append_message(cid, "user", &args.prompt).map_err(|e| e.to_string())?;
     }
 
     let bg_app = app.clone();
@@ -196,7 +206,8 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
         .conversation_id
         .as_deref()
         .and_then(conv::project_id_of_conversation);
-    let cm_ctx = claude_md::render_for_project(current_project_id.as_deref(), &args.prompt, args.use_kb);
+    let cm_ctx =
+        claude_md::render_for_project(current_project_id.as_deref(), &args.prompt, args.use_kb);
 
     let mut final_prompt = String::new();
 
@@ -373,22 +384,23 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     //   注意: 这里只**计算**专家块, 注入推迟到「## 用户问题」紧前(见步骤 4)——
     //   此前专家块排在第 6 段, 与用户问题之间隔着 KB 概览/召回/记忆地图/对话历史数千 token,
     //   专家准则在注意力上被淹没; 约束贴着问题放才最有效。
+    // 专家团一律走内核桥(引擎未拼装时 expert_bridge()=None → 不注入, 语义同无命中)。
     let expert_block: Option<String> = match args.agent_mode.as_deref() {
-        Some("expert-team") => {
-            if crate::expert::detect_multi_expert_task(&args.prompt) {
+        Some("expert-team") => super::bridges::expert_bridge().and_then(|eb| {
+            if eb.detect_multi_expert_task(&args.prompt) {
                 current_project_id.clone().and_then(|project_id| {
-                    let matches =
-                        crate::expert::expert_team_spawn(project_id, args.prompt.clone());
                     // 多专家召集: 注入每位主选专家的完整准则正文(而非只有名字+标签)
-                    crate::expert::team_block(&matches)
+                    eb.team_block_spawn(project_id, args.prompt.clone())
                 })
             } else {
                 // 单专家任务也给个智能匹配视角，不必非要凑成多人团
-                crate::expert::route_block(&args.prompt)
+                eb.route_block(&args.prompt)
             }
-        }
+        }),
         // 默认（None 或 "auto-match"）走智能匹配；"single-agent" / "single-expert" 不在此注入。
-        Some("auto-match") | None => crate::expert::route_block(&args.prompt),
+        Some("auto-match") | None => {
+            super::bridges::expert_bridge().and_then(|eb| eb.route_block(&args.prompt))
+        }
         _ => None,
     };
 
@@ -399,7 +411,11 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     //     **确定性地**插入这句中文说明(见下方 image_notice), 保证用户一上来就看到。
     let image_notice: Option<String> = if skills::detect_image_intent(&args.prompt) {
         let (provider_name, supported) = crate::provider::image_gen_capability();
-        final_prompt.push_str(&image_capability_directive(&provider_name, supported, &art_dir));
+        final_prompt.push_str(&image_capability_directive(
+            &provider_name,
+            supported,
+            &art_dir,
+        ));
         final_prompt.push_str("\n\n---\n\n");
         if supported {
             None
@@ -421,7 +437,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
 
     // fable 状态只查一次(打开 SQLite + COUNT): 此前家底概览与强制召回各自调一次
     // fable::status(), 现在共用同一份结果。
-    let fable_st = crate::fable::status().ok();
+    let fable_st = super::bridges::kb_bridge().and_then(|b| b.fable_status());
 
     // 3.15 知识库家底概览(始终注入, 便宜): 让模型一开口就答得清「你的库在哪 / 有什么」,
     //      报全四层(妈妈库 wiki / raw / output / memory)家底, 不再只会复述 wiki 结构。
@@ -442,8 +458,13 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
         // mode=="hybrid" 闸)。预算也调小, 片段少 → 提示词更短、首 token 更快。
         // 工作模式(纯 Claude Code, 手动开 KB)走全质量 hybrid(带重排)。
         let fast_recall = !work_full;
-        let recall_budget = if work_full { FORCED_RECALL_BUDGET } else { FAST_RECALL_BUDGET };
-        let recall = forced_recall_block(&args.prompt, recall_budget, fast_recall, fable_st.as_ref());
+        let recall_budget = if work_full {
+            FORCED_RECALL_BUDGET
+        } else {
+            FAST_RECALL_BUDGET
+        };
+        let recall =
+            forced_recall_block(&args.prompt, recall_budget, fast_recall, fable_st.as_ref());
         if !recall.is_empty() {
             final_prompt.push_str(&recall);
             final_prompt.push_str("\n\n---\n\n");
@@ -465,7 +486,8 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     //     让模型可直接 Read「上次那个文件」, 用户不用重新拖拽。当前对话排除(它的文件
     //     已在下面的对话历史里出现)。
     if let Some(pid) = current_project_id.as_deref() {
-        let amap = project_artifacts_block(pid, args.conversation_id.as_deref(), ARTIFACT_MAP_BUDGET);
+        let amap =
+            project_artifacts_block(pid, args.conversation_id.as_deref(), ARTIFACT_MAP_BUDGET);
         if !amap.is_empty() {
             final_prompt.push_str(&amap);
             final_prompt.push_str("\n\n---\n\n");
@@ -477,7 +499,11 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     if let Some(cid) = args.conversation_id.as_deref() {
         // 快速模式历史预算调小: 秒级问答用不到大段历史/代码上下文, 少喂 → 输入 token 少 → 更快;
         // 工作模式要更全的上下文(多文件/多轮重构), 保留较大预算。
-        let hist_budget = if work_full { HISTORY_CTX_BUDGET } else { FAST_HISTORY_BUDGET };
+        let hist_budget = if work_full {
+            HISTORY_CTX_BUDGET
+        } else {
+            FAST_HISTORY_BUDGET
+        };
         let hist = history_block(cid, hist_budget);
         if !hist.is_empty() {
             final_prompt.push_str(&hist);
@@ -532,8 +558,14 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
 
     // 默认走宿主机执行（沙箱可选，但默认关闭）；动态编排时放行 Task 子代理；
     // work_full 决定快速模式是否禁用冗余工具(disallowedTools)、是否传按模式的 --model。
-    let mut child =
-        spawn_on_host(&final_prompt, perm, &art_dir, args.dynamic_workflow, work_full, args.provider_id.as_deref())?;
+    let mut child = spawn_on_host(
+        &final_prompt,
+        perm,
+        &art_dir,
+        args.dynamic_workflow,
+        work_full,
+        args.provider_id.as_deref(),
+    )?;
 
     // prompt 经 stdin 喂给 claude (而非命令行参数): 大 prompt 不会撞 Windows 命令行
     // 长度上限, 也不会因 prompt 以 `-` 开头被当成 flag。spawn 后立刻写 + drop, claude 读到 EOF 就开始处理。
@@ -610,8 +642,8 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                     let Some(c) = g.get(&wd_req) else { break };
                     c.id()
                 };
-                let over_cap = hard_cap > 0
-                    && started.elapsed() >= std::time::Duration::from_secs(hard_cap);
+                let over_cap =
+                    hard_cap > 0 && started.elapsed() >= std::time::Duration::from_secs(hard_cap);
                 if !over_cap && idle < timeout {
                     // 有输出在推进, 回到常态节拍并清掉 CPU 基线。
                     last_cpu = None;
@@ -638,9 +670,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                         );
                     }
                 } else {
-                    eprintln!(
-                        "[chat-watchdog] req={wd_req} 总时长超硬顶 {hard_cap}s, 无条件回收"
-                    );
+                    eprintln!("[chat-watchdog] req={wd_req} 总时长超硬顶 {hard_cap}s, 无条件回收");
                 }
                 // 重新确认仍是本 req 的同一进程再杀(防深检窗口内正常结束 + PID 复用误杀)。
                 let g = CHILDREN.lock();
@@ -734,7 +764,11 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                 continue;
             }
             *act_out.lock() = std::time::Instant::now(); // 刷新活动: 流式产出即视为推进, 防误杀
-            let target = if capped { &mut scrap } else { &mut assistant_text };
+            let target = if capped {
+                &mut scrap
+            } else {
+                &mut assistant_text
+            };
             match serde_json::from_str::<Value>(&line) {
                 Ok(v) => handle_stream_event(
                     &app_out,
@@ -781,8 +815,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
             // 否则一年里每次卡死都泄漏一个 ~2MB 栈的线程 → 终将 OOM。
             // 非阻塞 try_wait 轮询 + 硬死线, 到点强杀回收 (关管道) 再走异常退出路径。
             // 注意: 这里只补一道兜底, stdout/stderr 的读取与 emit、看门狗、事件载荷全不变。
-            let wait_deadline =
-                std::time::Instant::now() + std::time::Duration::from_secs(900);
+            let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
             let waited: std::io::Result<Option<std::process::ExitStatus>> = loop {
                 match child.try_wait() {
                     Ok(Some(status)) => break Ok(Some(status)),
@@ -790,7 +823,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                         if std::time::Instant::now() >= wait_deadline {
                             let _ = child.kill(); // 强杀回收: 关掉管道, 不让本线程泄漏
                             let _ = child.wait(); // 杀后做一次简短最终 reap
-                            // 拿不到真实状态就当超时异常 (走下方 None 分支 → 同款错误事件)
+                                                  // 拿不到真实状态就当超时异常 (走下方 None 分支 → 同款错误事件)
                             break Ok(child.try_wait().ok().flatten());
                         }
                         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -888,9 +921,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                 return Path::new(dir).is_dir();
             }
             let pb = Path::new(p);
-            pb.is_file()
-                && is_displayable_artifact(p)
-                && packaged_project_root(pb).is_none()
+            pb.is_file() && is_displayable_artifact(p) && packaged_project_root(pb).is_none()
         });
 
         // 持久化 assistant 消息 (产物清单以注释 marker 形式存入正文, 重载历史时解析)
@@ -960,7 +991,6 @@ pub fn chat_build_manifest(conversation_id: Option<String>) -> Option<Value> {
     serde_json::from_str::<Value>(&txt).ok()
 }
 
-
 /// 看门狗深检采样: root 进程树(含 root)的子孙数 + 整树累计 CPU 时间。
 /// cpu 单位各平台不同(Windows 100ns / Linux jiffies / mac 秒), 只用于跨采样单调比较。
 struct TreeSample {
@@ -990,8 +1020,7 @@ fn collect_tree(root: u32, pairs: &[(u32, u32)]) -> Vec<u32> {
 fn sample_tree(root: u32) -> Option<TreeSample> {
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
-        TH32CS_SNAPPROCESS,
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -1031,7 +1060,10 @@ fn sample_tree(root: u32) -> Option<TreeSample> {
             CloseHandle(h);
         }
     }
-    Some(TreeSample { descendants: tree.len().saturating_sub(1), cpu })
+    Some(TreeSample {
+        descendants: tree.len().saturating_sub(1),
+        cpu,
+    })
 }
 
 /// Linux(容器/server): 单遍扫 /proc/<pid>/stat 同时拿 ppid 与 utime+stime。
@@ -1042,9 +1074,15 @@ fn sample_tree(root: u32) -> Option<TreeSample> {
     for ent in std::fs::read_dir("/proc").ok()? {
         let Ok(ent) = ent else { continue };
         let name = ent.file_name();
-        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
-        let Ok(stat) = std::fs::read_to_string(ent.path().join("stat")) else { continue };
-        let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else { continue };
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(ent.path().join("stat")) else {
+            continue;
+        };
+        let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
+            continue;
+        };
         let f: Vec<&str> = rest.split_whitespace().collect();
         // rest 内 0-based: state=0, ppid=1, …, utime=11, stime=12
         let (Some(ppid), Some(ut), Some(st)) = (
@@ -1063,7 +1101,10 @@ fn sample_tree(root: u32) -> Option<TreeSample> {
         .filter(|(p, _, _)| tree.contains(p))
         .map(|&(_, _, c)| c)
         .sum();
-    Some(TreeSample { descendants: tree.len().saturating_sub(1), cpu })
+    Some(TreeSample {
+        descendants: tree.len().saturating_sub(1),
+        cpu,
+    })
 }
 
 /// macOS 及其它 unix: 一次 `ps -axo pid=,ppid=,cputime=` 全表。cputime 形如
@@ -1081,7 +1122,10 @@ fn sample_tree(root: u32) -> Option<TreeSample> {
         }
         days * 86400 + secs as u64
     }
-    let out = Command::new("ps").args(["-axo", "pid=,ppid=,cputime="]).output().ok()?;
+    let out = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,cputime="])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1103,7 +1147,10 @@ fn sample_tree(root: u32) -> Option<TreeSample> {
         .filter(|(p, _, _)| tree.contains(p))
         .map(|&(_, _, c)| c)
         .sum();
-    Some(TreeSample { descendants: tree.len().saturating_sub(1), cpu })
+    Some(TreeSample {
+        descendants: tree.len().saturating_sub(1),
+        cpu,
+    })
 }
 
 // ───────────────────────── Internals ─────────────────────
@@ -1141,14 +1188,15 @@ const DELTA_BATCH_WINDOW_MS: u64 = 30;
 
 impl DeltaBatcher {
     fn new() -> Self {
-        Self { buf: String::new(), last_emit: std::time::Instant::now() }
+        Self {
+            buf: String::new(),
+            last_emit: std::time::Instant::now(),
+        }
     }
     /// 累积一段 text_delta; 距上次 emit ≥ 时间窗即 flush。
     fn push(&mut self, app: &AppHandle, req_id: &str, conv_id: Option<&str>, txt: &str) {
         self.buf.push_str(txt);
-        if self.last_emit.elapsed()
-            >= std::time::Duration::from_millis(DELTA_BATCH_WINDOW_MS)
-        {
+        if self.last_emit.elapsed() >= std::time::Duration::from_millis(DELTA_BATCH_WINDOW_MS) {
             self.flush(app, req_id, conv_id);
         }
     }
@@ -1380,10 +1428,17 @@ fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
     if partial_stream_enabled() {
         cmd.arg("--include-partial-messages");
     }
-    cmd.args(["--add-dir", "/kb", "--allowedTools", &allowed, &perm_flag, prompt])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args([
+        "--add-dir",
+        "/kb",
+        "--allowedTools",
+        &allowed,
+        &perm_flag,
+        prompt,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     no_window(&mut cmd); // 隐藏式: 不弹控制台窗口
     let child = cmd
         .spawn()
@@ -1410,7 +1465,11 @@ fn spawn_on_host(
     ensure_kb_search_ignore();
 
     // 如果 KB root 不在 cwd 子树下(用户可能把 KB 移到别处), 用 --add-dir 显式放行
-    let kb_root = std::path::PathBuf::from(kb::kb_root());
+    let kb_root = std::path::PathBuf::from(
+        super::bridges::kb_bridge()
+            .map(|b| b.root())
+            .unwrap_or_default(),
+    );
     let mut extra_dirs: Vec<String> = Vec::new();
     if !kb_root.as_os_str().is_empty() && kb_root.exists() && !kb_root.starts_with(&cwd) {
         extra_dirs.push("--add-dir".into());
@@ -1446,8 +1505,16 @@ fn spawn_on_host(
     // 模型档跟随模式(可选, 默认不启用): 多模型供应商上可让快速模式走快档(便宜快)、工作模式走强档。
     // 仅当对应环境变量显式设了 model id 才传 --model —— 单模型网关/未配置时**保持原样**(供应商
     // 钉死的模型), 绝不因传错 model 名把请求打挂。POLARIS_WORK_MODEL / POLARIS_FAST_MODEL。
-    let model_env = if work_full { "POLARIS_WORK_MODEL" } else { "POLARIS_FAST_MODEL" };
-    if let Some(m) = std::env::var(model_env).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    let model_env = if work_full {
+        "POLARIS_WORK_MODEL"
+    } else {
+        "POLARIS_FAST_MODEL"
+    };
+    if let Some(m) = std::env::var(model_env)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
         args.push("--model".into());
         args.push(m);
     }
@@ -1504,12 +1571,19 @@ fn spawn_on_host(
     })
 }
 
-
 /// 从 tool_use 的 input JSON 里提一行人能看懂的摘要(命令/文件路径/检索词)。
 fn tool_input_summary(input: &serde_json::Value) -> Option<String> {
     const KEYS: [&str; 10] = [
-        "command", "file_path", "notebook_path", "pattern", "query", "url",
-        "description", "prompt", "path", "skill",
+        "command",
+        "file_path",
+        "notebook_path",
+        "pattern",
+        "query",
+        "url",
+        "description",
+        "prompt",
+        "path",
+        "skill",
     ];
     for k in KEYS {
         if let Some(s) = input.get(k).and_then(|x| x.as_str()) {
@@ -1560,6 +1634,10 @@ mod tests {
         let s = sample_tree(child.id()).expect("windows toolhelp 快照应可用");
         let _ = child.kill();
         let _ = child.wait();
-        assert!(s.descendants >= 1, "cmd 的 ping 子进程应被数进树, 实得 {}", s.descendants);
+        assert!(
+            s.descendants >= 1,
+            "cmd 的 ping 子进程应被数进树, 实得 {}",
+            s.descendants
+        );
     }
 }

@@ -52,7 +52,10 @@ fn wechat_profile() -> PathBuf {
 fn xhs_profile_candidates() -> Vec<PathBuf> {
     let lad = local_app_data();
     vec![
-        lad.join("Google").join("Chrome").join("XiaohongshuProfiles").join("default"),
+        lad.join("Google")
+            .join("Chrome")
+            .join("XiaohongshuProfiles")
+            .join("default"),
         lad.join("Google").join("Chrome").join("XiaohongshuProfile"),
     ]
 }
@@ -146,8 +149,7 @@ pub fn media_account_forget(platform: String) -> Result<String, String> {
     let mut removed = 0usize;
     for dir in targets {
         if dir.exists() {
-            fs::remove_dir_all(&dir)
-                .map_err(|e| format!("删除 {} 失败：{e}", dir.display()))?;
+            fs::remove_dir_all(&dir).map_err(|e| format!("删除 {} 失败：{e}", dir.display()))?;
             removed += 1;
         }
     }

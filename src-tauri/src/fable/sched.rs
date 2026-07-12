@@ -51,9 +51,17 @@ pub struct WorkQueue<T> {
 impl<T> WorkQueue<T> {
     /// 用初始工作单元播种(各记 0 次尝试)。`live_workers` 由 [`set_live_workers`] 设定。
     pub fn new(seed: impl IntoIterator<Item = T>) -> Self {
-        let q = seed.into_iter().map(|item| Job { item, attempts: 0 }).collect();
+        let q = seed
+            .into_iter()
+            .map(|item| Job { item, attempts: 0 })
+            .collect();
         WorkQueue {
-            inner: Mutex::new(Inner { q, in_flight: 0, live_workers: 0, closed: false }),
+            inner: Mutex::new(Inner {
+                q,
+                in_flight: 0,
+                live_workers: 0,
+                closed: false,
+            }),
             cond: Condvar::new(),
         }
     }
@@ -97,7 +105,10 @@ impl<T> WorkQueue<T> {
             if g.in_flight == 0 {
                 return None;
             }
-            let (ng, _) = self.cond.wait_timeout(g, Duration::from_millis(500)).unwrap();
+            let (ng, _) = self
+                .cond
+                .wait_timeout(g, Duration::from_millis(500))
+                .unwrap();
             g = ng;
         }
     }
@@ -140,7 +151,10 @@ impl<T> WorkQueue<T> {
     pub fn wait_until_done(&self) {
         let mut g = self.inner.lock().unwrap();
         while !g.closed && !crate::fable::cancelled() && !Self::is_done(&g) {
-            let (ng, _) = self.cond.wait_timeout(g, Duration::from_millis(500)).unwrap();
+            let (ng, _) = self
+                .cond
+                .wait_timeout(g, Duration::from_millis(500))
+                .unwrap();
             g = ng;
         }
     }
@@ -224,7 +238,10 @@ mod tests {
             42
         });
         assert_eq!(slow, None, "超时返回 None");
-        assert!(start.elapsed() < Duration::from_secs(3), "必须在死线附近返回,不等满 5s");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "必须在死线附近返回,不等满 5s"
+        );
         let fast: Option<u32> = with_deadline(5, || 7);
         assert_eq!(fast, Some(7), "正常活儿照常返回结果");
     }
@@ -258,7 +275,11 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
-        assert_eq!(processed.load(Ordering::SeqCst), 100, "0..100 每个节点恰处理一次");
+        assert_eq!(
+            processed.load(Ordering::SeqCst),
+            100,
+            "0..100 每个节点恰处理一次"
+        );
         let (inflight, qlen, live) = q.stats();
         assert_eq!((inflight, qlen, live), (0, 0, 0), "扫完后清零");
     }
@@ -276,7 +297,7 @@ mod tests {
         q.push("b");
         q.push("c");
         q.complete(); // a 这一轮了结
-        // pop_back 取件:c、b 先出,被降级的 a 最后出。
+                      // pop_back 取件:c、b 先出,被降级的 a 最后出。
         assert_eq!(q.pop().unwrap().item, "c");
         assert_eq!(q.pop().unwrap().item, "b");
         let again = q.pop().unwrap();
@@ -314,8 +335,11 @@ mod tests {
         let workers = 3usize;
         q.set_live_workers(workers);
         // 每个 worker 一个心跳槽:(是否在忙, 起始时刻, 是否已被看门狗判定卡死)。
-        let beats: Arc<Vec<Mutex<(bool, Instant, bool)>>> =
-            Arc::new((0..workers).map(|_| Mutex::new((false, Instant::now(), false))).collect());
+        let beats: Arc<Vec<Mutex<(bool, Instant, bool)>>> = Arc::new(
+            (0..workers)
+                .map(|_| Mutex::new((false, Instant::now(), false)))
+                .collect(),
+        );
         let scan_done = Arc::new(AtomicBool::new(false));
         let deadline = Duration::from_millis(300);
 

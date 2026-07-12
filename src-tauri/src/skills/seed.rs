@@ -194,7 +194,12 @@ pub struct CheckSkillEntry {
 /// 只信 ~/Polaris/skills 下主机自装的技能——绝不从任务分支读,防协作者注入检查脚本。
 pub fn resolve_check_skill(id: &str) -> Result<CheckSkillEntry, String> {
     // id 复用 delete_skill 同款安全闸:拒路径穿越。
-    if id.is_empty() || id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
+    if id.is_empty()
+        || id.contains("..")
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains(':')
+    {
         return Err(format!("检查技能 id 非法: {id}"));
     }
     let root = skills_dir().ok_or("无法获取用户目录")?;
@@ -219,7 +224,9 @@ pub fn resolve_check_skill(id: &str) -> Result<CheckSkillEntry, String> {
     let windows = cfg!(windows);
     let rel = if windows { &entry_win } else { &entry_unix };
     if rel.is_empty() {
-        return Err(format!("技能 {id} 未声明检查入口(check_entry_windows/check_entry_unix),不是检查技能"));
+        return Err(format!(
+            "技能 {id} 未声明检查入口(check_entry_windows/check_entry_unix),不是检查技能"
+        ));
     }
     if rel.contains("..") {
         return Err(format!("技能 {id} 检查入口路径非法: {rel}"));
@@ -228,7 +235,12 @@ pub fn resolve_check_skill(id: &str) -> Result<CheckSkillEntry, String> {
     if !entry.is_file() {
         return Err(format!("技能 {id} 检查入口脚本不存在: {rel}"));
     }
-    Ok(CheckSkillEntry { skill_id: id.to_string(), entry, windows, timeout_secs: timeout.clamp(30, 3600) })
+    Ok(CheckSkillEntry {
+        skill_id: id.to_string(),
+        entry,
+        windows,
+        timeout_secs: timeout.clamp(30, 3600),
+    })
 }
 
 /// 列出本机已安装、声明了检查协议的技能(检查设置下拉用)。返回 (id, name)。
@@ -351,8 +363,10 @@ fn write_wechat_tasks_files(dest: &Path) -> Result<(), String> {
     fs::write(dest.join("skill.md"), WECHAT_TASKS_SKILL_MD).map_err(|e| e.to_string())?;
     fs::write(scripts.join("wx_daily.py"), WECHAT_TASKS_DAILY_PY).map_err(|e| e.to_string())?;
     fs::write(scripts.join("wx_setup.py"), WECHAT_TASKS_SETUP_PY).map_err(|e| e.to_string())?;
-    fs::write(scripts.join("wx_config.example.json"), WECHAT_TASKS_CONFIG_EXAMPLE)
-        .map_err(|e| e.to_string())?;
+    fs::write(
+        scripts.join("wx_config.example.json"),
+        WECHAT_TASKS_CONFIG_EXAMPLE,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
-

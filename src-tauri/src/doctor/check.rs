@@ -1,8 +1,8 @@
 //! 环境体检命令 env_check / env_fix_path (纯移动)。
 
-use super::types::*;
-use super::probe::*;
 use super::path::*;
+use super::probe::*;
+use super::types::*;
 
 // ───────────────────────── Commands ─────────────────────────
 

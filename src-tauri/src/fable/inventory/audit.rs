@@ -42,20 +42,15 @@ pub fn fable_audit(mode: Option<String>, sample: Option<usize>) -> Result<AuditR
     let do_fix = mode == "fix";
     let conn = open_db()?;
 
-    let one = |sql: &str| -> u64 {
-        conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
-    };
+    let one =
+        |sql: &str| -> u64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64 };
     let roots = one("SELECT COUNT(*) FROM roots");
     let files_total = one("SELECT COUNT(*) FROM files");
-    let dangling_refs = one(
-        "SELECT COUNT(*) FROM files
+    let dangling_refs = one("SELECT COUNT(*) FROM files
          WHERE (dup_of<>0 AND dup_of NOT IN (SELECT id FROM files))
-            OR (superseded_by<>0 AND superseded_by NOT IN (SELECT id FROM files))",
-    );
-    let roots_count_drift = one(
-        "SELECT COUNT(*) FROM roots r
-         WHERE r.files <> (SELECT COUNT(*) FROM files f WHERE f.root_id=r.id)",
-    );
+            OR (superseded_by<>0 AND superseded_by NOT IN (SELECT id FROM files))");
+    let roots_count_drift = one("SELECT COUNT(*) FROM roots r
+         WHERE r.files <> (SELECT COUNT(*) FROM files f WHERE f.root_id=r.id)");
 
     let mut rep = AuditReport {
         mode: mode.clone(),
@@ -83,7 +78,11 @@ pub fn fable_audit(mode: Option<String>, sample: Option<usize>) -> Result<AuditR
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([k as i64], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
                 })
                 .map_err(|e| e.to_string())?;
             rows.flatten().collect()
@@ -93,9 +92,8 @@ pub fn fable_audit(mode: Option<String>, sample: Option<usize>) -> Result<AuditR
                 break;
             }
             rep.dirs_sampled += 1;
-            let abs_dir = super::reencode_fs_path(
-                &PathBuf::from(&root_path).join(&drel).to_string_lossy(),
-            );
+            let abs_dir =
+                super::reencode_fs_path(&PathBuf::from(&root_path).join(&drel).to_string_lossy());
             let rd = match std::fs::read_dir(&abs_dir) {
                 Ok(rd) => rd,
                 Err(_) => {
@@ -154,9 +152,9 @@ pub fn fable_audit(mode: Option<String>, sample: Option<usize>) -> Result<AuditR
             }
             // 幻影:库里记的直属文件盘上没有。只取「恰好多一段」的直属子(不含更深层)。
             let db_children: Vec<String> = if drel.is_empty() {
-                match conn
-                    .prepare("SELECT relpath FROM files WHERE root_id=?1 AND relpath NOT LIKE '%/%'")
-                {
+                match conn.prepare(
+                    "SELECT relpath FROM files WHERE root_id=?1 AND relpath NOT LIKE '%/%'",
+                ) {
                     Ok(mut s) => s
                         .query_map([root_id], |r| r.get::<_, String>(0))
                         .map(|rs| rs.flatten().collect())
@@ -238,7 +236,9 @@ pub fn fable_backfill_lang() -> Result<u64, String> {
                 let (stack, out) = (&stack, &out);
                 s.spawn(move || loop {
                     let item = { stack.lock().unwrap().pop() };
-                    let Some((id, ext, kind, root, rel)) = item else { break };
+                    let Some((id, ext, kind, root, rel)) = item else {
+                        break;
+                    };
                     let mut lang = quick_lang(&ext, &kind);
                     if lang.is_empty() {
                         // 文稿:读头嗅探自然语言;不可读/二进制 → 其他。
@@ -261,8 +261,13 @@ pub fn fable_backfill_lang() -> Result<u64, String> {
                 .map_err(|e| e.to_string())?;
             for (id, lang) in &updates {
                 // 给个非空哨兵避免再次入选(理论上 lang 已非空)。
-                let v = if lang.is_empty() { "未识别" } else { lang.as_str() };
-                stmt.execute(rusqlite::params![v, id]).map_err(|e| e.to_string())?;
+                let v = if lang.is_empty() {
+                    "未识别"
+                } else {
+                    lang.as_str()
+                };
+                stmt.execute(rusqlite::params![v, id])
+                    .map_err(|e| e.to_string())?;
             }
         }
         conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;

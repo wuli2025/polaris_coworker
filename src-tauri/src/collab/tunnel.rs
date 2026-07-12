@@ -141,7 +141,8 @@ pub fn get_or_create_device_key() -> Result<[u8; 32], String> {
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(&path, encoded.as_bytes()).map_err(|e| format!("写 device.key 失败: {e}"))?;
+        std::fs::write(&path, encoded.as_bytes())
+            .map_err(|e| format!("写 device.key 失败: {e}"))?;
     }
     Ok(seed)
 }
@@ -157,7 +158,8 @@ pub fn node_id_of_device_key() -> Result<String, String> {
 /// 接受 `{"relays":[{"url":"https://relay.example.com"}]}` 形式的配置。
 /// 空列表 = 恢复默认(n0 公共 relay)。v1 忽略证书指纹字段(预留)。
 pub fn apply_relay_config(json: &str) -> Result<(), String> {
-    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("relay 配置非法 JSON: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("relay 配置非法 JSON: {e}"))?;
     let mut urls = Vec::new();
     if let Some(arr) = v.get("relays").and_then(|r| r.as_array()) {
         for item in arr {
@@ -195,7 +197,10 @@ async fn build_endpoint(seed: [u8; 32]) -> Result<Endpoint, String> {
         }
         builder = builder.relay_mode(RelayMode::custom(urls));
     }
-    builder.bind().await.map_err(|e| format!("iroh endpoint 绑定失败: {e}"))
+    builder
+        .bind()
+        .await
+        .map_err(|e| format!("iroh endpoint 绑定失败: {e}"))
 }
 
 // ── 主机侧 ──────────────────────────────────────────────────────────────────
@@ -444,6 +449,17 @@ pub fn status() -> serde_json::Value {
     })
 }
 
+/// 本机主机 NodeId(不绑 Endpoint,直接由 host.key 种子导出)。挂牌到云机网关时上报用。
+pub fn host_node_id() -> Result<String, String> {
+    let seed = identity::get_or_create_host_key()?;
+    Ok(SecretKey::from_bytes(&seed).public().to_string())
+}
+
+/// 主机(或成员)隧道是否在跑。挂牌前据此判断要不要先起 host_listen。
+pub fn is_running() -> bool {
+    RUNNING.load(Ordering::SeqCst)
+}
+
 /// 通知隧道主循环退出(主机侧与成员侧通用)。
 pub fn stop() {
     SHUTDOWN.notify_waiters();
@@ -509,7 +525,8 @@ mod tests {
     /// relay 配置解析:合法进、坏 URL 拒。
     #[test]
     fn relay_config_parse() {
-        apply_relay_config(r#"{"relays":[{"url":"https://relay.example.com"}]}"#).expect("合法配置");
+        apply_relay_config(r#"{"relays":[{"url":"https://relay.example.com"}]}"#)
+            .expect("合法配置");
         assert_eq!(RELAYS.lock().unwrap().len(), 1);
         assert!(apply_relay_config(r#"{"relays":[{"url":"::bad::"}]}"#).is_err());
         apply_relay_config(r#"{"relays":[]}"#).expect("清空恢复默认");
@@ -522,7 +539,11 @@ mod tests {
     /// 手动跑:POLARIS_NET_TEST=1 cargo test --features server,collab-net --no-default-features collab::tunnel
     #[test]
     fn loopback_echo_roundtrip() {
-        if std::env::var("POLARIS_NET_TEST").map(|v| v == "1").unwrap_or(false) == false {
+        if std::env::var("POLARIS_NET_TEST")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            == false
+        {
             eprintln!("[tunnel-test] 未设 POLARIS_NET_TEST=1,跳过自环网络测试");
             return;
         }
@@ -571,7 +592,9 @@ mod tests {
 
             // 5) 经隧道往返
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
             let payload = b"GET /polaris-tunnel-echo HTTP/1.0\r\n\r\n";
             c.write_all(payload).await.unwrap();
             let mut buf = vec![0u8; payload.len()];

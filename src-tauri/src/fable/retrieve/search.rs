@@ -204,13 +204,13 @@ pub fn search(
                 let mut id_path: HashMap<i64, String> = HashMap::new();
                 for batch in sup_ids.chunks(400) {
                     let ph = vec!["?"; batch.len()].join(",");
-                    let sql =
-                        format!("SELECT id, relpath FROM files WHERE id IN ({ph})");
+                    let sql = format!("SELECT id, relpath FROM files WHERE id IN ({ph})");
                     if let Ok(mut stmt) = conn.prepare(&sql) {
-                        if let Ok(rs) = stmt.query_map(
-                            rusqlite::params_from_iter(batch.iter()),
-                            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-                        ) {
+                        if let Ok(rs) = stmt
+                            .query_map(rusqlite::params_from_iter(batch.iter()), |r| {
+                                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                            })
+                        {
                             for (id, rel) in rs.flatten() {
                                 id_path.insert(id, rel);
                             }
@@ -224,7 +224,9 @@ pub fn search(
                             .iter()
                             .find(|(root, _)| {
                                 f.hit.abspath.replace('\\', "/").starts_with(
-                                    &std::path::Path::new(root).to_string_lossy().replace('\\', "/"),
+                                    &std::path::Path::new(root)
+                                        .to_string_lossy()
+                                        .replace('\\', "/"),
                                 )
                             })
                             .or_else(|| cands.first());

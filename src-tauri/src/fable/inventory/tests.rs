@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[test]
 fn prog_lang_maps_extensions() {
     assert_eq!(prog_lang("py"), Some("Python"));
@@ -12,8 +11,14 @@ fn prog_lang_maps_extensions() {
 
 #[test]
 fn natural_lang_detects_script() {
-    assert_eq!(natural_lang("这是一段中文文本,讲的是知识库检索系统"), "中文");
-    assert_eq!(natural_lang("This is an English document about retrieval."), "英文");
+    assert_eq!(
+        natural_lang("这是一段中文文本,讲的是知识库检索系统"),
+        "中文"
+    );
+    assert_eq!(
+        natural_lang("This is an English document about retrieval."),
+        "英文"
+    );
     assert_eq!(natural_lang("123 456 !!! ==="), "其他语种"); // 字母太少
 }
 
@@ -26,7 +31,14 @@ fn quick_lang_code_and_media() {
 
 #[test]
 fn skip_dir_scan_prunes_system_and_appdata() {
-    for n in ["Windows", "Program Files", "AppData", "node_modules", "$Recycle.Bin", "@eaDir"] {
+    for n in [
+        "Windows",
+        "Program Files",
+        "AppData",
+        "node_modules",
+        "$Recycle.Bin",
+        "@eaDir",
+    ] {
         assert!(skip_dir_scan(n), "{n} 应被剪掉");
     }
     for n in ["Downloads", "Documents", "WeChat Files", "datasets"] {
@@ -37,13 +49,30 @@ fn skip_dir_scan_prunes_system_and_appdata() {
 #[test]
 fn two_tier_prune_keeps_user_named_dirs() {
     // 「永远跳」的噪音:任何根都剪(版本仓/依赖/回收站/NAS/$系统)。
-    for n in [".git", "node_modules", "$Recycle.Bin", "@eaDir", "#recycle", ".venv"] {
+    for n in [
+        ".git",
+        "node_modules",
+        "$Recycle.Bin",
+        "@eaDir",
+        "#recycle",
+        ".venv",
+    ] {
         assert!(skip_dir_always(n), "{n} 应永远剪");
     }
     // OS 目录黑名单:只在整盘扫描时叠加,本身不是「永远跳」。
-    for n in ["windows", "program files", "library", "boot", "recovery", "intel"] {
+    for n in [
+        "windows",
+        "program files",
+        "library",
+        "boot",
+        "recovery",
+        "intel",
+    ] {
         assert!(skip_dir_os(n), "{n} 应属 OS 黑名单");
-        assert!(!skip_dir_always(n), "{n} 不该被永远跳(用户同名文件夹要保留)");
+        assert!(
+            !skip_dir_always(n),
+            "{n} 不该被永远跳(用户同名文件夹要保留)"
+        );
     }
     // 核心诉求:用户自己挑的文件夹里名叫 library/boot 的子目录 = 真数据,不许永远跳。
     for n in ["library", "boot", "applications", "我的资料", "项目"] {
@@ -55,14 +84,26 @@ fn two_tier_prune_keeps_user_named_dirs() {
 fn macos_packages_always_skipped_but_dotted_user_dirs_kept() {
     // mac 包/库目录(Finder 里像单个文件、内部成千上万碎文件)→ 永远跳,治 macOS 盘点慢。
     for n in [
-        "Photos Library.photoslibrary", "Polaris.app", "MyKit.framework",
-        "Project.xcodeproj", "Movie.fcpbundle", "Some.bundle", "Debug.dSYM",
+        "Photos Library.photoslibrary",
+        "Polaris.app",
+        "MyKit.framework",
+        "Project.xcodeproj",
+        "Movie.fcpbundle",
+        "Some.bundle",
+        "Debug.dSYM",
     ] {
         assert!(is_macos_package_dir(n), "{n} 应判为 mac 包目录");
         assert!(skip_dir_always(n), "{n} 应永远跳");
     }
     // 名字里带点、但不是包扩展的普通用户目录 → 绝不误伤。
-    for n in ["v1.2", "report.final", "我的资料", "data.backup", "2024.照片", "node_modules"] {
+    for n in [
+        "v1.2",
+        "report.final",
+        "我的资料",
+        "data.backup",
+        "2024.照片",
+        "node_modules",
+    ] {
         assert!(!is_macos_package_dir(n), "{n} 不该被当 mac 包误跳");
     }
     // macOS 根级系统目录只在整盘扫 `/` 时剪(进 OS 黑名单),本身不「永远跳」(免误伤用户同名夹)。
@@ -103,7 +144,9 @@ fn scan_real_z_drive() {
     assert!(!heavy, "远程盘不应启用 OS 目录黑名单重剪");
 
     // ② 真调度器 + 真剪枝,多核计数遍历(复刻 scan_root,只把写库换成累加计数)。
-    let queue = Arc::new(crate::fable::sched::WorkQueue::new(vec![PathBuf::from(root)]));
+    let queue = Arc::new(crate::fable::sched::WorkQueue::new(vec![PathBuf::from(
+        root,
+    )]));
     let workers = crate::fable::worker_count();
     queue.set_live_workers(workers);
     let files = Arc::new(AtomicU64::new(0));
@@ -208,7 +251,11 @@ fn scan_real_z_drive() {
     eprintln!("──────── 结果 ────────");
     eprintln!(
         "{} · 文件 {f} 个 · 总量 {:.1} GB · 目录 {} 个 · 耗时 {:.0}s",
-        if finished { "扫完整盘" } else { "达上限(部分)" },
+        if finished {
+            "扫完整盘"
+        } else {
+            "达上限(部分)"
+        },
         b as f64 / 1e9,
         ndirs.load(Ordering::Relaxed),
         started.elapsed().as_secs_f64(),
@@ -255,10 +302,19 @@ fn remote_disk_root_skips_heavy_prune() {
 /// (旧实现只剥 `\\?\` 会留下非法的 `UNC\host\share`,导致这条根的文件打不开、对账失效)。
 #[test]
 fn strips_unc_extended_prefix() {
-    assert_eq!(strip_extended_prefix(r"\\?\UNC\100.78.103.101\tx"), r"\\100.78.103.101\tx");
-    assert_eq!(strip_extended_prefix(r"\\?\UNC\nas\share\sub"), r"\\nas\share\sub");
+    assert_eq!(
+        strip_extended_prefix(r"\\?\UNC\100.78.103.101\tx"),
+        r"\\100.78.103.101\tx"
+    );
+    assert_eq!(
+        strip_extended_prefix(r"\\?\UNC\nas\share\sub"),
+        r"\\nas\share\sub"
+    );
     assert_eq!(strip_extended_prefix(r"\\?\C:\Users\me"), r"C:\Users\me");
-    assert_eq!(strip_extended_prefix(r"C:\already\normal"), r"C:\already\normal");
+    assert_eq!(
+        strip_extended_prefix(r"C:\already\normal"),
+        r"C:\already\normal"
+    );
     assert_eq!(strip_extended_prefix(r"\\nas\share"), r"\\nas\share");
 }
 
@@ -267,8 +323,17 @@ fn is_os_disk_root_only_whole_disks() {
     for r in [r"C:\", "C:", r"D:\", "/", "z:/"] {
         assert!(is_os_disk_root(r), "{r} 应判为整盘根");
     }
-    for r in [r"C:\Users\me\proj", "/data", "/volume1/photos", r"D:\我的资料", "/Volumes/USB"] {
-        assert!(!is_os_disk_root(r), "{r} 是文件夹/卷,不是整盘根(里面的全归类)");
+    for r in [
+        r"C:\Users\me\proj",
+        "/data",
+        "/volume1/photos",
+        r"D:\我的资料",
+        "/Volumes/USB",
+    ] {
+        assert!(
+            !is_os_disk_root(r),
+            "{r} 是文件夹/卷,不是整盘根(里面的全归类)"
+        );
     }
 }
 
@@ -350,7 +415,10 @@ fn skip_bump_touches_only_direct_children() {
     .unwrap();
 
     let seen = |rel: &str| -> i64 {
-        conn.query_row("SELECT seen FROM files WHERE relpath=?1", [rel], |r| r.get(0)).unwrap()
+        conn.query_row("SELECT seen FROM files WHERE relpath=?1", [rel], |r| {
+            r.get(0)
+        })
+        .unwrap()
     };
     assert_eq!(seen("a.txt"), gen, "根直属应被刷");
     assert_eq!(seen("d/b.txt"), gen, "d 的直属应被刷");
@@ -396,13 +464,26 @@ fn incremental_rescan_e2e() {
     let s1 = scan_root(&root_s, &empty, false, &noop).unwrap();
     assert_eq!(s1.files, 5, "首扫应有 5 个文件");
     let conn = open_db().unwrap();
-    let root_id: i64 =
-        conn.query_row("SELECT id FROM roots ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    let root_id: i64 = conn
+        .query_row("SELECT id FROM roots ORDER BY id DESC LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     let nfiles = |c: &rusqlite::Connection| -> i64 {
-        c.query_row("SELECT COUNT(*) FROM files WHERE root_id=?1", [root_id], |r| r.get(0)).unwrap()
+        c.query_row(
+            "SELECT COUNT(*) FROM files WHERE root_id=?1",
+            [root_id],
+            |r| r.get(0),
+        )
+        .unwrap()
     };
     let ndirs = |c: &rusqlite::Connection| -> i64 {
-        c.query_row("SELECT COUNT(*) FROM dirs WHERE root_id=?1", [root_id], |r| r.get(0)).unwrap()
+        c.query_row(
+            "SELECT COUNT(*) FROM dirs WHERE root_id=?1",
+            [root_id],
+            |r| r.get(0),
+        )
+        .unwrap()
     };
     let has = |c: &rusqlite::Connection, rel: &str| -> bool {
         c.query_row(
@@ -446,8 +527,14 @@ fn incremental_rescan_e2e() {
     let s2 = scan_root(&root_s, &empty, false, &noop).unwrap();
     assert!(has(&conn, "A/a3.txt"), "增量应发现新增文件 A/a3.txt");
     assert!(!has(&conn, "B/b1.txt"), "增量应删除已消失的 B/b1.txt");
-    assert!(has(&conn, "top.txt"), "没变目录里的 top.txt 绝不能被代际对账误删");
-    assert!(has(&conn, "A/a1.txt") && has(&conn, "A/a2.txt"), "A 里旧文件仍在");
+    assert!(
+        has(&conn, "top.txt"),
+        "没变目录里的 top.txt 绝不能被代际对账误删"
+    );
+    assert!(
+        has(&conn, "A/a1.txt") && has(&conn, "A/a2.txt"),
+        "A 里旧文件仍在"
+    );
     assert!(has(&conn, "B/SUB/s1.txt"), "没变目录里的 s1 仍在");
     assert_eq!(nfiles(&conn), 5, "top + A(a1/a2/a3) + B/SUB/s1 = 5");
     assert_eq!(s2.files, 5, "增量汇报的文件数含跳过子树,口径不缩水");
@@ -527,7 +614,11 @@ fn fable_audit_e2e() {
     let f = fable_audit(Some("fix".into()), Some(5000)).unwrap();
     assert!(f.fixed_dirs >= 1, "有漏收的目录应被作废缓存");
     let drift_chunked: i64 = conn
-        .query_row("SELECT chunked FROM files WHERE relpath='d/drift.txt'", [], |r| r.get(0))
+        .query_row(
+            "SELECT chunked FROM files WHERE relpath='d/drift.txt'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(drift_chunked, 0, "漂移文件标记应被重置待重建");
 
@@ -595,15 +686,23 @@ fn rename_move_reuses_index() {
 
     // 同一 id 现落在 dir2/doc.txt,chunked 保持 1、chunk 未删(零重嵌)。
     let new_rel: String = conn
-        .query_row("SELECT relpath FROM files WHERE id=?1", [file_id], |r| r.get(0))
+        .query_row("SELECT relpath FROM files WHERE id=?1", [file_id], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(new_rel, "dir2/doc.txt", "旧行应改指移动后的新路径");
     let chunked: i64 = conn
-        .query_row("SELECT chunked FROM files WHERE id=?1", [file_id], |r| r.get(0))
+        .query_row("SELECT chunked FROM files WHERE id=?1", [file_id], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(chunked, 1, "移动后仍标已索引,不触发重嵌");
     let nchunks: i64 = conn
-        .query_row("SELECT COUNT(*) FROM chunks WHERE file_id=?1", [file_id], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE file_id=?1",
+            [file_id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(nchunks, 1, "已建向量随文件一起保留");
     let at_new: i64 = conn
@@ -660,8 +759,11 @@ fn skipped_subtree_self_heals() {
     let s1 = scan_root(&root_s, &empty, false, &noop).unwrap();
     assert_eq!(s1.files, 2, "首扫应有 2 个文件");
     let conn = open_db().unwrap();
-    let root_id: i64 =
-        conn.query_row("SELECT id FROM roots ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    let root_id: i64 = conn
+        .query_row("SELECT id FROM roots ORDER BY id DESC LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     let has = |c: &rusqlite::Connection, rel: &str| -> bool {
         c.query_row(
             "SELECT COUNT(*) FROM files WHERE root_id=?1 AND relpath=?2",
@@ -685,7 +787,11 @@ fn skipped_subtree_self_heals() {
     // ② 模拟「A/SUB 那轮读失败 → 代际对账清掉它的 dirs 行」留下的状态(A 的 mtime 不变,因为 A
     //    直属项没增删)。同时在 A/SUB 里**新增**文件(A 的 mtime 仍不变,SUB 早已存在)——这正是
     //    增量盘点的盲区。
-    conn.execute("DELETE FROM dirs WHERE root_id=?1 AND relpath='A/SUB'", [root_id]).unwrap();
+    conn.execute(
+        "DELETE FROM dirs WHERE root_id=?1 AND relpath='A/SUB'",
+        [root_id],
+    )
+    .unwrap();
     write(&root.join("A").join("SUB").join("s2-new.txt"), "s2-new");
 
     // ③ 复现漏扫:不调自愈,直接增量重扫 → A 走「免遍历」跳过、邻接表里没了 A/SUB → 新文件被漏。

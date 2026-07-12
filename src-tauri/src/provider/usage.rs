@@ -128,7 +128,10 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
     let mut year = TokenBucket::default();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for entry in dirs.iter().flat_map(|d| WalkDir::new(d).into_iter().flatten()) {
+    for entry in dirs
+        .iter()
+        .flat_map(|d| WalkDir::new(d).into_iter().flatten())
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -150,7 +153,9 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
             if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
                 continue;
             }
-            let Some(msg) = v.get("message") else { continue };
+            let Some(msg) = v.get("message") else {
+                continue;
+            };
             let Some(usage_v) = msg.get("usage") else {
                 continue;
             };
@@ -160,10 +165,22 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
                 }
             }
             let u = Usage {
-                input: usage_v.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                output: usage_v.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                cache_read: usage_v.get("cache_read_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                cache_creation: usage_v.get("cache_creation_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                input: usage_v
+                    .get("input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
+                output: usage_v
+                    .get("output_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
+                cache_read: usage_v
+                    .get("cache_read_input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
+                cache_creation: usage_v
+                    .get("cache_creation_input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
             };
             let line_tokens = u.input + u.output + u.cache_read + u.cache_creation;
             if line_tokens == 0 {
@@ -205,7 +222,12 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
         .into_iter()
         .map(|(date, label)| {
             let (total, cost) = by_day.get(&date).copied().unwrap_or((0, 0.0));
-            DailyUsage { date, label, total, cost }
+            DailyUsage {
+                date,
+                label,
+                total,
+                cost,
+            }
         })
         .collect();
 
@@ -327,13 +349,26 @@ pub fn provider_balance(id: String) -> Result<ProviderBalance, String> {
         // Moonshot / Kimi 开放平台(按量付费)—— 真实人民币余额。
         "kimi" => {
             let host = host_only(&v.base_url);
-            let host = if host.is_empty() { "api.moonshot.cn".to_string() } else { host };
+            let host = if host.is_empty() {
+                "api.moonshot.cn".to_string()
+            } else {
+                host
+            };
             let url = format!("https://{host}/v1/users/me/balance");
             let j = balance_get_json(&url, &token)?;
             let d = j.get("data").cloned().unwrap_or(Value::Null);
-            let avail = d.get("available_balance").and_then(|x| x.as_f64()).unwrap_or(0.0);
-            let voucher = d.get("voucher_balance").and_then(|x| x.as_f64()).unwrap_or(0.0);
-            let cash = d.get("cash_balance").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let avail = d
+                .get("available_balance")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.0);
+            let voucher = d
+                .get("voucher_balance")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.0);
+            let cash = d
+                .get("cash_balance")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.0);
             Ok(mk(
                 "balance",
                 &format!("¥{avail:.2}"),
@@ -351,7 +386,12 @@ pub fn provider_balance(id: String) -> Result<ProviderBalance, String> {
                     "订阅套餐额度每 7 天刷新, 剩余额度/速率请在 Kimi Code 控制台查看",
                     "https://www.kimi.com/code/console",
                 )),
-                Err(e) => Ok(mk("error", "校验失败", &e, "https://www.kimi.com/code/console")),
+                Err(e) => Ok(mk(
+                    "error",
+                    "校验失败",
+                    &e,
+                    "https://www.kimi.com/code/console",
+                )),
             }
         }
         // DeepSeek —— GET /user/balance, balance_infos[0].total_balance(字符串)。
@@ -363,9 +403,18 @@ pub fn provider_balance(id: String) -> Result<ProviderBalance, String> {
                 .and_then(|a| a.first())
                 .cloned()
                 .unwrap_or(Value::Null);
-            let cur = info.get("currency").and_then(|x| x.as_str()).unwrap_or("CNY");
-            let total = info.get("total_balance").and_then(|x| x.as_str()).unwrap_or("0");
-            let granted = info.get("granted_balance").and_then(|x| x.as_str()).unwrap_or("0");
+            let cur = info
+                .get("currency")
+                .and_then(|x| x.as_str())
+                .unwrap_or("CNY");
+            let total = info
+                .get("total_balance")
+                .and_then(|x| x.as_str())
+                .unwrap_or("0");
+            let granted = info
+                .get("granted_balance")
+                .and_then(|x| x.as_str())
+                .unwrap_or("0");
             let sym = if cur == "USD" { "$" } else { "¥" };
             Ok(mk(
                 "balance",
@@ -379,8 +428,14 @@ pub fn provider_balance(id: String) -> Result<ProviderBalance, String> {
             let url = format!("{}/v1/user/info", v.base_url.trim_end_matches('/'));
             let j = balance_get_json(&url, &token)?;
             let d = j.get("data").cloned().unwrap_or(Value::Null);
-            let total = d.get("totalBalance").and_then(|x| x.as_str()).unwrap_or("0");
-            let charge = d.get("chargeBalance").and_then(|x| x.as_str()).unwrap_or("0");
+            let total = d
+                .get("totalBalance")
+                .and_then(|x| x.as_str())
+                .unwrap_or("0");
+            let charge = d
+                .get("chargeBalance")
+                .and_then(|x| x.as_str())
+                .unwrap_or("0");
             let bal = d.get("balance").and_then(|x| x.as_str()).unwrap_or("0");
             Ok(mk(
                 "balance",

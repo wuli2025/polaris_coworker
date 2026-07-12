@@ -58,15 +58,18 @@ fn rename_apply_validates_and_writes() {
         apply_names_and_relations(&conn, &[], &parsed, &valid, &croot, 123).unwrap();
     assert_eq!(renamed, 1, "只有 id=1 在范围内且有名字");
     assert_eq!(edges, 1, "只有 1→2 合法(自环 / 越界被丢)");
-    let label: String =
-        conn.query_row("SELECT label FROM clusters WHERE id=1", [], |r| r.get(0)).unwrap();
+    let label: String = conn
+        .query_row("SELECT label FROM clusters WHERE id=1", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(label, "我的报税");
-    let summary: String =
-        conn.query_row("SELECT summary FROM clusters WHERE id=1", [], |r| r.get(0)).unwrap();
+    let summary: String = conn
+        .query_row("SELECT summary FROM clusters WHERE id=1", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(summary, "报税材料都在这");
     // id=2 未被命名 → 保留原名。
-    let label2: String =
-        conn.query_row("SELECT label FROM clusters WHERE id=2", [], |r| r.get(0)).unwrap();
+    let label2: String = conn
+        .query_row("SELECT label FROM clusters WHERE id=2", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(label2, "簇B");
     let (s, d, l): (i64, i64, String) = conn
         .query_row("SELECT src,dst,label FROM cluster_edges", [], |r| {
@@ -96,8 +99,9 @@ fn rename_apply_is_idempotent_rebuild() {
     let croot: HashMap<i64, i64> = [(1i64, 0i64), (2, 0)].into_iter().collect();
     apply_names_and_relations(&conn, &[], &parsed, &valid, &croot, 1).unwrap();
     apply_names_and_relations(&conn, &[], &parsed, &valid, &croot, 2).unwrap();
-    let n: i64 =
-        conn.query_row("SELECT COUNT(*) FROM cluster_edges", [], |r| r.get(0)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM cluster_edges", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(n, 1, "重跑不累积关系边");
 }
 
@@ -127,35 +131,47 @@ fn merge_consolidates_same_parent_leaves_and_remaps() {
                   "relations":[{"from":2,"to":4,"label":"配套"}]}"#;
     let parsed: LlmNameRel = serde_json::from_str(raw).unwrap();
     let valid: std::collections::HashSet<i64> = [10i64, 1, 2, 3, 4].into_iter().collect();
-    let croot: HashMap<i64, i64> = [(10i64, 0), (1, 0), (2, 0), (3, 0), (4, 0)].into_iter().collect();
+    let croot: HashMap<i64, i64> = [(10i64, 0), (1, 0), (2, 0), (3, 0), (4, 0)]
+        .into_iter()
+        .collect();
     let (renamed, edges, merged) =
         apply_names_and_relations(&conn, &[], &parsed, &valid, &croot, 1).unwrap();
     assert_eq!(merged, 2, "1/2/3 同父并入 survivor=1,合并掉 2 个");
     // survivor=1(最大簇)留下,2/3 删除。
     let gone: i64 = conn
-        .query_row("SELECT COUNT(*) FROM clusters WHERE id IN (2,3)", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM clusters WHERE id IN (2,3)", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(gone, 0, "被并簇 2/3 已删");
     // survivor 吸收全部 6 个文件,size 重算为 6。
-    let nf: i64 =
-        conn.query_row("SELECT COUNT(*) FROM files WHERE cluster_id=1", [], |r| r.get(0)).unwrap();
+    let nf: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files WHERE cluster_id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     assert_eq!(nf, 6, "原 1/2/3 的文件全改挂 survivor=1");
-    let sz: i64 =
-        conn.query_row("SELECT size FROM clusters WHERE id=1", [], |r| r.get(0)).unwrap();
+    let sz: i64 = conn
+        .query_row("SELECT size FROM clusters WHERE id=1", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(sz, 6, "survivor size 重算 = 实际文件数");
     // 跨父组 [1,4] 被拒 → 4 仍在。
-    let kept: i64 =
-        conn.query_row("SELECT COUNT(*) FROM clusters WHERE id=4", [], |r| r.get(0)).unwrap();
+    let kept: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clusters WHERE id=4", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(kept, 1, "跨父合并被拒,簇 4 保留");
     // 命名重映射:id=2 → survivor 1,故 1 被命名「发票报销」。
-    let label1: String =
-        conn.query_row("SELECT label FROM clusters WHERE id=1", [], |r| r.get(0)).unwrap();
+    let label1: String = conn
+        .query_row("SELECT label FROM clusters WHERE id=1", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(label1, "发票报销");
     assert_eq!(renamed, 2, "id=2(→1) 与 id=4 各命名一次");
     // 关系重映射:2→4 变 1→4。
     assert_eq!(edges, 1);
     let (s, d): (i64, i64) = conn
-        .query_row("SELECT src,dst FROM cluster_edges", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row("SELECT src,dst FROM cluster_edges", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .unwrap();
     assert_eq!((s, d), (1, 4), "关系端点跟随合并重映射");
 }
@@ -183,7 +199,9 @@ fn merge_skips_parent_clusters() {
     let (_r, _e, merged) =
         apply_names_and_relations(&conn, &[], &parsed, &valid, &croot, 1).unwrap();
     assert_eq!(merged, 0, "父簇不参与合并");
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM clusters", [], |r| r.get(0)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clusters", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(n, 4, "无簇被删");
 }
 
@@ -218,11 +236,16 @@ fn digest_directive_includes_ids_and_samples() {
 //   (置 EVAL_NO_LLM=1 则只测 T0,不调模型)。结果按 EVAL_OUT 追加一行 JSON。
 
 fn env_u64(k: &str, d: u64) -> u64 {
-    std::env::var(k).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d)
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(d)
 }
 // 可复现 LCG(避免 rand 依赖,种子可控)。
 fn lcg(s: &mut u64) -> u64 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *s = s
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *s >> 33
 }
 
@@ -236,36 +259,172 @@ struct EvalTopic {
 }
 fn eval_topics() -> Vec<EvalTopic> {
     vec![
-        EvalTopic { id: 0, folder: "财务/报税", ext: "xlsx", kind: "doc",
-            stems: &["增值税申报表", "个税专项扣除", "年度利润表", "记账凭证", "京东发票", "报销单", "工资表", "对账单"],
-            aliases: &["报税", "财务", "税", "发票", "报销", "账", "工资", "对账", "凭证", "利润", "扣除", "报表", "单据"] },
-        EvalTopic { id: 1, folder: "装修/新房", ext: "jpg", kind: "image",
-            stems: &["客厅效果图", "水电改造预算", "家具清单", "施工合同", "瓷砖选样", "全屋定制报价", "卫生间布局"],
-            aliases: &["装修", "房", "家具", "施工", "效果图", "户型", "布局", "选材", "报价", "预算"] },
-        EvalTopic { id: 2, folder: "考研/复习", ext: "pdf", kind: "doc",
-            stems: &["数学强化讲义", "英语真题2022", "政治大纲笔记", "专业课总结", "错题本", "肖四肖八", "高数公式"],
-            aliases: &["考研", "复习", "真题", "笔记", "讲义", "学习", "数学", "英语", "政治", "错题", "公式"] },
-        EvalTopic { id: 3, folder: "照片/宝宝", ext: "jpg", kind: "image",
-            stems: &["周岁照", "幼儿园运动会", "全家福", "第一次走路", "生日蛋糕", "公园游玩"],
-            aliases: &["照片", "宝宝", "孩子", "娃", "家庭", "全家福"] },
-        EvalTopic { id: 4, folder: "工作/汇报", ext: "pptx", kind: "doc",
-            stems: &["季度汇报", "周报", "项目方案v3", "OKR复盘", "需求评审纪要", "述职报告"],
-            aliases: &["工作", "汇报", "项目", "报告", "周报", "方案", "复盘", "述职", "纪要", "评审"] },
-        EvalTopic { id: 5, folder: "副业/接单", ext: "psd", kind: "image",
-            stems: &["logo设计稿", "客户需求", "报价单", "海报终稿", "名片排版", "公众号配图"],
-            aliases: &["副业", "接单", "客户", "设计", "海报", "logo", "名片", "排版", "配图"] },
-        EvalTopic { id: 6, folder: "旅行/日本", ext: "pdf", kind: "doc",
-            stems: &["行程单", "机票确认", "东京攻略", "酒店预订", "签证材料", "美食清单"],
-            aliases: &["旅行", "旅游", "行程", "攻略", "机票", "日本", "酒店", "住宿", "签证", "美食", "东京"] },
-        EvalTopic { id: 7, folder: "code/polaris", ext: "rs", kind: "text",
-            stems: &["main", "lib", "server", "README", "cluster_build", "retrieve"],
-            aliases: &["代码", "项目", "开发", "程序", "code", "源码"] },
-        EvalTopic { id: 8, folder: "movies", ext: "mkv", kind: "video",
+        EvalTopic {
+            id: 0,
+            folder: "财务/报税",
+            ext: "xlsx",
+            kind: "doc",
+            stems: &[
+                "增值税申报表",
+                "个税专项扣除",
+                "年度利润表",
+                "记账凭证",
+                "京东发票",
+                "报销单",
+                "工资表",
+                "对账单",
+            ],
+            aliases: &[
+                "报税", "财务", "税", "发票", "报销", "账", "工资", "对账", "凭证", "利润", "扣除",
+                "报表", "单据",
+            ],
+        },
+        EvalTopic {
+            id: 1,
+            folder: "装修/新房",
+            ext: "jpg",
+            kind: "image",
+            stems: &[
+                "客厅效果图",
+                "水电改造预算",
+                "家具清单",
+                "施工合同",
+                "瓷砖选样",
+                "全屋定制报价",
+                "卫生间布局",
+            ],
+            aliases: &[
+                "装修",
+                "房",
+                "家具",
+                "施工",
+                "效果图",
+                "户型",
+                "布局",
+                "选材",
+                "报价",
+                "预算",
+            ],
+        },
+        EvalTopic {
+            id: 2,
+            folder: "考研/复习",
+            ext: "pdf",
+            kind: "doc",
+            stems: &[
+                "数学强化讲义",
+                "英语真题2022",
+                "政治大纲笔记",
+                "专业课总结",
+                "错题本",
+                "肖四肖八",
+                "高数公式",
+            ],
+            aliases: &[
+                "考研", "复习", "真题", "笔记", "讲义", "学习", "数学", "英语", "政治", "错题",
+                "公式",
+            ],
+        },
+        EvalTopic {
+            id: 3,
+            folder: "照片/宝宝",
+            ext: "jpg",
+            kind: "image",
+            stems: &[
+                "周岁照",
+                "幼儿园运动会",
+                "全家福",
+                "第一次走路",
+                "生日蛋糕",
+                "公园游玩",
+            ],
+            aliases: &["照片", "宝宝", "孩子", "娃", "家庭", "全家福"],
+        },
+        EvalTopic {
+            id: 4,
+            folder: "工作/汇报",
+            ext: "pptx",
+            kind: "doc",
+            stems: &[
+                "季度汇报",
+                "周报",
+                "项目方案v3",
+                "OKR复盘",
+                "需求评审纪要",
+                "述职报告",
+            ],
+            aliases: &[
+                "工作", "汇报", "项目", "报告", "周报", "方案", "复盘", "述职", "纪要", "评审",
+            ],
+        },
+        EvalTopic {
+            id: 5,
+            folder: "副业/接单",
+            ext: "psd",
+            kind: "image",
+            stems: &[
+                "logo设计稿",
+                "客户需求",
+                "报价单",
+                "海报终稿",
+                "名片排版",
+                "公众号配图",
+            ],
+            aliases: &[
+                "副业", "接单", "客户", "设计", "海报", "logo", "名片", "排版", "配图",
+            ],
+        },
+        EvalTopic {
+            id: 6,
+            folder: "旅行/日本",
+            ext: "pdf",
+            kind: "doc",
+            stems: &[
+                "行程单",
+                "机票确认",
+                "东京攻略",
+                "酒店预订",
+                "签证材料",
+                "美食清单",
+            ],
+            aliases: &[
+                "旅行", "旅游", "行程", "攻略", "机票", "日本", "酒店", "住宿", "签证", "美食",
+                "东京",
+            ],
+        },
+        EvalTopic {
+            id: 7,
+            folder: "code/polaris",
+            ext: "rs",
+            kind: "text",
+            stems: &[
+                "main",
+                "lib",
+                "server",
+                "README",
+                "cluster_build",
+                "retrieve",
+            ],
+            aliases: &["代码", "项目", "开发", "程序", "code", "源码"],
+        },
+        EvalTopic {
+            id: 8,
+            folder: "movies",
+            ext: "mkv",
+            kind: "video",
             stems: &["复仇者联盟", "星际穿越", "盗梦空间", "教父", "肖申克的救赎"],
-            aliases: &["电影", "影视", "视频", "剧", "movie", "大片", "片", "科幻", "经典", "动作"] },
-        EvalTopic { id: 9, folder: "合同", ext: "docx", kind: "doc",
+            aliases: &[
+                "电影", "影视", "视频", "剧", "movie", "大片", "片", "科幻", "经典", "动作",
+            ],
+        },
+        EvalTopic {
+            id: 9,
+            folder: "合同",
+            ext: "docx",
+            kind: "doc",
             stems: &["租房合同", "劳动合同", "保密协议", "采购合同", "服务协议"],
-            aliases: &["合同", "协议", "法律", "租房", "劳动"] },
+            aliases: &["合同", "协议", "法律", "租房", "劳动"],
+        },
     ]
 }
 
@@ -296,7 +455,12 @@ fn gen_corpus(scenario: &str, seed: u64, size: usize) -> (Vec<EvalFile>, Vec<Eva
         let name = if garbled {
             // 乱名(无主题信号)→ 仍标真值主题,考验「靠文件夹/同簇邻居兜底」
             let kinds = ["IMG_", "微信图片_", "DSC", "副本_未命名"];
-            format!("{}{}.{}", kinds[(lcg(&mut rng) as usize) % kinds.len()], variant, t.ext)
+            format!(
+                "{}{}.{}",
+                kinds[(lcg(&mut rng) as usize) % kinds.len()],
+                variant,
+                t.ext
+            )
         } else {
             format!("{stem}_{variant}.{}", t.ext)
         };
@@ -352,20 +516,30 @@ fn cluster_eval_run() {
     let _ = std::fs::remove_file(&dbp);
     let conn = rusqlite::Connection::open(&dbp).unwrap();
     eval_schema(&conn);
-    conn.execute("INSERT INTO roots(id,path) VALUES(1,'/eval')", []).unwrap();
+    conn.execute("INSERT INTO roots(id,path) VALUES(1,'/eval')", [])
+        .unwrap();
     {
         let mut ins = conn
             .prepare("INSERT INTO files(id,root_id,relpath,name,ext,kind,size,mtime,cluster_id) VALUES(?1,1,?2,?3,?4,?5,?6,?7,0)")
             .unwrap();
         for (i, f) in corpus.iter().enumerate() {
             ins.execute(rusqlite::params![
-                (i + 1) as i64, f.relpath, f.name, f.ext, f.kind, f.size, f.mtime
+                (i + 1) as i64,
+                f.relpath,
+                f.name,
+                f.ext,
+                f.kind,
+                f.size,
+                f.mtime
             ])
             .unwrap();
         }
     }
-    let topic_of: HashMap<i64, usize> =
-        corpus.iter().enumerate().map(|(i, f)| ((i + 1) as i64, f.topic)).collect();
+    let topic_of: HashMap<i64, usize> = corpus
+        .iter()
+        .enumerate()
+        .map(|(i, f)| ((i + 1) as i64, f.topic))
+        .collect();
 
     // ── T0:词法骨架(真生产函数)──
     let t0 = std::time::Instant::now();
@@ -376,7 +550,9 @@ fn cluster_eval_run() {
     // 读回归簇
     let assign: HashMap<i64, i64> = {
         let mut stmt = conn.prepare("SELECT id, cluster_id FROM files").unwrap();
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap();
         rows.flatten().collect()
     };
     let total = corpus.len();
@@ -402,7 +578,11 @@ fn cluster_eval_run() {
         pure_hits += cnt;
         cluster_dom.insert(cid, dom);
     }
-    let purity = if covered > 0 { pure_hits as f64 / covered as f64 } else { 0.0 };
+    let purity = if covered > 0 {
+        pure_hits as f64 / covered as f64
+    } else {
+        0.0
+    };
     let leaf_n = members.len();
 
     // ── T1:真大模型命名(读簇画像)──
@@ -430,8 +610,7 @@ fn cluster_eval_run() {
                         edges_n = e;
                         // 读回每个叶簇的 AI 名,核对是否命中其主导主题别名。
                         let labels: HashMap<i64, String> = {
-                            let mut stmt =
-                                conn.prepare("SELECT id, label FROM clusters").unwrap();
+                            let mut stmt = conn.prepare("SELECT id, label FROM clusters").unwrap();
                             let rows = stmt
                                 .query_map([], |r| {
                                     Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
@@ -456,8 +635,16 @@ fn cluster_eval_run() {
                                 samples.push((topics[dom].folder.to_string(), label, ok));
                             }
                         }
-                        name_acc = if leaf_n > 0 { hit as f64 / leaf_n as f64 } else { 0.0 };
-                        name_acc_w = if covered > 0 { hit_w as f64 / covered as f64 } else { 0.0 };
+                        name_acc = if leaf_n > 0 {
+                            hit as f64 / leaf_n as f64
+                        } else {
+                            0.0
+                        };
+                        name_acc_w = if covered > 0 {
+                            hit_w as f64 / covered as f64
+                        } else {
+                            0.0
+                        };
                     }
                     Err(e) => llm_err = format!("json parse: {e}"),
                 },
@@ -481,8 +668,10 @@ fn cluster_eval_run() {
     println!("EVAL_RESULT {line}");
     if let Ok(out) = std::env::var("EVAL_OUT") {
         use std::io::Write as _;
-        if let Ok(mut f) =
-            std::fs::OpenOptions::new().create(true).append(true).open(&out)
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&out)
         {
             let _ = writeln!(f, "{line}");
         }
@@ -549,11 +738,23 @@ fn human_size_scales() {
 #[test]
 fn source_tag_recognizes_download_dirs() {
     assert_eq!(source_tag(r"C:\Users\me\Downloads", "a.pdf"), "下载");
-    assert_eq!(source_tag(r"C:\Users\me\Documents\WeChat Files", "x/y.jpg"), "微信");
-    assert_eq!(source_tag(r"C:\Users\me\Documents\xwechat_files", "f.docx"), "微信");
-    assert_eq!(source_tag(r"C:\Users\me\Documents\WXWork", "f.zip"), "企业微信");
+    assert_eq!(
+        source_tag(r"C:\Users\me\Documents\WeChat Files", "x/y.jpg"),
+        "微信"
+    );
+    assert_eq!(
+        source_tag(r"C:\Users\me\Documents\xwechat_files", "f.docx"),
+        "微信"
+    );
+    assert_eq!(
+        source_tag(r"C:\Users\me\Documents\WXWork", "f.zip"),
+        "企业微信"
+    );
     // Tencent Files:按根末段,或 relpath 里的 FileRecv 命中
-    assert_eq!(source_tag(r"C:\Users\me\Documents\Tencent Files", "123/FileRecv/a.7z"), "QQ");
+    assert_eq!(
+        source_tag(r"C:\Users\me\Documents\Tencent Files", "123/FileRecv/a.7z"),
+        "QQ"
+    );
     assert_eq!(source_tag("/data/nas/share", "2024/FileRecv/b.rar"), "QQ");
     // 普通目录 → 空(不显示徽标)
     assert_eq!(source_tag(r"D:\datasets", "housing/a.csv"), "");
@@ -562,9 +763,15 @@ fn source_tag_recognizes_download_dirs() {
 #[test]
 fn clean_title_strips_noise_keeps_meaning() {
     // 时间戳/计数器/分隔符清掉,保留有意义的词
-    assert_eq!(clean_title("全澳房产_dataset_v2 (3).csv"), "全澳房产 dataset v2");
+    assert_eq!(
+        clean_title("全澳房产_dataset_v2 (3).csv"),
+        "全澳房产 dataset v2"
+    );
     // 纯噪声图片名:无可保留 → 退回去扩展名的原名(总比空好)
-    assert_eq!(clean_title("IMG_20230101_123456.jpg"), "IMG_20230101_123456");
+    assert_eq!(
+        clean_title("IMG_20230101_123456.jpg"),
+        "IMG_20230101_123456"
+    );
     // 长 hex 哈希被丢
     assert_eq!(clean_title("a1b2c3d4e5f6 报告.pdf"), "报告");
     // 正常中文名原样

@@ -8,6 +8,8 @@
 //!
 //! 阶段 B（WebSocket 长连接收事件 → 跑对话 → 回发）需真实飞书 app 凭证联调，单列后续 PR。
 
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use directories::UserDirs;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -21,12 +23,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
-#[cfg(not(feature = "desktop"))]
-use crate::host::AppHandle;
 
 // ───────────────────────── 配置 ─────────────────────────
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuConfig {
     #[serde(default)]
@@ -38,7 +38,7 @@ pub struct FeishuConfig {
     /// "feishu"(国内) | "lark"(国际)
     #[serde(default = "default_domain")]
     pub domain: String,
-    /// 私聊策略: "open" | "allowlist" | "disabled"
+    /// 私聊策略: "allowlist" | "disabled"。历史的 "open" 值会被安全地拒绝。
     #[serde(default = "default_dm_policy")]
     pub dm_policy: String,
     /// 群聊是否必须 @机器人才响应
@@ -55,7 +55,7 @@ fn default_domain() -> String {
     "feishu".into()
 }
 fn default_dm_policy() -> String {
-    "open".into()
+    "allowlist".into()
 }
 fn default_true() -> bool {
     true
@@ -67,6 +67,21 @@ impl FeishuConfig {
             "https://open.larksuite.com"
         } else {
             "https://open.feishu.cn"
+        }
+    }
+}
+
+impl Default for FeishuConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            app_id: String::new(),
+            app_secret: String::new(),
+            domain: default_domain(),
+            dm_policy: default_dm_policy(),
+            group_require_mention: true,
+            allow_from: Vec::new(),
+            auto_start: false,
         }
     }
 }
@@ -201,12 +216,15 @@ pub fn is_allowed(cfg: &FeishuConfig, ctx: &IncomingCtx) -> bool {
     if !ctx.bot_open_id.is_empty() && ctx.sender_open_id == ctx.bot_open_id {
         return false;
     }
+    // 飞书消息最终会进入带工具的本机对话管线，因此无论私聊还是群聊都必须命中白名单。
+    // 旧版本的 "open" 配置在这里 fail-closed，避免升级后继续暴露远程执行入口。
+    let sender_allowed =
+        !ctx.sender_open_id.is_empty() && cfg.allow_from.iter().any(|id| id == ctx.sender_open_id);
+    if !sender_allowed {
+        return false;
+    }
     if ctx.chat_type == "p2p" {
-        return match cfg.dm_policy.as_str() {
-            "disabled" => false,
-            "allowlist" => cfg.allow_from.iter().any(|id| id == ctx.sender_open_id),
-            _ => true, // open
-        };
+        return cfg.dm_policy == "allowlist";
     }
     // 群聊：默认需 @机器人
     if cfg.group_require_mention {
@@ -261,6 +279,20 @@ pub fn feishu_get_config() -> FeishuConfig {
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_set_config(config: FeishuConfig) -> Result<(), String> {
     let mut cfg = config;
+    if cfg.domain != "feishu" && cfg.domain != "lark" {
+        return Err("版本只能是 feishu 或 lark".into());
+    }
+    if cfg.dm_policy != "allowlist" && cfg.dm_policy != "disabled" {
+        return Err("为保护本机数据，飞书私聊仅支持白名单或关闭".into());
+    }
+    cfg.allow_from = cfg
+        .allow_from
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
     // 前端回传的占位 secret 表示「不修改」，保留原值
     if cfg.app_secret == "********" {
         cfg.app_secret = read_config().app_secret;
@@ -396,8 +428,13 @@ struct Gateway {
     stdin: Option<ChildStdin>,
     running: bool,
 }
-static GATEWAY: Lazy<Mutex<Gateway>> =
-    Lazy::new(|| Mutex::new(Gateway { pid: None, stdin: None, running: false }));
+static GATEWAY: Lazy<Mutex<Gateway>> = Lazy::new(|| {
+    Mutex::new(Gateway {
+        pid: None,
+        stdin: None,
+        running: false,
+    })
+});
 static GW_DEDUP: Lazy<Mutex<DedupRing>> = Lazy::new(|| Mutex::new(DedupRing::new(256)));
 /// 网关「应当在运行」总开关：守护线程据此决定崩溃后是否自动重起；stop 时置 false。
 static SHOULD_RUN: AtomicBool = AtomicBool::new(false);
@@ -436,7 +473,11 @@ fn read_lock() -> Option<u32> {
     let p = lock_path()?;
     let s = fs::read_to_string(&p).ok()?;
     let pid_line = s.lines().find(|l| l.starts_with("pid="))?;
-    pid_line.trim_start_matches("pid=").trim().parse::<u32>().ok()
+    pid_line
+        .trim_start_matches("pid=")
+        .trim()
+        .parse::<u32>()
+        .ok()
 }
 fn is_pid_alive(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
@@ -466,7 +507,11 @@ fn is_pid_alive(pid: u32) -> bool {
 /// 若锁被另一「还活着的」进程持有 → 返回 Some(对方 PID);否则 None(无锁/死锁都视作可抢)。
 fn lock_holder_alive() -> Option<u32> {
     let pid = read_lock()?;
-    if is_pid_alive(pid) { Some(pid) } else { None }
+    if is_pid_alive(pid) {
+        Some(pid)
+    } else {
+        None
+    }
 }
 fn acquire_lock(pid: u32) {
     let Some(p) = lock_path() else { return };
@@ -482,7 +527,10 @@ fn acquire_lock(pid: u32) {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     // 简单覆盖写: 单机双 App 场景够用; 不依赖 OS 级 advisory lock, 三平台同构。
-    let _ = fs::write(&p, format!("pid={pid}\nstarted_at_ms={started_at_ms}\nexe={exe}\n"));
+    let _ = fs::write(
+        &p,
+        format!("pid={pid}\nstarted_at_ms={started_at_ms}\nexe={exe}\n"),
+    );
 }
 fn release_lock() {
     if let Some(p) = lock_path() {
@@ -538,17 +586,11 @@ fn emit_log(app: &AppHandle, text: impl Into<String>) {
 /// 同步阻塞跑一次 chat_send（飞书 bridge 在独立线程里调用）。
 /// 桌面走 tauri 运行时；server 临时建一个 current-thread tokio 运行时。
 #[cfg(feature = "desktop")]
-fn block_on_chat_send(
-    app: AppHandle,
-    args: crate::chat::ChatSendArgs,
-) -> Result<String, String> {
+fn block_on_chat_send(app: AppHandle, args: crate::chat::ChatSendArgs) -> Result<String, String> {
     tauri::async_runtime::block_on(crate::chat::chat_send(app, args))
 }
 #[cfg(not(feature = "desktop"))]
-fn block_on_chat_send(
-    app: AppHandle,
-    args: crate::chat::ChatSendArgs,
-) -> Result<String, String> {
+fn block_on_chat_send(app: AppHandle, args: crate::chat::ChatSendArgs) -> Result<String, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -568,7 +610,10 @@ fn ensure_bridge(app: &AppHandle) -> Result<PathBuf, String> {
     fs::write(dir.join("package.json"), BRIDGE_PKG).map_err(|e| e.to_string())?;
     if !dir.join("node_modules").join("@larksuiteoapi").exists() {
         emit_status(app, "installing");
-        emit_log(app, "首次启动：正在安装飞书 SDK 依赖（npm install，请稍候）…");
+        emit_log(
+            app,
+            "首次启动：正在安装飞书 SDK 依赖（npm install，请稍候）…",
+        );
         if !npm_install(&dir)? {
             return Err("npm install 失败：请确认已安装 Node.js / npm".into());
         }
@@ -679,7 +724,9 @@ pub struct GatewayStatus {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_gateway_status() -> GatewayStatus {
-    GatewayStatus { running: SHOULD_RUN.load(Ordering::Relaxed) }
+    GatewayStatus {
+        running: SHOULD_RUN.load(Ordering::Relaxed),
+    }
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -717,29 +764,49 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
             }
             _ => {}
         },
-        "log" => emit_log(app, v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string()),
+        "log" => emit_log(
+            app,
+            v.get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string(),
+        ),
         "fatal" => emit_log(
             app,
-            format!("致命错误: {}", v.get("text").and_then(|t| t.as_str()).unwrap_or("")),
+            format!(
+                "致命错误: {}",
+                v.get("text").and_then(|t| t.as_str()).unwrap_or("")
+            ),
         ),
         "message" => {
             let msg_id = v.get("messageId").and_then(|x| x.as_str()).unwrap_or("");
             if GW_DEDUP.lock().seen(msg_id) {
                 return;
             }
-            let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let chat_id = v.get("chatId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let text = v
+                .get("text")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let chat_id = v
+                .get("chatId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let ctx = IncomingCtx {
                 chat_type: v.get("chatType").and_then(|x| x.as_str()).unwrap_or("p2p"),
                 sender_open_id: v.get("senderOpenId").and_then(|x| x.as_str()).unwrap_or(""),
                 bot_open_id,
-                mentioned_bot: v.get("mentioned").and_then(|x| x.as_bool()).unwrap_or(false),
+                mentioned_bot: v
+                    .get("mentioned")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
             };
             if text.is_empty() || !is_allowed(cfg, &ctx) {
                 return;
             }
-            // 接进 Polaris 真对话管线：「飞书机器人」项目下建/取对话 → chat_send(AutoAll,全工具)
-            // 让 Claude Code 真执行(可操作软件/写文件) → 落库(UI 实时可见) → 轮询回复发回飞书。
+            // 接进 Polaris 真对话管线。默认使用只读/规划权限；只有管理员在宿主机上显式设置
+            // POLARIS_FEISHU_UNSAFE_HOST_TOOLS=1 才允许远程写文件和执行本机工具。
             let conv_id = match ensure_feishu_conversation(&chat_id) {
                 Ok(id) => id,
                 Err(e) => {
@@ -751,11 +818,29 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
                 .iter()
                 .filter(|m| m.role == "assistant")
                 .count();
-            emit_log(app, format!("收到：{text} → 交给 Claude Code（项目「飞书机器人」）执行…"));
+            let unsafe_host_tools = std::env::var("POLARIS_FEISHU_UNSAFE_HOST_TOOLS")
+                .ok()
+                .as_deref()
+                == Some("1");
+            emit_log(
+                app,
+                format!(
+                    "收到：{text} → 交给 Claude Code（{}模式）…",
+                    if unsafe_host_tools {
+                        "宿主机工具"
+                    } else {
+                        "安全只读"
+                    }
+                ),
+            );
             let args = crate::chat::ChatSendArgs {
                 prompt: text.clone(),
-                permission_mode: crate::chat::PermissionMode::AutoAll,
-                use_sandbox: false,
+                permission_mode: if unsafe_host_tools {
+                    crate::chat::PermissionMode::AutoAll
+                } else {
+                    crate::chat::PermissionMode::Deny
+                },
+                use_sandbox: !unsafe_host_tools,
                 skill_ids: None,
                 conversation_id: Some(conv_id.clone()),
                 goal: None,
@@ -764,8 +849,7 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
                 batch_build: false,
                 batch_size: None,
                 agent_mode: None,
-                // 飞书机器人要真操作软件/写文件 → 工作模式(纯 Claude Code)放开全套工具
-                work_mode: Some("work".into()),
+                work_mode: Some(if unsafe_host_tools { "work" } else { "fast" }.into()),
                 // 飞书走应用全局当前供应商(Auto 档), 不按对话钉死
                 provider_id: None,
             };
@@ -780,7 +864,8 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
                     return;
                 }
             };
-            let payload = serde_json::json!({"type":"reply","chatId":chat_id,"text":reply}).to_string();
+            let payload =
+                serde_json::json!({"type":"reply","chatId":chat_id,"text":reply}).to_string();
             let mut g = GATEWAY.lock();
             if let Some(si) = g.stdin.as_mut() {
                 let _ = si.write_all(payload.as_bytes());
@@ -795,7 +880,12 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
 }
 
 /// 起一次桥进程并读到其退出；返回本次连接存活秒数（守护线程据此决定退避）。
-fn run_bridge_once(app: &AppHandle, dir: &std::path::Path, cfg: &FeishuConfig, bot_open_id: &str) -> u64 {
+fn run_bridge_once(
+    app: &AppHandle,
+    dir: &std::path::Path,
+    cfg: &FeishuConfig,
+    bot_open_id: &str,
+) -> u64 {
     let started = Instant::now();
     let mut cmd = Command::new("node");
     cmd.arg(dir.join("bridge.mjs"))
@@ -879,6 +969,9 @@ pub fn feishu_gateway_start(app: AppHandle) -> Result<(), String> {
     let cfg = read_config();
     if cfg.app_id.trim().is_empty() || cfg.app_secret.trim().is_empty() {
         return Err("请先填写并保存 App ID 与 App Secret".into());
+    }
+    if cfg.allow_from.is_empty() {
+        return Err("启动前至少填写一个允许的发送者 open_id".into());
     }
     emit_status(&app, "starting");
     // 清场：全量杀光所有 bridge.mjs 进程（孤儿 + 任何兄弟极光的桥），确保本极光起来后是唯一在飞的。
@@ -968,7 +1061,7 @@ mod tests {
 
     #[test]
     fn never_reply_to_self() {
-        let cfg = cfg_with("open", &[], true);
+        let cfg = cfg_with("allowlist", &["bot1"], true);
         let ctx = IncomingCtx {
             chat_type: "p2p",
             sender_open_id: "bot1",
@@ -989,7 +1082,7 @@ mod tests {
             bot_open_id: "bot",
             mentioned_bot: false,
         };
-        assert!(is_allowed(&open, &mk("u2")));
+        assert!(!is_allowed(&open, &mk("u2")));
         assert!(is_allowed(&allow, &mk("u1")));
         assert!(!is_allowed(&allow, &mk("u2")));
         assert!(!is_allowed(&off, &mk("u1")));
@@ -997,7 +1090,7 @@ mod tests {
 
     #[test]
     fn group_requires_mention() {
-        let cfg = cfg_with("open", &[], true);
+        let cfg = cfg_with("allowlist", &["u1"], true);
         let no_at = IncomingCtx {
             chat_type: "group",
             sender_open_id: "u1",

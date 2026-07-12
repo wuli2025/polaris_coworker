@@ -8,13 +8,21 @@
 use super::workset;
 
 #[tauri::command]
-pub fn collab_clone_partial(remoteUrl: String, dest: String, sparseDirs: Vec<String>) -> Result<(), String> {
+pub fn collab_clone_partial(
+    remoteUrl: String,
+    dest: String,
+    sparseDirs: Vec<String>,
+) -> Result<(), String> {
     let dirs: Vec<&str> = sparseDirs.iter().map(|s| s.as_str()).collect();
     workset::clone_partial(&remoteUrl, std::path::Path::new(&dest), &dirs)
 }
 
 #[tauri::command]
-pub fn collab_task_setup(repo: String, branch: String, scope: String) -> Result<workset::SetupReport, String> {
+pub fn collab_task_setup(
+    repo: String,
+    branch: String,
+    scope: String,
+) -> Result<workset::SetupReport, String> {
     workset::task_setup(std::path::Path::new(&repo), &branch, &scope)
 }
 
@@ -55,7 +63,11 @@ pub fn collab_scope_status(repo: String, scope: String) -> Result<workset::Scope
 
 /// 把 outbox 积压消息补传到主机(断线缓存的发送端,连上/重连后调)。
 #[tauri::command]
-pub fn collab_outbox_flush(dir: String, baseUrl: String, token: String) -> Result<workset::FlushReport, String> {
+pub fn collab_outbox_flush(
+    dir: String,
+    baseUrl: String,
+    token: String,
+) -> Result<workset::FlushReport, String> {
     workset::flush_outbox(std::path::Path::new(&dir), &baseUrl, &token)
 }
 
@@ -118,4 +130,127 @@ pub fn collab_tunnel_status() -> serde_json::Value {
     }
     #[cfg(not(feature = "collab-net"))]
     serde_json::json!({"running": false, "unavailable": "本构建未启用 collab-net"})
+}
+
+// ── 云机中继网关:桌面主机挂牌(真·中继完整形态) ──
+
+#[cfg(feature = "collab-net")]
+fn gateway_cfg_path() -> Option<std::path::PathBuf> {
+    directories::UserDirs::new().map(|u| u.home_dir().join("Polaris/data/gateway.json"))
+}
+
+/// 挂牌到云机网关:本机主机 NodeId → 云机注册 → 云机 NodeId 加白名单 → 确保隧道在跑 → 存自启。
+/// 成功后手机把「主机地址」填成返回的 shareUrl(https://cloud/h/<hostId>),任何网络、零安装可达。
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn collab_gateway_attach(
+    cloudBase: String,
+    token: String,
+    hostName: Option<String>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "collab-net")]
+    {
+        let base = cloudBase.trim().trim_end_matches('/').to_string();
+        if base.is_empty() {
+            return Err("云机地址为空".into());
+        }
+        let host_nid = super::tunnel::host_node_id()?;
+        // 网关经 iroh 连进来的落点 = 本机主机隧道,确保它在跑。
+        if !super::tunnel::is_running() {
+            super::tunnel::start_host_blocking_thread();
+        }
+        let name = hostName
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "桌面主机".into());
+        let resp = ureq::post(&format!("{base}/api/gw/register"))
+            .set("Authorization", &format!("Bearer {}", token.trim()))
+            .timeout(std::time::Duration::from_secs(30))
+            .send_json(serde_json::json!({"hostNodeId": host_nid, "hostName": name}))
+            .map_err(|e| format!("注册到云机失败: {e}"))?;
+        let v: serde_json::Value = resp
+            .into_json()
+            .map_err(|e| format!("解析注册响应失败: {e}"))?;
+        let gw_nid = v
+            .get("gatewayNodeId")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if gw_nid.is_empty() {
+            return Err("云机未返回 gatewayNodeId".into());
+        }
+        // 云机 NodeId 加设备白名单(host_listen 校验连入方 NodeId);幂等,已在则跳过。
+        if !super::identity::is_node_allowed(&gw_nid) {
+            super::identity::add_device(0, "云机网关", &gw_nid)?;
+        }
+        // 存配置供开机自启重挂(云机重启后注册表清空,需桌面重挂)。
+        if let Some(p) = gateway_cfg_path() {
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(
+                &p,
+                serde_json::json!({"cloudBase": base, "token": token.trim(), "hostName": name})
+                    .to_string(),
+            );
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "hostId": host_nid,
+            "gatewayNodeId": gw_nid,
+            "shareUrl": format!("{base}/h/{host_nid}"),
+        }))
+    }
+    #[cfg(not(feature = "collab-net"))]
+    {
+        let _ = (cloudBase, token, hostName);
+        Err("本构建未启用 collab-net(iroh) 功能".into())
+    }
+}
+
+/// 断开挂牌:删本地自启配置(云机侧注册随其重启自然清)。
+#[tauri::command]
+pub fn collab_gateway_detach() -> Result<(), String> {
+    #[cfg(feature = "collab-net")]
+    {
+        if let Some(p) = gateway_cfg_path() {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(())
+    }
+    #[cfg(not(feature = "collab-net"))]
+    Err("本构建未启用 collab-net 功能".into())
+}
+
+/// 开机自启:上次挂过牌就重新向云机注册(云机重启后注册表清空需桌面重挂)。desktop setup 调。
+#[cfg(feature = "collab-net")]
+pub fn gateway_auto_reattach() {
+    let Some(p) = gateway_cfg_path() else { return };
+    let Ok(txt) = std::fs::read_to_string(&p) else {
+        return;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return;
+    };
+    let base = v
+        .get("cloudBase")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let token = v
+        .get("token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name = v
+        .get("hostName")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    if base.is_empty() || token.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || match collab_gateway_attach(base, token, name) {
+        Ok(_) => println!("[gateway] 开机自动重挂云机成功"),
+        Err(e) => eprintln!("[gateway] 开机自动重挂失败: {e}"),
+    });
 }

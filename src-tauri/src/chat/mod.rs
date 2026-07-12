@@ -13,23 +13,25 @@
 
 pub mod artifacts;
 pub mod attach;
+// 内核→引擎桥(kb/fable/expert 依赖倒置端口, 由外壳启动时经 wiring 注入实现)
+pub mod bridges;
 pub mod pipeline;
 pub mod prompt;
 pub mod types;
 
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use std::process::Command;
 #[cfg(feature = "desktop")]
 use tauri::AppHandle;
-#[cfg(not(feature = "desktop"))]
-use crate::host::AppHandle;
 
 // 原 chat.rs 的公有面原样再导出: lib.rs 的 generate_handler! 与
 // server/feishu/project 等外部引用的 `crate::chat::xxx` 路径全部零改动。
+pub(crate) use artifacts::artifacts_dir;
 pub use artifacts::{
     artifact_list, artifact_open_external, artifact_read, artifact_reveal, artifact_search,
     artifact_write, ArtifactEntry, ArtifactPayload, ArtifactSearchHit, ARTIFACT_MARKER_PREFIX,
 };
-pub(crate) use artifacts::artifacts_dir;
 pub use attach::{chat_attach_files, chat_attach_image, AttachedFile};
 pub use pipeline::{chat_build_manifest, chat_cancel, chat_send};
 pub use types::{ChatSendArgs, ChatStreamEvent, PermissionMode};
@@ -42,17 +44,19 @@ pub(crate) use artifacts::{
     __cmd__artifact_reveal, __cmd__artifact_search, __cmd__artifact_write,
 };
 #[cfg(feature = "desktop")]
-pub(crate) use attach::{__cmd__chat_attach_files, __cmd__chat_attach_image};
-#[cfg(feature = "desktop")]
-pub(crate) use pipeline::{__cmd__chat_build_manifest, __cmd__chat_cancel, __cmd__chat_send};
-#[cfg(feature = "desktop")]
 pub(crate) use artifacts::{
     __tauri_command_name_artifact_list, __tauri_command_name_artifact_open_external,
     __tauri_command_name_artifact_read, __tauri_command_name_artifact_reveal,
     __tauri_command_name_artifact_search, __tauri_command_name_artifact_write,
 };
 #[cfg(feature = "desktop")]
-pub(crate) use attach::{__tauri_command_name_chat_attach_files, __tauri_command_name_chat_attach_image};
+pub(crate) use attach::{__cmd__chat_attach_files, __cmd__chat_attach_image};
+#[cfg(feature = "desktop")]
+pub(crate) use attach::{
+    __tauri_command_name_chat_attach_files, __tauri_command_name_chat_attach_image,
+};
+#[cfg(feature = "desktop")]
+pub(crate) use pipeline::{__cmd__chat_build_manifest, __cmd__chat_cancel, __cmd__chat_send};
 #[cfg(feature = "desktop")]
 pub(crate) use pipeline::{
     __tauri_command_name_chat_build_manifest, __tauri_command_name_chat_cancel,
@@ -80,11 +84,17 @@ pub fn open_url(url: String) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg(u).spawn().map_err(|e| e.to_string())?;
+        Command::new("open")
+            .arg(u)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        Command::new("xdg-open").arg(u).spawn().map_err(|e| e.to_string())?;
+        Command::new("xdg-open")
+            .arg(u)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

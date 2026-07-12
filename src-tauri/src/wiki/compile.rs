@@ -1,6 +1,7 @@
 //! 构建知识网 kb_compile + headless claude 只读管线 + JSON 提取 —— 自原 kb.rs 纯移动, 逻辑零改动。
+//! (Phase 0 已归位 wiki 域; 共享作用域仍取自 kb 门面, 与原 `use super::*` 同一语义。)
 
-use super::*;
+use crate::kb::*;
 
 // ───────────────────────── 构建知识网 (摄入即编译 Ingest=Compile) ─────────────────────────
 //
@@ -149,7 +150,12 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
     let run_id_thread = run_id.clone();
     std::thread::spawn(move || {
         let _kb_task = _kb_task; // 持锁直到本线程结束(Drop 释放)
-        emit_compile(&app, &run_id_thread, "phase", Some("启动 wiki 维护者…".into()));
+        emit_compile(
+            &app,
+            &run_id_thread,
+            "phase",
+            Some("启动 wiki 维护者…".into()),
+        );
 
         // prompt 经 stdin 喂给 claude (而非命令行参数): 大 prompt 不会撞 Windows 命令行
         // 长度上限, 也不会因 prompt 以 `-` 开头被当成 flag —— 实测 argv 路径在某些 shell 下
@@ -206,7 +212,10 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
         if let Some(se) = child.stderr.take() {
             let buf = stderr_buf.clone();
             std::thread::spawn(move || {
-                for line in BufReader::new(se).lines().map_while(std::result::Result::ok) {
+                for line in BufReader::new(se)
+                    .lines()
+                    .map_while(std::result::Result::ok)
+                {
                     if !line.trim().is_empty() {
                         buf.lock().push_str(&line);
                         buf.lock().push('\n');
@@ -218,8 +227,16 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
         // stdout: 解析 stream-json, 把工具调用 / 写页面 / 文本翻成进度
         let mut pages: Vec<String> = Vec::new();
         if let Some(so) = child.stdout.take() {
-            emit_compile(&app, &run_id_thread, "phase", Some("读取资料、抽取实体与概念…".into()));
-            for line in BufReader::new(so).lines().map_while(std::result::Result::ok) {
+            emit_compile(
+                &app,
+                &run_id_thread,
+                "phase",
+                Some("读取资料、抽取实体与概念…".into()),
+            );
+            for line in BufReader::new(so)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -265,7 +282,8 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
                                     .and_then(|x| x.as_str())
                                 {
                                     let norm = fp.replace('\\', "/");
-                                    let short = norm.rsplit('/').next().unwrap_or(&norm).to_string();
+                                    let short =
+                                        norm.rsplit('/').next().unwrap_or(&norm).to_string();
                                     if !pages.contains(&norm) {
                                         pages.push(norm);
                                     }
@@ -284,7 +302,12 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
                             if let Some(t) = block.get("text").and_then(|x| x.as_str()) {
                                 let t = t.trim();
                                 if !t.is_empty() {
-                                    emit_compile(&app, &run_id_thread, "delta", Some(t.to_string()));
+                                    emit_compile(
+                                        &app,
+                                        &run_id_thread,
+                                        "delta",
+                                        Some(t.to_string()),
+                                    );
                                 }
                             }
                         }
@@ -320,7 +343,11 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
             );
         }
         let msg = if ok {
-            format!("编译完成: 新建/更新 {} 个页面, 知识库共 {} 篇", pages.len(), n)
+            format!(
+                "编译完成: 新建/更新 {} 个页面, 知识库共 {} 篇",
+                pages.len(),
+                n
+            )
         } else {
             "编译中断 (见上方原因), 已刷新索引".into()
         };
@@ -401,7 +428,10 @@ pub(crate) fn run_claude_readonly_inner<F: FnMut(&str, &str)>(
     if let Some(se) = child.stderr.take() {
         let buf = stderr_buf.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(se).lines().map_while(std::result::Result::ok) {
+            for line in BufReader::new(se)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
                 if !line.trim().is_empty() {
                     buf.lock().push_str(&line);
                     buf.lock().push('\n');
@@ -434,7 +464,10 @@ pub(crate) fn run_claude_readonly_inner<F: FnMut(&str, &str)>(
     let mut collected = String::new();
     let mut result_err: Option<String> = None;
     if let Some(so) = stdout {
-        for line in BufReader::new(so).lines().map_while(std::result::Result::ok) {
+        for line in BufReader::new(so)
+            .lines()
+            .map_while(std::result::Result::ok)
+        {
             if line.trim().is_empty() {
                 continue;
             }
@@ -497,7 +530,11 @@ pub(crate) fn run_claude_readonly_inner<F: FnMut(&str, &str)>(
         let se = stderr_buf.lock().clone();
         return Err(format!(
             "claude 异常退出{}",
-            if se.is_empty() { String::new() } else { format!(": {se}") }
+            if se.is_empty() {
+                String::new()
+            } else {
+                format!(": {se}")
+            }
         ));
     }
     Ok(collected)

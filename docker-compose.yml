@@ -1,10 +1,10 @@
 # Polaris 服务器一键上云。用法：
 #   cp .env.server.example .env   # 填 token/key
-#   docker compose --profile relay up -d     # 纯中继:polaris-web(账号/团队) + iroh-relay
+#   docker compose up -d                     # 生产主路径:polaris-web，由 HTTPS 反代接入
 #
 # ── 服务角色 ──
 # · polaris-web  账号/邀请票据/白名单/审计 + Web 面板(8080) + 中继协调   [常驻]
-# · relay        iroh-relay 中继:打洞协调 + 密文兜底转发(443)          [--profile relay]
+# · relay        iroh-relay 实验组件（当前客户端流程尚未接通）          [--profile relay]
 # · gitea        无头 Gitea:git 仓库存储                               [--profile gitea, 默认不起]
 #
 # ⚠ Gitea 只在「这台机也要当权威仓库存储」时才需要(整栈上云)。
@@ -19,13 +19,16 @@ services:
     build: .
     container_name: polaris-web
     restart: unless-stopped
+    # 安全默认：只给本机 TLS 反代访问，不把带 owner 能力的明文 HTTP 直接暴露公网。
+    # 仅在可信内网且明确接受明文风险时，才在 .env 设置 POLARIS_BIND_IP=0.0.0.0。
     ports:
-      - "8080:8080"
+      - "${POLARIS_BIND_IP:-127.0.0.1}:8080:8080"
     environment:
       - POLARIS_AUTH_TOKEN=${POLARIS_AUTH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
+      - POLARIS_REPO_ROOT=${POLARIS_REPO_ROOT:-/home/polaris/Polaris/repos}
       # 协作:/git/* 反代与 Gitea REST 指向 gitea 容器(仅在 --profile gitea 启用时用到;
       # 纯中继下 gitea 不起,polaris-web 只在有人真正用 git 功能时才惰性访问,不硬依赖)
       - POLARIS_GITEA_HOST=gitea
@@ -48,7 +51,7 @@ services:
         limits:
           memory: ${POLARIS_MEM_LIMIT:-1600m}
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/ready"]
       interval: 30s
       timeout: 5s
       start_period: 20s

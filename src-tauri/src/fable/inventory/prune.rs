@@ -1,8 +1,24 @@
 /// 扫描时跳过的目录名(系统/缓存/版本仓;@eaDir、#recycle 是群晖特产)。
 const SKIP_DIRS: &[&str] = &[
-    ".git", ".svn", "node_modules", "target", ".fable", ".history", ".quarantine", "__pycache__",
-    ".venv", "venv", "$RECYCLE.BIN", "System Volume Information", ".Trash", ".Trashes",
-    "@eaDir", "#recycle", "#snapshot", ".DocumentRevisions-V100", ".Spotlight-V100",
+    ".git",
+    ".svn",
+    "node_modules",
+    "target",
+    ".fable",
+    ".history",
+    ".quarantine",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "$RECYCLE.BIN",
+    "System Volume Information",
+    ".Trash",
+    ".Trashes",
+    "@eaDir",
+    "#recycle",
+    "#snapshot",
+    ".DocumentRevisions-V100",
+    ".Spotlight-V100",
 ];
 
 fn skip_dir(name: &str) -> bool {
@@ -18,13 +34,37 @@ fn skip_dir(name: &str) -> bool {
 /// 这些操作系统/缓存/依赖目录用户数据从不放、且体量巨大 → 扫文件夹和盘点时都整棵跳过,
 /// 避免把 Windows、Program Files 卷进文件库。在 [`skip_dir`] 基础上再加一层系统目录黑名单。
 const SCAN_EXTRA_SKIP: &[&str] = &[
-    "windows", "program files", "program files (x86)", "programdata", "perflogs", "msocache",
-    "$recycle.bin", "system volume information", "recovery", "appdata", "$windows.~bs",
-    "$windows.~ws", "intel", "amd", "nvidia", "site-packages", "anaconda3", "miniconda3",
-    "library", "applications", "boot", "proc", "sys", "dev",
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "perflogs",
+    "msocache",
+    "$recycle.bin",
+    "system volume information",
+    "recovery",
+    "appdata",
+    "$windows.~bs",
+    "$windows.~ws",
+    "intel",
+    "amd",
+    "nvidia",
+    "site-packages",
+    "anaconda3",
+    "miniconda3",
+    "library",
+    "applications",
+    "boot",
+    "proc",
+    "sys",
+    "dev",
     // macOS 根级系统目录(整盘扫 `/` 时才剪):/System 密封系统卷、/private(var/tmp/etc)、
     // /cores 崩溃转储、/Network、/automount —— 全是系统态,扫进去既极慢又毫无用户文档。
-    "system", "private", "cores", "network", "automount",
+    "system",
+    "private",
+    "cores",
+    "network",
+    "automount",
 ];
 
 /// macOS「包/库目录」——以扩展名结尾、在 Finder 里显示成**单个文件**、内部却塞着成千上万份
@@ -35,9 +75,20 @@ const SCAN_EXTRA_SKIP: &[&str] = &[
 /// 一定是 mac 包,跳了无害。这是 macOS 盘点慢的头号来源。
 pub(crate) fn is_macos_package_dir(name: &str) -> bool {
     const PKG_EXT: &[&str] = &[
-        ".app", ".framework", ".bundle", ".appex", ".dsym", ".xcarchive", ".xcassets",
-        ".xcodeproj", ".photoslibrary", ".fcpbundle", ".imovielibrary", ".tvlibrary",
-        ".aplibrary", ".musiclibrary",
+        ".app",
+        ".framework",
+        ".bundle",
+        ".appex",
+        ".dsym",
+        ".xcarchive",
+        ".xcassets",
+        ".xcodeproj",
+        ".photoslibrary",
+        ".fcpbundle",
+        ".imovielibrary",
+        ".tvlibrary",
+        ".aplibrary",
+        ".musiclibrary",
     ];
     let low = name.to_ascii_lowercase();
     PKG_EXT.iter().any(|e| low.ends_with(e))
@@ -97,8 +148,10 @@ pub(crate) fn is_remote_root(path: &str) -> bool {
         use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
         use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE;
         let drive = format!("{}:\\", b[0] as char); // GetDriveType 要盘符根
-        let wide: Vec<u16> =
-            std::ffi::OsStr::new(&drive).encode_wide().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = std::ffi::OsStr::new(&drive)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
         // SAFETY: wide 是 NUL 结尾的合法宽字符串。
         return unsafe { GetDriveTypeW(wide.as_ptr()) == DRIVE_REMOTE };
     }

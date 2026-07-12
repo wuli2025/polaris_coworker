@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::runtime::procs::no_window;
-use super::types::*;
 use super::probe::*;
+use super::types::*;
+use crate::runtime::procs::no_window;
 
 /// 人类可读字节数。
 fn human_bytes(n: u64) -> String {
@@ -72,7 +72,10 @@ pub fn env_uv_cache_info() -> UvCacheInfo {
     let (bytes, dir_str) = match &dir {
         Some(d) => {
             let pb = PathBuf::from(d);
-            (if pb.exists() { dir_size(&pb) } else { 0 }, Some(to_fwd(&pb)))
+            (
+                if pb.exists() { dir_size(&pb) } else { 0 },
+                Some(to_fwd(&pb)),
+            )
         }
         None => (0, None),
     };

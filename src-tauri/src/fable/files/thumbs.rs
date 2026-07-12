@@ -3,8 +3,9 @@ use super::*;
 // ───────────────────────── 缩略图 / 首帧 ─────────────────────────
 
 pub(crate) const IMG_DECODE: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp"];
-pub(crate) const VIDEO_EXTS: &[&str] =
-    &["mp4", "mkv", "mov", "avi", "wmv", "flv", "webm", "m4v", "mpg", "mpeg"];
+pub(crate) const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mkv", "mov", "avi", "wmv", "flv", "webm", "m4v", "mpg", "mpeg",
+];
 
 pub(crate) fn ext_of(path: &str) -> String {
     Path::new(path)
@@ -16,7 +17,10 @@ pub(crate) fn ext_of(path: &str) -> String {
 pub(crate) fn jpeg_data_url(rgb: &image::DynamicImage) -> Result<String, String> {
     let mut buf = Vec::new();
     image::DynamicImage::ImageRgb8(rgb.to_rgb8())
-        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+        .write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Jpeg,
+        )
         .map_err(|e| format!("缩略图编码失败: {e}"))?;
     Ok(format!("data:image/jpeg;base64,{}", b64(&buf)))
 }
@@ -39,7 +43,12 @@ pub fn thumb(abspath: String, max: u32) -> Result<Option<String>, String> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let key = hash_key(&[&abspath, &mtime.to_string(), &meta.len().to_string(), &max.to_string()]);
+    let key = hash_key(&[
+        &abspath,
+        &mtime.to_string(),
+        &meta.len().to_string(),
+        &max.to_string(),
+    ]);
     let cache = thumbs_dir().map(|d| d.join(format!("{key}.jpg")));
     if let Some(c) = &cache {
         if let Ok(bytes) = std::fs::read(c) {
@@ -63,7 +72,10 @@ pub fn thumb(abspath: String, max: u32) -> Result<Option<String>, String> {
         }
         let mut buf = Vec::new();
         if image::DynamicImage::ImageRgb8(img.to_rgb8())
-            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut buf),
+                image::ImageFormat::Jpeg,
+            )
             .is_ok()
         {
             let _ = std::fs::write(c, &buf);
@@ -79,7 +91,10 @@ pub fn thumb(abspath: String, max: u32) -> Result<Option<String>, String> {
 /// 逐图调用(常跑在多核缩略图线程上)—— 一个挂死的 ffmpeg 进程就能拖死整个 grid 加载、表现为
 /// 「文件中心卡死」。复用 [`crate::forge::run_with_timeout`]:超 15s 即杀进程返回,绝不永久阻塞。
 pub(crate) fn video_frame(p: &Path, max: u32) -> Option<image::DynamicImage> {
-    let tmp = std::env::temp_dir().join(format!("polaris-vf-{}.jpg", hash_key(&[&p.to_string_lossy()])));
+    let tmp = std::env::temp_dir().join(format!(
+        "polaris-vf-{}.jpg",
+        hash_key(&[&p.to_string_lossy()])
+    ));
     let mut cmd = std::process::Command::new("ffmpeg");
     cmd.args([
         "-y",

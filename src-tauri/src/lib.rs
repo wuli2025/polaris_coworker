@@ -2,29 +2,35 @@
 pub mod accounts;
 pub mod chat;
 // 多人协作:账号/会话/设备白名单/任务卡/合并闸门(桌面主机与 Docker server 共用)。
-pub mod collab;
 pub mod claude_md;
+pub mod collab;
 pub mod conv;
 pub mod convert;
 pub mod doctor;
-pub mod forge;
-pub mod integrations;
+pub mod expert;
 pub mod fable;
-// Figma 往返桥：REST 拉回节点树 + 图片/SVG 内嵌（去程走 html.to.design 插件）
-pub mod figma_bridge;
+pub mod forge;
 pub mod infer;
+pub mod integrations;
 pub mod kb;
 pub mod palette;
 pub mod persona;
-pub mod expert;
-pub mod echo;
 pub mod project;
 pub mod provider;
 pub mod runtime;
-pub mod scan;
-pub mod sense;
 pub mod skills;
 pub mod voice;
+// llmwiki 知识网构建域(分仓规划 v2 第 12 仓雏形): 构建管线原 kb/compile.rs 归位于此。
+pub mod wiki;
+
+// ── Phase 0 文件归位的 crate 根别名(分仓规划 v2)──
+// echo/sense/scan 归 fable(懂你+检索板块)、figma_bridge 归 forge(设计成品板块);
+// 别名让 `crate::echo` 等全部旧路径(含 generate_handler! 的 __cmd__ 宏解析)零改动,
+// 抽仓时删别名、调用方一次性切新路径。
+pub use fable::{echo, scan, sense};
+pub use forge::figma_bridge;
+// 外壳拼装点: 把引擎实现注入内核桥(chat::bridges), 桌面 setup 与 server serve 共用。
+pub mod wiring;
 // 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。
 #[cfg(feature = "desktop")]
 pub mod updater;
@@ -38,26 +44,32 @@ pub mod host;
 #[cfg(feature = "server")]
 pub mod server;
 
-#[cfg(feature = "desktop")]
+// ── 桌面外壳入口(run + 适配器):`not(test)` 门控 ──
+// 单测二进制永远不会跑 Tauri 事件循环, 却会因编入 run() 把 tauri-plugin-dialog→rfd
+// 的静态导入 TaskDialogIndirect(comctl32 **v6** 专有, 需 manifest 激活上下文)带进
+// test exe —— 而 tauri_build 只给 app bin 嵌 manifest, test exe 没有 → 测试进程
+// 加载即 STATUS_ENTRYPOINT_NOT_FOUND, 一个测试都起不来(2026-07-12 Windows 实测)。
+// 从 test 构建里整体剔除 run(), 锚点确定性消失; 真实 app bin(cfg(test)=false)不受影响。
+#[cfg(all(feature = "desktop", not(test)))]
 use polaris_core::KbLocator;
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(test)))]
 use std::sync::Arc;
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(test)))]
 use tauri::Manager;
 
 /// host 适配器：把板块② `kb` 的 `kb_root()` 适配成 core 的 [`KbLocator`] 契约，
 /// 在启动时注入给板块⑤ `polaris-sandbox`，从而打破 `sandbox → kb` 的直接依赖。
 /// （架构重构 Phase 1：依赖反转的落地点）
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(test)))]
 struct HostKbLocator;
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(test)))]
 impl KbLocator for HostKbLocator {
     fn kb_root(&self) -> std::path::PathBuf {
         std::path::PathBuf::from(kb::kb_root())
     }
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(test)))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -79,7 +91,10 @@ pub fn run() {
                 let log_path = std::env::temp_dir().join("polaris-panics.log");
                 // 滚动: 7×24 一年只 append 会无限膨胀 → >5MiB 轮转成 .1(覆盖旧 .1)。
                 // Windows 上 rename 目标存在会失败, 先删旧 .1 再转。全程 best-effort。
-                if std::fs::metadata(&log_path).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false) {
+                if std::fs::metadata(&log_path)
+                    .map(|m| m.len() > 5 * 1024 * 1024)
+                    .unwrap_or(false)
+                {
                     let bak = std::env::temp_dir().join("polaris-panics.log.1");
                     let _ = std::fs::remove_file(&bak);
                     let _ = std::fs::rename(&log_path, &bak);
@@ -100,6 +115,8 @@ pub fn run() {
             }));
             let h = app.handle();
             kb::init(h).map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            // 内核桥注入(kb/fable/expert → chat): 须在任何 chat_send 可执行之前。
+            wiring::wire_engine_bridges();
             // 注入 KbLocator 给 sandbox 板块 (须在 kb::init 之后, 命令执行之前)
             app.manage(Arc::new(HostKbLocator) as Arc<dyn KbLocator>);
             polaris_sandbox::init()
@@ -144,6 +161,9 @@ pub fn run() {
             fable::init();
             // 协作主机自启:上次点过「设为主机」就静默续上(不阻塞启动)。
             collab::hosting::auto_start_if_enabled(h.clone());
+            // 云机网关自启重挂:上次挂过牌就重新向云机注册(云机重启后注册表清空需重挂)。
+            #[cfg(feature = "collab-net")]
+            collab::commands::gateway_auto_reattach();
             // 开发实例窗口标题带 (Dev+版本): 与已安装正式版(同为 polaris-app.exe,
             // 还可能是改牌分发)一眼区分, 测试时不点混窗口。仅 debug 构建, 发版不受影响。
             #[cfg(debug_assertions)]
@@ -169,6 +189,9 @@ pub fn run() {
             collab::commands::collab_device_node_id,
             collab::commands::collab_tunnel_connect,
             collab::commands::collab_tunnel_status,
+            // 云机中继网关:桌面主机挂牌/断开(真·中继完整形态)
+            collab::commands::collab_gateway_attach,
+            collab::commands::collab_gateway_detach,
             // 多人协作:一键把本机变成协作主机(内嵌 axum 协作路由)
             collab::hosting::collab_host_start,
             collab::hosting::collab_host_status,
@@ -439,8 +462,8 @@ pub fn run() {
                 // 退出瞬间可能还有最近半秒的消息只在内存里 —— 这里补一刀(不脏则零开销)。
                 conv::flush();
                 integrations::feishu::shutdown_on_exit(); // 回收飞书 node 桥,防其 autoReconnect 空转成孤儿烧 CPU
-                // 释放全局键盘热键监听:置 ENABLED=false,退出时不再处理热键事件
-                //(rdev::listen 无法干净中止是已知限制,置闸 + 进程退出即可接受的清理)。
+                                                          // 释放全局键盘热键监听:置 ENABLED=false,退出时不再处理热键事件
+                                                          //(rdev::listen 无法干净中止是已知限制,置闸 + 进程退出即可接受的清理)。
                 #[cfg(feature = "voice-live")]
                 voice::live::stop();
             }

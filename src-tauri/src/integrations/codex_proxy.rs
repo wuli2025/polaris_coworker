@@ -524,7 +524,10 @@ fn build_tools(req: &Value) -> Vec<Value> {
 /// 从上游 Responses 流里解析出的规范化事件
 enum Norm {
     TextDelta(String),
-    ToolStart { id: String, name: String },
+    ToolStart {
+        id: String,
+        name: String,
+    },
     ToolArgs(String),
     ToolStop,
     Done {
@@ -567,7 +570,8 @@ fn drive_upstream<R: Read>(resp_reader: R, mut emit: impl FnMut(Norm)) {
             }
             "response.output_item.added" => {
                 let item = v.get("item");
-                if item.and_then(|i| i.get("type")).and_then(|x| x.as_str()) == Some("function_call")
+                if item.and_then(|i| i.get("type")).and_then(|x| x.as_str())
+                    == Some("function_call")
                 {
                     let item = item.unwrap();
                     let id = item
@@ -576,7 +580,11 @@ fn drive_upstream<R: Read>(resp_reader: R, mut emit: impl FnMut(Norm)) {
                         .or_else(|| item.get("id").and_then(|x| x.as_str()))
                         .unwrap_or("")
                         .to_string();
-                    let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     saw_tool = true;
                     in_tool = true;
                     tool_args_streamed = false;
@@ -599,7 +607,9 @@ fn drive_upstream<R: Read>(resp_reader: R, mut emit: impl FnMut(Norm)) {
             }
             "response.output_item.done" => {
                 if in_tool
-                    && v.get("item").and_then(|i| i.get("type")).and_then(|x| x.as_str())
+                    && v.get("item")
+                        .and_then(|i| i.get("type"))
+                        .and_then(|x| x.as_str())
                         == Some("function_call")
                 {
                     in_tool = false;
@@ -673,70 +683,118 @@ fn stream_translate(client: &mut TcpStream, resp: ureq::Response) {
     drive_upstream(resp.into_reader(), |ev| match ev {
         Norm::TextDelta(t) => {
             if tool_open {
-                let _ = write_event(client, "content_block_stop", &json!({ "type": "content_block_stop", "index": index }));
+                let _ = write_event(
+                    client,
+                    "content_block_stop",
+                    &json!({ "type": "content_block_stop", "index": index }),
+                );
                 tool_open = false;
             }
             if !text_open {
                 index += 1;
-                let _ = write_event(client, "content_block_start", &json!({
-                    "type": "content_block_start", "index": index,
-                    "content_block": { "type": "text", "text": "" }
-                }));
+                let _ = write_event(
+                    client,
+                    "content_block_start",
+                    &json!({
+                        "type": "content_block_start", "index": index,
+                        "content_block": { "type": "text", "text": "" }
+                    }),
+                );
                 text_open = true;
             }
-            let _ = write_event(client, "content_block_delta", &json!({
-                "type": "content_block_delta", "index": index,
-                "delta": { "type": "text_delta", "text": t }
-            }));
+            let _ = write_event(
+                client,
+                "content_block_delta",
+                &json!({
+                    "type": "content_block_delta", "index": index,
+                    "delta": { "type": "text_delta", "text": t }
+                }),
+            );
         }
         Norm::ToolStart { id, name } => {
             if text_open {
-                let _ = write_event(client, "content_block_stop", &json!({ "type": "content_block_stop", "index": index }));
+                let _ = write_event(
+                    client,
+                    "content_block_stop",
+                    &json!({ "type": "content_block_stop", "index": index }),
+                );
                 text_open = false;
             }
             index += 1;
             tool_open = true;
-            let _ = write_event(client, "content_block_start", &json!({
-                "type": "content_block_start", "index": index,
-                "content_block": { "type": "tool_use", "id": id, "name": name, "input": {} }
-            }));
+            let _ = write_event(
+                client,
+                "content_block_start",
+                &json!({
+                    "type": "content_block_start", "index": index,
+                    "content_block": { "type": "tool_use", "id": id, "name": name, "input": {} }
+                }),
+            );
         }
         Norm::ToolArgs(a) => {
             if tool_open {
-                let _ = write_event(client, "content_block_delta", &json!({
-                    "type": "content_block_delta", "index": index,
-                    "delta": { "type": "input_json_delta", "partial_json": a }
-                }));
+                let _ = write_event(
+                    client,
+                    "content_block_delta",
+                    &json!({
+                        "type": "content_block_delta", "index": index,
+                        "delta": { "type": "input_json_delta", "partial_json": a }
+                    }),
+                );
             }
         }
         Norm::ToolStop => {
             if tool_open {
-                let _ = write_event(client, "content_block_stop", &json!({ "type": "content_block_stop", "index": index }));
+                let _ = write_event(
+                    client,
+                    "content_block_stop",
+                    &json!({ "type": "content_block_stop", "index": index }),
+                );
                 tool_open = false;
             }
         }
-        Norm::Done { stop, input_tokens, output_tokens } => {
+        Norm::Done {
+            stop,
+            input_tokens,
+            output_tokens,
+        } => {
             if text_open {
-                let _ = write_event(client, "content_block_stop", &json!({ "type": "content_block_stop", "index": index }));
+                let _ = write_event(
+                    client,
+                    "content_block_stop",
+                    &json!({ "type": "content_block_stop", "index": index }),
+                );
                 text_open = false;
             }
             if tool_open {
-                let _ = write_event(client, "content_block_stop", &json!({ "type": "content_block_stop", "index": index }));
+                let _ = write_event(
+                    client,
+                    "content_block_stop",
+                    &json!({ "type": "content_block_stop", "index": index }),
+                );
                 tool_open = false;
             }
-            let _ = write_event(client, "message_delta", &json!({
-                "type": "message_delta",
-                "delta": { "stop_reason": stop, "stop_sequence": Value::Null },
-                "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens }
-            }));
+            let _ = write_event(
+                client,
+                "message_delta",
+                &json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": stop, "stop_sequence": Value::Null },
+                    "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens }
+                }),
+            );
             let _ = write_event(client, "message_stop", &json!({ "type": "message_stop" }));
             done_sent = true;
         }
         Norm::Failed(msg) => {
             set_error(msg.clone());
-            let _ = write_event(client, "error", &json!({
-                "type": "error", "error": { "type": "api_error", "message": msg }
-            }));
+            let _ = write_event(
+                client,
+                "error",
+                &json!({
+                    "type": "error", "error": { "type": "api_error", "message": msg }
+                }),
+            );
             done_sent = true;
         }
     });
@@ -744,16 +802,28 @@ fn stream_translate(client: &mut TcpStream, resp: ureq::Response) {
     if !done_sent {
         // 上游中途断流: 优雅收尾, 别让 claude 一直挂着
         if text_open {
-            let _ = write_event(client, "content_block_stop", &json!({ "type": "content_block_stop", "index": index }));
+            let _ = write_event(
+                client,
+                "content_block_stop",
+                &json!({ "type": "content_block_stop", "index": index }),
+            );
         }
         if tool_open {
-            let _ = write_event(client, "content_block_stop", &json!({ "type": "content_block_stop", "index": index }));
+            let _ = write_event(
+                client,
+                "content_block_stop",
+                &json!({ "type": "content_block_stop", "index": index }),
+            );
         }
-        let _ = write_event(client, "message_delta", &json!({
-            "type": "message_delta",
-            "delta": { "stop_reason": "end_turn", "stop_sequence": Value::Null },
-            "usage": { "input_tokens": 0, "output_tokens": 0 }
-        }));
+        let _ = write_event(
+            client,
+            "message_delta",
+            &json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn", "stop_sequence": Value::Null },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }),
+        );
         let _ = write_event(client, "message_stop", &json!({ "type": "message_stop" }));
     }
     let _ = client.flush();
@@ -789,7 +859,11 @@ fn buffer_translate(client: &mut TcpStream, resp: ureq::Response) {
                 blocks.push(json!({ "type": "tool_use", "id": id, "name": name, "input": input }));
             }
         }
-        Norm::Done { stop, input_tokens: it, output_tokens: ot } => {
+        Norm::Done {
+            stop,
+            input_tokens: it,
+            output_tokens: ot,
+        } => {
             stop_reason = stop;
             input_tokens = it;
             output_tokens = ot;
@@ -834,14 +908,26 @@ fn load_auth() -> Result<Auth, String> {
     let tokens = v
         .get("tokens")
         .ok_or_else(|| "auth.json 缺少 tokens, 请重新授权".to_string())?;
-    let access = tokens.get("access_token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let access = tokens
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     if access.is_empty() {
         return Err("ChatGPT 授权无效(缺 access_token), 请重新授权".into());
     }
     let mut auth = Auth {
         access_token: access,
-        refresh_token: tokens.get("refresh_token").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        account_id: tokens.get("account_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        refresh_token: tokens
+            .get("refresh_token")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        account_id: tokens
+            .get("account_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
     };
     // access_token 将过期则主动刷新(失败不致命: 还可能在上游 401 时再刷一次)
     if token_expiring(&auth.access_token) {
@@ -889,8 +975,14 @@ fn refresh_auth(auth: &Auth) -> Result<Auth, String> {
             ("scope", "openid profile email"),
         ])
         .map_err(|e| format!("刷新 ChatGPT token 失败: {}", short_err(e)))?;
-    let v: Value = resp.into_json().map_err(|e| format!("解析刷新响应失败: {e}"))?;
-    let access = v.get("access_token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let v: Value = resp
+        .into_json()
+        .map_err(|e| format!("解析刷新响应失败: {e}"))?;
+    let access = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     if access.is_empty() {
         return Err("刷新响应缺少 access_token".into());
     }
@@ -899,7 +991,11 @@ fn refresh_auth(auth: &Auth) -> Result<Auth, String> {
         .and_then(|x| x.as_str())
         .map(String::from)
         .unwrap_or_else(|| auth.refresh_token.clone());
-    let id_token = v.get("id_token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let id_token = v
+        .get("id_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let new = Auth {
         access_token: access,
         refresh_token: refresh,

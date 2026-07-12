@@ -102,8 +102,7 @@ pub fn sandbox_status() -> SandboxStatus {
         notes.push("Docker CLI 未检测到。请先安装 Docker Desktop (Windows)。".into());
     } else if !docker_running {
         notes.push(
-            "Docker daemon 未运行。请启动 Docker Desktop, 然后回到本页点击 \"刷新状态\"。"
-                .into(),
+            "Docker daemon 未运行。请启动 Docker Desktop, 然后回到本页点击 \"刷新状态\"。".into(),
         );
     } else if !image_built {
         notes.push(format!(

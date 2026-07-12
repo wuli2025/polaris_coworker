@@ -54,19 +54,28 @@ pub struct FolderScan {
 /// 盘点可选的全部根:知识库根 + NAS 挂载点(默认勾)+ 本机盘符/桌面/外置卷(默认不勾)。
 fn scan_root_candidates(explicit: Option<String>) -> Vec<ScanRootInfo> {
     // 显式指定一个根 → 只扫它(默认勾上)。
-    if let Some(r) = explicit.map(|r| r.trim().to_string()).filter(|r| !r.is_empty()) {
+    if let Some(r) = explicit
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+    {
         let label = Path::new(&r)
             .file_name()
             .map(super::decode_fs)
             .unwrap_or_else(|| r.clone());
-        return vec![ScanRootInfo { path: r, label, default_on: true }];
+        return vec![ScanRootInfo {
+            path: r,
+            label,
+            default_on: true,
+        }];
     }
     let mut out: Vec<ScanRootInfo> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let kb = crate::kb::kb_root();
     // App 数据根的友好名(下载/微信/QQ…),给下方贴标签用(inventory_roots 已含这些路径)。
-    let app_labels: std::collections::HashMap<String, String> =
-        app_data_roots().into_iter().map(|r| (r.path, r.label)).collect();
+    let app_labels: std::collections::HashMap<String, String> = app_data_roots()
+        .into_iter()
+        .map(|r| (r.path, r.label))
+        .collect();
     // 默认勾:知识库根 + NAS 挂载点 + App 数据下载目录(沿用盘点默认根集合)。
     for r in inventory_roots(None) {
         // 有界探测:NAS 挂载点掉线时 is_dir 会 stat 几十秒吊死选择器 → 超死线判不可达即跳过
@@ -84,7 +93,11 @@ fn scan_root_candidates(explicit: Option<String>) -> Vec<ScanRootInfo> {
                 .map(super::decode_fs)
                 .unwrap_or_else(|| r.clone())
         };
-        out.push(ScanRootInfo { path: r, label, default_on: true });
+        out.push(ScanRootInfo {
+            path: r,
+            label,
+            default_on: true,
+        });
     }
     // 本机盘符 / 桌面 / 外置卷 / 挂载点(复用全盘资源归集的跨平台根)。
     // default_on 直接沿用 scan_roots 的判断(现在「一个不落」——所有真实存在的盘符/卷默认都勾),
@@ -96,7 +109,11 @@ fn scan_root_candidates(explicit: Option<String>) -> Vec<ScanRootInfo> {
         {
             continue;
         }
-        out.push(ScanRootInfo { path: sr.path, label: sr.label, default_on: sr.default_on });
+        out.push(ScanRootInfo {
+            path: sr.path,
+            label: sr.label,
+            default_on: sr.default_on,
+        });
     }
     out
 }
@@ -104,7 +121,9 @@ fn scan_root_candidates(explicit: Option<String>) -> Vec<ScanRootInfo> {
 /// 列出某目录的直属子文件夹(只读一层目录项;每个子目录再读一层估直属文件数 + 是否可展开)。
 /// `root` = 所属盘点根(用于算 depth 并回填 FolderNode.root)。
 fn list_child_folders(dir: &Path, root: &str) -> Vec<FolderNode> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     // 只有正浏览「本机整盘根目录顶层」(如 C:\ 直属子目录)时才叠加 OS 目录黑名单,把 Windows、
     // Program Files 等藏起来;往里钻一层后(用户自己的文件夹)只剪永远跳的噪音,这样里面名叫
     // library/boot 的子目录照常显示、可选可盘 ——「文件夹里的都能归类进库」也要在选择器里看得见。
@@ -150,7 +169,11 @@ fn list_child_folders(dir: &Path, root: &str) -> Vec<FolderNode> {
             .file_name()
             .map(super::decode_fs)
             .unwrap_or_else(|| sub.to_string_lossy().into_owned());
-        let depth = sub.strip_prefix(root_path).map(|r| r.components().count()).unwrap_or(1).max(1);
+        let depth = sub
+            .strip_prefix(root_path)
+            .map(|r| r.components().count())
+            .unwrap_or(1)
+            .max(1);
         out.push(FolderNode {
             path: sub.to_string_lossy().into_owned(),
             parent: dir.to_string_lossy().into_owned(),
@@ -178,9 +201,10 @@ pub fn scan_folders(explicit: Option<String>) -> Result<FolderScan, String> {
         // 列子目录要 read_dir 挂载点,死 NAS 会吊死整个选择器 → 每根加死线(见 [`probe_secs`]),
         // 超时就跳过这个根(其它健康根照常展示),用户点「盘点」绝不转圈卡死。
         let rp = root.path.clone();
-        let children =
-            super::sched::with_deadline(probe_secs(), move || list_child_folders(Path::new(&rp), &rp))
-                .unwrap_or_default();
+        let children = super::sched::with_deadline(probe_secs(), move || {
+            list_child_folders(Path::new(&rp), &rp)
+        })
+        .unwrap_or_default();
         for node in children {
             folders.push(node);
             if folders.len() >= FOLDER_SCAN_CAP {
@@ -192,7 +216,11 @@ pub fn scan_folders(explicit: Option<String>) -> Result<FolderScan, String> {
             break;
         }
     }
-    Ok(FolderScan { roots, folders, truncated })
+    Ok(FolderScan {
+        roots,
+        folders,
+        truncated,
+    })
 }
 
 /// 盘点前先扫一眼文件夹结构(根 + 第一层)。
@@ -231,7 +259,9 @@ pub struct FolderSize {
 // 留在计数器里能读回来 —— 大目录至少给个「下限体积」,而不是一刀切归 0。
 fn folder_size_rec(dir: &Path, files: &AtomicU64, bytes: &AtomicU64, remote: bool) {
     use std::sync::atomic::Ordering::Relaxed;
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_symlink() {
@@ -269,15 +299,16 @@ fn disk_used_bytes(path: &str) -> Option<u64> {
     } else {
         return None;
     };
-    let wide: Vec<u16> =
-        std::ffi::OsStr::new(&root).encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = std::ffi::OsStr::new(&root)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let mut free_avail: u64 = 0;
     let mut total: u64 = 0;
     let mut total_free: u64 = 0;
     // SAFETY: wide 是 NUL 结尾的合法宽字符串;三个 out 指针均指向本栈上的有效 u64。
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_avail, &mut total, &mut total_free)
-    };
+    let ok =
+        unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_avail, &mut total, &mut total_free) };
     if ok == 0 || total == 0 {
         return None;
     }
@@ -304,7 +335,10 @@ pub fn fable_folder_size(path: String) -> Result<FolderSize, String> {
         if let Some(Some(used)) =
             super::sched::with_deadline(probe_secs(), move || disk_used_bytes(&pc))
         {
-            return Ok(FolderSize { files: 0, bytes: used });
+            return Ok(FolderSize {
+                files: 0,
+                bytes: used,
+            });
         }
         // 拿不到容量(盘掉线等)→ 落到下面的递归(同样带死线)。
     }
@@ -320,5 +354,8 @@ pub fn fable_folder_size(path: String) -> Result<FolderSize, String> {
             folder_size_rec(p, &fc, &bc, remote);
         }
     });
-    Ok(FolderSize { files: files.load(Relaxed), bytes: bytes.load(Relaxed) })
+    Ok(FolderSize {
+        files: files.load(Relaxed),
+        bytes: bytes.load(Relaxed),
+    })
 }

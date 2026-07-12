@@ -102,8 +102,8 @@ pub struct KbUploadResult {
 
 /// 视频扩展名 (小写)。注意不含 "ts" —— 那会误伤 TypeScript 源码 (TEXT_EXTS 按文本转)。
 pub(crate) const VIDEO_EXTS: &[&str] = &[
-    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "m2ts", "3gp",
-    "rmvb", "rm", "vob", "ogv",
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "m2ts", "3gp", "rmvb",
+    "rm", "vob", "ogv",
 ];
 
 #[derive(Serialize)]
@@ -298,7 +298,11 @@ impl IngestCache {
 /// - 可抽文本 → 写 `raw/<stem>.md`
 /// - 不可抽(图片/二进制) → 原样复制 `raw/<filename>`
 /// 返回写入的相对路径(正斜杠)。
-pub(crate) fn ingest_one(root: &Path, src: &Path, cache: &mut IngestCache) -> Result<String, String> {
+pub(crate) fn ingest_one(
+    root: &Path,
+    src: &Path,
+    cache: &mut IngestCache,
+) -> Result<String, String> {
     if !src.is_file() {
         return Err(format!("不是文件: {}", src.to_string_lossy()));
     }
@@ -331,7 +335,11 @@ pub(crate) fn ingest_one(root: &Path, src: &Path, cache: &mut IngestCache) -> Re
 }
 
 /// 实际的转换+落盘 (从 ingest_one 拆出, 便于缓存命中时整体跳过)。
-pub(crate) fn ingest_convert_write(root: &Path, src: &Path, raw_dir: &Path) -> Result<String, String> {
+pub(crate) fn ingest_convert_write(
+    root: &Path,
+    src: &Path,
+    raw_dir: &Path,
+) -> Result<String, String> {
     match convert::convert_to_markdown(src)? {
         Some(md) => {
             let stem = src

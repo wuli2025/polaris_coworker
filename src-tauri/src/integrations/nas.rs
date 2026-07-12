@@ -120,7 +120,11 @@ fn now_secs() -> i64 {
 
 /// host+share → 稳定 id(同目标只一条)。
 fn make_id(host: &str, share: &str) -> String {
-    let raw = format!("{}/{}", host.trim().to_lowercase(), share.trim().to_lowercase());
+    let raw = format!(
+        "{}/{}",
+        host.trim().to_lowercase(),
+        share.trim().to_lowercase()
+    );
     let id: String = raw
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -489,7 +493,10 @@ fn pick_drive(rec: &NasRecord) -> Result<char, String> {
 fn do_connect(rec: &NasRecord) -> Result<String, String> {
     let unc = unc_of(rec);
     let key = unc_key(&unc);
-    if let Some((letter, _)) = enum_remote_drives().into_iter().find(|(_, u)| unc_key(u) == key) {
+    if let Some((letter, _)) = enum_remote_drives()
+        .into_iter()
+        .find(|(_, u)| unc_key(u) == key)
+    {
         return Ok(format!("已经连上了:{letter}: → {unc}"));
     }
     let drive = pick_drive(rec)?;
@@ -512,7 +519,9 @@ fn do_connect(rec: &NasRecord) -> Result<String, String> {
     }
     let out = cmd.output().map_err(|e| format!("启动 net use 失败:{e}"))?;
     if out.status.success() {
-        Ok(format!("已连接:{drive}: → {unc}。现在点「盘点」就能扫到它了。"))
+        Ok(format!(
+            "已连接:{drive}: → {unc}。现在点「盘点」就能扫到它了。"
+        ))
     } else {
         let mut err = decode_console(&out.stderr);
         err.push_str(&decode_console(&out.stdout));
@@ -528,12 +537,17 @@ fn do_connect(rec: &NasRecord) -> Result<String, String> {
 #[cfg(windows)]
 fn do_disconnect(rec: &NasRecord) -> Result<String, String> {
     let key = unc_key(&unc_of(rec));
-    let Some((letter, _)) = enum_remote_drives().into_iter().find(|(_, u)| unc_key(u) == key)
+    let Some((letter, _)) = enum_remote_drives()
+        .into_iter()
+        .find(|(_, u)| unc_key(u) == key)
     else {
         return Ok("这个 NAS 当前没有映射,无需断开。".into());
     };
     let mut cmd = Command::new("net");
-    cmd.arg("use").arg(format!("{letter}:")).arg("/delete").arg("/y");
+    cmd.arg("use")
+        .arg(format!("{letter}:"))
+        .arg("/delete")
+        .arg("/y");
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -577,7 +591,11 @@ mod tests {
     #[test]
     fn id_is_stable_and_sanitized() {
         let a = make_id("100.78.103.101", "tx");
-        assert_eq!(a, make_id("  100.78.103.101 ", "TX"), "大小写/空白应规整成同一 id");
+        assert_eq!(
+            a,
+            make_id("  100.78.103.101 ", "TX"),
+            "大小写/空白应规整成同一 id"
+        );
         assert!(!a.contains('.') && !a.contains('/') && !a.is_empty());
     }
 
@@ -593,7 +611,10 @@ mod tests {
         let (h, s) = split_unc(&unc);
         assert_eq!((h.as_str(), s.as_str()), ("100.78.103.101", "tx"));
         // host-only(无共享)不应崩
-        let host_only = NasRecord { host: "nas".into(), ..Default::default() };
+        let host_only = NasRecord {
+            host: "nas".into(),
+            ..Default::default()
+        };
         assert_eq!(unc_of(&host_only), r"\\nas");
     }
 

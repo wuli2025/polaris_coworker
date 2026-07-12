@@ -18,10 +18,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "desktop")]
-use tauri::{AppHandle, Emitter};
 #[cfg(not(feature = "desktop"))]
 use crate::host::AppHandle;
+#[cfg(feature = "desktop")]
+use tauri::{AppHandle, Emitter};
 
 // ───────────────────────── 配置与状态 ─────────────────────────
 
@@ -131,7 +131,14 @@ struct DreamEvent {
 }
 
 fn emit_dream(app: &AppHandle, kind: &str, text: Option<String>, episodes: Option<usize>) {
-    let _ = app.emit("echo:dream", DreamEvent { kind: kind.into(), text, episodes });
+    let _ = app.emit(
+        "echo:dream",
+        DreamEvent {
+            kind: kind.into(),
+            text,
+            episodes,
+        },
+    );
 }
 
 // ───────────────────────── 命令 ─────────────────────────
@@ -251,7 +258,10 @@ fn write_briefing(day: &str, items: &[Suggestion]) {
 
 /// 今天未忽略的建议条数(给 EchoStatus 显示)。
 fn briefing_today_count() -> usize {
-    read_briefing(&local_day()).into_iter().filter(|s| !s.dismissed).count()
+    read_briefing(&local_day())
+        .into_iter()
+        .filter(|s| !s.dismissed)
+        .count()
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -346,7 +356,10 @@ pub fn echo_briefing_today() -> Vec<Suggestion> {
 }
 
 fn echo_briefing_today_sync() -> Vec<Suggestion> {
-    read_briefing(&local_day()).into_iter().filter(|s| !s.dismissed).collect()
+    read_briefing(&local_day())
+        .into_iter()
+        .filter(|s| !s.dismissed)
+        .collect()
 }
 
 /// 忽略一条建议(不再展示;幂等)。
@@ -441,7 +454,15 @@ fn finish_job(app: &AppHandle, result: Result<(usize, String), String>, advance_
                     cfg.last_dream_day = local_day();
                     cfg.last_dream_ms = now_ms();
                 }
-                cfg.log.insert(0, DreamLog { ts: now_ms(), day: local_day(), episodes: n, summary: summary.clone() });
+                cfg.log.insert(
+                    0,
+                    DreamLog {
+                        ts: now_ms(),
+                        day: local_day(),
+                        episodes: n,
+                        summary: summary.clone(),
+                    },
+                );
                 cfg.log.truncate(30);
             }
             persist_cfg();
@@ -485,7 +506,11 @@ fn dream(app: &AppHandle, manual: bool) -> Result<(usize, String), String> {
     // ① 沉淀取材:严格按「上次做梦以来」,避免把同一段对话反复蒸馏。
     let since = {
         let cfg = CFG.read();
-        if cfg.last_dream_ms > 0 { cfg.last_dream_ms } else { now_ms() - DAY }
+        if cfg.last_dream_ms > 0 {
+            cfg.last_dream_ms
+        } else {
+            now_ms() - DAY
+        }
     };
     let day_transcripts = crate::conv::transcripts_since(since, 8, 12_000);
     // ② 晨报取材:近一周新内容为主;**近期没东西就逐级往前回溯**(月→季→年→不限),
@@ -502,7 +527,11 @@ fn dream(app: &AppHandle, manual: bool) -> Result<(usize, String), String> {
     {
         return Ok((
             0,
-            if manual { "没有新对话/新资料可处理".into() } else { "今夜无梦(无新增)".into() },
+            if manual {
+                "没有新对话/新资料可处理".into()
+            } else {
+                "今夜无梦(无新增)".into()
+            },
         ));
     }
     // 沉淀对话为记忆(只用「上次以来」的新对话,防重复蒸馏)。
@@ -568,7 +597,11 @@ fn recent_additions(since_ms: i64, cap: usize) -> Vec<(String, String)> {
             if mtime <= since_ms {
                 continue;
             }
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let name = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
             let rel = p
                 .strip_prefix(&kb_root)
                 .map(|r| r.to_string_lossy().replace('\\', "/"))
@@ -615,7 +648,12 @@ fn distill_and_write(
     }
 
     let prompt = dream_directive(&local_day(), &existing_index, &convo_block);
-    emit_dream(app, "phase", Some(format!("蒸馏 {} 段对话…", transcripts.len())), None);
+    emit_dream(
+        app,
+        "phase",
+        Some(format!("蒸馏 {} 段对话…", transcripts.len())),
+        None,
+    );
 
     let collected = crate::kb::run_claude_readonly(&kb_root, &prompt, |kind, text| {
         if kind == "delta" {
@@ -623,8 +661,7 @@ fn distill_and_write(
         }
     })?;
 
-    let json = crate::kb::extract_balanced_json(&collected)
-        .ok_or("蒸馏输出里找不到 JSON 决策")?;
+    let json = crate::kb::extract_balanced_json(&collected).ok_or("蒸馏输出里找不到 JSON 决策")?;
     let decisions: Vec<DreamDecision> =
         serde_json::from_str(&json).map_err(|e| format!("决策 JSON 解析失败: {e}"))?;
 
@@ -635,7 +672,12 @@ fn distill_and_write(
             continue;
         }
         if !is_safe_memory_relpath(&d.file) {
-            emit_dream(app, "phase", Some(format!("跳过不安全路径: {}", d.file)), None);
+            emit_dream(
+                app,
+                "phase",
+                Some(format!("跳过不安全路径: {}", d.file)),
+                None,
+            );
             continue;
         }
         let dst = kb_root.join(d.file.replace('\\', "/"));
@@ -651,7 +693,12 @@ fn distill_and_write(
         }
         if fs::write(&dst, d.content.trim()).is_ok() {
             written += 1;
-            emit_dream(app, "phase", Some(format!("✦ {} {} — {}", d.action, d.file, d.reason)), None);
+            emit_dream(
+                app,
+                "phase",
+                Some(format!("✦ {} {} — {}", d.action, d.file, d.reason)),
+                None,
+            );
         }
     }
 
@@ -672,7 +719,11 @@ fn rebuild_index(mem_root: &Path) {
         "<!-- 由做梦管线自动维护;一行一条,正文按需 Read。 -->".into(),
         String::new(),
     ];
-    for entry in walkdir::WalkDir::new(mem_root).sort_by_file_name().into_iter().flatten() {
+    for entry in walkdir::WalkDir::new(mem_root)
+        .sort_by_file_name()
+        .into_iter()
+        .flatten()
+    {
         let p = entry.path();
         if !p.is_file()
             || p.extension().map(|x| x != "md").unwrap_or(true)
@@ -681,7 +732,10 @@ fn rebuild_index(mem_root: &Path) {
         {
             continue;
         }
-        let rel = p.strip_prefix(mem_root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        let rel = p
+            .strip_prefix(mem_root)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
         let body = fs::read_to_string(p).unwrap_or_default();
         // 取 frontmatter 之后第一行非空文本当摘要
         let mut in_fm = false;
@@ -778,22 +832,31 @@ fn kb_portrait() -> String {
     }
 
     let mut s = String::new();
-    s.push_str(
-        "## 知识库画像(全库观察 —— 先据此勾勒「主人是谁 / 在做什么 / 关注与擅长什么」)\n",
-    );
+    s.push_str("## 知识库画像(全库观察 —— 先据此勾勒「主人是谁 / 在做什么 / 关注与擅长什么」)\n");
     s.push_str(&format!(
         "- 四层家底:权威 wiki {} 篇 · 原始资料 {} 篇 · 成品 {} 篇 · 记忆 {} 条(共索引 {} 篇文档)\n",
         ov.wiki, ov.raw_md, ov.output, ov.memory, ov.total_docs
     ));
     if let Some(f) = files.as_ref() {
         s.push_str(&format!("- 盘点文件总量:{} 个\n", f.total_files));
-        let langs: Vec<String> =
-            f.by_lang.iter().take(8).map(|l| format!("{}({})", l.lang, l.count)).collect();
+        let langs: Vec<String> = f
+            .by_lang
+            .iter()
+            .take(8)
+            .map(|l| format!("{}({})", l.lang, l.count))
+            .collect();
         if !langs.is_empty() {
-            s.push_str(&format!("- 语言分布(看 ta 在用什么):{}\n", langs.join(" · ")));
+            s.push_str(&format!(
+                "- 语言分布(看 ta 在用什么):{}\n",
+                langs.join(" · ")
+            ));
         }
-        let kinds: Vec<String> =
-            f.by_kind.iter().take(6).map(|k| format!("{}({})", k.kind, k.count)).collect();
+        let kinds: Vec<String> = f
+            .by_kind
+            .iter()
+            .take(6)
+            .map(|k| format!("{}({})", k.kind, k.count))
+            .collect();
         if !kinds.is_empty() {
             s.push_str(&format!("- 类型分布:{}\n", kinds.join(" · ")));
         }
@@ -815,7 +878,10 @@ fn kb_portrait() -> String {
                 .collect();
         }
         if !topics.is_empty() {
-            s.push_str(&format!("- 主要主题(整库智能归类):{}\n", topics.join(" · ")));
+            s.push_str(&format!(
+                "- 主要主题(整库智能归类):{}\n",
+                topics.join(" · ")
+            ));
         }
     }
     s.push('\n');
@@ -830,7 +896,12 @@ fn kb_portrait() -> String {
 /// 返回 (近期新对话, 近期新资料, 搁置老项目, 取材窗口中文描述)。
 fn gather_briefing_material(
     now: i64,
-) -> (Vec<(String, String)>, Vec<(String, String)>, Vec<(String, String)>, String) {
+) -> (
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+    String,
+) {
     const DAY: i64 = 24 * 3600 * 1000;
     let stale = crate::conv::stale_unfinished_transcripts(now, 3, 4_000);
     // (回溯天数, 中文描述);0 天 = 不限,取全部历史。先盯最近两天(尤其昨天),空了才放宽。
@@ -870,7 +941,12 @@ fn generate_briefing(
     if kb_root.as_os_str().is_empty() || !kb_root.exists() {
         return Ok(0);
     }
-    emit_dream(app, "phase", Some("观察全库画像 → 据用户画像生成工程化建议…".into()), None);
+    emit_dream(
+        app,
+        "phase",
+        Some("观察全库画像 → 据用户画像生成工程化建议…".into()),
+        None,
+    );
 
     // 素材顺序刻意:**先全库画像(立人设)**,再近期新内容/老项目(给落点)。
     let mut material = String::new();
@@ -885,7 +961,9 @@ fn generate_briefing(
         material.push('\n');
     }
     if !transcripts.is_empty() {
-        material.push_str("## 近期新对话(节选,按时间从新到旧排列 —— 排在最前的就是最近一两天、尤其昨天的活动)\n");
+        material.push_str(
+            "## 近期新对话(节选,按时间从新到旧排列 —— 排在最前的就是最近一两天、尤其昨天的活动)\n",
+        );
         for (title, text) in transcripts {
             let snip: String = text.chars().take(1500).collect();
             material.push_str(&format!("\n### 对话「{title}」\n{snip}\n"));
@@ -893,7 +971,9 @@ fn generate_briefing(
         material.push('\n');
     }
     if !stale.is_empty() {
-        material.push_str("## 几个月前曾大量讨论、似乎没收尾的老项目(供回顾,是否重启/收尾由主人判断)\n");
+        material.push_str(
+            "## 几个月前曾大量讨论、似乎没收尾的老项目(供回顾,是否重启/收尾由主人判断)\n",
+        );
         for (title, text) in stale {
             let snip: String = text.chars().take(1200).collect();
             material.push_str(&format!("\n### 项目「{title}」\n{snip}\n"));
@@ -907,8 +987,7 @@ fn generate_briefing(
             emit_dream(app, "delta", Some(text.to_string()), None);
         }
     })?;
-    let json =
-        crate::kb::extract_balanced_json(&collected).ok_or("晨报输出里找不到 JSON 数组")?;
+    let json = crate::kb::extract_balanced_json(&collected).ok_or("晨报输出里找不到 JSON 数组")?;
     let raw: Vec<SuggestionIn> =
         serde_json::from_str(&json).map_err(|e| format!("建议 JSON 解析失败: {e}"))?;
 
@@ -935,7 +1014,12 @@ fn generate_briefing(
         .collect();
 
     write_briefing(&day, &items);
-    emit_dream(app, "phase", Some(format!("晨报:{} 条建议", items.len())), None);
+    emit_dream(
+        app,
+        "phase",
+        Some(format!("晨报:{} 条建议", items.len())),
+        None,
+    );
     Ok(items.len())
 }
 

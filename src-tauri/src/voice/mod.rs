@@ -33,10 +33,10 @@ use std::path::{Path, PathBuf};
 use pinyin::ToPinyin;
 
 // AppHandle:桌面 = tauri,Docker = host shim(与 sense.rs 同策略)。仅实时语音命令用。
-#[cfg(feature = "desktop")]
-use tauri::AppHandle;
 #[cfg(not(feature = "desktop"))]
 use crate::host::AppHandle;
+#[cfg(feature = "desktop")]
+use tauri::AppHandle;
 
 // ───────────────────────── 数据模型 ─────────────────────────
 
@@ -128,9 +128,26 @@ fn persist() {
 
 fn seed_lexicon() -> VoiceLexicon {
     let hotwords: Vec<String> = [
-        "Polaris", "北极星", "codex", "Claude", "forge", "fable", "Tauri", "Rust",
-        "sherpa-onnx", "SenseVoice", "Paraformer", "FunASR", "群晖", "Docker",
-        "Ollama", "通义千问", "MiniMax", "知识库", "感官坞", "检索枢纽",
+        "Polaris",
+        "北极星",
+        "codex",
+        "Claude",
+        "forge",
+        "fable",
+        "Tauri",
+        "Rust",
+        "sherpa-onnx",
+        "SenseVoice",
+        "Paraformer",
+        "FunASR",
+        "群晖",
+        "Docker",
+        "Ollama",
+        "通义千问",
+        "MiniMax",
+        "知识库",
+        "感官坞",
+        "检索枢纽",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -152,7 +169,11 @@ fn seed_lexicon() -> VoiceLexicon {
     for w in &hotwords {
         weights.insert(w.clone(), 1);
     }
-    VoiceLexicon { hotwords, corrections, weights }
+    VoiceLexicon {
+        hotwords,
+        corrections,
+        weights,
+    }
 }
 
 /// 启动时调用:读盘;首次(无文件)写入种子词表。
@@ -255,7 +276,11 @@ pub struct TranscribeResult {
 }
 
 /// 秒达档:corrections 精确替换 + 拼音模糊回填。纯本地,无网络。
-pub fn anti_pollute_lite(text: &str, lex: &VoiceLexicon, threshold: u32) -> (String, Vec<AntiChange>) {
+pub fn anti_pollute_lite(
+    text: &str,
+    lex: &VoiceLexicon,
+    threshold: u32,
+) -> (String, Vec<AntiChange>) {
     let mut changes: Vec<AntiChange> = Vec::new();
     let mut out = text.to_string();
 
@@ -337,7 +362,11 @@ pub fn anti_pollute_lite(text: &str, lex: &VoiceLexicon, threshold: u32) -> (Str
 pub fn anti_pollute(text: &str) -> AntiPolluteResult {
     let (tier, threshold, lex) = {
         let s = STORE.read();
-        (s.config.antipollute.clone(), s.config.pinyin_threshold, s.lexicon.clone())
+        (
+            s.config.antipollute.clone(),
+            s.config.pinyin_threshold,
+            s.lexicon.clone(),
+        )
     };
     match tier.as_str() {
         "off" => AntiPolluteResult {
@@ -371,9 +400,9 @@ pub fn anti_pollute(text: &str) -> AntiPolluteResult {
 // ───────────────────────── 词表自学(mine_terms)─────────────────────────
 
 const STOPWORDS: &[&str] = &[
-    "the", "and", "for", "you", "that", "this", "with", "are", "was", "but", "not",
-    "have", "has", "from", "they", "what", "your", "our", "can", "all", "out", "get",
-    "com", "www", "http", "https", "html", "json", "true", "false", "null",
+    "the", "and", "for", "you", "that", "this", "with", "are", "was", "but", "not", "have", "has",
+    "from", "they", "what", "your", "our", "can", "all", "out", "get", "com", "www", "http",
+    "https", "html", "json", "true", "false", "null",
 ];
 
 /// 从文本挖高频技术专名(ASCII 技术词为主,CJK 专名抽取待接 jieba/做梦阶段)。
@@ -547,7 +576,10 @@ pub fn voice_transcribe_file(path: String) -> Result<TranscribeResult, String> {
     #[cfg(not(feature = "voice-asr"))]
     {
         let _ = path;
-        Err("语音识别运行时未编译:用 `--features voice-asr` 构建即可启用本地 SenseVoice 识别".into())
+        Err(
+            "语音识别运行时未编译:用 `--features voice-asr` 构建即可启用本地 SenseVoice 识别"
+                .into(),
+        )
     }
 }
 
@@ -710,7 +742,10 @@ mod tests {
     #[test]
     fn syllable_lev_basic() {
         let a: Vec<String> = ["bei", "ji", "xin"].iter().map(|s| s.to_string()).collect();
-        let b: Vec<String> = ["bei", "ji", "xing"].iter().map(|s| s.to_string()).collect();
+        let b: Vec<String> = ["bei", "ji", "xing"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(syllable_lev(&a, &b), 1);
     }
 }

@@ -69,7 +69,9 @@ pub(crate) fn chat_complete(cfg: &ClusterModelCfg, prompt: &str) -> Result<Strin
         }));
     match resp {
         Ok(r) => {
-            let v: Value = r.into_json().map_err(|e| format!("归类模型响应解析失败: {e}"))?;
+            let v: Value = r
+                .into_json()
+                .map_err(|e| format!("归类模型响应解析失败: {e}"))?;
             v.get("choices")
                 .and_then(|c| c.get(0))
                 .and_then(|c| c.get("message"))
@@ -128,7 +130,10 @@ pub(crate) struct LlmGroup {
 }
 
 pub(crate) fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 pub(crate) fn emit_llm(app: &AppHandle, payload: Value) {
@@ -136,7 +141,10 @@ pub(crate) fn emit_llm(app: &AppHandle, payload: Value) {
 }
 
 /// 加载范围内文件(mtime 倒序,上限 LLM_FILE_CAP)给大模型归类。
-pub(crate) fn load_files_for_llm(conn: &rusqlite::Connection, filter: &str) -> Result<Vec<FileLite>, String> {
+pub(crate) fn load_files_for_llm(
+    conn: &rusqlite::Connection,
+    filter: &str,
+) -> Result<Vec<FileLite>, String> {
     let sql = format!(
         "SELECT f.id, f.relpath, f.name, f.kind FROM files f
          WHERE 1=1{filter} ORDER BY f.mtime DESC LIMIT {LLM_FILE_CAP}"
@@ -206,7 +214,10 @@ pub(crate) fn resolve_index(v: &Value, files: &[FileLite]) -> Option<usize> {
     None
 }
 
-pub(crate) fn cluster_llm_run(app: &AppHandle, root: Option<String>) -> Result<(usize, usize, String), String> {
+pub(crate) fn cluster_llm_run(
+    app: &AppHandle,
+    root: Option<String>,
+) -> Result<(usize, usize, String), String> {
     emit_llm(app, json!({ "kind": "phase", "text": "收集文件清单…" }));
     let conn = open_db()?;
     let ids = resolve_root_ids(&conn, &root);
@@ -235,7 +246,11 @@ pub(crate) fn cluster_llm_run(app: &AppHandle, root: Option<String>) -> Result<(
             json!({ "kind": "phase", "text": format!("用已连接的对话大模型给 {} 个文件归类…", files.len()) }),
         );
         let kb_root = PathBuf::from(crate::kb::kb_root());
-        let cwd = if kb_root.exists() { kb_root } else { std::env::temp_dir() };
+        let cwd = if kb_root.exists() {
+            kb_root
+        } else {
+            std::env::temp_dir()
+        };
         crate::kb::run_claude_readonly(&cwd, &prompt, |kind, _text| {
             if kind == "delta" {
                 emit_llm(app, json!({ "kind": "tick" })); // 心跳,不外泄正文
@@ -257,9 +272,21 @@ pub(crate) fn cluster_llm_run(app: &AppHandle, root: Option<String>) -> Result<(
     } else {
         let inlist: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
         let inlist = inlist.join(",");
-        conn.execute(&format!("DELETE FROM clusters WHERE root_id IN ({inlist})"), []).ok();
-        conn.execute(&format!("DELETE FROM cluster_edges WHERE root_id IN ({inlist})"), []).ok();
-        conn.execute(&format!("UPDATE files SET cluster_id=0 WHERE root_id IN ({inlist})"), []).ok();
+        conn.execute(
+            &format!("DELETE FROM clusters WHERE root_id IN ({inlist})"),
+            [],
+        )
+        .ok();
+        conn.execute(
+            &format!("DELETE FROM cluster_edges WHERE root_id IN ({inlist})"),
+            [],
+        )
+        .ok();
+        conn.execute(
+            &format!("UPDATE files SET cluster_id=0 WHERE root_id IN ({inlist})"),
+            [],
+        )
+        .ok();
     }
 
     let built_at = chrono::Local::now().timestamp_millis();
@@ -316,9 +343,11 @@ pub(crate) fn cluster_llm_run(app: &AppHandle, root: Option<String>) -> Result<(
         color_i += 1;
         let total: usize = children.iter().map(|(_, m)| m.len()).sum();
         let root_id: i64 = conn
-            .query_row("SELECT root_id FROM files WHERE id=?1", [files[children[0].1[0]].id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT root_id FROM files WHERE id=?1",
+                [files[children[0].1[0]].id],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
 
         // 顶层主题(父簇:不直接挂文件,size = 旗下文件总数)
@@ -332,7 +361,11 @@ pub(crate) fn cluster_llm_run(app: &AppHandle, root: Option<String>) -> Result<(
         // 子主题(叶簇:与父同色,挂文件)
         for (lab, m) in &children {
             let croot: i64 = conn
-                .query_row("SELECT root_id FROM files WHERE id=?1", [files[m[0]].id], |r| r.get(0))
+                .query_row(
+                    "SELECT root_id FROM files WHERE id=?1",
+                    [files[m[0]].id],
+                    |r| r.get(0),
+                )
                 .unwrap_or(root_id);
             conn.execute(
                 "INSERT INTO clusters(root_id,label,color,keywords,size,built_at,parent) VALUES(?1,?2,?3,'',?4,?5,?6)",
@@ -345,7 +378,8 @@ pub(crate) fn cluster_llm_run(app: &AppHandle, root: Option<String>) -> Result<(
                     .prepare_cached("UPDATE files SET cluster_id=?1 WHERE id=?2")
                     .map_err(|e| e.to_string())?;
                 for &i in m {
-                    stmt.execute(rusqlite::params![cid, files[i].id]).map_err(|e| e.to_string())?;
+                    stmt.execute(rusqlite::params![cid, files[i].id])
+                        .map_err(|e| e.to_string())?;
                 }
             }
             assigned += m.len();
@@ -408,8 +442,9 @@ pub(crate) fn collect_cluster_digests(
         format!(" WHERE root_id IN ({})", list.join(","))
     };
     let clusters: Vec<(i64, i64, String, String, i64)> = {
-        let sql =
-            format!("SELECT id, parent, label, keywords, size FROM clusters{cfilter} ORDER BY size DESC");
+        let sql = format!(
+            "SELECT id, parent, label, keywords, size FROM clusters{cfilter} ORDER BY size DESC"
+        );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -437,8 +472,11 @@ pub(crate) fn collect_cluster_digests(
     let mut digests = Vec::with_capacity(clusters.len());
     for (id, parent, label, keywords, size) in &clusters {
         let leaf_ids: Vec<i64> = children.get(id).cloned().unwrap_or_else(|| vec![*id]);
-        let inlist: String =
-            leaf_ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let inlist: String = leaf_ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "SELECT f.relpath, f.name, f.kind, t.title
              FROM files f LEFT JOIN titles t ON t.file_id=f.id
@@ -506,7 +544,11 @@ pub(crate) fn collect_cluster_digests(
 pub(crate) fn digest_directive(digests: &[ClusterDigest]) -> String {
     let mut body = String::new();
     for d in digests {
-        let role = if d.parent == 0 { "大主题" } else { "子主题" };
+        let role = if d.parent == 0 {
+            "大主题"
+        } else {
+            "子主题"
+        };
         body.push_str(&format!(
             "[id={}] {}(文件 {} 个,现名「{}」)\n",
             d.id, role, d.size, d.label
@@ -521,8 +563,12 @@ pub(crate) fn digest_directive(digests: &[ClusterDigest]) -> String {
             body.push_str(&format!("  代表文件: {}\n", d.samples.join("、")));
         }
         if !d.kinds.is_empty() {
-            let ks: Vec<String> =
-                d.kinds.iter().take(4).map(|(k, n)| format!("{}×{}", kind_cn(k), n)).collect();
+            let ks: Vec<String> = d
+                .kinds
+                .iter()
+                .take(4)
+                .map(|(k, n)| format!("{}×{}", kind_cn(k), n))
+                .collect();
             body.push_str(&format!("  类型: {}\n", ks.join(" ")));
         }
     }
@@ -621,10 +667,17 @@ pub(crate) fn apply_names_and_relations(
         let mut smap: HashMap<i64, i64> = HashMap::new();
         let mut parent_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT id, parent, size FROM clusters").map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare("SELECT id, parent, size FROM clusters")
+                .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })
                 .map_err(|e| e.to_string())?;
             for (id, parent, size) in rows.flatten() {
                 pmap.insert(id, parent);
@@ -648,13 +701,14 @@ pub(crate) fn apply_names_and_relations(
             }
             // 必须**同父**(同层、同主题旗下)才合并 —— 防把跨主题的叶簇乱并。
             let par = pmap.get(&g[0]).copied().unwrap_or(-1);
-            if !g.iter().all(|id| pmap.get(id).copied().unwrap_or(-2) == par) {
+            if !g
+                .iter()
+                .all(|id| pmap.get(id).copied().unwrap_or(-2) == par)
+            {
                 continue;
             }
             // survivor = 组内最大簇(size 最大;并列取最小 id,确定性)。
-            g.sort_by(|a, b| {
-                smap.get(b).cmp(&smap.get(a)).then(a.cmp(b))
-            });
+            g.sort_by(|a, b| smap.get(b).cmp(&smap.get(a)).then(a.cmp(b)));
             let survivor = g[0];
             for &loser in &g[1..] {
                 conn.execute(
@@ -690,7 +744,9 @@ pub(crate) fn apply_names_and_relations(
             .prepare_cached("UPDATE clusters SET label=?1, summary=?2 WHERE id=?3")
             .map_err(|e| e.to_string())?;
         for n in &parsed.names {
-            let Some(id0) = loose_i64(&n.id) else { continue };
+            let Some(id0) = loose_i64(&n.id) else {
+                continue;
+            };
             let id = remap.get(&id0).copied().unwrap_or(id0);
             if !work_valid.contains(&id) {
                 continue;
@@ -701,7 +757,8 @@ pub(crate) fn apply_names_and_relations(
             }
             let name: String = name.chars().take(24).collect();
             let summary: String = n.summary.trim().chars().take(60).collect();
-            up.execute(rusqlite::params![name, summary, id]).map_err(|e| e.to_string())?;
+            up.execute(rusqlite::params![name, summary, id])
+                .map_err(|e| e.to_string())?;
             renamed += 1;
         }
     }
@@ -711,7 +768,10 @@ pub(crate) fn apply_names_and_relations(
     } else {
         let inlist: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
         conn.execute(
-            &format!("DELETE FROM cluster_edges WHERE root_id IN ({})", inlist.join(",")),
+            &format!(
+                "DELETE FROM cluster_edges WHERE root_id IN ({})",
+                inlist.join(",")
+            ),
             [],
         )
         .ok();
@@ -730,12 +790,17 @@ pub(crate) fn apply_names_and_relations(
             // 关系端点也跟着合并重映射(被并簇 → survivor),再去重去自环。
             let a = remap.get(&a0).copied().unwrap_or(a0);
             let b = remap.get(&b0).copied().unwrap_or(b0);
-            if a == b || !work_valid.contains(&a) || !work_valid.contains(&b) || !seen.insert((a, b)) {
+            if a == b
+                || !work_valid.contains(&a)
+                || !work_valid.contains(&b)
+                || !seen.insert((a, b))
+            {
                 continue;
             }
             let label: String = r.label.trim().chars().take(12).collect();
             let rid = croot.get(&a).copied().unwrap_or(0);
-            ins.execute(rusqlite::params![rid, a, b, label, built_at]).map_err(|e| e.to_string())?;
+            ins.execute(rusqlite::params![rid, a, b, label, built_at])
+                .map_err(|e| e.to_string())?;
             edges += 1;
             if edges >= 200 {
                 break; // 关系边封顶,防爆图
@@ -764,7 +829,9 @@ pub(crate) fn cluster_rename_llm(
     // 簇 → 所属根(关系边 root_id 按 src 簇定,范围删除对得上)。
     let mut croot: HashMap<i64, i64> = HashMap::new();
     {
-        let mut stmt = conn.prepare("SELECT id, root_id FROM clusters").map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, root_id FROM clusters")
+            .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
             .map_err(|e| e.to_string())?;
@@ -786,7 +853,11 @@ pub(crate) fn cluster_rename_llm(
             json!({ "kind": "phase", "tier": tier, "text": format!("AI 正在读懂你的 {} 个主题、起亲切的名字…", digests.len()) }),
         );
         let kb_root = PathBuf::from(crate::kb::kb_root());
-        let cwd = if kb_root.exists() { kb_root } else { std::env::temp_dir() };
+        let cwd = if kb_root.exists() {
+            kb_root
+        } else {
+            std::env::temp_dir()
+        };
         crate::kb::run_claude_readonly(&cwd, &prompt, |kind, _t| {
             if kind == "delta" {
                 emit_cluster(app, json!({ "kind": "tick", "tier": tier }));
@@ -882,7 +953,11 @@ pub(crate) fn titles_llm_run(app: &AppHandle, root: Option<String>) -> Result<us
             json!({ "kind": "phase", "text": format!("用已连接的对话大模型给 {} 个文件起名…", files.len()) }),
         );
         let kb_root = PathBuf::from(crate::kb::kb_root());
-        let cwd = if kb_root.exists() { kb_root } else { std::env::temp_dir() };
+        let cwd = if kb_root.exists() {
+            kb_root
+        } else {
+            std::env::temp_dir()
+        };
         crate::kb::run_claude_readonly(&cwd, &prompt, |kind, _text| {
             if kind == "delta" {
                 emit_title(app, json!({ "kind": "tick" }));

@@ -1,7 +1,7 @@
 //! 对话附件(拖拽上传/剪贴板贴图)与附件类型识别。
 //! (从 chat.rs 纯移动拆出, 逻辑零变化)
 
-use crate::convert;
+use crate::{conv, convert};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -27,11 +27,24 @@ pub struct AttachedFile {
 /// 与「知识库上传」是两条不同的路径 —— 这里只把文件挂到当前对话,
 /// 前端发送时把这些绝对路径写进 prompt,claude 用 Read 工具按需读取。
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn chat_attach_files(
-    conversation_id: Option<String>,
-    paths: Vec<String>,
-) -> Vec<AttachedFile> {
+pub fn chat_attach_files(conversation_id: Option<String>, paths: Vec<String>) -> Vec<AttachedFile> {
     const MAX: usize = 50;
+    if let Some(cid) = conversation_id.as_deref() {
+        if let Err(e) = conv::ensure_conversation_writable(cid) {
+            return paths
+                .iter()
+                .take(MAX)
+                .map(|p| AttachedFile {
+                    name: file_name_of(Path::new(p)),
+                    path: String::new(),
+                    kind: "binary".into(),
+                    size: 0,
+                    ok: false,
+                    error: Some(e.clone()),
+                })
+                .collect();
+        }
+    }
     let dir = conversation_dir(conversation_id.as_deref()).join("uploads");
     let _ = std::fs::create_dir_all(&dir);
 
@@ -74,6 +87,9 @@ pub fn chat_attach_image(
     data_base64: String,
 ) -> Result<AttachedFile, String> {
     const MAX_BYTES: usize = 20 * 1024 * 1024;
+    if let Some(cid) = conversation_id.as_deref() {
+        conv::ensure_conversation_writable(cid)?;
+    }
     let bytes = b64_decode(&data_base64).ok_or("图片数据解析失败")?;
     if bytes.is_empty() {
         return Err("空图片".into());
@@ -88,7 +104,11 @@ pub fn chat_attach_image(
         .chars()
         .filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
         .collect();
-    let safe = if safe.trim().is_empty() { "pasted.png".to_string() } else { safe };
+    let safe = if safe.trim().is_empty() {
+        "pasted.png".to_string()
+    } else {
+        safe
+    };
     let dst = unique_upload_path(&dir, &safe);
     std::fs::write(&dst, &bytes).map_err(|e| e.to_string())?;
     Ok(AttachedFile {
@@ -152,8 +172,18 @@ fn push_attach(dir: &Path, src: &Path, out: &mut Vec<AttachedFile>) {
                 .to_lowercase();
             let convertible = matches!(
                 ext.as_str(),
-                "pdf" | "docx" | "doc" | "xlsx" | "xls" | "xlsm"
-                    | "xlsb" | "pptx" | "ppt" | "ods" | "odt" | "odp"
+                "pdf"
+                    | "docx"
+                    | "doc"
+                    | "xlsx"
+                    | "xls"
+                    | "xlsm"
+                    | "xlsb"
+                    | "pptx"
+                    | "ppt"
+                    | "ods"
+                    | "odt"
+                    | "odp"
             );
             if convertible {
                 match convert::convert_to_markdown(src) {

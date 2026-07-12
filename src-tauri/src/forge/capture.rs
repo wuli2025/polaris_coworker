@@ -68,10 +68,10 @@ pub struct CapturedFrame {
 /// 浏览器实例配置
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
-    pub headless: bool,             // 桌面/headless-shell → true;CloakBrowser 有头模式 → false
-    pub disable_sandbox: bool,      // Docker 必须 true
-    pub disable_dev_shm: bool,      // 兜底 shm_size 不足
-    pub disable_gpu: bool,          // 容器内无 GPU 驱动
+    pub headless: bool, // 桌面/headless-shell → true;CloakBrowser 有头模式 → false
+    pub disable_sandbox: bool, // Docker 必须 true
+    pub disable_dev_shm: bool, // 兜底 shm_size 不足
+    pub disable_gpu: bool, // 容器内无 GPU 驱动
     pub user_data_dir: Option<PathBuf>,
 }
 
@@ -79,7 +79,7 @@ impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
             headless: true,
-            disable_sandbox: cfg!(target_os = "linux"),  // Docker/linux 默认开
+            disable_sandbox: cfg!(target_os = "linux"), // Docker/linux 默认开
             disable_dev_shm: true,
             disable_gpu: cfg!(target_os = "linux"),
             user_data_dir: None,
@@ -93,13 +93,22 @@ pub fn find_browser() -> Option<PathBuf> {
         if let Ok(p) = std::env::var(env) {
             if !p.is_empty() {
                 let path = PathBuf::from(&p);
-                if path.exists() { return Some(path); }
+                if path.exists() {
+                    return Some(path);
+                }
             }
         }
     }
-    for name in &["chrome-headless-shell", "chromium", "chromium-browser", "chrome"] {
+    for name in &[
+        "chrome-headless-shell",
+        "chromium",
+        "chromium-browser",
+        "chrome",
+    ] {
         if let Ok(out) = std::process::Command::new(name).arg("--version").output() {
-            if out.status.success() { return Some(PathBuf::from(name)); }
+            if out.status.success() {
+                return Some(PathBuf::from(name));
+            }
         }
     }
     None
@@ -168,16 +177,24 @@ async fn capture_cli_single_frame(
         &format!("--virtual-time-budget=2000"),
     ]);
     cmd.arg(&file_base);
-    let out = cmd.output().map_err(|e| format!("chromium 启动失败: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("chromium 启动失败: {e}"))?;
     if !out.status.success() {
-        return Err(format!("chromium exit {}: {}",
+        return Err(format!(
+            "chromium exit {}: {}",
             out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).chars().take(400).collect::<String>()));
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(400)
+                .collect::<String>()
+        ));
     }
     let bytes = std::fs::read(out_png).map_err(|e| format!("读截图失败: {e}"))?;
     Ok(CapturedFrame {
         png_bytes: bytes,
-        width, height,
+        width,
+        height,
         tier: CaptureTier::CliSingleFrame,
         duration_ms: start.elapsed().as_millis() as u64,
     })
@@ -204,7 +221,13 @@ impl TargetPool {
     }
 
     /// 截一帧
-    pub async fn screenshot(&mut self, _url: &str, _w: u32, _h: u32, _out: &Path) -> Result<CapturedFrame, String> {
+    pub async fn screenshot(
+        &mut self,
+        _url: &str,
+        _w: u32,
+        _h: u32,
+        _out: &Path,
+    ) -> Result<CapturedFrame, String> {
         Err("TargetPool::screenshot P1.5 待实".into())
     }
 }

@@ -74,7 +74,11 @@ fn download_data_uri(url: &str, budget_left: &mut usize, deadline: Instant) -> O
         .ok()?;
     let mime = {
         let ct = resp.content_type();
-        if ct.is_empty() { "image/png".to_string() } else { ct.to_string() }
+        if ct.is_empty() {
+            "image/png".to_string()
+        } else {
+            ct.to_string()
+        }
     };
     let mut buf: Vec<u8> = Vec::new();
     resp.into_reader()
@@ -144,7 +148,10 @@ fn figma_export_svgs_sync(
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    let v = get_json(&format!("{API}/v1/images/{key}?ids={joined}&format=svg"), token)?;
+    let v = get_json(
+        &format!("{API}/v1/images/{key}?ids={joined}&format=svg"),
+        token,
+    )?;
     let mut out = HashMap::new();
     let mut budget = IMG_TOTAL_CAP;
     let deadline = Instant::now() + DL_DEADLINE;

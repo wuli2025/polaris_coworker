@@ -41,7 +41,8 @@ fn row_to_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
     })
 }
 
-const COLS: &str = "id,name,repo,lead_expert_id,charter_path,created_at,archived,team_id,shared_scope";
+const COLS: &str =
+    "id,name,repo,lead_expert_id,charter_path,created_at,archived,team_id,shared_scope";
 
 /// 设共享可见路径(CSV)。can_admin 校验在调用侧(http 层)。
 pub fn set_shared_scope(project_id: i64, shared_scope: &str, actor: &str) -> Result<(), String> {
@@ -51,11 +52,22 @@ pub fn set_shared_scope(project_id: i64, shared_scope: &str, actor: &str) -> Res
         params![shared_scope.trim(), project_id],
     )
     .map_err(|e| e.to_string())?;
-    db::audit(actor, "project.shared_scope", &project_id.to_string(), shared_scope.trim());
+    db::audit(
+        actor,
+        "project.shared_scope",
+        &project_id.to_string(),
+        shared_scope.trim(),
+    );
     Ok(())
 }
 
-pub fn create(name: &str, repo: &str, team_id: Option<i64>, owner_user_id: i64, actor: &str) -> Result<Project, String> {
+pub fn create(
+    name: &str,
+    repo: &str,
+    team_id: Option<i64>,
+    owner_user_id: i64,
+    actor: &str,
+) -> Result<Project, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("项目名不能为空".into());
@@ -78,8 +90,12 @@ pub fn create(name: &str, repo: &str, team_id: Option<i64>, owner_user_id: i64, 
 
 pub fn get(id: i64) -> Result<Project, String> {
     let conn = open_db()?;
-    conn.query_row(&format!("SELECT {COLS} FROM projects WHERE id=?1"), params![id], row_to_project)
-        .map_err(|_| format!("项目 #{id} 不存在"))
+    conn.query_row(
+        &format!("SELECT {COLS} FROM projects WHERE id=?1"),
+        params![id],
+        row_to_project,
+    )
+    .map_err(|_| format!("项目 #{id} 不存在"))
 }
 
 /// 列出某用户可见的项目(owner 角色看全部;普通用户=显式成员 ∪ 所在团队的项目)。
@@ -132,7 +148,12 @@ pub fn add_member(project_id: i64, user_id: i64, role: &str, actor: &str) -> Res
         params![project_id, user_id, role],
     )
     .map_err(|e| e.to_string())?;
-    db::audit(actor, "project.member.add", &format!("{project_id}/{user_id}"), role);
+    db::audit(
+        actor,
+        "project.member.add",
+        &format!("{project_id}/{user_id}"),
+        role,
+    );
     Ok(())
 }
 
@@ -143,7 +164,12 @@ pub fn remove_member(project_id: i64, user_id: i64, actor: &str) -> Result<(), S
         params![project_id, user_id],
     )
     .map_err(|e| e.to_string())?;
-    db::audit(actor, "project.member.remove", &format!("{project_id}/{user_id}"), "");
+    db::audit(
+        actor,
+        "project.member.remove",
+        &format!("{project_id}/{user_id}"),
+        "",
+    );
     Ok(())
 }
 
@@ -165,7 +191,13 @@ pub fn member_role(project_id: i64, user_id: i64) -> Option<String> {
         |r| r.get::<_, String>(0),
     )
     .ok()
-    .map(|team_role| if team_role == "owner" { "owner".into() } else { "collaborator".into() })
+    .map(|team_role| {
+        if team_role == "owner" {
+            "owner".into()
+        } else {
+            "collaborator".into()
+        }
+    })
 }
 
 /// 项目管理权(验收/放行/改设置):全局 owner、项目 owner、或所属团队 owner。
@@ -174,7 +206,12 @@ pub fn can_admin(project_id: i64, user_id: i64, global_owner: bool) -> bool {
 }
 
 /// 按用户名把人加进项目(GitHub 式)。返回 user_id。
-pub fn add_member_by_username(project_id: i64, username: &str, role: &str, actor: &str) -> Result<i64, String> {
+pub fn add_member_by_username(
+    project_id: i64,
+    username: &str,
+    role: &str,
+    actor: &str,
+) -> Result<i64, String> {
     let conn = open_db()?;
     let uid: i64 = conn
         .query_row(
@@ -205,7 +242,12 @@ pub fn members(project_id: i64) -> Result<Vec<Member>, String> {
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![project_id], |r| {
-            Ok(Member { user_id: r.get(0)?, username: r.get(1)?, display_name: r.get(2)?, role: r.get(3)? })
+            Ok(Member {
+                user_id: r.get(0)?,
+                username: r.get(1)?,
+                display_name: r.get(2)?,
+                role: r.get(3)?,
+            })
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
@@ -219,6 +261,11 @@ pub fn set_lead(project_id: i64, expert_id: Option<&str>, actor: &str) -> Result
         params![expert_id, project_id],
     )
     .map_err(|e| e.to_string())?;
-    db::audit(actor, "project.lead.set", &project_id.to_string(), expert_id.unwrap_or("(纯人工)"));
+    db::audit(
+        actor,
+        "project.lead.set",
+        &project_id.to_string(),
+        expert_id.unwrap_or("(纯人工)"),
+    );
     Ok(())
 }

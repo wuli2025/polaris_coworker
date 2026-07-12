@@ -69,7 +69,11 @@ pub fn first_hit_rank(top_paths: &[String], expect: &[String]) -> Option<usize> 
     if expect.is_empty() {
         return None;
     }
-    let exp: Vec<String> = expect.iter().map(|e| norm(e)).filter(|e| !e.is_empty()).collect();
+    let exp: Vec<String> = expect
+        .iter()
+        .map(|e| norm(e))
+        .filter(|e| !e.is_empty())
+        .collect();
     for (i, p) in top_paths.iter().enumerate() {
         let np = norm(p);
         if exp.iter().any(|e| np.contains(e.as_str())) {
@@ -88,7 +92,10 @@ pub fn aggregate(ranks: &[Option<usize>]) -> (f32, f32, f32) {
     }
     let n = ranks.len() as f32;
     let hit = ranks.iter().filter(|r| r.is_some()).count() as f32;
-    let mrr: f32 = ranks.iter().map(|r| r.map(|x| 1.0 / x as f32).unwrap_or(0.0)).sum();
+    let mrr: f32 = ranks
+        .iter()
+        .map(|r| r.map(|x| 1.0 / x as f32).unwrap_or(0.0))
+        .sum();
     let ndcg: f32 = ranks
         .iter()
         .map(|r| r.map(|x| 1.0 / ((x as f32 + 1.0).log2())).unwrap_or(0.0))
@@ -99,7 +106,10 @@ pub fn aggregate(ranks: &[Option<usize>]) -> (f32, f32, f32) {
 // ───────────────────────── 运行 ─────────────────────────
 
 fn eval_path(custom: Option<String>) -> Result<PathBuf, String> {
-    if let Some(c) = custom.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()) {
+    if let Some(c) = custom
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+    {
         return Ok(PathBuf::from(c));
     }
     super::db_path()

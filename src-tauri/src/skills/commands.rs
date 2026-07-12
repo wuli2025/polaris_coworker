@@ -126,10 +126,7 @@ fn install_web_video_presentation() -> Result<(), String> {
     let tmp = make_temp_dir()?;
     let repo = tmp.join("repo");
     let repo_s = repo.to_string_lossy();
-    let clone_res = run_cmd(
-        "git",
-        &["clone", "--depth", "1", WVP_REPO, repo_s.as_ref()],
-    );
+    let clone_res = run_cmd("git", &["clone", "--depth", "1", WVP_REPO, repo_s.as_ref()]);
     if let Err(e) = clone_res {
         let _ = fs::remove_dir_all(&tmp);
         return Err(format!("下载技能包失败（需要 git + 联网）：{}", e));
@@ -220,7 +217,10 @@ fn import_from_remote(src: &str) -> Result<Vec<String>, String> {
         let dest = tmp.join("repo");
         let dest_s = dest.to_string_lossy();
         // `--` 终止选项解析: 否则 src 以 `-` 开头(如 --upload-pack=…)会被 git 当 flag → 参数注入。
-        run_cmd("git", &["clone", "--depth", "1", "--", src, dest_s.as_ref()])?;
+        run_cmd(
+            "git",
+            &["clone", "--depth", "1", "--", src, dest_s.as_ref()],
+        )?;
         import_from_dir(&dest)
     };
 
@@ -293,7 +293,11 @@ fn import_one_md(md: &Path, default_source: &str) -> Result<String, String> {
             .and_then(|n| n.to_str())
             .filter(|s| !["unzipped", "repo", "skills", ""].contains(s))
             .map(|s| s.to_string())
-            .or_else(|| md.file_stem().and_then(|n| n.to_str()).map(|s| s.to_string()))
+            .or_else(|| {
+                md.file_stem()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
             .unwrap_or_else(|| "imported-skill".to_string());
         (base.clone(), base, String::new(), "user".to_string())
     };
@@ -363,4 +367,3 @@ pub fn delete_skill(id: String) -> Result<(), String> {
     }
     Err("技能不存在".into())
 }
-

@@ -32,7 +32,9 @@ pub fn fable_local_embed_status() -> Result<LocalEmbedStatus, String> {
             compiled: true,
             ready: crate::fable::embed_local::ready(),
             enabled: crate::fable::embed_local::enabled(),
-            dir: crate::fable::embed_local::cache_dir().to_string_lossy().into_owned(),
+            dir: crate::fable::embed_local::cache_dir()
+                .to_string_lossy()
+                .into_owned(),
         })
     }
     #[cfg(not(feature = "local-embed"))]
@@ -54,7 +56,10 @@ pub fn fable_local_embed_download(app: AppHandle) -> Result<(), String> {
     #[cfg(feature = "local-embed")]
     {
         if crate::fable::embed_local::ready() {
-            let _ = app.emit("fable:localembed", json!({ "kind": "done", "message": "模型已就位" }));
+            let _ = app.emit(
+                "fable:localembed",
+                json!({ "kind": "done", "message": "模型已就位" }),
+            );
             return Ok(());
         }
         std::thread::spawn(move || {

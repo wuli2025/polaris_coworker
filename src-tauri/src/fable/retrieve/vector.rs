@@ -189,7 +189,11 @@ pub(crate) fn vector_lane(query: &str, top_k: usize) -> Result<Vec<VecHit>, Stri
             .map_err(|e| e.to_string())?;
         let cells: Vec<(i64, Vec<u8>, i64)> = stmt
             .query_map(rusqlite::params![model, qv.len() as i64], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })
             .map_err(|e| e.to_string())?
             .flatten()
@@ -202,8 +206,11 @@ pub(crate) fn vector_lane(query: &str, top_k: usize) -> Result<Vec<VecHit>, Stri
             // 0(索引早于 n 回填修复、计数尚未刷新),`nonempty` 为空 → 退回「按汉明在全部 cell
             // 里选」的旧行为(召回安全),等一次 fable_index_repair 刷新 n 后自动启用密度感知。
             let nonempty: Vec<&(i64, Vec<u8>, i64)> = cells.iter().filter(|c| c.2 > 0).collect();
-            let pool: Vec<&(i64, Vec<u8>, i64)> =
-                if nonempty.is_empty() { cells.iter().collect() } else { nonempty };
+            let pool: Vec<&(i64, Vec<u8>, i64)> = if nonempty.is_empty() {
+                cells.iter().collect()
+            } else {
+                nonempty
+            };
             // nprobe ≈ √(有效 cell 数),夹在 [8,64]:扫约 nprobe/pool 比例的向量。
             let nprobe = ((pool.len() as f64).sqrt() as usize).clamp(8, 64);
             let mut scored: Vec<(u32, i64)> = pool
@@ -253,9 +260,7 @@ pub(crate) fn vector_lane(query: &str, top_k: usize) -> Result<Vec<VecHit>, Stri
                 scored.push((id, score));
             }
         }
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(want);
         // 步骤②:仅回读入选条的 seq/text/路径(JOIN 只跑 want 行),按 id 建 map 再按分数序拼装。
         if !scored.is_empty() {
@@ -330,9 +335,7 @@ pub(crate) fn vector_lane(query: &str, top_k: usize) -> Result<Vec<VecHit>, Stri
                 let id: i64 = row.get(0).map_err(|e| e.to_string())?;
                 cand.push((id, score));
                 if cand.len() > want {
-                    cand.sort_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     cand.truncate(want);
                     min_score = cand.last().map(|c| c.1).unwrap_or(f32::MIN);
                 }

@@ -70,7 +70,9 @@ fn codex_status_sync() -> Result<CodexStatus, String> {
     Ok(CodexStatus {
         installed,
         logged_in,
-        auth_path: auth_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        auth_path: auth_path
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
     })
 }
 
@@ -200,7 +202,8 @@ pub fn codex_start_login() -> Result<CodexDeviceLogin, String> {
                     &session,
                     Duration::from_secs(LOOPBACK_TIMEOUT_SECS),
                     |code| {
-                        let tokens = codex_exchange_code(code, &verifier, CODEX_LOOPBACK_REDIRECT_URI)?;
+                        let tokens =
+                            codex_exchange_code(code, &verifier, CODEX_LOOPBACK_REDIRECT_URI)?;
                         let refresh = tokens
                             .refresh_token
                             .clone()
@@ -270,7 +273,11 @@ pub fn codex_login_cancel() -> Result<(), String> {
 /// ② 轮询授权状态; 成功则换 token 并落盘 ~/.codex/auth.json
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexPollResult, String> {
-    let pending = || Ok(CodexPollResult { status: "pending".into() });
+    let pending = || {
+        Ok(CodexPollResult {
+            status: "pending".into(),
+        })
+    };
 
     let resp = match codex_agent()
         .post(CODEX_DEVICE_TOKEN_URL)
@@ -281,9 +288,7 @@ pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexP
         Ok(r) => r,
         // 403/404 = 用户尚未在浏览器完成授权, 继续轮询
         Err(ureq::Error::Status(403, _)) | Err(ureq::Error::Status(404, _)) => return pending(),
-        Err(ureq::Error::Status(410, _)) => {
-            return Err("设备码已过期, 请重新发起授权".into())
-        }
+        Err(ureq::Error::Status(410, _)) => return Err("设备码已过期, 请重新发起授权".into()),
         Err(e) => return Err(format!("轮询授权状态失败: {}", codex_http_err(e))),
     };
 
@@ -304,7 +309,9 @@ pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexP
     let account_id = codex_account_id(&tokens);
 
     codex_write_auth_json(&tokens, &refresh_token, account_id.as_deref())?;
-    Ok(CodexPollResult { status: "ok".into() })
+    Ok(CodexPollResult {
+        status: "ok".into(),
+    })
 }
 
 /// 用 authorization_code + code_verifier 换 token (redirect_uri 须与授权时一致)
@@ -421,8 +428,8 @@ fn codex_write_auth_json(
         "last_refresh": codex_rfc3339_now(),
     });
 
-    let content = serde_json::to_string_pretty(&auth)
-        .map_err(|e| format!("序列化 auth.json 失败: {e}"))?;
+    let content =
+        serde_json::to_string_pretty(&auth).map_err(|e| format!("序列化 auth.json 失败: {e}"))?;
     // auth.json 含 refresh/access/id token:① 原子写防写一半撕裂 → 外部 codex CLI 读到坏 JSON;
     // ② Unix 下收紧到 0600,NAS/Docker 多用户主机上不让同机其他用户读走凭证。
     atomic_write(&path, &content).map_err(|e| format!("写入 ~/.codex/auth.json 失败: {e}"))?;
@@ -472,11 +479,17 @@ pub(crate) fn codex_open_browser(url: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg(url).spawn().map_err(|e| e.to_string())?;
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        Command::new("xdg-open").arg(url).spawn().map_err(|e| e.to_string())?;
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

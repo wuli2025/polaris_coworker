@@ -49,7 +49,10 @@ fn git(repo: &Path, args: &[&str]) -> Result<(String, i32), String> {
         .args(args)
         .output()
         .map_err(|e| format!("git 启动失败: {e}"))?;
-    Ok((String::from_utf8_lossy(&out.stdout).into_owned(), out.status.code().unwrap_or(-1)))
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.code().unwrap_or(-1),
+    ))
 }
 
 /// 只接受 0 退出码的便捷封装(错误里带 stderr,便于回溯)。
@@ -73,9 +76,17 @@ fn git_ok(repo: &Path, args: &[&str]) -> Result<String, String> {
 
 /// 校验引用存在(rev-parse --verify),防手滑传错分支名。
 fn ensure_ref(repo: &Path, r: &str) -> Result<(), String> {
-    git_ok(repo, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")])
-        .map(|_| ())
-        .map_err(|_| format!("引用不存在: {r}"))
+    git_ok(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{r}^{{commit}}"),
+        ],
+    )
+    .map(|_| ())
+    .map_err(|_| format!("引用不存在: {r}"))
 }
 
 /// 合并试算(无副作用):`git merge-tree --write-tree --name-only base branch`。
@@ -83,7 +94,10 @@ fn ensure_ref(repo: &Path, r: &str) -> Result<(), String> {
 pub fn merge_trial(repo: &Path, base: &str, branch: &str) -> Result<MergeTrial, String> {
     ensure_ref(repo, base)?;
     ensure_ref(repo, branch)?;
-    let (out, code) = git(repo, &["merge-tree", "--write-tree", "--name-only", base, branch])?;
+    let (out, code) = git(
+        repo,
+        &["merge-tree", "--write-tree", "--name-only", base, branch],
+    )?;
     if code != 0 && code != 1 {
         return Err(format!("merge-tree 失败(code={code})"));
     }
@@ -102,7 +116,11 @@ pub fn merge_trial(repo: &Path, base: &str, branch: &str) -> Result<MergeTrial, 
             conflict_files.push(l.to_string());
         }
     }
-    Ok(MergeTrial { clean: code == 0, tree_oid, conflict_files })
+    Ok(MergeTrial {
+        clean: code == 0,
+        tree_oid,
+        conflict_files,
+    })
 }
 
 /// 落后/领先计数:`git rev-list --left-right --count base...branch` → (behind, ahead)。
@@ -110,21 +128,46 @@ pub fn merge_trial(repo: &Path, base: &str, branch: &str) -> Result<MergeTrial, 
 pub fn behind_count(repo: &Path, base: &str, branch: &str) -> Result<(u64, u64), String> {
     ensure_ref(repo, base)?;
     ensure_ref(repo, branch)?;
-    let out = git_ok(repo, &["rev-list", "--left-right", "--count", &format!("{base}...{branch}")])?;
+    let out = git_ok(
+        repo,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{base}...{branch}"),
+        ],
+    )?;
     let mut it = out.split_whitespace();
-    let behind = it.next().and_then(|s| s.parse().ok()).ok_or("rev-list 输出解析失败")?;
-    let ahead = it.next().and_then(|s| s.parse().ok()).ok_or("rev-list 输出解析失败")?;
+    let behind = it
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or("rev-list 输出解析失败")?;
+    let ahead = it
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or("rev-list 输出解析失败")?;
     Ok((behind, ahead))
 }
 
 /// scope 冲突预警:base 上自 merge-base 以来改动的文件,与任务卡 scope 前缀(逗号分隔)取交集。
 /// 命中说明别人已经动了这张卡圈定的地盘,合并前该先 rebase/沟通。
-pub fn scope_overlap(repo: &Path, base: &str, branch: &str, scope: &str) -> Result<Vec<String>, String> {
+pub fn scope_overlap(
+    repo: &Path,
+    base: &str,
+    branch: &str,
+    scope: &str,
+) -> Result<Vec<String>, String> {
     ensure_ref(repo, base)?;
     ensure_ref(repo, branch)?;
-    let mb = git_ok(repo, &["merge-base", base, branch])?.trim().to_string();
+    let mb = git_ok(repo, &["merge-base", base, branch])?
+        .trim()
+        .to_string();
     let out = git_ok(repo, &["diff", "--name-only", &mb, base])?;
-    let prefixes: Vec<&str> = scope.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let prefixes: Vec<&str> = scope
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     let hits = out
         .lines()
         .map(|l| l.trim())
@@ -138,15 +181,27 @@ pub fn scope_overlap(repo: &Path, base: &str, branch: &str, scope: &str) -> Resu
 /// 用 `git merge-file -p --diff3` 产出带标记的合并体,再解析
 /// `<<<<<<<` / `|||||||` / `=======` / `>>>>>>>` 四段标记。
 /// 走 merge-file 而不抠 merge-tree 输出,是因为它对每个文件独立、行号可直接数,最稳妥。
-pub fn conflict_blocks(repo: &Path, base: &str, branch: &str, file: &str) -> Result<Vec<ConflictBlock>, String> {
+pub fn conflict_blocks(
+    repo: &Path,
+    base: &str,
+    branch: &str,
+    file: &str,
+) -> Result<Vec<ConflictBlock>, String> {
     parse_blocks(&merged_with_markers(repo, base, branch, file)?)
 }
 
 /// 单文件三方合并体(带 diff3 冲突标记)——conflict_blocks 与裁决落地共用同一份权威文本。
-fn merged_with_markers(repo: &Path, base: &str, branch: &str, file: &str) -> Result<String, String> {
+fn merged_with_markers(
+    repo: &Path,
+    base: &str,
+    branch: &str,
+    file: &str,
+) -> Result<String, String> {
     ensure_ref(repo, base)?;
     ensure_ref(repo, branch)?;
-    let mb = git_ok(repo, &["merge-base", base, branch])?.trim().to_string();
+    let mb = git_ok(repo, &["merge-base", base, branch])?
+        .trim()
+        .to_string();
 
     // 三方内容落临时文件(文件在某侧可能不存在 → 按空文件处理,对应增/删冲突)。
     let show = |rev: &str| -> String {
@@ -171,7 +226,17 @@ fn merged_with_markers(repo: &Path, base: &str, branch: &str, file: &str) -> Res
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["merge-file", "-p", "--diff3", "-L", "ours", "-L", "base", "-L", "theirs"])
+        .args([
+            "merge-file",
+            "-p",
+            "--diff3",
+            "-L",
+            "ours",
+            "-L",
+            "base",
+            "-L",
+            "theirs",
+        ])
         .arg(&f_ours)
         .arg(&f_base)
         .arg(&f_theirs)
@@ -181,7 +246,10 @@ fn merged_with_markers(repo: &Path, base: &str, branch: &str, file: &str) -> Res
         let _ = std::fs::remove_file(p);
     }
     if out.status.code().map(|c| c < 0).unwrap_or(true) {
-        return Err(format!("merge-file 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "merge-file 失败: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -260,14 +328,19 @@ pub fn resolve_conflicts(
     let base_oid = git_ok(repo, &["rev-parse", base])?.trim().to_string();
 
     // 临时索引:从试算树(干净文件已合好)出发,逐个替换冲突文件为裁决后内容。
-    let index_path = std::env::temp_dir().join(format!("mergectl-idx-{}-{}", std::process::id(), db::now()));
+    let index_path =
+        std::env::temp_dir().join(format!("mergectl-idx-{}-{}", std::process::id(), db::now()));
     let git_idx = |args: &[&str], stdin: Option<&str>| -> Result<String, String> {
         let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(repo).env("GIT_INDEX_FILE", &index_path).args(args);
+        cmd.arg("-C")
+            .arg(repo)
+            .env("GIT_INDEX_FILE", &index_path)
+            .args(args);
         if stdin.is_some() {
             cmd.stdin(std::process::Stdio::piped());
         }
-        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("git 启动失败: {e}"))?;
         if let Some(content) = stdin {
             use std::io::Write;
@@ -278,7 +351,9 @@ pub fn resolve_conflicts(
                 .write_all(content.as_bytes())
                 .map_err(|e| format!("写入 git stdin 失败: {e}"))?;
         }
-        let out = child.wait_with_output().map_err(|e| format!("git 执行失败: {e}"))?;
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("git 执行失败: {e}"))?;
         if !out.status.success() {
             return Err(format!(
                 "git {} 失败(code={}): {}",
@@ -306,32 +381,74 @@ pub fn resolve_conflicts(
             }
             let resolved = apply_resolutions(&merged_with_markers(repo, base, branch, file)?, res)?;
             total_blocks += res.len();
-            let blob = git_idx(&["hash-object", "-w", "--stdin"], Some(&resolved))?.trim().to_string();
+            let blob = git_idx(&["hash-object", "-w", "--stdin"], Some(&resolved))?
+                .trim()
+                .to_string();
             // 保留原文件模式(可执行位);试算树里没有(增删冲突)则按普通文件。
             let mode = git_ok(repo, &["ls-tree", &trial.tree_oid, "--", file])
                 .ok()
                 .and_then(|l| l.split_whitespace().next().map(String::from))
                 .unwrap_or_else(|| "100644".into());
-            git_idx(&["update-index", "--add", "--cacheinfo", &format!("{mode},{blob},{file}")], None)?;
+            git_idx(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("{mode},{blob},{file}"),
+                ],
+                None,
+            )?;
         }
         let tree = git_idx(&["write-tree"], None)?.trim().to_string();
-        let msg = format!("裁决合并 {base} 进 {branch}({} 文件 {total_blocks} 块,裁决人:{actor})", trial.conflict_files.len());
+        let msg = format!(
+            "裁决合并 {base} 进 {branch}({} 文件 {total_blocks} 块,裁决人:{actor})",
+            trial.conflict_files.len()
+        );
         let commit = git_ok(
             repo,
-            &["-c", "user.name=polaris-collab", "-c", "user.email=collab@polaris.local",
-              "commit-tree", &tree, "-p", &branch_oid, "-p", &base_oid, "-m", &msg],
+            &[
+                "-c",
+                "user.name=polaris-collab",
+                "-c",
+                "user.email=collab@polaris.local",
+                "commit-tree",
+                &tree,
+                "-p",
+                &branch_oid,
+                "-p",
+                &base_oid,
+                "-m",
+                &msg,
+            ],
         )?
         .trim()
         .to_string();
         // CAS:分支还停在裁决开始时的提交上才允许前进,否则报冲突态势变化。
-        git_ok(repo, &["update-ref", &format!("refs/heads/{branch}"), &commit, &branch_oid])
-            .map_err(|_| format!("分支 {branch} 在裁决期间被推进,请刷新重裁"))?;
+        git_ok(
+            repo,
+            &[
+                "update-ref",
+                &format!("refs/heads/{branch}"),
+                &commit,
+                &branch_oid,
+            ],
+        )
+        .map_err(|_| format!("分支 {branch} 在裁决期间被推进,请刷新重裁"))?;
         Ok(commit)
     };
     let result = run();
     let _ = std::fs::remove_file(&index_path);
     if let Ok(oid) = &result {
-        db::audit(actor, "merge.adjudicate", branch, &format!("{} → {}", &branch_oid[..8.min(branch_oid.len())], &oid[..8.min(oid.len())]));
+        db::audit(
+            actor,
+            "merge.adjudicate",
+            branch,
+            &format!(
+                "{} → {}",
+                &branch_oid[..8.min(branch_oid.len())],
+                &oid[..8.min(oid.len())]
+            ),
+        );
     }
     result
 }
@@ -357,8 +474,15 @@ fn apply_resolutions(merged: &str, res: &[BlockResolution]) -> Result<String, St
                 "ours" => ours.clone(),
                 "theirs" => theirs.clone(),
                 "manual" => {
-                    let t = r.text.clone().ok_or_else(|| format!("第 {} 块选了融合草案却没有文本", idx + 1))?;
-                    if t.is_empty() || t.ends_with('\n') { t } else { format!("{t}\n") }
+                    let t = r
+                        .text
+                        .clone()
+                        .ok_or_else(|| format!("第 {} 块选了融合草案却没有文本", idx + 1))?;
+                    if t.is_empty() || t.ends_with('\n') {
+                        t
+                    } else {
+                        format!("{t}\n")
+                    }
                 }
                 other => return Err(format!("未知处置类型: {other}")),
             };
@@ -384,7 +508,10 @@ fn apply_resolutions(merged: &str, res: &[BlockResolution]) -> Result<String, St
         }
     }
     if idx != res.len() {
-        return Err(format!("裁决块数不匹配(文件 {idx} 块,收到 {} 块)", res.len()));
+        return Err(format!(
+            "裁决块数不匹配(文件 {idx} 块,收到 {} 块)",
+            res.len()
+        ));
     }
     Ok(out)
 }
@@ -392,10 +519,19 @@ fn apply_resolutions(merged: &str, res: &[BlockResolution]) -> Result<String, St
 /// squash 合并进 base(放行闸最后一步)。
 /// 合并前强制重跑 merge_trial——试算不干净一律拒绝,不给"带冲突硬合"留门。
 /// 成功返回新提交 OID 并记审计。
-pub fn squash_merge(repo: &Path, base: &str, branch: &str, title: &str, actor: &str) -> Result<String, String> {
+pub fn squash_merge(
+    repo: &Path,
+    base: &str,
+    branch: &str,
+    title: &str,
+    actor: &str,
+) -> Result<String, String> {
     let trial = merge_trial(repo, base, branch)?;
     if !trial.clean {
-        return Err(format!("拒绝合并:试算存在冲突({} 个文件),先解决冲突再来", trial.conflict_files.len()));
+        return Err(format!(
+            "拒绝合并:试算存在冲突({} 个文件),先解决冲突再来",
+            trial.conflict_files.len()
+        ));
     }
     git_ok(repo, &["switch", base]).map_err(|e| format!("切到 {base} 失败: {e}"))?;
     git_ok(repo, &["merge", "--squash", branch])?;
@@ -430,7 +566,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "mergectl-{name}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         run(&dir, &["init", "-b", "main"]);
@@ -448,7 +587,12 @@ mod tests {
             .args(args)
             .output()
             .unwrap();
-        assert!(st.status.success(), "git {:?} 失败: {}", args, String::from_utf8_lossy(&st.stderr));
+        assert!(
+            st.status.success(),
+            "git {:?} 失败: {}",
+            args,
+            String::from_utf8_lossy(&st.stderr)
+        );
     }
 
     fn write_commit(repo: &PathBuf, file: &str, content: &str, msg: &str) {
@@ -459,11 +603,16 @@ mod tests {
 
     /// 切独立临时 collab.db,防审计写进真实库(串行锁防并行串库)。
     fn tmp_db() -> std::sync::MutexGuard<'static, ()> {
-        let g = super::super::db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let g = super::super::db::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let p = std::env::temp_dir().join(format!(
             "collab-mergectl-{}-{}.db",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::env::set_var("POLARIS_COLLAB_DB", p);
         g
@@ -491,7 +640,9 @@ mod tests {
         // scope 命中:main 自分叉后动了 c.txt
         let hits = scope_overlap(&repo, "main", "feat", "c.txt, src/").unwrap();
         assert_eq!(hits, vec!["c.txt"]);
-        assert!(scope_overlap(&repo, "main", "feat", "docs/").unwrap().is_empty());
+        assert!(scope_overlap(&repo, "main", "feat", "docs/")
+            .unwrap()
+            .is_empty());
 
         // squash 合并
         let oid = squash_merge(&repo, "main", "feat", "合入 feat", "boss").unwrap();
@@ -554,7 +705,13 @@ mod tests {
 
         // 采纳分支侧(theirs)落地 → 分支上多一笔双亲合并提交,试算变干净
         let mut res = std::collections::HashMap::new();
-        res.insert("a.txt".to_string(), vec![BlockResolution { choice: "theirs".into(), text: None }]);
+        res.insert(
+            "a.txt".to_string(),
+            vec![BlockResolution {
+                choice: "theirs".into(),
+                text: None,
+            }],
+        );
         let oid = resolve_conflicts(&repo, "main", "feat", &res, "boss").unwrap();
         assert_eq!(oid.len(), 40);
         let content = git_ok(&repo, &["show", "feat:a.txt"]).unwrap();
@@ -562,7 +719,10 @@ mod tests {
         let t = merge_trial(&repo, "main", "feat").unwrap();
         assert!(t.clean, "裁决后试算应干净");
         // main 本身未被动过
-        assert_eq!(git_ok(&repo, &["show", "main:a.txt"]).unwrap(), "line1\nmain-change\nline3\n");
+        assert_eq!(
+            git_ok(&repo, &["show", "main:a.txt"]).unwrap(),
+            "line1\nmain-change\nline3\n"
+        );
         // 干净后 squash 放行畅通
         assert!(squash_merge(&repo, "main", "feat", "合入 feat", "boss").is_ok());
 
@@ -572,9 +732,18 @@ mod tests {
         run(&repo, &["switch", "main"]);
         write_commit(&repo, "a.txt", "line1\nmain2\nline3\n", "main edit2");
         let mut res2 = std::collections::HashMap::new();
-        res2.insert("a.txt".to_string(), vec![BlockResolution { choice: "manual".into(), text: Some("融合双方".into()) }]);
+        res2.insert(
+            "a.txt".to_string(),
+            vec![BlockResolution {
+                choice: "manual".into(),
+                text: Some("融合双方".into()),
+            }],
+        );
         resolve_conflicts(&repo, "main", "feat2", &res2, "boss").unwrap();
-        assert_eq!(git_ok(&repo, &["show", "feat2:a.txt"]).unwrap(), "line1\n融合双方\nline3\n");
+        assert_eq!(
+            git_ok(&repo, &["show", "feat2:a.txt"]).unwrap(),
+            "line1\n融合双方\nline3\n"
+        );
         assert!(merge_trial(&repo, "main", "feat2").unwrap().clean);
     }
 }

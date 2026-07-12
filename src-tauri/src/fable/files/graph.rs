@@ -30,8 +30,9 @@ pub(crate) fn build_file_graph(root: Option<String>) -> Result<crate::kb::KbGrap
     let mut cluster_ids: Vec<i64> = Vec::new();
     let mut colors: HashMap<i64, String> = HashMap::new();
     {
-        let sql =
-            format!("SELECT id, label, color, parent, summary FROM clusters{cfilter} ORDER BY size DESC");
+        let sql = format!(
+            "SELECT id, label, color, parent, summary FROM clusters{cfilter} ORDER BY size DESC"
+        );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -55,8 +56,16 @@ pub(crate) fn build_file_graph(root: Option<String>) -> Result<crate::kb::KbGrap
                 kind: "folder".into(),
                 summary: (!summary.trim().is_empty()).then_some(summary),
             });
-            let src = if parent == 0 { ROOT_ID.to_string() } else { format!("c{parent}") };
-            edges.push(KbEdge { source: src, target: format!("c{id}"), rel: None });
+            let src = if parent == 0 {
+                ROOT_ID.to_string()
+            } else {
+                format!("c{parent}")
+            };
+            edges.push(KbEdge {
+                source: src,
+                target: format!("c{id}"),
+                rel: None,
+            });
         }
     }
     if cluster_ids.is_empty() {
@@ -74,7 +83,11 @@ pub(crate) fn build_file_graph(root: Option<String>) -> Result<crate::kb::KbGrap
         let sql = format!("SELECT src, dst, label FROM cluster_edges{efilter}");
         if let Ok(mut stmt) = conn.prepare(&sql) {
             if let Ok(rows) = stmt.query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             }) {
                 for (src, dst, label) in rows.flatten() {
                     if cluster_set.contains(&src) && cluster_set.contains(&dst) {
@@ -114,7 +127,11 @@ pub(crate) fn build_file_graph(root: Option<String>) -> Result<crate::kb::KbGrap
     let mut total = 0usize;
     if let Ok(mut stmt) = conn.prepare(&sql) {
         if let Ok(rows) = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         }) {
             for (fid, cid, title) in rows.flatten() {
                 if total >= CAP {
@@ -133,7 +150,11 @@ pub(crate) fn build_file_graph(root: Option<String>) -> Result<crate::kb::KbGrap
                     kind: "doc".into(),
                     summary: None,
                 });
-                edges.push(KbEdge { source: format!("c{cid}"), target: format!("f{fid}"), rel: None });
+                edges.push(KbEdge {
+                    source: format!("c{cid}"),
+                    target: format!("f{fid}"),
+                    rel: None,
+                });
             }
         }
     }

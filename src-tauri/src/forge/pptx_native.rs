@@ -58,31 +58,79 @@ struct Palette {
 
 fn palette(name: &str) -> (&'static str, Palette) {
     match name {
-        "ink-gold" => ("ink-gold", Palette {
-            bg1: "16181D", bg2: "1F232B", ink: "F2F0E9", muted: "A8A49A",
-            accent: "D4B06A", card: "20242C", card_line: "2E333D",
-        }),
-        "deep-space" => ("deep-space", Palette {
-            bg1: "0B0F1A", bg2: "131A2A", ink: "E8ECF6", muted: "93A0B8",
-            accent: "7AA2F7", card: "16203A", card_line: "263250",
-        }),
-        "warm-paper" => ("warm-paper", Palette {
-            bg1: "FAF6EE", bg2: "F3EDE0", ink: "3A2F25", muted: "8A7E6F",
-            accent: "B3672A", card: "FFFFFF", card_line: "E5DCCB",
-        }),
-        "forest" => ("forest", Palette {
-            bg1: "F4F7F2", bg2: "E9F0E7", ink: "1E2A22", muted: "6B7A6F",
-            accent: "2F7A4F", card: "FFFFFF", card_line: "D7E2D6",
-        }),
-        "tech-blue" => ("tech-blue", Palette {
-            bg1: "FFFFFF", bg2: "EEF3FA", ink: "16324F", muted: "5D7187",
-            accent: "1F6FD6", card: "FFFFFF", card_line: "D8E2EE",
-        }),
+        "ink-gold" => (
+            "ink-gold",
+            Palette {
+                bg1: "16181D",
+                bg2: "1F232B",
+                ink: "F2F0E9",
+                muted: "A8A49A",
+                accent: "D4B06A",
+                card: "20242C",
+                card_line: "2E333D",
+            },
+        ),
+        "deep-space" => (
+            "deep-space",
+            Palette {
+                bg1: "0B0F1A",
+                bg2: "131A2A",
+                ink: "E8ECF6",
+                muted: "93A0B8",
+                accent: "7AA2F7",
+                card: "16203A",
+                card_line: "263250",
+            },
+        ),
+        "warm-paper" => (
+            "warm-paper",
+            Palette {
+                bg1: "FAF6EE",
+                bg2: "F3EDE0",
+                ink: "3A2F25",
+                muted: "8A7E6F",
+                accent: "B3672A",
+                card: "FFFFFF",
+                card_line: "E5DCCB",
+            },
+        ),
+        "forest" => (
+            "forest",
+            Palette {
+                bg1: "F4F7F2",
+                bg2: "E9F0E7",
+                ink: "1E2A22",
+                muted: "6B7A6F",
+                accent: "2F7A4F",
+                card: "FFFFFF",
+                card_line: "D7E2D6",
+            },
+        ),
+        "tech-blue" => (
+            "tech-blue",
+            Palette {
+                bg1: "FFFFFF",
+                bg2: "EEF3FA",
+                ink: "16324F",
+                muted: "5D7187",
+                accent: "1F6FD6",
+                card: "FFFFFF",
+                card_line: "D8E2EE",
+            },
+        ),
         // 默认:近白暖米,最稳的「传统 PPT」气质。
-        _ => ("minimal-white", Palette {
-            bg1: "FFFFFF", bg2: "F6F5F0", ink: "1F1F1F", muted: "6B6B6B",
-            accent: "A07520", card: "FFFFFF", card_line: "E6E3D8",
-        }),
+        _ => (
+            "minimal-white",
+            Palette {
+                bg1: "FFFFFF",
+                bg2: "F6F5F0",
+                ink: "1F1F1F",
+                muted: "6B6B6B",
+                accent: "A07520",
+                card: "FFFFFF",
+                card_line: "E6E3D8",
+            },
+        ),
     }
 }
 
@@ -102,7 +150,16 @@ struct Para<'a> {
 
 impl<'a> Para<'a> {
     fn plain(text: &'a str, size_pt: i64, color: &'a str) -> Self {
-        Para { text, size_pt, bold: false, italic: false, color, align: "l", bullet: None, space_after_pt: 0 }
+        Para {
+            text,
+            size_pt,
+            bold: false,
+            italic: false,
+            color,
+            align: "l",
+            bullet: None,
+            space_after_pt: 0,
+        }
     }
 }
 
@@ -116,7 +173,10 @@ fn para_xml(p: &Para<'_>, pal: &Palette) -> String {
     };
     ppr.push_str(&format!("<a:pPr algn=\"{}\"{}>", p.align, bullet_attr));
     if p.space_after_pt > 0 {
-        ppr.push_str(&format!("<a:spcAft><a:spcPts val=\"{}\"/></a:spcAft>", p.space_after_pt * 100));
+        ppr.push_str(&format!(
+            "<a:spcAft><a:spcPts val=\"{}\"/></a:spcAft>",
+            p.space_after_pt * 100
+        ));
     }
     match p.bullet {
         Some(0) => ppr.push_str(&format!(
@@ -163,7 +223,10 @@ fn solid_rect(id: u32, x: i64, y: i64, w: i64, h: i64, color: &str) -> String {
 <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>\
 <a:solidFill><a:srgbClr val=\"{color}\"/></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr>\
 <p:txBody><a:bodyPr/><a:p/></p:txBody></p:sp>",
-        x * PX, y * PX, w * PX, h * PX
+        x * PX,
+        y * PX,
+        w * PX,
+        h * PX
     )
 }
 
@@ -182,7 +245,11 @@ fn round_card(id: u32, x: i64, y: i64, w: i64, h: i64, pal: &Palette) -> String 
 
 /// 强调色圆形 + 居中数字(timeline 步骤节点)。文字用 bg1 反衬强调色,深浅色板都可读。
 fn circle_num(id: u32, x: i64, y: i64, d: i64, label: &str, pal: &Palette) -> String {
-    let p = Para { align: "ctr", bold: true, ..Para::plain(label, 18, pal.bg1) };
+    let p = Para {
+        align: "ctr",
+        bold: true,
+        ..Para::plain(label, 18, pal.bg1)
+    };
     format!(
         "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"step{id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>\
 <p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>\
@@ -210,7 +277,12 @@ fn slide_bg(pal: &Palette) -> String {
 fn header(title: &str, pal: &Palette, mut id: u32) -> (String, u32) {
     let mut s = String::new();
     if !title.is_empty() {
-        let p = Para { text: title, size_pt: 26, bold: true, ..Para::plain(title, 26, pal.ink) };
+        let p = Para {
+            text: title,
+            size_pt: 26,
+            bold: true,
+            ..Para::plain(title, 26, pal.ink)
+        };
         s.push_str(&text_box(id, 80, 50, 1120, 64, "t", &para_xml(&p, pal)));
         id += 1;
         s.push_str(&solid_rect(id, 80, 122, 72, 4, pal.accent));
@@ -236,18 +308,28 @@ fn warn_bad_type(v: Option<&Value>, what: &str, page: usize, warnings: &mut Vec<
 /// points 数组 → bullet 段落串(支持 string 或 {text, sub:[…]} 两级)。
 fn points_paras(points: Option<&Value>, size_pt: i64, pal: &Palette) -> String {
     let mut out = String::new();
-    let Some(arr) = points.and_then(|v| v.as_array()) else { return out };
+    let Some(arr) = points.and_then(|v| v.as_array()) else {
+        return out;
+    };
     for p in arr {
         if let Some(t) = p.as_str() {
             out.push_str(&para_xml(
-                &Para { bullet: Some(0), space_after_pt: 8, ..Para::plain(t, size_pt, pal.ink) },
+                &Para {
+                    bullet: Some(0),
+                    space_after_pt: 8,
+                    ..Para::plain(t, size_pt, pal.ink)
+                },
                 pal,
             ));
         } else if let Some(o) = p.as_object() {
             let t = o.get("text").and_then(|x| x.as_str()).unwrap_or("");
             if !t.is_empty() {
                 out.push_str(&para_xml(
-                    &Para { bullet: Some(0), space_after_pt: 4, ..Para::plain(t, size_pt, pal.ink) },
+                    &Para {
+                        bullet: Some(0),
+                        space_after_pt: 4,
+                        ..Para::plain(t, size_pt, pal.ink)
+                    },
                     pal,
                 ));
             }
@@ -255,7 +337,11 @@ fn points_paras(points: Option<&Value>, size_pt: i64, pal: &Palette) -> String {
                 for sline in subs {
                     if let Some(st) = sline.as_str() {
                         out.push_str(&para_xml(
-                            &Para { bullet: Some(1), space_after_pt: 4, ..Para::plain(st, size_pt - 3, pal.muted) },
+                            &Para {
+                                bullet: Some(1),
+                                space_after_pt: 4,
+                                ..Para::plain(st, size_pt - 3, pal.muted)
+                            },
                             pal,
                         ));
                     }
@@ -275,19 +361,34 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
         "title" | "closing" => {
             let kicker = s_str(sl, "kicker");
             if !kicker.is_empty() {
-                let p = Para { align: "ctr", bold: true, ..Para::plain(kicker, 14, pal.accent) };
+                let p = Para {
+                    align: "ctr",
+                    bold: true,
+                    ..Para::plain(kicker, 14, pal.accent)
+                };
                 s.push_str(&text_box(id, 160, 218, 960, 32, "t", &para_xml(&p, pal)));
                 id += 1;
             }
-            let title = if s_str(sl, "title").is_empty() && layout == "closing" { "谢谢" } else { s_str(sl, "title") };
-            let p = Para { align: "ctr", bold: true, ..Para::plain(title, 40, pal.ink) };
+            let title = if s_str(sl, "title").is_empty() && layout == "closing" {
+                "谢谢"
+            } else {
+                s_str(sl, "title")
+            };
+            let p = Para {
+                align: "ctr",
+                bold: true,
+                ..Para::plain(title, 40, pal.ink)
+            };
             s.push_str(&text_box(id, 80, 268, 1120, 110, "t", &para_xml(&p, pal)));
             id += 1;
             s.push_str(&solid_rect(id, 598, 392, 84, 4, pal.accent));
             id += 1;
             let sub = s_str(sl, "subtitle");
             if !sub.is_empty() {
-                let p = Para { align: "ctr", ..Para::plain(sub, 17, pal.muted) };
+                let p = Para {
+                    align: "ctr",
+                    ..Para::plain(sub, 17, pal.muted)
+                };
                 s.push_str(&text_box(id, 160, 420, 960, 70, "t", &para_xml(&p, pal)));
             }
         }
@@ -296,11 +397,17 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
             id += 1;
             let kicker = s_str(sl, "kicker");
             if !kicker.is_empty() {
-                let p = Para { bold: true, ..Para::plain(kicker, 14, pal.accent) };
+                let p = Para {
+                    bold: true,
+                    ..Para::plain(kicker, 14, pal.accent)
+                };
                 s.push_str(&text_box(id, 116, 296, 1000, 32, "t", &para_xml(&p, pal)));
                 id += 1;
             }
-            let p = Para { bold: true, ..Para::plain(s_str(sl, "title"), 34, pal.ink) };
+            let p = Para {
+                bold: true,
+                ..Para::plain(s_str(sl, "title"), 34, pal.ink)
+            };
             s.push_str(&text_box(id, 116, 336, 1040, 90, "t", &para_xml(&p, pal)));
         }
         "two-col" => {
@@ -314,7 +421,11 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
                     let head = s_str(col, "head");
                     if !head.is_empty() {
                         paras.push_str(&para_xml(
-                            &Para { bold: true, space_after_pt: 8, ..Para::plain(head, 17, pal.accent) },
+                            &Para {
+                                bold: true,
+                                space_after_pt: 8,
+                                ..Para::plain(head, 17, pal.accent)
+                            },
                             pal,
                         ));
                     }
@@ -334,9 +445,16 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
             s.push_str(&h);
             id = nid;
             warn_bad_type(sl.get("items"), "items", page, warnings);
-            let full = sl.get("items").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let full = sl
+                .get("items")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             if full > 4 {
-                warnings.push(format!("第 {page} 页 compare 仅渲染前 4 项,丢弃 {} 项", full - 4));
+                warnings.push(format!(
+                    "第 {page} 页 compare 仅渲染前 4 项,丢弃 {} 项",
+                    full - 4
+                ));
             }
             let items: Vec<&Value> = sl
                 .get("items")
@@ -354,7 +472,11 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
                 let head = s_str(it, "head");
                 if !head.is_empty() {
                     paras.push_str(&para_xml(
-                        &Para { bold: true, space_after_pt: 8, ..Para::plain(head, 17, pal.accent) },
+                        &Para {
+                            bold: true,
+                            space_after_pt: 8,
+                            ..Para::plain(head, 17, pal.accent)
+                        },
                         pal,
                     ));
                 }
@@ -362,7 +484,10 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
                 if !body.is_empty() {
                     for line in body.split('\n').filter(|l| !l.trim().is_empty()) {
                         paras.push_str(&para_xml(
-                            &Para { space_after_pt: 6, ..Para::plain(line.trim(), 14, pal.ink) },
+                            &Para {
+                                space_after_pt: 6,
+                                ..Para::plain(line.trim(), 14, pal.ink)
+                            },
                             pal,
                         ));
                     }
@@ -378,9 +503,16 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
             s.push_str(&h);
             id = nid;
             warn_bad_type(sl.get("items"), "items", page, warnings);
-            let full = sl.get("items").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let full = sl
+                .get("items")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             if full > 4 {
-                warnings.push(format!("第 {page} 页 stats 仅渲染前 4 项,丢弃 {} 项", full - 4));
+                warnings.push(format!(
+                    "第 {page} 页 stats 仅渲染前 4 项,丢弃 {} 项",
+                    full - 4
+                ));
             }
             let items: Vec<&Value> = sl
                 .get("items")
@@ -398,21 +530,34 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
                 let value = s_str(it, "value");
                 if !value.is_empty() {
                     paras.push_str(&para_xml(
-                        &Para { align: "ctr", bold: true, space_after_pt: 10, ..Para::plain(value, 44, pal.accent) },
+                        &Para {
+                            align: "ctr",
+                            bold: true,
+                            space_after_pt: 10,
+                            ..Para::plain(value, 44, pal.accent)
+                        },
                         pal,
                     ));
                 }
                 let label = s_str(it, "label");
                 if !label.is_empty() {
                     paras.push_str(&para_xml(
-                        &Para { align: "ctr", bold: true, space_after_pt: 6, ..Para::plain(label, 16, pal.ink) },
+                        &Para {
+                            align: "ctr",
+                            bold: true,
+                            space_after_pt: 6,
+                            ..Para::plain(label, 16, pal.ink)
+                        },
                         pal,
                     ));
                 }
                 let desc = s_str(it, "desc");
                 if !desc.is_empty() {
                     paras.push_str(&para_xml(
-                        &Para { align: "ctr", ..Para::plain(desc, 12, pal.muted) },
+                        &Para {
+                            align: "ctr",
+                            ..Para::plain(desc, 12, pal.muted)
+                        },
                         pal,
                     ));
                 }
@@ -426,9 +571,16 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
             s.push_str(&h);
             id = nid;
             warn_bad_type(sl.get("steps"), "steps", page, warnings);
-            let full = sl.get("steps").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let full = sl
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             if full > 5 {
-                warnings.push(format!("第 {page} 页 timeline 仅渲染前 5 步,丢弃 {} 步", full - 5));
+                warnings.push(format!(
+                    "第 {page} 页 timeline 仅渲染前 5 步,丢弃 {} 步",
+                    full - 5
+                ));
             }
             let steps: Vec<&Value> = sl
                 .get("steps")
@@ -454,14 +606,23 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
                 let head = s_str(st, "head");
                 if !head.is_empty() {
                     paras.push_str(&para_xml(
-                        &Para { align: "ctr", bold: true, space_after_pt: 6, ..Para::plain(head, 16, pal.ink) },
+                        &Para {
+                            align: "ctr",
+                            bold: true,
+                            space_after_pt: 6,
+                            ..Para::plain(head, 16, pal.ink)
+                        },
                         pal,
                     ));
                 }
                 let body = s_str(st, "body");
                 for line in body.split('\n').filter(|l| !l.trim().is_empty()) {
                     paras.push_str(&para_xml(
-                        &Para { align: "ctr", space_after_pt: 4, ..Para::plain(line.trim(), 13, pal.muted) },
+                        &Para {
+                            align: "ctr",
+                            space_after_pt: 4,
+                            ..Para::plain(line.trim(), 13, pal.muted)
+                        },
                         pal,
                     ));
                 }
@@ -472,16 +633,26 @@ fn slide_content(sl: &Value, pal: &Palette, warnings: &mut Vec<String>, page: us
             }
         }
         "quote" => {
-            let p = Para { bold: true, ..Para::plain("\u{201C}", 96, pal.accent) };
+            let p = Para {
+                bold: true,
+                ..Para::plain("\u{201C}", 96, pal.accent)
+            };
             s.push_str(&text_box(id, 100, 120, 200, 130, "t", &para_xml(&p, pal)));
             id += 1;
-            let p = Para { align: "ctr", italic: true, ..Para::plain(s_str(sl, "text"), 26, pal.ink) };
+            let p = Para {
+                align: "ctr",
+                italic: true,
+                ..Para::plain(s_str(sl, "text"), 26, pal.ink)
+            };
             s.push_str(&text_box(id, 160, 250, 960, 220, "ctr", &para_xml(&p, pal)));
             id += 1;
             let by = s_str(sl, "by");
             if !by.is_empty() {
                 let byline = format!("—— {by}");
-                let p = Para { align: "ctr", ..Para::plain(&byline, 15, pal.muted) };
+                let p = Para {
+                    align: "ctr",
+                    ..Para::plain(&byline, 15, pal.muted)
+                };
                 s.push_str(&text_box(id, 160, 490, 960, 40, "t", &para_xml(&p, pal)));
             }
         }
@@ -575,7 +746,9 @@ pub fn build_pptx_from_spec(spec_json: &str, out_path: &str) -> Result<Value, St
     let mut warnings: Vec<String> = Vec::new();
     // 未知色板静默回退会让用户不知情(大小写写错都中招),与未知版式同等待遇。
     if !requested_theme.is_empty() && theme_name != requested_theme {
-        warnings.push(format!("未知色板 \"{requested_theme}\",已回退 {theme_name}"));
+        warnings.push(format!(
+            "未知色板 \"{requested_theme}\",已回退 {theme_name}"
+        ));
     }
     let mut slide_xmls: Vec<String> = Vec::with_capacity(n);
     let mut notes: Vec<Option<String>> = Vec::with_capacity(n);
@@ -599,12 +772,14 @@ pub fn build_pptx_from_spec(spec_json: &str, out_path: &str) -> Result<Value, St
         std::fs::File::create(&tmp_path).map_err(|e| format!("创建 {tmp_path} 失败: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
     let opt = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let put = |zip: &mut zip::ZipWriter<std::fs::File>, name: &str, data: &[u8]| -> Result<(), String> {
-        zip.start_file(name, opt)
-            .map_err(|e| format!("zip 写 {name} 失败: {e}"))?;
-        zip.write_all(data).map_err(|e| format!("zip 写入 {name} 失败: {e}"))?;
-        Ok(())
-    };
+    let put =
+        |zip: &mut zip::ZipWriter<std::fs::File>, name: &str, data: &[u8]| -> Result<(), String> {
+            zip.start_file(name, opt)
+                .map_err(|e| format!("zip 写 {name} 失败: {e}"))?;
+            zip.write_all(data)
+                .map_err(|e| format!("zip 写入 {name} 失败: {e}"))?;
+            Ok(())
+        };
 
     // [Content_Types].xml
     let mut ct = String::from(xml_decl());
@@ -642,14 +817,22 @@ pub fn build_pptx_from_spec(spec_json: &str, out_path: &str) -> Result<Value, St
     // ppt/presentation.xml — rId1=master, rId2=notesMaster(可选), 之后 slides, 最后 theme。
     let slide_rid_base = if has_notes { 2 } else { 1 }; // slides 从 rId(base+1) 起
     let mut pres = String::from(xml_decl());
-    pres.push_str(&format!("<p:presentation xmlns:a=\"{NS_A}\" xmlns:r=\"{NS_R}\" xmlns:p=\"{NS_P}\">"));
-    pres.push_str("<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId1\"/></p:sldMasterIdLst>");
+    pres.push_str(&format!(
+        "<p:presentation xmlns:a=\"{NS_A}\" xmlns:r=\"{NS_R}\" xmlns:p=\"{NS_P}\">"
+    ));
+    pres.push_str(
+        "<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId1\"/></p:sldMasterIdLst>",
+    );
     if has_notes {
         pres.push_str("<p:notesMasterIdLst><p:notesMasterId r:id=\"rId2\"/></p:notesMasterIdLst>");
     }
     pres.push_str("<p:sldIdLst>");
     for i in 1..=n {
-        pres.push_str(&format!("<p:sldId id=\"{}\" r:id=\"rId{}\"/>", 255 + i, slide_rid_base + i));
+        pres.push_str(&format!(
+            "<p:sldId id=\"{}\" r:id=\"rId{}\"/>",
+            255 + i,
+            slide_rid_base + i
+        ));
     }
     pres.push_str("</p:sldIdLst>");
     pres.push_str(&format!(
@@ -675,11 +858,19 @@ pub fn build_pptx_from_spec(spec_json: &str, out_path: &str) -> Result<Value, St
         slide_rid_base + n + 1
     ));
     prels.push_str("</Relationships>");
-    put(&mut zip, "ppt/_rels/presentation.xml.rels", prels.as_bytes())?;
+    put(
+        &mut zip,
+        "ppt/_rels/presentation.xml.rels",
+        prels.as_bytes(),
+    )?;
 
     // theme / master / layout(与图片版共用同一套最小合法骨架)。
     put(&mut zip, "ppt/theme/theme1.xml", theme_xml().as_bytes())?;
-    put(&mut zip, "ppt/slideMasters/slideMaster1.xml", slide_master_xml(CX, CY).as_bytes())?;
+    put(
+        &mut zip,
+        "ppt/slideMasters/slideMaster1.xml",
+        slide_master_xml(CX, CY).as_bytes(),
+    )?;
     put(
         &mut zip,
         "ppt/slideMasters/_rels/slideMaster1.xml.rels",
@@ -689,7 +880,11 @@ pub fn build_pptx_from_spec(spec_json: &str, out_path: &str) -> Result<Value, St
         )
         .as_bytes(),
     )?;
-    put(&mut zip, "ppt/slideLayouts/slideLayout1.xml", slide_layout_xml(CX, CY).as_bytes())?;
+    put(
+        &mut zip,
+        "ppt/slideLayouts/slideLayout1.xml",
+        slide_layout_xml(CX, CY).as_bytes(),
+    )?;
     put(
         &mut zip,
         "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
@@ -702,7 +897,11 @@ pub fn build_pptx_from_spec(spec_json: &str, out_path: &str) -> Result<Value, St
     if has_notes {
         // notesMaster 按惯例配独立 theme part(共享 theme1 有 Office 修复风险)。
         put(&mut zip, "ppt/theme/theme2.xml", theme_xml().as_bytes())?;
-        put(&mut zip, "ppt/notesMasters/notesMaster1.xml", notes_master_xml().as_bytes())?;
+        put(
+            &mut zip,
+            "ppt/notesMasters/notesMaster1.xml",
+            notes_master_xml().as_bytes(),
+        )?;
         put(
             &mut zip,
             "ppt/notesMasters/_rels/notesMaster1.xml.rels",
@@ -725,9 +924,17 @@ pub fn build_pptx_from_spec(spec_json: &str, out_path: &str) -> Result<Value, St
             srels.push_str(&format!("<Relationship Id=\"rId2\" Type=\"{NS_R}/notesSlide\" Target=\"../notesSlides/notesSlide{i}.xml\"/>"));
         }
         srels.push_str("</Relationships>");
-        put(&mut zip, &format!("ppt/slides/_rels/slide{i}.xml.rels"), srels.as_bytes())?;
+        put(
+            &mut zip,
+            &format!("ppt/slides/_rels/slide{i}.xml.rels"),
+            srels.as_bytes(),
+        )?;
         if let Some(nt) = &notes[idx] {
-            put(&mut zip, &format!("ppt/notesSlides/notesSlide{i}.xml"), notes_slide_xml(nt).as_bytes())?;
+            put(
+                &mut zip,
+                &format!("ppt/notesSlides/notesSlide{i}.xml"),
+                notes_slide_xml(nt).as_bytes(),
+            )?;
             put(
                 &mut zip,
                 &format!("ppt/notesSlides/_rels/notesSlide{i}.xml.rels"),
@@ -833,7 +1040,10 @@ mod tests {
         let f = std::fs::File::open(&out).unwrap();
         let z = zip::ZipArchive::new(f).unwrap();
         let names: Vec<&str> = z.file_names().collect();
-        assert!(!names.iter().any(|n| n.contains("notesMaster")), "无备注不应有 notesMaster");
+        assert!(
+            !names.iter().any(|n| n.contains("notesMaster")),
+            "无备注不应有 notesMaster"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -909,7 +1119,8 @@ mod tests {
         let dir = std::env::temp_dir().join("polaris_native_pptx_escape");
         let _ = std::fs::create_dir_all(&dir);
         let out = dir.join("e.pptx");
-        let spec = r#"{"slides":[{"layout":"bullets","title":"<script>&\"x\"","points":["a<b>"]}]}"#;
+        let spec =
+            r#"{"slides":[{"layout":"bullets","title":"<script>&\"x\"","points":["a<b>"]}]}"#;
         build_pptx_from_spec(spec, &out.to_string_lossy()).unwrap();
         let s1 = read_part(&out, "ppt/slides/slide1.xml");
         assert!(s1.contains("&lt;script&gt;&amp;"));

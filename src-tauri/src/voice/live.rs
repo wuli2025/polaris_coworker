@@ -87,7 +87,10 @@ fn dictate_session(app: AppHandle) {
     };
     if let Err(e) = stream.play() {
         DICTATING.store(false, Ordering::SeqCst);
-        let _ = app.emit("voice:dictation", json!({ "error": format!("启动采集失败: {e}") }));
+        let _ = app.emit(
+            "voice:dictation",
+            json!({ "error": format!("启动采集失败: {e}") }),
+        );
         return;
     }
     let _ = app.emit("voice:listening", true);
@@ -176,7 +179,10 @@ fn record_and_recognize(app: &AppHandle, rx: &Receiver<Ctrl>) {
         }
     };
     if let Err(e) = stream.play() {
-        let _ = app.emit("voice:final", json!({ "error": format!("启动采集失败: {e}") }));
+        let _ = app.emit(
+            "voice:final",
+            json!({ "error": format!("启动采集失败: {e}") }),
+        );
         return;
     }
     let _ = app.emit("voice:listening", true);
@@ -204,7 +210,10 @@ fn record_and_recognize(app: &AppHandle, rx: &Receiver<Ctrl>) {
 
     if samples.len() < (16000.0 * 0.2) as usize {
         // 太短(误触/没说话):不注入
-        let _ = app.emit("voice:final", json!({ "text": "", "raw": "", "cancelled": true }));
+        let _ = app.emit(
+            "voice:final",
+            json!({ "text": "", "raw": "", "cancelled": true }),
+        );
         return;
     }
     match crate::voice::asr::transcribe_samples(16000, &samples) {
@@ -261,9 +270,7 @@ fn push_mono(buf: &Arc<Mutex<Vec<f32>>>, data: &[f32], ch: usize, cap: usize) {
 
 fn build_stream(buf: Arc<Mutex<Vec<f32>>>) -> Result<(cpal::Stream, u32), String> {
     let host = cpal::default_host();
-    let dev = host
-        .default_input_device()
-        .ok_or("没有可用麦克风设备")?;
+    let dev = host.default_input_device().ok_or("没有可用麦克风设备")?;
     let cfg = dev
         .default_input_config()
         .map_err(|e| format!("读麦克风配置失败: {e}"))?;
@@ -300,8 +307,10 @@ fn build_stream(buf: Arc<Mutex<Vec<f32>>>) -> Result<(cpal::Stream, u32), String
             dev.build_input_stream(
                 &sc,
                 move |data: &[u16], _: &_| {
-                    let f: Vec<f32> =
-                        data.iter().map(|s| (*s as f32 - 32768.0) / 32768.0).collect();
+                    let f: Vec<f32> = data
+                        .iter()
+                        .map(|s| (*s as f32 - 32768.0) / 32768.0)
+                        .collect();
                     push_mono(&b, &f, ch, cap);
                 },
                 err_fn,

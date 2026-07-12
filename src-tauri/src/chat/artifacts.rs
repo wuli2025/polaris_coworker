@@ -1,7 +1,7 @@
 //! 产物(成品)读写/列举/搜索、产物目录定位、marker 解析与访问护栏。
 //! (从 chat.rs 纯移动拆出, 逻辑零变化)
 
-use crate::kb;
+use crate::{conv, kb};
 use directories::UserDirs;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -26,10 +26,8 @@ const DISPLAY_EXTS: &[&str] = &[
     // 文档
     "md", "markdown", "txt", "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv",
     // 网页成品
-    "html", "htm",
-    // 图片
-    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico",
-    // 视频 / 音频
+    "html", "htm", // 图片
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico", // 视频 / 音频
     "mp4", "mov", "webm", "mkv", "avi", "mp3", "wav", "m4a", "aac", "flac", "ogg",
     // 打包交付
     "zip",
@@ -81,7 +79,13 @@ pub(crate) fn folder_artifact_repr(dir: &Path) -> String {
 /// 同处一地、可见可备份：`<kb_root>/conversations/<id>/`。
 /// KB root 不可用时回退到 `~/Polaris/data/artifacts/<id>`。
 pub(crate) fn conversation_dir(conv_id: Option<&str>) -> PathBuf {
-    let id = conv_id.unwrap_or("scratch");
+    // conversation_id 来自 IPC/HTTP，绝不能原样 join；`../../...` 会把附件/产物写出
+    // conversations 根。命令边界会返回明确错误，这里再做最后一道 fail-closed 兜底。
+    let id = match conv_id {
+        Some(id) if conv::is_safe_conversation_id(id) => id,
+        Some(_) => "invalid-conversation-id",
+        None => "scratch",
+    };
     let kb_root = PathBuf::from(kb::kb_root());
     if !kb_root.as_os_str().is_empty() && kb_root.exists() {
         kb_root.join("conversations").join(id)
@@ -360,7 +364,9 @@ pub fn artifact_write(path: String, content: String) -> Result<(), String> {
     let parent = p.parent().ok_or("无法定位父目录")?;
     let tmp = parent.join(format!(
         ".{}.polaris-tmp",
-        p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+        p.file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
     ));
     std::fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &p).map_err(|e| {
@@ -539,7 +545,8 @@ fn artifact_search_sync(query: String) -> Vec<ArtifactSearchHit> {
     // 全量遍历所有 conversations/<id>/outputs 并逐个读文本文件:产物攒多后可拖到数十秒,
     // 逼近/超过命令超时上限(历史「artifact_search 挂死」同族隐患)。给一个墙钟预算,超时即以
     // 已收集的部分命中收工,把最坏代价压成有界——宁可少召回,不可拖垮调用方。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(ARTIFACT_SEARCH_BUDGET_SECS);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(ARTIFACT_SEARCH_BUDGET_SECS);
     let mut checked: u32 = 0;
     'roots: for root in conversation_roots() {
         if !root.exists() {
@@ -603,7 +610,13 @@ fn artifact_search_sync(query: String) -> Vec<ArtifactSearchHit> {
                     let lower = body.to_lowercase();
                     if let Some(pos) = lower.find(&q) {
                         score += 2;
-                        let start = body[..pos].char_indices().rev().take(40).last().map(|(i, _)| i).unwrap_or(0);
+                        let start = body[..pos]
+                            .char_indices()
+                            .rev()
+                            .take(40)
+                            .last()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
                         let end = (pos + q.len() + 60).min(body.len());
                         let mut e = end;
                         while e < body.len() && !body.is_char_boundary(e) {
@@ -640,22 +653,36 @@ mod tests {
         let content = "已生成报告。\n\n<!--POLARIS_ARTIFACTS:[\"D:/a/r.html\",\"D:/a/r.md\"]-->";
         let (clean, paths) = split_artifacts(content);
         assert_eq!(clean, "已生成报告。");
-        assert_eq!(paths, vec!["D:/a/r.html".to_string(), "D:/a/r.md".to_string()]);
+        assert_eq!(
+            paths,
+            vec!["D:/a/r.html".to_string(), "D:/a/r.md".to_string()]
+        );
     }
 
     #[test]
     fn displayable_artifact_whitelists_common_formats_only() {
         // 常见成品: 进对话框
         for p in [
-            "D:/a/report.html", "D:/a/读书笔记.MD", "D:/a/v.mp4", "D:/a/讲解.mp3",
-            "D:/a/图.png", "D:/a/слайды.pptx", "D:/a/简历.docx", "D:/a/r.pdf",
+            "D:/a/report.html",
+            "D:/a/读书笔记.MD",
+            "D:/a/v.mp4",
+            "D:/a/讲解.mp3",
+            "D:/a/图.png",
+            "D:/a/слайды.pptx",
+            "D:/a/简历.docx",
+            "D:/a/r.pdf",
         ] {
             assert!(is_displayable_artifact(p), "{p} 应展示");
         }
         // 脚本 / 配置 / 无后缀等中间产物: 不进对话框
         for p in [
-            "D:/a/build.py", "D:/a/index.js", "D:/a/package.json", "D:/a/run.sh",
-            "D:/a/Makefile", "D:/a/data.sqlite", "D:/a/启动应用.bat",
+            "D:/a/build.py",
+            "D:/a/index.js",
+            "D:/a/package.json",
+            "D:/a/run.sh",
+            "D:/a/Makefile",
+            "D:/a/data.sqlite",
+            "D:/a/启动应用.bat",
         ] {
             assert!(!is_displayable_artifact(p), "{p} 不应展示");
         }

@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::runtime::procs::no_window;
-use super::types::*;
 use super::probe::*;
+use super::types::*;
+use crate::runtime::procs::no_window;
 
 // ───────────────────────── 用户 PATH (Windows) ─────────────────────────
 
@@ -145,7 +145,11 @@ fn persist_unix_path(dir: &str) -> PathFixResult {
             already = true;
             continue;
         }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&p)
+        {
             let _ = writeln!(f, "\n# Added by Polaris\n{line}");
             wrote = true;
         }
@@ -155,7 +159,9 @@ fn persist_unix_path(dir: &str) -> PathFixResult {
             ok: true,
             dir: Some(dir.to_string()),
             status: "added".into(),
-            message: format!("已把 {dir} 写进 shell 配置 (~/.zshrc 等) 并同步当前进程。新开终端即生效。"),
+            message: format!(
+                "已把 {dir} 写进 shell 配置 (~/.zshrc 等) 并同步当前进程。新开终端即生效。"
+            ),
         }
     } else if already {
         PathFixResult {
@@ -287,7 +293,10 @@ fn login_shell_path() -> Option<String> {
 fn merge_login_path_into_process(login_path: &str) {
     use std::collections::HashSet;
     let cur = std::env::var("PATH").unwrap_or_default();
-    let have: HashSet<String> = cur.split(':').map(|s| s.trim_end_matches('/').to_string()).collect();
+    let have: HashSet<String> = cur
+        .split(':')
+        .map(|s| s.trim_end_matches('/').to_string())
+        .collect();
     let adds: Vec<&str> = login_path
         .split(':')
         .filter(|s| !s.is_empty() && !have.contains(&s.trim_end_matches('/').to_string()))
@@ -364,8 +373,7 @@ mod tests {
             Some(PathBuf::from(r"C:\Users\mi\.local\bin"))
         );
         // node_modules 路径 → 永不返回那个内部 bin 目录 (要么 npm 前缀, 要么至少不是 .../bin 自身的误用)
-        let npmish =
-            PathBuf::from(r"D:\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe");
+        let npmish = PathBuf::from(r"D:\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe");
         let dir = claude_dir_from_path(&npmish).expect("应解析出某个目录");
         assert!(
             !dir.ends_with("claude.exe"),
@@ -381,8 +389,14 @@ mod tests {
         let first = prepend_process_path(marker);
         let path_now = std::env::var("PATH").unwrap_or_default();
         assert!(first, "首次应真的前插");
-        assert!(path_contains_dir(&path_now, marker), "前插后 PATH 应含该目录");
-        assert!(!prepend_process_path(marker), "已在 PATH 中应返回 false (幂等)");
+        assert!(
+            path_contains_dir(&path_now, marker),
+            "前插后 PATH 应含该目录"
+        );
+        assert!(
+            !prepend_process_path(marker),
+            "已在 PATH 中应返回 false (幂等)"
+        );
 
         // resolve_claude_exe: 若本机装了 claude, 解析出的路径必须真实存在 (Windows 上偏好 .exe)
         if let Some(exe) = resolve_claude_exe() {
@@ -394,9 +408,11 @@ mod tests {
                     .map(|e| e.eq_ignore_ascii_case("exe"))
                     .unwrap_or(false);
                 // 本机同时有 .exe 与 .cmd 时, 必须挑 .exe (chat spawn 只认 .exe)
-                let has_exe_alt = which_all("claude")
-                    .iter()
-                    .any(|p| p.extension().map(|e| e.eq_ignore_ascii_case("exe")).unwrap_or(false));
+                let has_exe_alt = which_all("claude").iter().any(|p| {
+                    p.extension()
+                        .map(|e| e.eq_ignore_ascii_case("exe"))
+                        .unwrap_or(false)
+                });
                 if has_exe_alt {
                     assert!(is_exe, "存在 .exe 候选时应优先解析为 .exe, 实得: {exe:?}");
                 }

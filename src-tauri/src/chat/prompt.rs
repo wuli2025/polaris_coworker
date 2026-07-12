@@ -2,10 +2,11 @@
 //! KB 召回/历史/记忆地图等上下文块。(从 chat.rs 纯移动拆出, 逻辑零变化)
 
 use crate::conv;
-use crate::kb;
 use std::path::Path;
 
 use super::artifacts::split_artifacts;
+// 检索引擎(kb/fable)一律走内核桥, 不再直接 import 引擎模块(分仓规划 v2 §4)。
+use super::bridges::{self, FableStatusLite};
 
 // ───────────────────────── 对话记忆 (历史 + 跨对话产物地图) ─────────────────────────
 //
@@ -75,14 +76,21 @@ pub(crate) fn history_block(conv_id: &str, budget: usize) -> String {
     let mut used = 0usize;
     for m in msgs.iter().rev() {
         let line = match m.role.as_str() {
-            "user" => format!("**用户**：{}", truncate_chars(m.content.trim(), HISTORY_MSG_CAP)),
+            "user" => format!(
+                "**用户**：{}",
+                truncate_chars(m.content.trim(), HISTORY_MSG_CAP)
+            ),
             "assistant" => {
                 let (clean, files) = split_artifacts(&m.content);
                 let body = truncate_chars(clean.trim(), HISTORY_MSG_CAP);
                 if files.is_empty() {
                     format!("**助手**：{}", body)
                 } else {
-                    format!("**助手**：{}\n〔本轮生成文件：{}〕", body, files.join(" · "))
+                    format!(
+                        "**助手**：{}\n〔本轮生成文件：{}〕",
+                        body,
+                        files.join(" · ")
+                    )
                 }
             }
             _ => continue, // tool 等其它角色不进历史
@@ -108,7 +116,11 @@ pub(crate) fn history_block(conv_id: &str, budget: usize) -> String {
 /// ② 跨对话产物地图: 遍历本项目其它对话, 把每条带产物的 assistant 消息的文件路径,
 /// 配上「前一条 user 问题」当描述, 列成一张地图。只列仍存在于磁盘的文件(去悬空), 去重, 预算封顶。
 /// 排除当前对话(它的文件已在 history_block 里出现, 避免重复)。
-pub(crate) fn project_artifacts_block(project_id: &str, exclude_conv: Option<&str>, budget: usize) -> String {
+pub(crate) fn project_artifacts_block(
+    project_id: &str,
+    exclude_conv: Option<&str>,
+    budget: usize,
+) -> String {
     let convs = conv::conversations_of_project(project_id); // 最近在前
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut lines: Vec<String> = Vec::new();
@@ -145,7 +157,10 @@ pub(crate) fn project_artifacts_block(project_id: &str, exclude_conv: Option<&st
             let line = if desc_short.is_empty() {
                 format!("- `{}` — 来自对话「{}」· {}", path, c.title, date)
             } else {
-                format!("- `{}` — 来自对话「{}」({}) · 当时请求: {}", path, c.title, date, desc_short)
+                format!(
+                    "- `{}` — 来自对话「{}」({}) · 当时请求: {}",
+                    path, c.title, date, desc_short
+                )
             };
             let cost = line.chars().count() + 1;
             if used + cost > budget && !lines.is_empty() {
@@ -174,7 +189,11 @@ pub(crate) fn project_artifacts_block(project_id: &str, exclude_conv: Option<&st
 pub(crate) fn user_edited_artifacts_block(conv_id: &str) -> String {
     let msgs = conv::get_messages(conv_id);
     // 上一轮收尾时刻 = 最后一条 assistant 消息的落库时间(epoch ms)
-    let Some(last_ms) = msgs.iter().rev().find(|m| m.role == "assistant").map(|m| m.created_at)
+    let Some(last_ms) = msgs
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant")
+        .map(|m| m.created_at)
     else {
         return String::new();
     };
@@ -189,7 +208,9 @@ pub(crate) fn user_edited_artifacts_block(conv_id: &str) -> String {
             if !seen.insert(f.clone()) {
                 continue;
             }
-            let Ok(meta) = std::fs::metadata(&f) else { continue };
+            let Ok(meta) = std::fs::metadata(&f) else {
+                continue;
+            };
             let mtime_ms = meta
                 .modified()
                 .ok()
@@ -220,7 +241,10 @@ pub(crate) fn user_edited_artifacts_block(conv_id: &str) -> String {
 /// 只给地图(≤MEMORY_MAP_BUDGET), 正文让模型按需 Read。跨项目全局(记的是「与主人相处之道」,
 /// 不挂在某个项目下)。memory/ 还没建或 index 为空时返回空串。
 pub(crate) fn memory_map_block(budget: usize) -> String {
-    let root = crate::kb::kb_root();
+    let root = match bridges::kb_bridge() {
+        Some(b) => b.root(),
+        None => return String::new(), // 检索引擎未拼装 → 记忆地图静默跳过
+    };
     if root.is_empty() {
         return String::new();
     }
@@ -271,8 +295,11 @@ fn format_memory_map(index_text: &str, mem_abs: &str, budget: usize) -> String {
 /// 解决「问知识库有什么只答得出妈妈库 wiki」——让模型一开口就报全四层家底,
 /// 并明确「我会跨全部四层检索,不只 wiki」。全部来自内存 INDEX + fable.db 快速 COUNT。
 /// `fable_st`: 调用方一次 fable::status() 的结果, 与 forced_recall_block 共用(免双查)。
-pub(crate) fn kb_overview_block(fable_st: Option<&crate::fable::FableStatus>) -> String {
-    let ov = crate::kb::kb_overview();
+pub(crate) fn kb_overview_block(fable_st: Option<&FableStatusLite>) -> String {
+    let ov = match bridges::kb_bridge() {
+        Some(b) => b.overview(),
+        None => return String::new(), // 检索引擎未拼装 → 家底概览静默跳过
+    };
     if ov.root.is_empty() {
         return String::new();
     }
@@ -287,7 +314,10 @@ pub(crate) fn kb_overview_block(fable_st: Option<&crate::fable::FableStatus>) ->
                 " · 尚未向量化(仅关键词/全文检索)".to_string()
             },
         ),
-        _ => ("(外部资料尚未盘点,可在「知识库」里盘点以启用全盘语义检索)".to_string(), String::new()),
+        _ => (
+            "(外部资料尚未盘点,可在「知识库」里盘点以启用全盘语义检索)".to_string(),
+            String::new(),
+        ),
     };
     format!(
         "## 你的知识库 · 家底\n\n\
@@ -318,19 +348,23 @@ pub(crate) fn forced_recall_block(
     query: &str,
     budget: usize,
     fast: bool,
-    fable_st: Option<&crate::fable::FableStatus>,
+    fable_st: Option<&FableStatusLite>,
 ) -> String {
     let q = query.trim();
     if q.chars().count() < 2 {
         return String::new();
     }
+    // 检索引擎未拼装 → 双库召回整体跳过(语义同「引擎未就绪」)。
+    let Some(bridge) = bridges::kb_bridge() else {
+        return String::new();
+    };
     // 快档用的多车道无重排 mode: grep+向量都跑(want_grep/want_vec 只在 mode 等于另一条腿名时关),
     // 但因 != "hybrid" 不触发重排。
     let rag_mode = if fast { "grep_vec" } else { "hybrid" };
     // 一次 kb_search 取较多, 再按路拆分(wiki 权威 / 非 wiki 资料)。
     // 用同步核:此处本就在(desktop 下)spawn_blocking 的命令线程里跑,直调同步核免去
     // 再包一层 async(desktop 的 kb_search 已是 async fn,不能在同步上下文里直接取值)。
-    let kb_hits = crate::kb::kb_search_sync(q.to_string(), Some(40));
+    let kb_hits = bridge.search_sync(q.to_string(), Some(40));
     let mut wiki: Vec<(String, String, String)> = Vec::new(); // (title, path, snippet)
     let mut raw_kw: Vec<(String, String, String)> = Vec::new();
     for h in &kb_hits {
@@ -347,9 +381,8 @@ pub(crate) fn forced_recall_block(
     // 非 wiki(raw/output)关键词命中兜底, 保证「外库」始终被查到且零延迟代价。
     let fable_ready = matches!(fable_st, Some(s) if s.chunks_total > 0 || s.lex_files > 0);
     let rag: Vec<(String, String, String)> = if fable_ready {
-        match crate::fable::retrieve::search(q, 40, rag_mode, Some("!wiki")) {
-            Ok(r) if !r.hits.is_empty() => r
-                .hits
+        match bridge.rag_search(q, 40, rag_mode, Some("!wiki")) {
+            Some(hits) if !hits.is_empty() => hits
                 .into_iter()
                 .map(|h| {
                     let title = h.path.rsplit('/').next().unwrap_or(&h.path).to_string();
@@ -373,7 +406,12 @@ pub(crate) fn forced_recall_block(
     );
     let mut used = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let push_section = |out: &mut String, used: &mut usize, seen: &mut std::collections::HashSet<String>, title: &str, items: &[(String, String, String)], take: usize| {
+    let push_section = |out: &mut String,
+                        used: &mut usize,
+                        seen: &mut std::collections::HashSet<String>,
+                        title: &str,
+                        items: &[(String, String, String)],
+                        take: usize| {
         let mut n = 0;
         let mut section = String::new();
         for (t, p, sn) in items {
@@ -384,7 +422,13 @@ pub(crate) fn forced_recall_block(
                 continue;
             }
             let snip: String = sn.chars().take(180).collect();
-            let line = format!("{}. [{}] `{}`\n   {}\n", n + 1, t, p, snip.replace('\n', " "));
+            let line = format!(
+                "{}. [{}] `{}`\n   {}\n",
+                n + 1,
+                t,
+                p,
+                snip.replace('\n', " ")
+            );
             *used += line.chars().count();
             section.push_str(&line);
             n += 1;
@@ -396,8 +440,22 @@ pub(crate) fn forced_recall_block(
             out.push('\n');
         }
     };
-    push_section(&mut out, &mut used, &mut seen, "**妈妈库 wiki(权威):**", &wiki, 6);
-    push_section(&mut out, &mut used, &mut seen, "**资料库 raw/output(混检取优):**", &rag, 8);
+    push_section(
+        &mut out,
+        &mut used,
+        &mut seen,
+        "**妈妈库 wiki(权威):**",
+        &wiki,
+        6,
+    );
+    push_section(
+        &mut out,
+        &mut used,
+        &mut seen,
+        "**资料库 raw/output(混检取优):**",
+        &rag,
+        8,
+    );
     out
 }
 
@@ -539,14 +597,49 @@ pub(crate) fn detect_script_intent(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
     const HINTS: &[&str] = &[
         // 中文 · 脚本/执行/批处理类
-        "脚本", "运行", "执行", "跑一下", "跑个", "跑起来", "自动化", "批量",
-        "爬虫", "抓取", "转换", "转成", "压缩", "解压", "重命名", "处理文件", "处理这批",
+        "脚本",
+        "运行",
+        "执行",
+        "跑一下",
+        "跑个",
+        "跑起来",
+        "自动化",
+        "批量",
+        "爬虫",
+        "抓取",
+        "转换",
+        "转成",
+        "压缩",
+        "解压",
+        "重命名",
+        "处理文件",
+        "处理这批",
         // 中文 · 要跑脚本才能产出的成品
-        "ppt", "幻灯", "演示文稿", "excel", "表格", "xlsx", "word 文档", "docx",
-        "pdf", "视频", "转码", "截图", "长图",
+        "ppt",
+        "幻灯",
+        "演示文稿",
+        "excel",
+        "表格",
+        "xlsx",
+        "word 文档",
+        "docx",
+        "pdf",
+        "视频",
+        "转码",
+        "截图",
+        "长图",
         // 英文
-        "script", "run ", "execute", "automation", "batch ", "convert",
-        "scrape", "crawler", "pptx", "spreadsheet", "screenshot",
+        "script",
+        "run ",
+        "execute",
+        "automation",
+        "batch ",
+        "convert",
+        "scrape",
+        "crawler",
+        "pptx",
+        "spreadsheet",
+        "screenshot",
     ];
     HINTS.iter().any(|h| lower.contains(h))
 }
@@ -557,13 +650,44 @@ pub(crate) fn detect_artifact_intent(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
     const HINTS: &[&str] = &[
         // 中文
-        "生成", "写一份", "做一份", "写个", "做个", "做一个", "帮我写", "帮我做",
-        "导出", "保存", "输出到", "落盘", "报告", "文档", "网页", "海报", "简历",
-        "图表", "可视化", "整理成", "汇总成", "文件",
+        "生成",
+        "写一份",
+        "做一份",
+        "写个",
+        "做个",
+        "做一个",
+        "帮我写",
+        "帮我做",
+        "导出",
+        "保存",
+        "输出到",
+        "落盘",
+        "报告",
+        "文档",
+        "网页",
+        "海报",
+        "简历",
+        "图表",
+        "可视化",
+        "整理成",
+        "汇总成",
+        "文件",
         // 英文
-        "generate", "create a", "make a", "export", "save ", "report",
-        "webpage", "website", "chart", "visualiz", "poster", "resume", "write a",
-        "html", "markdown file",
+        "generate",
+        "create a",
+        "make a",
+        "export",
+        "save ",
+        "report",
+        "webpage",
+        "website",
+        "chart",
+        "visualiz",
+        "poster",
+        "resume",
+        "write a",
+        "html",
+        "markdown file",
     ];
     HINTS.iter().any(|h| lower.contains(h))
 }
@@ -574,11 +698,33 @@ pub(crate) fn detect_search_intent(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
     const HINTS: &[&str] = &[
         // 中文
-        "查找", "找一下", "找找", "找出", "搜索", "搜一下", "搜搜", "检索",
-        "翻一下", "翻翻", "库里", "知识库", "资料里", "哪个文件", "哪些文件",
-        "什么文件", "找文件", "全文", "在哪",
+        "查找",
+        "找一下",
+        "找找",
+        "找出",
+        "搜索",
+        "搜一下",
+        "搜搜",
+        "检索",
+        "翻一下",
+        "翻翻",
+        "库里",
+        "知识库",
+        "资料里",
+        "哪个文件",
+        "哪些文件",
+        "什么文件",
+        "找文件",
+        "全文",
+        "在哪",
         // 英文
-        "search", "find ", "look up", "locate", "grep", "glob", "where is",
+        "search",
+        "find ",
+        "look up",
+        "locate",
+        "grep",
+        "glob",
+        "where is",
         "which file",
     ];
     HINTS.iter().any(|h| lower.contains(h))
@@ -766,7 +912,10 @@ pub(crate) fn search_convention_lite() -> &'static str {
 /// 而 `.gitignore` 只在 git 仓库内生效 —— 用户的 KB 根多半不是 git 仓库, 故必须用 `.ignore`。
 /// 仅在文件缺失时创建(不覆盖用户自定义), KB 根不存在 / 不可写则静默跳过, 绝不致命。
 pub(crate) fn ensure_kb_search_ignore() {
-    let root = kb::kb_root();
+    let root = match bridges::kb_bridge() {
+        Some(b) => b.root(),
+        None => return, // 检索引擎未拼装 → 无 KB 根可写
+    };
     if root.is_empty() {
         return;
     }
@@ -883,7 +1032,11 @@ pub(crate) fn goal_directive(goal: &str) -> String {
 /// 生图能力指令: 把「当前供应商 + 能否真生图」作为事实交给模型。
 /// supported=false(绝大多数情况)时, 要求一开始就用中文讲清「当前模型不支持生成真实图片」,
 /// 再用「很有图片质感的自包含 HTML」兜底; supported=true 才允许走真实图像 API。
-pub(crate) fn image_capability_directive(provider_name: &str, supported: bool, art_dir: &Path) -> String {
+pub(crate) fn image_capability_directive(
+    provider_name: &str,
+    supported: bool,
+    art_dir: &Path,
+) -> String {
     let dir = art_dir.to_string_lossy().replace('\\', "/");
     if supported {
         format!(
@@ -966,7 +1119,10 @@ mod tests {
 
     #[test]
     fn format_memory_map_empty_when_no_entries() {
-        assert_eq!(format_memory_map("# 标题\n\n<!-- 空 -->\n", "D:/kb/memory", 2000), "");
+        assert_eq!(
+            format_memory_map("# 标题\n\n<!-- 空 -->\n", "D:/kb/memory", 2000),
+            ""
+        );
         assert_eq!(format_memory_map("", "D:/kb/memory", 2000), "");
     }
 
@@ -1001,11 +1157,15 @@ mod tests {
         // 脚本/执行/成品类意图 → 注入 script_convention
         assert!(detect_script_intent("帮我写个脚本批量重命名这些照片"));
         assert!(detect_script_intent("做一份 ppt 讲一下增长策略"));
-        assert!(detect_script_intent("please run a quick script to convert these"));
+        assert!(detect_script_intent(
+            "please run a quick script to convert these"
+        ));
         assert!(!detect_script_intent("今天天气怎么样"));
         // 产物意图 → 注入全量 output_convention
         assert!(detect_artifact_intent("生成一份本周周报"));
-        assert!(detect_artifact_intent("export the data and give me a chart"));
+        assert!(detect_artifact_intent(
+            "export the data and give me a chart"
+        ));
         assert!(!detect_artifact_intent("你好呀"));
         // 检索意图 → 注入全量 search_convention
         assert!(detect_search_intent("在知识库里找一下上次的会议纪要"));

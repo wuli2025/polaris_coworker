@@ -105,7 +105,9 @@ pub fn list(task_id: i64, after_id: i64, limit: i64) -> Result<Vec<TaskMessage>,
         ))
         .map_err(|e| format!("查询失败: {e}"))?;
     let rows = stmt
-        .query_map(rusqlite::params![task_id, after_id, limit], |r| row_to_msg(r))
+        .query_map(rusqlite::params![task_id, after_id, limit], |r| {
+            row_to_msg(r)
+        })
         .map_err(|e| format!("查询失败: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("读取失败: {e}"))?;
@@ -135,14 +137,21 @@ mod tests {
 
     fn setup(tag: &str) -> std::sync::MutexGuard<'static, ()> {
         let g = db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        std::env::set_var("POLARIS_COLLAB_DB", std::env::temp_dir().join(format!("chat-{tag}-{ts}.db")));
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::set_var(
+            "POLARIS_COLLAB_DB",
+            std::env::temp_dir().join(format!("chat-{tag}-{ts}.db")),
+        );
         g
     }
 
     fn mk_task() -> i64 {
         let conn = db::open_db().unwrap();
-        conn.execute("INSERT INTO projects(name,created_at) VALUES('p',0)", []).unwrap();
+        conn.execute("INSERT INTO projects(name,created_at) VALUES('p',0)", [])
+            .unwrap();
         let pid = conn.last_insert_rowid();
         let card = tasks::create(pid, "t", "b", "src", "c1", "tester").unwrap();
         card.id

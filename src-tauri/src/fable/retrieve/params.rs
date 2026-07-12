@@ -149,13 +149,22 @@ pub(crate) fn phrase_boost_w() -> f32 {
 
 /// 计算单个候选的「覆盖 + 整句」加分。`doc`=匹配文本(已小写在外部传入以复用),`q_full`=整句小写,
 /// `terms`=内容词(split_query 切好的拉丁词 + CJK 二元组)。返回 `cov_w*覆盖率 + (整句命中?phrase_w:0)`。
-pub(crate) fn coverage_phrase_boost(doc_lower: &str, q_full: &str, terms: &[String], cov_w: f32, phrase_w: f32) -> f32 {
+pub(crate) fn coverage_phrase_boost(
+    doc_lower: &str,
+    q_full: &str,
+    terms: &[String],
+    cov_w: f32,
+    phrase_w: f32,
+) -> f32 {
     if doc_lower.is_empty() || (cov_w <= 0.0 && phrase_w <= 0.0) {
         return 0.0;
     }
     let mut bonus = 0.0;
     if cov_w > 0.0 && !terms.is_empty() {
-        let hit = terms.iter().filter(|t| doc_lower.contains(t.as_str())).count();
+        let hit = terms
+            .iter()
+            .filter(|t| doc_lower.contains(t.as_str()))
+            .count();
         bonus += cov_w * (hit as f32 / terms.len() as f32);
     }
     if phrase_w > 0.0 && q_full.chars().count() >= 4 && doc_lower.contains(q_full) {
@@ -265,7 +274,10 @@ mod tests {
         // 文件名命中应当 > 路径命中 > 无命中(排序意义)
         assert!(a > b && b > 0.0);
         // 权重 0 = 关闭(零回归)
-        assert_eq!(path_boost("policy/退款政策.md", "退款政策", &terms, 0.0), 0.0);
+        assert_eq!(
+            path_boost("policy/退款政策.md", "退款政策", &terms, 0.0),
+            0.0
+        );
         // 默认权重为正(通用增益默认开)
         assert!(path_boost_w() > 0.0);
     }
@@ -280,14 +292,29 @@ mod tests {
         let partial = coverage_phrase_boost("检索系统设计", q_full, &terms, 0.30, 0.6);
         // 完全不沾边 → 0
         let none = coverage_phrase_boost("今天天气不错", q_full, &terms, 0.30, 0.6);
-        assert!(full > partial && partial > none && none == 0.0, "覆盖越多分越高");
-        assert!((full - 0.30).abs() < 1e-6, "全覆盖=cov_w(无整句命中)full={full}");
-        assert!((partial - 0.10).abs() < 1e-6, "1/3 覆盖=cov_w/3 partial={partial}");
+        assert!(
+            full > partial && partial > none && none == 0.0,
+            "覆盖越多分越高"
+        );
+        assert!(
+            (full - 0.30).abs() < 1e-6,
+            "全覆盖=cov_w(无整句命中)full={full}"
+        );
+        assert!(
+            (partial - 0.10).abs() < 1e-6,
+            "1/3 覆盖=cov_w/3 partial={partial}"
+        );
         // 整句精确命中 → 额外 +phrase_w(且整句必含全部内容词 → 再 +cov_w)
         let phrase = coverage_phrase_boost("文档讲知识库检索精度的做法", q_full, &terms, 0.30, 0.6);
-        assert!((phrase - (0.30 + 0.6)).abs() < 1e-6, "整句命中=cov_w+phrase_w phrase={phrase}");
+        assert!(
+            (phrase - (0.30 + 0.6)).abs() < 1e-6,
+            "整句命中=cov_w+phrase_w phrase={phrase}"
+        );
         // 权重置 0 → 关闭(零回归)
-        assert_eq!(coverage_phrase_boost("知识库检索", q_full, &terms, 0.0, 0.0), 0.0);
+        assert_eq!(
+            coverage_phrase_boost("知识库检索", q_full, &terms, 0.0, 0.0),
+            0.0
+        );
         // 默认权重为正(默认开)
         assert!(coverage_boost_w() > 0.0 && phrase_boost_w() > 0.0);
     }
@@ -298,7 +325,13 @@ mod tests {
         assert_eq!(rerank_gate(), 0.25);
         // 门控语义自洽:top1/top2 相对差 0.1(咬得紧)< 默认阈值 → 触发重排;0.5(一骑绝尘)→ 不触发。
         let (r1, close, far) = (1.0_f32, 0.9_f32, 0.5_f32);
-        assert!((r1 - close) / r1 < rerank_gate(), "差 0.1 应判咬得紧、该重排");
-        assert!((r1 - far) / r1 >= rerank_gate(), "差 0.5 应判一骑绝尘、不必重排");
+        assert!(
+            (r1 - close) / r1 < rerank_gate(),
+            "差 0.1 应判咬得紧、该重排"
+        );
+        assert!(
+            (r1 - far) / r1 >= rerank_gate(),
+            "差 0.5 应判一骑绝尘、不必重排"
+        );
     }
 }

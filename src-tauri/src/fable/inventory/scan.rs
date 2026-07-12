@@ -56,7 +56,12 @@ enum Msg {
     /// 一个文件:照常 upsert 进 files(mtime/size 没变则保留 chunked/ftsed 标记)。
     File(FileRow),
     /// 一个**改过/新**的目录:read_dir 完后记下它的 mtime + 直属文件数/字节,供下次增量比对。
-    Dir { rel: String, mtime: i64, fcount: i64, fbytes: i64 },
+    Dir {
+        rel: String,
+        mtime: i64,
+        fcount: i64,
+        fbytes: i64,
+    },
     /// 一个**没变**的目录(mtime 命中缓存,整棵跳过 read_dir):把它的直属文件标记「本轮见过」
     /// (否则代际对账会把它们误判消失而删),并 touch 自己的 dirs 行(mtime 不变,只刷 seen)。
     Skip { rel: String },
@@ -112,8 +117,7 @@ pub(crate) fn invalidate_skipped_parents(
     if skipped_paths.is_empty() {
         return 0;
     }
-    let Ok(mut up_parent) =
-        conn.prepare("UPDATE dirs SET mtime=0 WHERE root_id=?1 AND relpath=?2")
+    let Ok(mut up_parent) = conn.prepare("UPDATE dirs SET mtime=0 WHERE root_id=?1 AND relpath=?2")
     else {
         return 0;
     };
@@ -123,7 +127,9 @@ pub(crate) fn invalidate_skipped_parents(
         let rel = rel_of(Path::new(p), root_path);
         let parent = parent_rel(&rel).to_string();
         if seen_parents.insert(parent.clone()) {
-            n += up_parent.execute(rusqlite::params![root_id, parent]).unwrap_or(0);
+            n += up_parent
+                .execute(rusqlite::params![root_id, parent])
+                .unwrap_or(0);
         }
     }
     n
@@ -163,7 +169,9 @@ fn reconcile_renames(
             "SELECT id, size, content_hash, name FROM files
              WHERE id IN ({ph}) AND chunked=1 AND content_hash<>''"
         );
-        let Ok(mut stmt) = conn.prepare(&sql) else { return moved };
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return moved;
+        };
         let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -193,17 +201,14 @@ fn reconcile_renames(
             ) else {
                 continue;
             };
-            let rows = stmt.query_map(
-                rusqlite::params![root_id, gen, size, oname],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, i64>(3)?,
-                    ))
-                },
-            );
+            let rows = stmt.query_map(rusqlite::params![root_id, gen, size, oname], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            });
             match rows {
                 Ok(rs) => rs.filter_map(|r| r.ok()).collect(),
                 Err(_) => continue,
@@ -217,7 +222,9 @@ fn reconcile_renames(
                 continue;
             }
             let abs = super::reencode_fs_path(&root_base.join(&c.1).to_string_lossy());
-            let Ok(bytes) = std::fs::read(&abs) else { continue };
+            let Ok(bytes) = std::fs::read(&abs) else {
+                continue;
+            };
             if bytes.iter().take(4096).any(|&b| b == 0) {
                 continue; // 伪文本,内容哈希只对文本有意义
             }
@@ -308,7 +315,9 @@ pub fn scan_root(
     )
     .map_err(|e| e.to_string())?;
     let root_id: i64 = conn
-        .query_row("SELECT id FROM roots WHERE path=?1", [&root_canon], |r| r.get(0))
+        .query_row("SELECT id FROM roots WHERE path=?1", [&root_canon], |r| {
+            r.get(0)
+        })
         .map_err(|e| e.to_string())?;
 
     // ── 增量盘点:载入上一轮的目录缓存(rel → mtime + 直属文件数/字节)──────────────
@@ -316,7 +325,8 @@ pub fn scan_root(
     // `full=true` 或第一次盘点(缓存空)→ 不命中,等同全量。`dir_children` 由全部 key 反推父子
     // 邻接表:跳过某目录时据它把子目录排进队列(自己不 read_dir 也能继续往下钻、逐个比对)。
     let mut dir_mt: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut dir_stat: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
+    let mut dir_stat: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
     if !full {
         if let Ok(mut stmt) =
             conn.prepare("SELECT relpath, mtime, fcount, fbytes FROM dirs WHERE root_id=?1")
@@ -342,7 +352,10 @@ pub fn scan_root(
         if rel.is_empty() {
             continue; // 根没有父
         }
-        dir_children.entry(parent_rel(rel).to_string()).or_default().push(rel.clone());
+        dir_children
+            .entry(parent_rel(rel).to_string())
+            .or_default()
+            .push(rel.clone());
     }
     let dir_mt = Arc::new(dir_mt);
     let dir_stat = Arc::new(dir_stat);
@@ -365,7 +378,12 @@ pub fn scan_root(
     queue.set_live_workers(workers);
     let beats: Arc<Vec<Mutex<Beat>>> = Arc::new(
         (0..workers)
-            .map(|_| Mutex::new(Beat { dir: None, abandoned: false }))
+            .map(|_| {
+                Mutex::new(Beat {
+                    dir: None,
+                    abandoned: false,
+                })
+            })
             .collect(),
     );
     // 每个 worker 的「已处理目录项」累加计数(Relaxed,热循环里零锁开销)。看门狗据此区分
@@ -441,12 +459,24 @@ pub fn scan_root(
                             Msg::File(row) => {
                                 ins_file
                                     .execute(rusqlite::params![
-                                        root_id, row.relpath, row.name, row.ext, row.kind, row.lang,
-                                        row.size as i64, row.mtime, gen
+                                        root_id,
+                                        row.relpath,
+                                        row.name,
+                                        row.ext,
+                                        row.kind,
+                                        row.lang,
+                                        row.size as i64,
+                                        row.mtime,
+                                        gen
                                     ])
                                     .map_err(|e| e.to_string())?;
                             }
-                            Msg::Dir { rel, mtime, fcount, fbytes } => {
+                            Msg::Dir {
+                                rel,
+                                mtime,
+                                fcount,
+                                fbytes,
+                            } => {
                                 up_dir
                                     .execute(rusqlite::params![
                                         root_id, rel, mtime, fcount, fbytes, gen
@@ -534,9 +564,13 @@ pub fn scan_root(
                 // mtime 由父目录的 read_dir 顺手带出(known_mtime,免再 stat);根 / 跳过路径排进来的
                 // 子目录 known=0 → 现 stat 一次拿 mtime(NAS 上一次往返,远比 read_dir 整个目录省)。
                 let rel = rel_of(&dir, root_path.as_path());
-                let cur_mtime = if known_mtime != 0 { known_mtime } else { dir_mtime(&dir) };
-                let unchanged = cur_mtime != 0
-                    && dir_mt.get(&rel).map(|m| *m == cur_mtime).unwrap_or(false);
+                let cur_mtime = if known_mtime != 0 {
+                    known_mtime
+                } else {
+                    dir_mtime(&dir)
+                };
+                let unchanged =
+                    cur_mtime != 0 && dir_mt.get(&rel).map(|m| *m == cur_mtime).unwrap_or(false);
                 if unchanged {
                     // 直属文件没变:从缓存把它们的数量/字节计入进度(报数不缩水),并标记「本轮见过」;
                     // 子目录排进队列各自比对(它们的内层可能变了——目录 mtime 只反映直属项的增删改名)。
@@ -577,7 +611,8 @@ pub fn scan_root(
                                 if ft.is_dir() {
                                     // 永远跳的噪音任何根都剪;OS 目录黑名单只在整盘扫描时叠加,
                                     // 这样显式挑的文件夹里的东西「全归类进库」。
-                                    if skip_dir_always(&name) || (heavy_prune && skip_dir_os(&name)) {
+                                    if skip_dir_always(&name) || (heavy_prune && skip_dir_os(&name))
+                                    {
                                         continue;
                                     }
                                     let child = entry.path();
@@ -631,7 +666,12 @@ pub fn scan_root(
                                     }));
                                 }
                             }
-                            let _ = tx.send(Msg::Dir { rel, mtime: cur_mtime, fcount, fbytes });
+                            let _ = tx.send(Msg::Dir {
+                                rel,
+                                mtime: cur_mtime,
+                                fcount,
+                                fbytes,
+                            });
                         }
                         Err(_) => {
                             // 读目录失败(权限抖动 / NAS 瞬断):不丢弃也不原地卡住别人,而是降级到
@@ -639,7 +679,10 @@ pub fn scan_root(
                             if job.attempts < MAX_DIR_ATTEMPTS {
                                 queue.demote((dir.clone(), known_mtime), job.attempts + 1);
                             } else {
-                                problematic.lock().unwrap().push(dir.to_string_lossy().into_owned());
+                                problematic
+                                    .lock()
+                                    .unwrap()
+                                    .push(dir.to_string_lossy().into_owned());
                             }
                         }
                     }
@@ -692,14 +735,12 @@ pub fn scan_root(
                     let stuck = {
                         let mut b = slot.lock().unwrap();
                         // 仅当「在忙(dir 有值)、未被放弃、且零进度已超死线」才判卡死。
-                        let hit = if !b.abandoned
-                            && b.dir.is_some()
-                            && last[i].1.elapsed() > deadline
-                        {
-                            b.dir.as_ref().map(|p| p.to_string_lossy().into_owned())
-                        } else {
-                            None
-                        };
+                        let hit =
+                            if !b.abandoned && b.dir.is_some() && last[i].1.elapsed() > deadline {
+                                b.dir.as_ref().map(|p| p.to_string_lossy().into_owned())
+                            } else {
+                                None
+                            };
                         if hit.is_some() {
                             b.abandoned = true;
                         }
@@ -738,7 +779,9 @@ pub fn scan_root(
     let skipped_dirs = queue.drain_remaining();
     // 仅 join writer(它靠 scan_done 在 ≤150ms 内收尾,有界);worker/看门狗 detach:健康 worker
     // 此刻在途已归零、即将自行退出,卡死的随其阻塞 syscall 自然回收 —— 绝不 join 卡死线程。
-    writer.join().map_err(|_| "writer 线程 panic".to_string())??;
+    writer
+        .join()
+        .map_err(|_| "writer 线程 panic".to_string())??;
 
     if cancelled() {
         return Err("已取消".into());
@@ -747,8 +790,8 @@ pub fn scan_root(
     let files = n_files.load(Ordering::Relaxed);
     let bytes = n_bytes.load(Ordering::Relaxed);
     progress(files, bytes); // 收尾再报一次,确保进度条落到最终值
-    // 本轮被跳过/反复读失败/看门狗放弃的目录绝对路径(用于①报数 ②下面给它们的父目录作废增量缓存,
-    // 根治「一次读失败就永久漏扫」——见下方自愈逻辑)。
+                            // 本轮被跳过/反复读失败/看门狗放弃的目录绝对路径(用于①报数 ②下面给它们的父目录作废增量缓存,
+                            // 根治「一次读失败就永久漏扫」——见下方自愈逻辑)。
     let skipped_paths: Vec<String> = {
         let mut v = problematic.lock().unwrap();
         for (d, _mt) in skipped_dirs {
@@ -857,8 +900,11 @@ pub fn scan_root(
         // 目录缓存对账:本轮没确认(seen<>gen)的 dirs 行清掉 —— 目录已消失,或本轮没扫到
         // (挂载掉线 / 反复读失败被跳过)。后者只是丢掉它的「免遍历」资格,下次重扫当成新目录
         // 完整 read_dir 再补回缓存,绝不波及 files(文件的删除另由上面「逐个 stat 确认真消失」把关)。
-        conn.execute("DELETE FROM dirs WHERE root_id=?1 AND seen<>?2", rusqlite::params![root_id, gen])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM dirs WHERE root_id=?1 AND seen<>?2",
+            rusqlite::params![root_id, gen],
+        )
+        .map_err(|e| e.to_string())?;
 
         // 自愈:防「一次读失败就永久漏扫」。被跳过/读失败的目录本轮没产生 Msg → 它的 dirs 行刚被
         // 上面按 seen<>gen 清掉;而它的**父目录** mtime 多半没变,下次增量盘点会对父目录走「免遍历」
@@ -902,7 +948,9 @@ pub(crate) fn strip_extended_prefix(s: &str) -> String {
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
     }
-    s.strip_prefix(r"\\?\").map(|x| x.to_string()).unwrap_or_else(|| s.to_string())
+    s.strip_prefix(r"\\?\")
+        .map(|x| x.to_string())
+        .unwrap_or_else(|| s.to_string())
 }
 
 /// 文件「磁盘实占」字节数,而非 `metadata().len()` 报的逻辑大小。
@@ -940,7 +988,11 @@ pub(crate) fn on_disk_size(path: &Path, meta: &std::fs::Metadata, remote: bool) 
         if meta.file_attributes() & (FILE_ATTRIBUTE_SPARSE_FILE | FILE_ATTRIBUTE_COMPRESSED) == 0 {
             return meta.len();
         }
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
         let mut high: u32 = 0;
         // SAFETY: wide 是以 NUL 结尾的合法宽字符串;high 是有效可写指针。
         let low = unsafe { GetCompressedFileSizeW(wide.as_ptr(), &mut high) };

@@ -6,22 +6,23 @@
 //! 工程姿势(PRD「巡夜人/滴灌」):一次构建只消化一个预算额(默认 4000 chunk),
 //! 幂等续跑 —— files.chunked 标记位,断了再点继续;429 限速指数退避。
 
-
 // 模块拆分(纯移动): 原 `crate::fable::index::xxx` 公有路径经 `pub use 子模块::*` 门面保持零变化,
 // lib.rs generate_handler! / server.rs / retrieve.rs 等外部引用一律不用改。
 
-pub mod client;
-pub mod math;
 pub mod build;
-pub mod lexical;
-pub mod ivf;
+pub mod client;
 pub mod commands;
 pub mod dedupe;
+pub mod ivf;
+pub mod lexical;
 pub mod local_embed;
+pub mod math;
 
 // 共享依赖统一在此升为 pub(crate) 供子模块 `use super::*` 取用(与原单文件同一作用域语义)。
 // 深度加一层:fable 级符号在此再导出到 index 层,子文件的 `super::xxx` 零改动命中。
-pub(crate) use super::{cancelled, lex_available, open_db, reencode_fs_path, FlagGuard, CANCEL, INDEXING};
+pub(crate) use super::{
+    cancelled, lex_available, open_db, reencode_fs_path, FlagGuard, CANCEL, INDEXING,
+};
 pub(crate) use once_cell::sync::Lazy;
 pub(crate) use serde::Serialize;
 pub(crate) use serde_json::{json, Value};
@@ -30,16 +31,16 @@ pub(crate) use std::sync::atomic::Ordering;
 pub(crate) use std::sync::Mutex;
 pub(crate) use std::time::Duration;
 
-#[cfg(feature = "desktop")]
-pub(crate) use tauri::{AppHandle, Emitter};
 #[cfg(not(feature = "desktop"))]
 pub(crate) use crate::host::AppHandle;
+#[cfg(feature = "desktop")]
+pub(crate) use tauri::{AppHandle, Emitter};
 
-pub use client::*;
-pub use math::*;
 pub use build::*;
-pub use lexical::*;
-pub use ivf::*;
+pub use client::*;
 pub use commands::*;
 pub use dedupe::*;
+pub use ivf::*;
+pub use lexical::*;
 pub use local_embed::*;
+pub use math::*;

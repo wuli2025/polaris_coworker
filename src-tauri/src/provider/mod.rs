@@ -19,13 +19,15 @@
 // lib.rs generate_handler! 与 server / chat / kb / integrations 等外部引用一律不用改
 // (tauri 宏生成的 __cmd__xxx 项随 glob 一并带出)。子文件统一 `use super::*`。
 
+pub mod claude_login;
+pub mod codex_login;
+pub mod oauth_loopback;
 pub mod store;
 pub mod usage;
-pub mod codex_login;
-pub mod claude_login;
-pub mod oauth_loopback;
 
 // 共享依赖统一在此升为 pub(crate) 供子模块 `use super::*` 取用(与原单文件同一作用域语义)。
+#[cfg(not(feature = "desktop"))]
+pub(crate) use crate::host::AppHandle;
 pub(crate) use anyhow::Result;
 pub(crate) use directories::UserDirs;
 pub(crate) use once_cell::sync::Lazy;
@@ -44,8 +46,6 @@ pub(crate) use std::thread;
 pub(crate) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 pub(crate) use tauri::AppHandle;
-#[cfg(not(feature = "desktop"))]
-pub(crate) use crate::host::AppHandle;
 pub(crate) use walkdir::WalkDir;
 
 // 构建期注入的「粉丝福利」MiniMax key(XOR 滚动混淆字节, 见 build.rs)。
@@ -83,8 +83,8 @@ fn ymd_string(z: i64) -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+pub use claude_login::*;
+pub use codex_login::*;
+pub use oauth_loopback::*;
 pub use store::*;
 pub use usage::*;
-pub use codex_login::*;
-pub use claude_login::*;
-pub use oauth_loopback::*;

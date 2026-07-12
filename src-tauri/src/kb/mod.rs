@@ -11,22 +11,25 @@
 //! - 不做 SimHash 去重 (留 §8.6, 后续接入)
 //! - 索引常驻内存, 进程重启时重扫 (后续走 SQLite)
 
-
 // 模块拆分(纯移动): 原 `crate::kb::xxx` 公有路径经 `pub use 子模块::*` 门面保持零变化,
 // lib.rs generate_handler! 与 server/echo/fable 等外部引用一律不用改。
 
-pub mod scan;
 pub mod packs;
-pub mod compile;
-pub mod enrich;
+pub mod scan;
+// 知识网构建管线已归位 wiki 域(分仓规划 v2 第 12 仓雏形); 别名保持 `kb::compile`
+// 旧路径与下方 `pub use compile::*` 门面零改动, 抽仓时删别名一次性切 `wiki::compile`。
+pub use crate::wiki::compile;
 pub mod access;
-pub mod search;
-pub mod ingest;
+pub mod enrich;
 pub mod graph;
+pub mod ingest;
+pub mod search;
 pub mod threat;
 
 // 共享依赖统一在此升为 pub(crate) 供子模块 `use super::*` 取用(与原单文件同一作用域语义)。
 pub(crate) use crate::convert;
+#[cfg(not(feature = "desktop"))]
+pub(crate) use crate::host::AppHandle;
 pub(crate) use anyhow::Result;
 pub(crate) use directories::{ProjectDirs, UserDirs};
 pub(crate) use once_cell::sync::Lazy;
@@ -42,17 +45,14 @@ pub(crate) use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub(crate) use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 pub(crate) use tauri::{AppHandle, Emitter, Manager};
-#[cfg(not(feature = "desktop"))]
-pub(crate) use crate::host::AppHandle;
 pub(crate) use walkdir::WalkDir;
 
-
-pub use scan::*;
-pub use packs::*;
+pub use access::*;
 pub use compile::*;
 pub use enrich::*;
-pub use access::*;
-pub use search::*;
-pub use ingest::*;
 pub use graph::*;
+pub use ingest::*;
+pub use packs::*;
+pub use scan::*;
+pub use search::*;
 pub use threat::*;

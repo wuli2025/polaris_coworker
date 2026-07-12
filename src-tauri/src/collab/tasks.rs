@@ -4,7 +4,7 @@
 //! 六态:pending(待领取) → in_progress(进行中) → review(待验收) → merged(已合并) → archived(归档),
 //! 外加 cancelled 终态。「打回」不是独立状态而是动作:review → in_progress(同分支续改,round+1)。
 //! 打回熔断:同卡满 3 轮自动置 escalated 标记(抄送 owner,方案兜底 13)。
-use rusqlite::params;
+use rusqlite::{params, Connection, TransactionBehavior};
 
 use super::db::{self, now, open_db};
 
@@ -51,7 +51,14 @@ fn row_to_card(r: &rusqlite::Row) -> rusqlite::Result<TaskCard> {
 const CARD_COLS: &str = "id,project_id,title,body,scope,criteria,assignee,state,round,branch,pr_id,issue_no,created_at,updated_at";
 
 /// 建卡。四要素缺一不可(做什么/改哪里/验收标准/标题)——防"拆得云山雾罩"。
-pub fn create(project_id: i64, title: &str, body: &str, scope: &str, criteria: &str, actor: &str) -> Result<TaskCard, String> {
+pub fn create(
+    project_id: i64,
+    title: &str,
+    body: &str,
+    scope: &str,
+    criteria: &str,
+    actor: &str,
+) -> Result<TaskCard, String> {
     let (title, body, scope, criteria) = (title.trim(), body.trim(), scope.trim(), criteria.trim());
     if title.is_empty() || body.is_empty() || scope.is_empty() || criteria.is_empty() {
         return Err("任务卡四要素不全:标题、做什么、改哪里(scope)、验收标准都必填".into());
@@ -70,6 +77,10 @@ pub fn create(project_id: i64, title: &str, body: &str, scope: &str, criteria: &
 
 pub fn get(task_id: i64) -> Result<TaskCard, String> {
     let conn = open_db()?;
+    get_on(&conn, task_id)
+}
+
+fn get_on(conn: &Connection, task_id: i64) -> Result<TaskCard, String> {
     conn.query_row(
         &format!("SELECT {CARD_COLS} FROM tasks WHERE id=?1"),
         params![task_id],
@@ -81,9 +92,13 @@ pub fn get(task_id: i64) -> Result<TaskCard, String> {
 pub fn list(project_id: i64) -> Result<Vec<TaskCard>, String> {
     let conn = open_db()?;
     let mut stmt = conn
-        .prepare(&format!("SELECT {CARD_COLS} FROM tasks WHERE project_id=?1 ORDER BY updated_at DESC"))
+        .prepare(&format!(
+            "SELECT {CARD_COLS} FROM tasks WHERE project_id=?1 ORDER BY updated_at DESC"
+        ))
         .map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![project_id], row_to_card).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![project_id], row_to_card)
+        .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
@@ -102,7 +117,12 @@ fn allowed(from: &str, to: &str) -> bool {
     )
 }
 
-fn set_state(conn: &rusqlite::Connection, task_id: i64, from: &str, to: &str) -> Result<(), String> {
+fn set_state(
+    conn: &rusqlite::Connection,
+    task_id: i64,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
     if !allowed(from, to) {
         return Err(format!("非法状态迁移: {from} → {to}"));
     }
@@ -113,15 +133,20 @@ fn set_state(conn: &rusqlite::Connection, task_id: i64, from: &str, to: &str) ->
         )
         .map_err(|e| e.to_string())?;
     if n != 1 {
-        return Err(format!("任务 #{task_id} 状态已变化(期望 {from}),请刷新重试"));
+        return Err(format!(
+            "任务 #{task_id} 状态已变化(期望 {from}),请刷新重试"
+        ));
     }
     Ok(())
 }
 
 /// 领取:待领取 → 进行中,记 assignee 与分支名(task/日期-成员-短名)。
 pub fn claim(task_id: i64, user_id: i64, username: &str) -> Result<TaskCard, String> {
-    let card = get(task_id)?;
-    let conn = open_db()?;
+    let mut conn = open_db()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("领取事务失败: {e}"))?;
+    let card = get_on(&tx, task_id)?;
     let slug: String = card
         .title
         .chars()
@@ -135,27 +160,42 @@ pub fn claim(task_id: i64, user_id: i64, username: &str) -> Result<TaskCard, Str
     } else {
         format!("task/{date}-{username}-{slug}")
     };
-    set_state(&conn, task_id, &card.state, "in_progress")?;
-    conn.execute(
+    set_state(&tx, task_id, &card.state, "in_progress")?;
+    tx.execute(
         "UPDATE tasks SET assignee=?1, branch=?2, updated_at=?3 WHERE id=?4",
         params![user_id, branch, now(), task_id],
     )
     .map_err(|e| e.to_string())?;
+    let out = get_on(&tx, task_id)?;
+    tx.commit().map_err(|e| format!("提交领取失败: {e}"))?;
     db::audit(username, "task.claim", &task_id.to_string(), &branch);
-    get(task_id)
+    Ok(out)
 }
 
 /// 提交:进行中 → 待验收(关联 PR)。
 pub fn submit(task_id: i64, pr_id: Option<i64>, actor: &str) -> Result<TaskCard, String> {
-    let card = get(task_id)?;
-    let conn = open_db()?;
-    set_state(&conn, task_id, &card.state, "review")?;
+    let mut conn = open_db()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("提交任务事务失败: {e}"))?;
+    let card = get_on(&tx, task_id)?;
+    set_state(&tx, task_id, &card.state, "review")?;
     if let Some(pr) = pr_id {
-        conn.execute("UPDATE tasks SET pr_id=?1, updated_at=?2 WHERE id=?3", params![pr, now(), task_id])
-            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE tasks SET pr_id=?1, updated_at=?2 WHERE id=?3",
+            params![pr, now(), task_id],
+        )
+        .map_err(|e| e.to_string())?;
     }
-    db::audit(actor, "task.submit", &task_id.to_string(), &pr_id.map(|p| p.to_string()).unwrap_or_default());
-    get(task_id)
+    let out = get_on(&tx, task_id)?;
+    tx.commit().map_err(|e| format!("提交任务失败: {e}"))?;
+    db::audit(
+        actor,
+        "task.submit",
+        &task_id.to_string(),
+        &pr_id.map(|p| p.to_string()).unwrap_or_default(),
+    );
+    Ok(out)
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -167,56 +207,99 @@ pub struct ReviewOutcome {
 
 /// 验收:通过(review→merged 由合并闸门调用 mark_merged,这里只记意见)或打回。
 /// 打回:review → in_progress,round+1,意见入 review_rounds(JSON,逐条挂验收标准)。
-pub fn review(task_id: i64, reviewer: &str, pass: bool, comments_json: &str) -> Result<ReviewOutcome, String> {
-    let card = get(task_id)?;
+pub fn review(
+    task_id: i64,
+    reviewer: &str,
+    pass: bool,
+    comments_json: &str,
+) -> Result<ReviewOutcome, String> {
+    let mut conn = open_db()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("验收事务失败: {e}"))?;
+    let card = get_on(&tx, task_id)?;
     if card.state != "review" {
         return Err(format!("任务 #{task_id} 不在待验收状态"));
     }
-    let conn = open_db()?;
     let round = card.round + 1;
-    conn.execute(
+    tx.execute(
         "INSERT INTO review_rounds(task_id,round,reviewer,verdict,comments,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
         params![task_id, round, reviewer, if pass { "pass" } else { "reject" }, comments_json, now()],
     )
     .map_err(|e| e.to_string())?;
     let escalated = if pass {
         // 通过:停在 review,等合并闸门(机器闸+放行闸)调 mark_merged。
-        conn.execute("UPDATE tasks SET round=?1, updated_at=?2 WHERE id=?3", params![round, now(), task_id])
-            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE tasks SET round=?1, updated_at=?2 WHERE id=?3",
+            params![round, now(), task_id],
+        )
+        .map_err(|e| e.to_string())?;
         false
     } else {
-        set_state(&conn, task_id, "review", "in_progress")?;
-        conn.execute("UPDATE tasks SET round=?1, updated_at=?2 WHERE id=?3", params![round, now(), task_id])
-            .map_err(|e| e.to_string())?;
+        set_state(&tx, task_id, "review", "in_progress")?;
+        tx.execute(
+            "UPDATE tasks SET round=?1, updated_at=?2 WHERE id=?3",
+            params![round, now(), task_id],
+        )
+        .map_err(|e| e.to_string())?;
         round >= ESCALATE_ROUNDS
     };
-    db::audit(reviewer, if pass { "task.review.pass" } else { "task.review.reject" }, &task_id.to_string(), &format!("round={round}"));
-    Ok(ReviewOutcome { card: get(task_id)?, escalated })
+    let out = get_on(&tx, task_id)?;
+    tx.commit().map_err(|e| format!("提交验收失败: {e}"))?;
+    db::audit(
+        reviewer,
+        if pass {
+            "task.review.pass"
+        } else {
+            "task.review.reject"
+        },
+        &task_id.to_string(),
+        &format!("round={round}"),
+    );
+    Ok(ReviewOutcome {
+        card: out,
+        escalated,
+    })
 }
 
 /// 合并闸门放行后落状态:review → merged。
 pub fn mark_merged(task_id: i64, actor: &str) -> Result<TaskCard, String> {
-    let card = get(task_id)?;
-    let conn = open_db()?;
-    set_state(&conn, task_id, &card.state, "merged")?;
+    let mut conn = open_db()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let card = get_on(&tx, task_id)?;
+    set_state(&tx, task_id, &card.state, "merged")?;
+    let out = get_on(&tx, task_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
     db::audit(actor, "task.merged", &task_id.to_string(), &card.branch);
-    get(task_id)
+    Ok(out)
 }
 
 pub fn archive(task_id: i64, actor: &str) -> Result<TaskCard, String> {
-    let card = get(task_id)?;
-    let conn = open_db()?;
-    set_state(&conn, task_id, &card.state, "archived")?;
+    let mut conn = open_db()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let card = get_on(&tx, task_id)?;
+    set_state(&tx, task_id, &card.state, "archived")?;
+    let out = get_on(&tx, task_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
     db::audit(actor, "task.archive", &task_id.to_string(), "");
-    get(task_id)
+    Ok(out)
 }
 
 pub fn cancel(task_id: i64, actor: &str) -> Result<TaskCard, String> {
-    let card = get(task_id)?;
-    let conn = open_db()?;
-    set_state(&conn, task_id, &card.state, "cancelled")?;
+    let mut conn = open_db()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let card = get_on(&tx, task_id)?;
+    set_state(&tx, task_id, &card.state, "cancelled")?;
+    let out = get_on(&tx, task_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
     db::audit(actor, "task.cancel", &task_id.to_string(), "");
-    get(task_id)
+    Ok(out)
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -318,11 +401,16 @@ mod tests {
     use super::*;
 
     fn tmp_db() -> std::sync::MutexGuard<'static, ()> {
-        let g = super::super::db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let g = super::super::db::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let p = std::env::temp_dir().join(format!(
             "collab-tasks-{}-{}.db",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::env::set_var("POLARIS_COLLAB_DB", p);
         g
@@ -350,7 +438,15 @@ mod tests {
         let (pid, uid) = mk_project();
         // 四要素缺一不可
         assert!(create(pid, "t", "", "src/", "c1", "boss").is_err());
-        let card = create(pid, "开场重写", "重写第三章开场", "script/ch03/", "1.对白自然 2.用新角色名", "boss").unwrap();
+        let card = create(
+            pid,
+            "开场重写",
+            "重写第三章开场",
+            "script/ch03/",
+            "1.对白自然 2.用新角色名",
+            "boss",
+        )
+        .unwrap();
         assert_eq!(card.state, "pending");
 
         let card = claim(card.id, uid, "ming").unwrap();
@@ -361,7 +457,13 @@ mod tests {
         assert_eq!(card.state, "review");
 
         // 打回两轮
-        let r1 = review(card.id, "lead:tech", false, "[{\"item\":1,\"note\":\"对白生硬\"}]").unwrap();
+        let r1 = review(
+            card.id,
+            "lead:tech",
+            false,
+            "[{\"item\":1,\"note\":\"对白生硬\"}]",
+        )
+        .unwrap();
         assert_eq!(r1.card.state, "in_progress");
         assert!(!r1.escalated);
         submit(card.id, Some(42), "ming").unwrap();
@@ -397,8 +499,12 @@ mod tests {
         review(card.id, "boss", false, "[]").unwrap();
         let items = activity(pid, 30).unwrap();
         // 两类条目都在:一条 review(打回)+ 至少一条 task(状态流)
-        assert!(items.iter().any(|i| i.kind == "review" && i.detail.contains("reject")));
-        assert!(items.iter().any(|i| i.kind == "task" && i.title == "首页改版"));
+        assert!(items
+            .iter()
+            .any(|i| i.kind == "review" && i.detail.contains("reject")));
+        assert!(items
+            .iter()
+            .any(|i| i.kind == "task" && i.title == "首页改版"));
         // 时间倒序
         for w in items.windows(2) {
             assert!(w[0].at >= w[1].at);

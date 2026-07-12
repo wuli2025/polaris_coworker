@@ -38,16 +38,89 @@ fn guard<T>(label: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, Str
 /// 直接当纯文本读取的扩展名（含常见配置 / 代码 / 标记语言）。
 const TEXT_EXTS: &[&str] = &[
     // 文档 / 标记
-    "txt", "text", "log", "md", "markdown", "mdx", "rst", "org", "tex",
+    "txt",
+    "text",
+    "log",
+    "md",
+    "markdown",
+    "mdx",
+    "rst",
+    "org",
+    "tex",
     // 数据 / 配置
-    "csv", "tsv", "json", "jsonl", "ndjson", "yaml", "yml", "toml", "ini", "conf", "cfg",
-    "env", "properties", "xml", "html", "htm", "svg",
+    "csv",
+    "tsv",
+    "json",
+    "jsonl",
+    "ndjson",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "conf",
+    "cfg",
+    "env",
+    "properties",
+    "xml",
+    "html",
+    "htm",
+    "svg",
     // 代码
-    "rs", "js", "mjs", "cjs", "ts", "tsx", "jsx", "vue", "py", "go", "java", "kt", "kts",
-    "swift", "c", "h", "cpp", "cc", "cxx", "hpp", "cs", "rb", "php", "pl", "lua", "sh",
-    "bash", "zsh", "fish", "bat", "ps1", "psm1", "sql", "graphql", "gql", "r", "scala",
-    "dart", "ex", "exs", "erl", "clj", "hs", "ml", "jl", "vim", "css", "scss", "sass",
-    "less", "styl", "makefile", "dockerfile", "gradle", "proto",
+    "rs",
+    "js",
+    "mjs",
+    "cjs",
+    "ts",
+    "tsx",
+    "jsx",
+    "vue",
+    "py",
+    "go",
+    "java",
+    "kt",
+    "kts",
+    "swift",
+    "c",
+    "h",
+    "cpp",
+    "cc",
+    "cxx",
+    "hpp",
+    "cs",
+    "rb",
+    "php",
+    "pl",
+    "lua",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "bat",
+    "ps1",
+    "psm1",
+    "sql",
+    "graphql",
+    "gql",
+    "r",
+    "scala",
+    "dart",
+    "ex",
+    "exs",
+    "erl",
+    "clj",
+    "hs",
+    "ml",
+    "jl",
+    "vim",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "styl",
+    "makefile",
+    "dockerfile",
+    "gradle",
+    "proto",
 ];
 
 fn ext_of(path: &Path) -> String {
@@ -114,13 +187,13 @@ fn open_zip(path: &Path) -> Result<zip::ZipArchive<std::fs::File>, String> {
 }
 
 fn read_zip_entry(zip: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<String, String> {
-    let f = zip
-        .by_name(name)
-        .map_err(|_| format!("缺少 {name}"))?;
+    let f = zip.by_name(name).map_err(|_| format!("缺少 {name}"))?;
     // 解压上限: docx/pptx 的 document.xml 解压后可远大于压缩包(zip 炸弹), 不封顶会 OOM。
     // 只读前 TEXT_READ_CAP 字节, 截断处回退到 UTF-8 字符边界, 抽正文足够。
     let mut buf = Vec::new();
-    f.take(TEXT_READ_CAP).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    f.take(TEXT_READ_CAP)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
     // 截断可能切在多字节 UTF-8 字符中间, 回退到最近的有效边界(至多回退 3 字节)。
     let s = match String::from_utf8(buf) {
         Ok(s) => s,
@@ -197,8 +270,34 @@ fn ooxml_text(xml: &str) -> String {
     for tab in ["<w:tab/>", "<w:tab />", "<a:tab/>", "<a:tab />"] {
         s = s.replace(tab, "\t");
     }
+    // 去掉 Word 域指令(<w:instrText>…</w:instrText>:TOC / HYPERLINK / PAGEREF / REF …)。
+    // 这些是排版指令而非正文,strip_tags 只删标签会把指令码当正文留下 → 污染索引(目录页
+    // 整段全是 `HYPERLINK \l "_Toc…" PAGEREF …`,低语义、挤占 chunk 预算、拉低检索质量)。
+    let s = remove_instr_text(&s);
     let stripped = strip_tags(&s);
     decode_xml_entities(&stripped)
+}
+
+/// 删除 `<w:instrText …>…</w:instrText>` 整段(含其间的域指令文本)。无闭合标签时丢弃残余起始段。
+fn remove_instr_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find("<w:instrText") {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open..];
+        let Some(gt) = after_open.find('>') else {
+            return out; // 起始标签未闭合:后面都当损坏内容丢弃
+        };
+        let content_start = open + gt + 1;
+        match rest[content_start..].find("</w:instrText>") {
+            Some(rel) => {
+                rest = &rest[content_start + rel + "</w:instrText>".len()..];
+            }
+            None => return out, // 无闭合:丢弃剩余
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn strip_tags(s: &str) -> String {
@@ -280,7 +379,10 @@ fn extract_spreadsheet(path: &Path) -> Result<String, String> {
             None => (1..=ncol).map(|i| format!("列{i}")).collect(),
         };
         out.push_str(&format!("| {} |\n", header_cells.join(" | ")));
-        out.push_str(&format!("|{}\n", " --- |".repeat(ncol.max(header_cells.len()))));
+        out.push_str(&format!(
+            "|{}\n",
+            " --- |".repeat(ncol.max(header_cells.len()))
+        ));
 
         let mut count = 0usize;
         for row in rows {
@@ -375,7 +477,8 @@ mod tests {
 
     #[test]
     fn ooxml_handles_tabs_breaks_entities() {
-        let xml = "<w:p><w:r><w:t>a</w:t><w:tab/><w:t>b</w:t><w:br/><w:t>c &amp; d</w:t></w:r></w:p>";
+        let xml =
+            "<w:p><w:r><w:t>a</w:t><w:tab/><w:t>b</w:t><w:br/><w:t>c &amp; d</w:t></w:r></w:p>";
         let out = ooxml_text(xml);
         assert_eq!(out.trim(), "a\tb\nc & d");
     }
@@ -384,7 +487,27 @@ mod tests {
     fn entities_decoded_amp_last() {
         // &amp;lt; 必须只解一层 → "&lt;"，不能变成 "<"
         assert_eq!(decode_xml_entities("x &amp;lt; y"), "x &lt; y");
-        assert_eq!(decode_xml_entities("&lt;tag&gt; &quot;q&quot;"), "<tag> \"q\"");
+        assert_eq!(
+            decode_xml_entities("&lt;tag&gt; &quot;q&quot;"),
+            "<tag> \"q\""
+        );
+    }
+
+    #[test]
+    fn instr_text_field_codes_are_dropped() {
+        // 目录/超链接域指令必须整段删掉,只留真正正文。
+        let xml = "<w:p><w:r><w:t>研究背景</w:t></w:r>\
+                   <w:r><w:instrText> HYPERLINK \\l \"_Toc123\" PAGEREF _Toc123 \\h </w:instrText></w:r>\
+                   <w:r><w:t>正文开始</w:t></w:r></w:p>";
+        let out = ooxml_text(xml);
+        assert!(
+            out.contains("研究背景") && out.contains("正文开始"),
+            "正文保留: {out}"
+        );
+        assert!(
+            !out.contains("HYPERLINK") && !out.contains("PAGEREF"),
+            "域指令删除: {out}"
+        );
     }
 
     #[test]

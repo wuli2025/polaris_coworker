@@ -70,7 +70,10 @@ pub(crate) fn lexical_vec(relpath: &str, name: &str, _ext: &str) -> Vec<f32> {
 ///  ② **id 哈希均匀散布全库**补齐到 `CAP` —— 保证所有老主题也都有质心、覆盖到全库。
 /// 真正的「全覆盖指派」在 [`cluster_build_on`] 里对**全部文件**做(O(N·k)),取样只决定质心位置,
 /// 故加 recency 偏置不影响覆盖率(仍 1.0),只让「最近主题」在星图里冒出来。
-pub(crate) fn load_lexical_files(conn: &rusqlite::Connection, filter: &str) -> Result<Vec<FileVec>, String> {
+pub(crate) fn load_lexical_files(
+    conn: &rusqlite::Connection,
+    filter: &str,
+) -> Result<Vec<FileVec>, String> {
     const CAP: usize = 6000;
     const RECENT: usize = 2000;
     let mut out: Vec<FileVec> = Vec::new();
@@ -97,7 +100,13 @@ pub(crate) fn load_lexical_files(conn: &rusqlite::Connection, filter: &str) -> R
             }
             let mut v = lexical_vec(&relpath, &name, &ext);
             normalize(&mut v);
-            out.push(FileVec { file_id: id, root_id, relpath, name, vec: v });
+            out.push(FileVec {
+                file_id: id,
+                root_id,
+                relpath,
+                name,
+                vec: v,
+            });
         }
         Ok(())
     };
@@ -200,7 +209,13 @@ pub(crate) fn cluster_build_on(
                     *x /= n as f32;
                 }
                 normalize(&mut vec);
-                FileVec { file_id, root_id, relpath, name, vec }
+                FileVec {
+                    file_id,
+                    root_id,
+                    relpath,
+                    name,
+                    vec,
+                }
             })
             .collect();
         if v.len() < 2 {
@@ -229,7 +244,9 @@ pub(crate) fn cluster_build_on(
     let n = files.len();
     let file_vecs: Vec<Vec<f32>> = files.iter().map(|f| f.vec.clone()).collect();
     // 一级(叶):细粒度语义簇 —— 比 √n 再细一点(×1.4),让主题分得更碎、星图更有层次。
-    let k = (((n as f64).sqrt() * 1.4).round() as usize).clamp(4, 32).min(n);
+    let k = (((n as f64).sqrt() * 1.4).round() as usize)
+        .clamp(4, 32)
+        .min(n);
     let (assign, leaf_centroids) = spherical_kmeans(&file_vecs, k);
 
     // 叶簇成员(剔空簇)
@@ -237,20 +254,32 @@ pub(crate) fn cluster_build_on(
     for (i, &c) in assign.iter().enumerate() {
         members_all[c].push(i);
     }
-    let leaf_idx: Vec<usize> = (0..members_all.len()).filter(|&c| !members_all[c].is_empty()).collect();
+    let leaf_idx: Vec<usize> = (0..members_all.len())
+        .filter(|&c| !members_all[c].is_empty())
+        .collect();
     let members: Vec<Vec<usize>> = leaf_idx.iter().map(|&c| members_all[c].clone()).collect();
     let n_leaf = members.len();
 
     // 二级(父):叶簇质心再聚合成「顶层主题」。叶簇 ≥4 才分两级,否则全部顶层。
     let two_level = n_leaf >= 4;
     let parent_of_leaf: Vec<usize> = if two_level {
-        let k_parent = ((n_leaf as f64).sqrt().ceil() as usize).clamp(3, 9).min(n_leaf);
-        let cvecs: Vec<Vec<f32>> = leaf_idx.iter().map(|&c| leaf_centroids[c].clone()).collect();
+        let k_parent = ((n_leaf as f64).sqrt().ceil() as usize)
+            .clamp(3, 9)
+            .min(n_leaf);
+        let cvecs: Vec<Vec<f32>> = leaf_idx
+            .iter()
+            .map(|&c| leaf_centroids[c].clone())
+            .collect();
         spherical_kmeans(&cvecs, k_parent).0
     } else {
         (0..n_leaf).collect()
     };
-    let n_parents = parent_of_leaf.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+    let n_parents = parent_of_leaf
+        .iter()
+        .copied()
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
 
     // 清旧簇(对涉及的根)。簇 id 即将重排,旧关系边一并清掉,免得 cluster_edges 残留指向已删簇
     // (虽然 build_file_graph 会按现存簇过滤、不会渲染脏边,但清掉更干净、避免长期累积)。
@@ -261,9 +290,21 @@ pub(crate) fn cluster_build_on(
     } else {
         let list: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
         let inlist = list.join(",");
-        conn.execute(&format!("DELETE FROM clusters WHERE root_id IN ({inlist})"), []).ok();
-        conn.execute(&format!("DELETE FROM cluster_edges WHERE root_id IN ({inlist})"), []).ok();
-        conn.execute(&format!("UPDATE files SET cluster_id=0 WHERE root_id IN ({inlist})"), []).ok();
+        conn.execute(
+            &format!("DELETE FROM clusters WHERE root_id IN ({inlist})"),
+            [],
+        )
+        .ok();
+        conn.execute(
+            &format!("DELETE FROM cluster_edges WHERE root_id IN ({inlist})"),
+            [],
+        )
+        .ok();
+        conn.execute(
+            &format!("UPDATE files SET cluster_id=0 WHERE root_id IN ({inlist})"),
+            [],
+        )
+        .ok();
     }
 
     let built_at = chrono::Local::now().timestamp_millis();
@@ -355,7 +396,8 @@ pub(crate) fn cluster_build_on(
                         best = *cid;
                     }
                 }
-                up.execute(rusqlite::params![best, id]).map_err(|e| e.to_string())?;
+                up.execute(rusqlite::params![best, id])
+                    .map_err(|e| e.to_string())?;
                 *counts.entry(best).or_insert(0) += 1;
                 assigned_all += 1;
             }
@@ -365,13 +407,21 @@ pub(crate) fn cluster_build_on(
         let mut psum: HashMap<i64, i64> = HashMap::new();
         for (li, (cid, _)) in leaf_db.iter().enumerate() {
             let c = counts.get(cid).copied().unwrap_or(0);
-            conn.execute("UPDATE clusters SET size=?1 WHERE id=?2", rusqlite::params![c, cid]).ok();
+            conn.execute(
+                "UPDATE clusters SET size=?1 WHERE id=?2",
+                rusqlite::params![c, cid],
+            )
+            .ok();
             if two_level {
                 *psum.entry(parent_ids[parent_of_leaf[li]]).or_insert(0) += c;
             }
         }
         for (pid, c) in &psum {
-            conn.execute("UPDATE clusters SET size=?1 WHERE id=?2", rusqlite::params![c, pid]).ok();
+            conn.execute(
+                "UPDATE clusters SET size=?1 WHERE id=?2",
+                rusqlite::params![c, pid],
+            )
+            .ok();
         }
     }
 
@@ -466,7 +516,10 @@ pub(crate) fn rep_root(files: &[FileVec], members: &[usize]) -> i64 {
     for &i in members {
         *freq.entry(files[i].root_id).or_insert(0) += 1;
     }
-    freq.into_iter().max_by_key(|(_, c)| *c).map(|(r, _)| r).unwrap_or(0)
+    freq.into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(r, _)| r)
+        .unwrap_or(0)
 }
 
 /// 簇命名:优先成员里出现最多的「非通用」目录段;退化用文件名高频词。
@@ -510,7 +563,12 @@ pub(crate) fn name_cluster(files: &[FileVec], members: &[usize]) -> (String, Str
             if keywords.is_empty() {
                 "未命名".to_string()
             } else {
-                keywords.iter().take(2).cloned().collect::<Vec<_>>().join(" · ")
+                keywords
+                    .iter()
+                    .take(2)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" · ")
             }
         }
     };
@@ -568,9 +626,32 @@ pub(crate) fn tokenize(name: &str) -> Vec<String> {
 /// 这是「本地档」标题;AI 档会把更难的(纯乱码/纯哈希)写进 titles 表覆盖它。
 pub(crate) fn clean_title(name: &str) -> String {
     const NOISE: &[&str] = &[
-        "copy", "final", "副本", "未命名", "untitled", "new", "draft", "tmp", "temp", "out",
-        "img", "image", "photo", "pic", "dsc", "vid", "video", "screenshot", "截图", "屏幕截图",
-        "微信图片", "mmexport", "download", "下载", "wechat", "qq图片",
+        "copy",
+        "final",
+        "副本",
+        "未命名",
+        "untitled",
+        "new",
+        "draft",
+        "tmp",
+        "temp",
+        "out",
+        "img",
+        "image",
+        "photo",
+        "pic",
+        "dsc",
+        "vid",
+        "video",
+        "screenshot",
+        "截图",
+        "屏幕截图",
+        "微信图片",
+        "mmexport",
+        "download",
+        "下载",
+        "wechat",
+        "qq图片",
     ];
     let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
     let mut parts: Vec<String> = Vec::new();

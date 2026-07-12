@@ -1,19 +1,19 @@
 //! 流式安装管线 + 安装命令 (Claude/Node/PowerShell/uv) + 取消 (纯移动)。
 
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
-#[cfg(not(feature = "desktop"))]
-use crate::host::AppHandle;
 
-use crate::runtime::procs::{no_window, CHILDREN};
-use super::types::*;
-use super::probe::*;
-use super::path::*;
 use super::check::*;
+use super::path::*;
+use super::probe::*;
+use super::types::*;
+use crate::runtime::procs::{no_window, CHILDREN};
 
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -51,7 +51,9 @@ pub fn env_install_node(app: AppHandle) -> Result<String, String> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = &app;
-        return Err("Node.js 自动安装目前支持 Windows 与 macOS; Linux 请用系统包管理器安装。".into());
+        return Err(
+            "Node.js 自动安装目前支持 Windows 与 macOS; Linux 请用系统包管理器安装。".into(),
+        );
     }
     #[cfg(any(windows, target_os = "macos"))]
     {
@@ -445,7 +447,13 @@ fn emit(app: &AppHandle, ev: EnvStreamEvent) {
 }
 
 /// 起子进程, 双线程读 stdout/stderr → `env:stream` 日志; 退出后(可选)修 PATH, 再发 done。
-pub(crate) fn stream_install(app: AppHandle, req_id: String, mut cmd: Command, fix_path_after: bool, label: &str) {
+pub(crate) fn stream_install(
+    app: AppHandle,
+    req_id: String,
+    mut cmd: Command,
+    fix_path_after: bool,
+    label: &str,
+) {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {

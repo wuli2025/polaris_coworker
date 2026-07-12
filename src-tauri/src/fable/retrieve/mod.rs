@@ -11,15 +11,15 @@
 // 模块拆分(纯移动): 原 `crate::fable::retrieve::xxx` 公有路径经 `pub use 子模块::*` 门面保持零变化,
 // lib.rs generate_handler! / server.rs / chat / kb / eval 等外部引用一律不用改。
 
-pub mod params;
-pub mod text;
-pub mod model;
-pub mod grep;
-pub mod vector;
-pub mod search;
 pub mod ai;
-pub mod rerank_cache;
 pub mod commands;
+pub mod grep;
+pub mod model;
+pub mod params;
+pub mod rerank_cache;
+pub mod search;
+pub mod text;
+pub mod vector;
 
 // 共享依赖统一在此升为 pub(crate) 供子模块 `use super::*` 取用(与原单文件同一作用域语义)。
 // 深度加一层:fable 级符号在此再导出到 retrieve 层,子文件的 `super::xxx` 零改动命中
@@ -32,12 +32,12 @@ pub(crate) use std::collections::{HashMap, VecDeque};
 pub(crate) use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) use std::sync::Mutex;
 
-pub(crate) use params::*;
-pub(crate) use text::*;
-pub use model::*;
-pub(crate) use grep::*;
-pub(crate) use vector::*;
-pub use search::*;
 pub(crate) use ai::*;
-pub(crate) use rerank_cache::*;
 pub use commands::*;
+pub(crate) use grep::*;
+pub use model::*;
+pub(crate) use params::*;
+pub(crate) use rerank_cache::*;
+pub use search::*;
+pub(crate) use text::*;
+pub(crate) use vector::*;

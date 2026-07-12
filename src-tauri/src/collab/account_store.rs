@@ -28,7 +28,9 @@ pub fn export_blob() -> Result<String, String> {
     let dump_table = |sql: &str| -> Result<Vec<serde_json::Value>, String> {
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
         let ncols = stmt.column_count();
-        let names: Vec<String> = (0..ncols).map(|i| stmt.column_name(i).unwrap_or("").to_string()).collect();
+        let names: Vec<String> = (0..ncols)
+            .map(|i| stmt.column_name(i).unwrap_or("").to_string())
+            .collect();
         let rows = stmt
             .query_map([], |r| {
                 let mut obj = serde_json::Map::new();
@@ -64,13 +66,19 @@ pub fn export_blob() -> Result<String, String> {
     let mut nonce_bytes = [0u8; 12];
     getrandom::getrandom(&mut nonce_bytes).map_err(|e| e.to_string())?;
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ct = cipher.encrypt(nonce, plain.as_ref()).map_err(|e| format!("加密失败: {e}"))?;
+    let ct = cipher
+        .encrypt(nonce, plain.as_ref())
+        .map_err(|e| format!("加密失败: {e}"))?;
     let mut blob = nonce_bytes.to_vec();
     blob.extend_from_slice(&ct);
 
     // 本地留底(cloud_mirror 表:云端存的就是这份密文)。
     let version: i64 = conn
-        .query_row("SELECT COALESCE(MAX(version),0)+1 FROM cloud_mirror", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(version),0)+1 FROM cloud_mirror",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(1);
     conn.execute(
         "INSERT OR REPLACE INTO cloud_mirror(id,version,updated_at,blob) VALUES(1,?1,?2,?3)",
@@ -91,7 +99,11 @@ pub fn store_remote_blob(blob_b64: &str) -> Result<i64, String> {
     }
     let conn = open_db()?;
     let version: i64 = conn
-        .query_row("SELECT COALESCE(MAX(version),0)+1 FROM cloud_mirror", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(version),0)+1 FROM cloud_mirror",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(1);
     conn.execute(
         "INSERT OR REPLACE INTO cloud_mirror(id,version,updated_at,blob) VALUES(1,?1,?2,?3)",
@@ -105,11 +117,16 @@ pub fn store_remote_blob(blob_b64: &str) -> Result<i64, String> {
 /// 取出本地保管的密文(主机推云端、或从云端拉回后本地读取都走它)。
 pub fn load_blob() -> Result<Option<(i64, String)>, String> {
     let conn = open_db()?;
-    let row = conn.query_row("SELECT version, blob FROM cloud_mirror WHERE id=1", [], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
-    });
+    let row = conn.query_row(
+        "SELECT version, blob FROM cloud_mirror WHERE id=1",
+        [],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+    );
     match row {
-        Ok((v, blob)) => Ok(Some((v, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(blob)))),
+        Ok((v, blob)) => Ok(Some((
+            v,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(blob),
+        ))),
         Err(_) => Ok(None),
     }
 }
@@ -131,12 +148,18 @@ pub fn restore_blob(blob_b64: &str) -> Result<usize, String> {
     let payload: serde_json::Value = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
 
     let conn = open_db()?;
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
     if n > 0 {
         return Err("当前库已有账号,拒绝覆盖式恢复(如确需,请先备份并清空 users)".into());
     }
     let mut restored = 0usize;
-    for u in payload.get("users").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+    for u in payload
+        .get("users")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&vec![])
+    {
         conn.execute(
             "INSERT INTO users(id,username,pass_hash,role,display_name,created_at,disabled) \
              VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -144,7 +167,9 @@ pub fn restore_blob(blob_b64: &str) -> Result<usize, String> {
                 u.get("id").and_then(|x| x.as_i64()),
                 u.get("username").and_then(|x| x.as_str()).unwrap_or(""),
                 u.get("pass_hash").and_then(|x| x.as_str()).unwrap_or(""),
-                u.get("role").and_then(|x| x.as_str()).unwrap_or("collaborator"),
+                u.get("role")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("collaborator"),
                 u.get("display_name").and_then(|x| x.as_str()).unwrap_or(""),
                 u.get("created_at").and_then(|x| x.as_i64()).unwrap_or(0),
                 u.get("disabled").and_then(|x| x.as_i64()).unwrap_or(0),
@@ -153,7 +178,11 @@ pub fn restore_blob(blob_b64: &str) -> Result<usize, String> {
         .map_err(|e| format!("恢复用户失败: {e}"))?;
         restored += 1;
     }
-    for d in payload.get("devices").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+    for d in payload
+        .get("devices")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&vec![])
+    {
         let _ = conn.execute(
             "INSERT OR IGNORE INTO devices(id,user_id,name,node_id,pubkey_fp,added_at,revoked) \
              VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -178,13 +207,18 @@ mod tests {
 
     #[test]
     fn export_restore_roundtrip() {
-        let _g = super::super::db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = super::super::db::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir();
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::set_var("POLARIS_COLLAB_DB", dir.join(format!("mirror-a-{ts}.db")));
         std::env::set_var("POLARIS_HOST_KEY", dir.join(format!("mirror-key-{ts}")));
 
-        super::super::auth::create_user("alice", "s3cret9", "owner", "Alice").unwrap();
+        super::super::auth::create_user("alice", "s3cret-9", "owner", "Alice").unwrap();
         super::super::identity::add_device(1, "本机", "node-abc").unwrap();
         let blob = export_blob().unwrap();
 
@@ -192,7 +226,7 @@ mod tests {
         std::env::set_var("POLARIS_COLLAB_DB", dir.join(format!("mirror-b-{ts}.db")));
         let n = restore_blob(&blob).unwrap();
         assert_eq!(n, 1);
-        let (u, _tok) = super::super::auth::login("alice", "s3cret9", "dev").unwrap();
+        let (u, _tok) = super::super::auth::login("alice", "s3cret-9", "dev").unwrap();
         assert_eq!(u.role, "owner");
         // 设备白名单也回来了
         assert!(super::super::identity::is_node_allowed("node-abc"));
@@ -207,13 +241,22 @@ mod tests {
 
     #[test]
     fn remote_store_is_opaque() {
-        let _g = super::super::db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = super::super::db::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir();
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::set_var("POLARIS_COLLAB_DB", dir.join(format!("mirror-r-{ts}.db")));
         std::env::set_var("POLARIS_HOST_KEY", dir.join(format!("mirror-rk-{ts}")));
-        let v1 = store_remote_blob(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 40])).unwrap();
-        let v2 = store_remote_blob(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 40])).unwrap();
+        let v1 =
+            store_remote_blob(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 40]))
+                .unwrap();
+        let v2 =
+            store_remote_blob(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 40]))
+                .unwrap();
         assert!(v2 > v1);
         assert!(load_blob().unwrap().is_some());
         assert!(store_remote_blob("xx").is_err());

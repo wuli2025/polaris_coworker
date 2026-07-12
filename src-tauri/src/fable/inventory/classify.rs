@@ -6,12 +6,18 @@ const TEXT_EXTS: &[&str] = &[
     "bat", "cmd", "sql", "vue", "go", "java", "c", "cpp", "h", "hpp", "rb", "php", "srt", "vtt",
     "tex", "rst", "org",
 ];
-const DOC_EXTS: &[&str] = &["pdf", "docx", "doc", "pptx", "ppt", "xlsx", "xls", "epub", "mobi"];
+const DOC_EXTS: &[&str] = &[
+    "pdf", "docx", "doc", "pptx", "ppt", "xlsx", "xls", "epub", "mobi",
+];
 const IMAGE_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "svg", "tif", "tiff", "raw", "cr2", "nef",
 ];
-const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "ogg", "wma", "opus", "amr"];
-const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "mov", "avi", "wmv", "flv", "webm", "m4v", "mpg", "mpeg"];
+const AUDIO_EXTS: &[&str] = &[
+    "mp3", "wav", "flac", "m4a", "aac", "ogg", "wma", "opus", "amr",
+];
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mkv", "mov", "avi", "wmv", "flv", "webm", "m4v", "mpg", "mpeg",
+];
 const ARCHIVE_EXTS: &[&str] = &["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "dmg"];
 
 pub(crate) fn classify(ext: &str) -> &'static str {
@@ -101,7 +107,11 @@ pub(crate) const CODE_EXTS: &[&str] = &[
 /// 某编程/标记语言 → 对应扩展名集合(grid 按语言过滤;代码语言由扩展名确定,不依赖回填)。
 /// 空 = 该标签不是代码语言(改按 lang 列 / kind 过滤)。
 pub(crate) fn exts_for_lang(label: &str) -> Vec<&'static str> {
-    CODE_EXTS.iter().copied().filter(|e| prog_lang(e) == Some(label)).collect()
+    CODE_EXTS
+        .iter()
+        .copied()
+        .filter(|e| prog_lang(e) == Some(label))
+        .collect()
 }
 
 /// 媒体/压缩语言标签 → 对应 kind(grid 过滤用)。None = 非媒体标签。

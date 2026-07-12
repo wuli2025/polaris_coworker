@@ -32,8 +32,8 @@ pub fn render_deck_fx_video(
     if n_frames > 900 {
         return Err(format!("帧数 {n_frames} 过多(上限 900;降 fps 或时长)"));
     }
-    let chromium = crate::forge::find_chromium()
-        .ok_or_else(|| "未找到 chromium/chrome".to_string())?;
+    let chromium =
+        crate::forge::find_chromium().ok_or_else(|| "未找到 chromium/chrome".to_string())?;
     let is_http = deck.starts_with("http://") || deck.starts_with("https://");
     let file_base = if is_http {
         deck.to_string()
@@ -141,7 +141,11 @@ pub fn render_deck_to_video(
     transition: Option<f64>,
     motion: bool,
 ) -> Result<Value, String> {
-    let secs = if seconds_per_slide > 0.0 { seconds_per_slide } else { 3.0 };
+    let secs = if seconds_per_slide > 0.0 {
+        seconds_per_slide
+    } else {
+        3.0
+    };
     let fps = if fps == 0 { 30 } else { fps };
     // fail-fast:指定了配音文件但不存在 → 立刻报错,别白截完所有图再被 ffmpeg 拒(用户省事)。
     if let Some(a) = audio.as_deref().filter(|s| !s.is_empty()) {
@@ -263,7 +267,9 @@ fn encode_images(
     }
     // 动画路(§06④转场 / Ken Burns 运镜):转场需多于 1 页;运镜单页也可。
     if motion || (transition.is_some() && pngs.len() > 1) {
-        return encode_animated(pngs, out_mp4, secs, fps, audio, transition, motion, width, height);
+        return encode_animated(
+            pngs, out_mp4, secs, fps, audio, transition, motion, width, height,
+        );
     }
     // ── 默认:concat 硬切 ──
     // concat demuxer 清单:每图一条 file + duration;最后一张需再列一次(concat 末帧时长怪癖)。
@@ -396,13 +402,21 @@ fn encode_animated(
         let mut prev = "s0".to_string();
         for k in 1..n {
             let offset = (k as f64) * (secs - t);
-            let label = if k == n - 1 { "vout".to_string() } else { format!("x{k}") };
+            let label = if k == n - 1 {
+                "vout".to_string()
+            } else {
+                format!("x{k}")
+            };
             fc.push_str(&format!(
                 "[{prev}][s{k}]xfade=transition=fade:duration={t}:offset={offset}[{label}];"
             ));
             prev = label;
         }
-        map_label = if n == 1 { "s0".to_string() } else { "vout".to_string() };
+        map_label = if n == 1 {
+            "s0".to_string()
+        } else {
+            "vout".to_string()
+        };
     } else {
         // 无转场:concat 拼接(motion 时各段已是运镜视频,不能用 concat demuxer)。
         for k in 0..n {

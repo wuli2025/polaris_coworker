@@ -34,18 +34,33 @@ where
     let r = match std::panic::catch_unwind(f) {
         Ok(Ok(())) => {
             FX_OK_COUNT.fetch_add(1, Ordering::Relaxed);
-            FxRunResult { name: name.to_string(), ok: true, err: None, duration_ms: start.elapsed().as_millis() as u64 }
+            FxRunResult {
+                name: name.to_string(),
+                ok: true,
+                err: None,
+                duration_ms: start.elapsed().as_millis() as u64,
+            }
         }
         Ok(Err(e)) => {
             FX_ERR_COUNT.fetch_add(1, Ordering::Relaxed);
             FX_LAST_ERR_T.store(now_ms(), Ordering::Relaxed);
-            FxRunResult { name: name.to_string(), ok: false, err: Some(e), duration_ms: start.elapsed().as_millis() as u64 }
+            FxRunResult {
+                name: name.to_string(),
+                ok: false,
+                err: Some(e),
+                duration_ms: start.elapsed().as_millis() as u64,
+            }
         }
         Err(panic) => {
             FX_ERR_COUNT.fetch_add(1, Ordering::Relaxed);
             FX_LAST_ERR_T.store(now_ms(), Ordering::Relaxed);
             let msg = panic_msg(&panic);
-            FxRunResult { name: name.to_string(), ok: false, err: Some(format!("panic: {msg}")), duration_ms: start.elapsed().as_millis() as u64 }
+            FxRunResult {
+                name: name.to_string(),
+                ok: false,
+                err: Some(format!("panic: {msg}")),
+                duration_ms: start.elapsed().as_millis() as u64,
+            }
         }
     };
     log_fx(&r);
@@ -53,14 +68,20 @@ where
 }
 
 fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = p.downcast_ref::<&'static str>() { s.to_string() }
-    else if let Some(s) = p.downcast_ref::<String>() { s.clone() }
-    else { "unknown".into() }
+    if let Some(s) = p.downcast_ref::<&'static str>() {
+        s.to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown".into()
+    }
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 动效错误日志(任务 c §C.2.1 末尾):单行 JSON 落 ~/Polaris/data/forge_fx.log.jsonl
@@ -72,7 +93,11 @@ fn log_fx(r: &FxRunResult) {
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("forge_fx.log.jsonl");
             let line = serde_json::to_string(r).unwrap_or_default();
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 use std::io::Write;
                 let _ = writeln!(f, "{}", line);
             }
@@ -95,13 +120,21 @@ pub fn health() -> FxHealth {
     let err = FX_ERR_COUNT.load(Ordering::Relaxed);
     let total = ok + err;
     let last_err_t = FX_LAST_ERR_T.load(Ordering::Relaxed);
-    let last_err_ms_ago = if last_err_t == 0 { 0 } else { now_ms().saturating_sub(last_err_t) };
+    let last_err_ms_ago = if last_err_t == 0 {
+        0
+    } else {
+        now_ms().saturating_sub(last_err_t)
+    };
     FxHealth {
         total_runs: total,
         ok_runs: ok,
         err_runs: err,
         last_err_ms_ago,
-        ok_rate: if total == 0 { 1.0 } else { ok as f64 / total as f64 },
+        ok_rate: if total == 0 {
+            1.0
+        } else {
+            ok as f64 / total as f64
+        },
     }
 }
 

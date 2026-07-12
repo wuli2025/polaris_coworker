@@ -23,13 +23,18 @@ pub mod agent;
 // 本地开源嵌入/重排(fastembed/ONNX),仅 local-embed feature 编译。
 #[cfg(feature = "local-embed")]
 pub mod embed_local;
+// 回声层/感官坞/全盘资源归集:与检索枢纽同属「懂你+检索」板块, 分仓规划 v2 同落
+// polaris-fable 仓(Phase 0 文件归位; lib.rs 有 crate 根别名保持 `crate::echo` 等旧路径)。
+pub mod echo;
 pub mod eval;
 pub mod files;
 pub mod index;
 pub mod inventory;
 pub mod ontology;
 pub mod retrieve;
+pub mod scan;
 pub mod sched;
+pub mod sense;
 
 use directories::UserDirs;
 use rusqlite::Connection;
@@ -109,7 +114,8 @@ pub(crate) fn open_db() -> Result<Connection, String> {
     conn.pragma_update(None, "temp_store", "MEMORY").ok();
     conn.pragma_update(None, "mmap_size", mmap_bytes).ok();
     conn.pragma_update(None, "cache_size", -cache_kib).ok(); // 负值 = KiB
-    conn.pragma_update(None, "wal_autocheckpoint", 20_000i64).ok();
+    conn.pragma_update(None, "wal_autocheckpoint", 20_000i64)
+        .ok();
     // 模式迁移每进程只跑一次。migrate 含十余条 CREATE TABLE/INDEX、6 次列探测 SELECT、
     // 以及 FTS5 建虚表 —— 而 open_db 在检索热路径被高频调用(单次 hybrid 查询光向量粗筛就按
     // worker 数开十余个连接,每个旧实现都重跑整套迁移,纯浪费)。双检锁:快路径一次原子读
@@ -201,9 +207,7 @@ static OVER_CAP_WARNED: AtomicBool = AtomicBool::new(false);
 fn total_memory_mb() -> Option<u64> {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::SystemInformation::{
-            GlobalMemoryStatusEx, MEMORYSTATUSEX,
-        };
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
         let mut s: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
         s.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
         if unsafe { GlobalMemoryStatusEx(&mut s) } != 0 {
@@ -253,10 +257,17 @@ fn db_mem_budget() -> (i64, i64) {
     };
 
     let env_mb = |k: &str| -> Option<i64> {
-        std::env::var(k).ok().and_then(|v| v.trim().parse::<i64>().ok()).filter(|n| *n >= 0)
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .filter(|n| *n >= 0)
     };
-    let mmap_mb = env_mb("POLARIS_FABLE_MMAP_MB").unwrap_or(def_mmap_mb).max(0);
-    let cache_mb = env_mb("POLARIS_FABLE_CACHE_MB").unwrap_or(def_cache_mb).max(1);
+    let mmap_mb = env_mb("POLARIS_FABLE_MMAP_MB")
+        .unwrap_or(def_mmap_mb)
+        .max(0);
+    let cache_mb = env_mb("POLARIS_FABLE_CACHE_MB")
+        .unwrap_or(def_cache_mb)
+        .max(1);
     (mmap_mb * 1024 * 1024, cache_mb * 1024)
 }
 
@@ -376,28 +387,46 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("fable.db 迁移失败: {e}"))?;
     // 文件中心:文件归簇列(语义聚类写入)。ALTER 无 IF NOT EXISTS → 先探列是否已在。
-    if conn.prepare("SELECT cluster_id FROM files LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE files ADD COLUMN cluster_id INTEGER NOT NULL DEFAULT 0", [])
-            .map_err(|e| format!("fable.db 加 cluster_id 列失败: {e}"))?;
+    if conn
+        .prepare("SELECT cluster_id FROM files LIMIT 1")
+        .is_err()
+    {
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN cluster_id INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 cluster_id 列失败: {e}"))?;
     }
     // 文件中心:簇层级列(parent=0 顶层主题;parent=父簇 id 子主题)。语义两级归类写入。
     if conn.prepare("SELECT parent FROM clusters LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE clusters ADD COLUMN parent INTEGER NOT NULL DEFAULT 0", [])
-            .map_err(|e| format!("fable.db 加 clusters.parent 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE clusters ADD COLUMN parent INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 clusters.parent 列失败: {e}"))?;
     }
     // 文件中心 v3:簇「一句话画像」(大模型起的亲切口吻概括,如「你 2023-2024 的报税材料都在这」)。
     // 渲染到星图选中卡 + 报告,强化「它很懂我」的感觉。旧库 '' = 尚未 AI 命名。
-    if conn.prepare("SELECT summary FROM clusters LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE clusters ADD COLUMN summary TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| format!("fable.db 加 clusters.summary 列失败: {e}"))?;
+    if conn
+        .prepare("SELECT summary FROM clusters LIMIT 1")
+        .is_err()
+    {
+        conn.execute(
+            "ALTER TABLE clusters ADD COLUMN summary TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 clusters.summary 列失败: {e}"))?;
     }
     // ── 20TB 整改 · P2-2 嵌入模型版本隔离 ──
     // chunks.model:写入该 chunk 时生效的嵌入模型标识(provider.default_model)。
     // 换模型后旧向量 model 不匹配 → 检索时直接被 SQL 过滤,不再「静默混入异源向量」,
     // 并据此在 status 里报「需重建的陈旧向量数」。旧库 model='' 视为陈旧。
     if conn.prepare("SELECT model FROM chunks LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE chunks ADD COLUMN model TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| format!("fable.db 加 chunks.model 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE chunks ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 chunks.model 列失败: {e}"))?;
     }
     // ── 20TB 整改 · P1-1/P1-3 二值量化粗筛位 ──
     // chunks.bits:入库时按符号位打包的二值码(dim/8 字节)。向量车道两段式 ANN:
@@ -410,50 +439,77 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     // ── 20TB 整改 · P1-2 全文倒排(FTS5)就绪标记 ──
     // files.ftsed:该文件正文是否已写入 lex 倒排索引(类 chunked,幂等续跑;mtime 变即重置)。
     if conn.prepare("SELECT ftsed FROM files LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE files ADD COLUMN ftsed INTEGER NOT NULL DEFAULT 0", [])
-            .map_err(|e| format!("fable.db 加 files.ftsed 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN ftsed INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 files.ftsed 列失败: {e}"))?;
     }
     // ── 20TB 整改 · 向量 IVF 倒排单元(ANN)──
     // chunks.cell:该向量被分配到的倒排单元(二值质心)id;-1=未分配(新入库、尚未优化)。
     // 向量车道查询只扫「最近 nprobe 个 cell + cell=-1 的新数据」,把每查询全表 O(N) 扫降到
     // ~O(N·nprobe/cells)。cell=-1 的全扫回退保证刚入库还没优化的数据不漏召回。
     if conn.prepare("SELECT cell FROM chunks LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE chunks ADD COLUMN cell INTEGER NOT NULL DEFAULT -1", [])
-            .map_err(|e| format!("fable.db 加 chunks.cell 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE chunks ADD COLUMN cell INTEGER NOT NULL DEFAULT -1",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 chunks.cell 列失败: {e}"))?;
     }
     // ── 文件中心 · 按「语言」归类 ──
     // files.lang:文件的语言维度 —— 代码按编程语言(Python/Rust/JavaScript…,由扩展名精确判定)、
     // 文稿按自然语言(中文/英文/其他,读文件头按 CJK 占比嗅探)、媒体按大类(图片/视频/音频…)。
     // 比粗粒度 kind(text/image/…)细、比文件名(应用名)更稳。盘点时写入;旧库 '' = 待回填。
     if conn.prepare("SELECT lang FROM files LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE files ADD COLUMN lang TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| format!("fable.db 加 files.lang 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN lang TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 files.lang 列失败: {e}"))?;
     }
     // ── 去重/冲突四列(索引时算,盘点保持 stat-only)──
     // content_hash:文件正文内容指纹。文本文件走全文 blake3(前缀 'f:'),索引读文件时顺手算,
     //   零额外 IO。跨路径同内容 = 同 hash → 精确去重(dedupe_scan)与「整目录移动零重嵌」的判据。
     //   旧库 '' = 尚未索引/待回填。非文本/未进索引文件保持 ''。
-    if conn.prepare("SELECT content_hash FROM files LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| format!("fable.db 加 files.content_hash 列失败: {e}"))?;
+    if conn
+        .prepare("SELECT content_hash FROM files LIMIT 1")
+        .is_err()
+    {
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 files.content_hash 列失败: {e}"))?;
     }
     // doc_key:文件名归一化键(去版本噪声:v2/日期/final/副本/(1)…)。仅在「同 root+同目录+同 ext」内
     //   比较,识别「同一份资料的不同版本」→ 新压旧(superseded_by)。旧库 '' = 待回填。
     if conn.prepare("SELECT doc_key FROM files LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE files ADD COLUMN doc_key TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| format!("fable.db 加 files.doc_key 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN doc_key TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 files.doc_key 列失败: {e}"))?;
     }
     // dup_of:内容完全重复时指向 canonical 文件 id(mtime 最新者);0=本身即 canonical 或无重复。
     //   非 0 者的 chunks/lex 已被 dedupe_scan 清除、不再参与检索,检索层遇到它归并到 canonical。
     if conn.prepare("SELECT dup_of FROM files LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE files ADD COLUMN dup_of INTEGER NOT NULL DEFAULT 0", [])
-            .map_err(|e| format!("fable.db 加 files.dup_of 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN dup_of INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 files.dup_of 列失败: {e}"))?;
     }
     // superseded_by:被同目录同名新版本压制时指向新版 id;0=最新版或无版本冲突。
     //   检索层对它降权(POLARIS_SUPERSEDE_DECAY,默认 0.4)而非剔除,并回传「有新版本」提示。
-    if conn.prepare("SELECT superseded_by FROM files LIMIT 1").is_err() {
-        conn.execute("ALTER TABLE files ADD COLUMN superseded_by INTEGER NOT NULL DEFAULT 0", [])
-            .map_err(|e| format!("fable.db 加 files.superseded_by 列失败: {e}"))?;
+    if conn
+        .prepare("SELECT superseded_by FROM files LIMIT 1")
+        .is_err()
+    {
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN superseded_by INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("fable.db 加 files.superseded_by 列失败: {e}"))?;
     }
     // 20TB 热点查询复合索引 + IVF 质心表(均在所需列 ALTER 之后建,故放此处)。
     conn.execute_batch(
@@ -658,14 +714,15 @@ pub fn status() -> Result<FableStatus, String> {
             roots.push(r);
         }
     }
-    let one = |sql: &str| -> u64 {
-        conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
-    };
+    let one =
+        |sql: &str| -> u64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64 };
     // 当前生效嵌入模型(用于算「陈旧向量」);无服务商时陈旧数报 0(向量车道本就停摆)。
     let active_model = crate::sense::active_provider("embed").map(|p| p.default_model);
     let stale_chunks = match &active_model {
         Some(m) => conn
-            .query_row("SELECT COUNT(*) FROM chunks WHERE model<>?1", [m], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM chunks WHERE model<>?1", [m], |r| {
+                r.get::<_, i64>(0)
+            })
             .unwrap_or(0) as u64,
         None => 0,
     };
@@ -692,7 +749,9 @@ pub fn status() -> Result<FableStatus, String> {
         None => (0, 0),
     };
     Ok(FableStatus {
-        db_path: db_path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        db_path: db_path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         roots,
         files_total: one("SELECT COUNT(*) FROM files"),
         text_files: one("SELECT COUNT(*) FROM files WHERE kind='text'"),
@@ -753,7 +812,10 @@ mod tests {
             let g = FlagGuard::acquire(&FLAG);
             assert!(g.is_some(), "首次上闸应成功");
             assert!(FLAG.load(Ordering::SeqCst), "持有守卫期间闸应为 true");
-            assert!(FlagGuard::acquire(&FLAG).is_none(), "已占用时重复上闸应被拒");
+            assert!(
+                FlagGuard::acquire(&FLAG).is_none(),
+                "已占用时重复上闸应被拒"
+            );
         }
         assert!(!FLAG.load(Ordering::SeqCst), "守卫 drop 后闸应释放");
         assert!(FlagGuard::acquire(&FLAG).is_some(), "释放后应能再次上闸");
@@ -790,14 +852,20 @@ mod tests {
         .unwrap();
         // 中文子串(≥3 字符)命中
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM lex WHERE body MATCH '\"营业时间\"'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM lex WHERE body MATCH '\"营业时间\"'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 1, "trigram 中文子串 MATCH 应命中");
         // 代码标识符子串命中
         let m: i64 = conn
-            .query_row("SELECT COUNT(*) FROM lex WHERE body MATCH '\"open_hours\"'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM lex WHERE body MATCH '\"open_hours\"'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(m, 1, "trigram ASCII 子串 MATCH 应命中");
         // bm25 排序可用(检索路用它取候选);term 取 ≥3 字符(trigram 索引不了 1~2 字符)
@@ -811,7 +879,11 @@ mod tests {
         assert_eq!(ordered, 1);
         // 反证 trigram 的 ≥3 字符下限:2 字符 term 不该命中(检索代码据此回退实时扫描)
         let two: i64 = conn
-            .query_row("SELECT COUNT(*) FROM lex WHERE body MATCH '\"九点\"'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM lex WHERE body MATCH '\"九点\"'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         assert_eq!(two, 0, "2 字符 term 在 trigram 下不命中(已知下限)");
     }
@@ -902,7 +974,8 @@ mod tests {
                 s.spawn(move || {
                     let c = open_like_fable(&db);
                     for _ in 0..300 {
-                        if c.query_row("SELECT COUNT(*) FROM t", [], |r| r.get::<_, i64>(0)).is_err()
+                        if c.query_row("SELECT COUNT(*) FROM t", [], |r| r.get::<_, i64>(0))
+                            .is_err()
                         {
                             errors.fetch_add(1, Ordering::Relaxed);
                         }
@@ -918,7 +991,9 @@ mod tests {
             "WAL + busy_timeout 下并发后台读写不应出现任何锁错误"
         );
         let c = open_like_fable(&db);
-        let total: i64 = c.query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0)).unwrap();
+        let total: i64 = c
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(total as usize, WRITERS * ROWS, "并发写入不应丢行");
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);

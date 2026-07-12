@@ -10,6 +10,8 @@
 
 use crate::conv;
 use crate::fable;
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use crate::kb;
 use anyhow::Result;
 use directories::UserDirs;
@@ -18,8 +20,6 @@ use std::fs;
 use std::path::PathBuf;
 #[cfg(feature = "desktop")]
 use tauri::AppHandle;
-#[cfg(not(feature = "desktop"))]
-use crate::host::AppHandle;
 
 pub const PLACEHOLDER_MARKER: &str = "polaris:placeholder";
 
@@ -153,8 +153,7 @@ fn resolve_path(area: &str, project_id: Option<&str>) -> Result<PathBuf, String>
     match area {
         "kb" => kb_claude_md_path().ok_or_else(|| "KB 根目录未就绪".into()),
         "project" => {
-            let pid = project_id
-                .ok_or_else(|| "area=project 时必须给 projectId".to_string())?;
+            let pid = project_id.ok_or_else(|| "area=project 时必须给 projectId".to_string())?;
             if !conv::list_active_projects().iter().any(|p| p.id == pid) {
                 return Err(format!("未知项目 id: {}", pid));
             }

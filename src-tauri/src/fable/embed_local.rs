@@ -21,9 +21,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use fastembed::{
-    Bgem3Embedding, InitOptionsUserDefined, TokenizerFiles, UserDefinedBgem3Model,
-};
+use fastembed::{Bgem3Embedding, InitOptionsUserDefined, TokenizerFiles, UserDefinedBgem3Model};
 
 /// 嵌入模型仓库与文件清单(INT8 单文件 + 分词器四件套)。镜像在前、官方兜底。
 const HF_REPO: &str = "gpahal/bge-m3-onnx-int8";
@@ -39,14 +37,21 @@ const MODEL_FILES: &[(&str, f64)] = &[
 
 /// 启用标记文件:UI「启用本地嵌入」开关落盘于此 → 重启仍生效(不必每次设环境变量)。
 fn enable_marker() -> Option<PathBuf> {
-    directories::UserDirs::new()
-        .map(|u| u.home_dir().join("Polaris").join("data").join("local_embed.on"))
+    directories::UserDirs::new().map(|u| {
+        u.home_dir()
+            .join("Polaris")
+            .join("data")
+            .join("local_embed.on")
+    })
 }
 
 /// 运行时开关:置 `POLARIS_LOCAL_EMBED=1` **或** UI 勾了「启用本地嵌入」(落盘标记)即切到本地;
 /// 否则仍走云 API(便于灰度/回退)。环境变量优先(可被运维强制)。
 pub fn enabled() -> bool {
-    if std::env::var("POLARIS_LOCAL_EMBED").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("POLARIS_LOCAL_EMBED")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         return true;
     }
     enable_marker().map(|p| p.exists()).unwrap_or(false)
@@ -72,7 +77,12 @@ pub fn cache_dir() -> PathBuf {
         return PathBuf::from(v);
     }
     directories::UserDirs::new()
-        .map(|u| u.home_dir().join("Polaris").join("models").join("fastembed"))
+        .map(|u| {
+            u.home_dir()
+                .join("Polaris")
+                .join("models")
+                .join("fastembed")
+        })
         .unwrap_or_else(|| PathBuf::from("/root/Polaris/models/fastembed"))
 }
 
@@ -151,7 +161,11 @@ fn fetch_file(file: &str, dst: &std::path::Path, approx_mb: f64) -> Result<(), S
             }
         }
     }
-    Err(if last_err.is_empty() { "全部下载源不可达".into() } else { last_err })
+    Err(if last_err.is_empty() {
+        "全部下载源不可达".into()
+    } else {
+        last_err
+    })
 }
 
 /// 强制下载/就位本地嵌入模型(INT8 单文件 + 分词器四件套,~560MB)。幂等:已有文件跳过。
@@ -240,11 +254,17 @@ mod bench {
         }
         let t0 = Instant::now();
         let dir = download().expect("下载本地模型失败");
-        eprintln!("[本地嵌入] 模型就位 {:.1}s @ {dir}", t0.elapsed().as_secs_f64());
+        eprintln!(
+            "[本地嵌入] 模型就位 {:.1}s @ {dir}",
+            t0.elapsed().as_secs_f64()
+        );
         assert!(ready());
         let n = 96usize;
         let docs: Vec<String> = (0..n)
-            .map(|i| ("北极星知识库混合检索把关键词与向量两腿并行编排取证 ".to_string() + &i.to_string()).repeat(3))
+            .map(|i| {
+                ("北极星知识库混合检索把关键词与向量两腿并行编排取证 ".to_string() + &i.to_string())
+                    .repeat(3)
+            })
             .collect();
         let _ = embed(&docs[..16]).expect("预热失败");
         let t1 = Instant::now();
@@ -252,6 +272,9 @@ mod bench {
         let dt = t1.elapsed().as_secs_f64();
         assert_eq!(v.len(), n);
         assert_eq!(v[0].len(), 1024);
-        eprintln!("[本地嵌入] {n} 条 / {dt:.2}s = {:.1} chunk/s(本地 CPU,无云限速)", n as f64 / dt);
+        eprintln!(
+            "[本地嵌入] {n} 条 / {dt:.2}s = {:.1} chunk/s(本地 CPU,无云限速)",
+            n as f64 / dt
+        );
     }
 }

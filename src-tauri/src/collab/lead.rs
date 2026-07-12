@@ -23,7 +23,12 @@ pub struct LeadGrants {
 
 impl Default for LeadGrants {
     fn default() -> Self {
-        Self { can_merge: false, can_reassign: false, auto_dispatch: false, token_budget: 200_000 }
+        Self {
+            can_merge: false,
+            can_reassign: false,
+            auto_dispatch: false,
+            token_budget: 200_000,
+        }
     }
 }
 
@@ -53,19 +58,24 @@ pub fn set_grants(project_id: i64, g: &LeadGrants, actor: &str) -> Result<(), St
         params![project_id, g.can_merge as i64, g.can_reassign as i64, g.auto_dispatch as i64, g.token_budget],
     )
     .map_err(|e| e.to_string())?;
-    db::audit(actor, "lead.grants.set", &project_id.to_string(), &serde_json::to_string(g).unwrap_or_default());
+    db::audit(
+        actor,
+        "lead.grants.set",
+        &project_id.to_string(),
+        &serde_json::to_string(g).unwrap_or_default(),
+    );
     Ok(())
 }
 
 /// 指挥动作枚举——工具面的全集。注意:没有任何权限类动作。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LeadAction {
-    CreateTask,   // 拆解建卡
-    Assign,       // 分派/改派
-    Review,       // 验收(出意见:通过/打回)
-    Adjudicate,   // 冲突裁决(出处置意见/融合草案落 PR 分支)
-    Merge,        // 合并放行(受 can_merge 位)
-    Nudge,        // 催办
+    CreateTask, // 拆解建卡
+    Assign,     // 分派/改派
+    Review,     // 验收(出意见:通过/打回)
+    Adjudicate, // 冲突裁决(出处置意见/融合草案落 PR 分支)
+    Merge,      // 合并放行(受 can_merge 位)
+    Nudge,      // 催办
 }
 
 /// 三问预过滤。全对返回主 Agent 的 actor 名("lead:<expert_id>"),任何一问不过即拒。
@@ -78,8 +88,12 @@ pub fn guard(project_id: i64, action: LeadAction) -> Result<String, String> {
     // 二问:操作在授权位上?(建卡/验收/裁决/催办是基本盘;改派与合并要显式授权)
     let g = get_grants(project_id)?;
     match action {
-        LeadAction::Assign if !g.can_reassign => return Err("主 Agent 未被授予改派权(owner 可在项目设置开启)".into()),
-        LeadAction::Merge if !g.can_merge => return Err("主 Agent 未被授予自动合并权,请申请人工放行".into()),
+        LeadAction::Assign if !g.can_reassign => {
+            return Err("主 Agent 未被授予改派权(owner 可在项目设置开启)".into())
+        }
+        LeadAction::Merge if !g.can_merge => {
+            return Err("主 Agent 未被授予自动合并权,请申请人工放行".into())
+        }
         _ => {}
     }
     // 三问由调用侧携带的目标校验完成(tasks::get 的 project_id 必须等于本项目,见各工具)。
@@ -94,7 +108,9 @@ pub fn guard(project_id: i64, action: LeadAction) -> Result<String, String> {
 fn ensure_task_in(project_id: i64, task_id: i64) -> Result<tasks::TaskCard, String> {
     let card = tasks::get(task_id)?;
     if card.project_id != project_id {
-        return Err(format!("任务 #{task_id} 不属于项目 #{project_id},拒绝跨项目操作"));
+        return Err(format!(
+            "任务 #{task_id} 不属于项目 #{project_id},拒绝跨项目操作"
+        ));
     }
     Ok(card)
 }
@@ -102,7 +118,13 @@ fn ensure_task_in(project_id: i64, task_id: i64) -> Result<tasks::TaskCard, Stri
 // ───────────────────────── 指挥六件套 ─────────────────────────
 
 /// ① 拆解:建任务卡(四要素强制)。
-pub fn lead_create_task(project_id: i64, title: &str, body: &str, scope: &str, criteria: &str) -> Result<tasks::TaskCard, String> {
+pub fn lead_create_task(
+    project_id: i64,
+    title: &str,
+    body: &str,
+    scope: &str,
+    criteria: &str,
+) -> Result<tasks::TaskCard, String> {
     let actor = guard(project_id, LeadAction::CreateTask)?;
     tasks::create(project_id, title, body, scope, criteria, &actor)
 }
@@ -120,12 +142,22 @@ pub fn lead_assign(project_id: i64, task_id: i64, user_id: i64) -> Result<tasks:
         params![user_id, now(), task_id],
     )
     .map_err(|e| e.to_string())?;
-    db::audit(&actor, "lead.assign", &task_id.to_string(), &user_id.to_string());
+    db::audit(
+        &actor,
+        "lead.assign",
+        &task_id.to_string(),
+        &user_id.to_string(),
+    );
     tasks::get(task_id)
 }
 
 /// ③ 验收:出意见(通过/打回)。合并是另一个受闸动作。
-pub fn lead_review(project_id: i64, task_id: i64, pass: bool, comments_json: &str) -> Result<tasks::ReviewOutcome, String> {
+pub fn lead_review(
+    project_id: i64,
+    task_id: i64,
+    pass: bool,
+    comments_json: &str,
+) -> Result<tasks::ReviewOutcome, String> {
     let actor = guard(project_id, LeadAction::Review)?;
     ensure_task_in(project_id, task_id)?;
     tasks::review(task_id, &actor, pass, comments_json)
@@ -138,7 +170,12 @@ pub fn lead_approve_merge(project_id: i64, task_id: i64) -> Result<tasks::TaskCa
     if card.state != "review" {
         return Err("任务不在待验收状态,不能放行合并".into());
     }
-    db::audit(&actor, "lead.merge.approve", &task_id.to_string(), &card.branch);
+    db::audit(
+        &actor,
+        "lead.merge.approve",
+        &task_id.to_string(),
+        &card.branch,
+    );
     Ok(card)
 }
 
@@ -151,7 +188,12 @@ pub fn lead_nudge(project_id: i64, stale_hours: i64) -> Result<Vec<tasks::TaskCa
         .filter(|c| c.state == "in_progress" && c.updated_at < cutoff)
         .collect();
     if !stale.is_empty() {
-        db::audit(&actor, "lead.nudge", &project_id.to_string(), &format!("{} 张卡超期", stale.len()));
+        db::audit(
+            &actor,
+            "lead.nudge",
+            &project_id.to_string(),
+            &format!("{} 张卡超期", stale.len()),
+        );
     }
     Ok(stale)
 }
@@ -162,11 +204,11 @@ pub fn lead_nudge(project_id: i64, stale_hours: i64) -> Result<Vec<tasks::TaskCa
 pub struct MorningReport {
     pub project_id: i64,
     pub merged_yesterday: Vec<tasks::TaskCard>,
-    pub rejected_open: Vec<tasks::TaskCard>,   // 被打回待续改
-    pub review_queue: Vec<tasks::TaskCard>,    // 待验收
-    pub stale: Vec<tasks::TaskCard>,           // 超 48h 无动静
-    pub unclaimed: Vec<tasks::TaskCard>,       // 待领取
-    pub escalated: Vec<tasks::TaskCard>,       // 打回满 3 轮
+    pub rejected_open: Vec<tasks::TaskCard>, // 被打回待续改
+    pub review_queue: Vec<tasks::TaskCard>,  // 待验收
+    pub stale: Vec<tasks::TaskCard>,         // 超 48h 无动静
+    pub unclaimed: Vec<tasks::TaskCard>,     // 待领取
+    pub escalated: Vec<tasks::TaskCard>,     // 打回满 3 轮
 }
 
 /// 晨会盘点数据——不依赖主 Agent 在线,纯状态机数据,owner 亲自当主脑时同样用它。
@@ -176,12 +218,38 @@ pub fn morning_report(project_id: i64) -> Result<MorningReport, String> {
     let two_days = now() - 48 * 3600;
     Ok(MorningReport {
         project_id,
-        merged_yesterday: all.iter().filter(|c| c.state == "merged" && c.updated_at >= day_ago).cloned().collect(),
-        rejected_open: all.iter().filter(|c| c.state == "in_progress" && c.round > 0).cloned().collect(),
-        review_queue: all.iter().filter(|c| c.state == "review").cloned().collect(),
-        stale: all.iter().filter(|c| c.state == "in_progress" && c.updated_at < two_days).cloned().collect(),
-        unclaimed: all.iter().filter(|c| c.state == "pending").cloned().collect(),
-        escalated: all.iter().filter(|c| c.round >= tasks::ESCALATE_ROUNDS && c.state != "merged" && c.state != "archived").cloned().collect(),
+        merged_yesterday: all
+            .iter()
+            .filter(|c| c.state == "merged" && c.updated_at >= day_ago)
+            .cloned()
+            .collect(),
+        rejected_open: all
+            .iter()
+            .filter(|c| c.state == "in_progress" && c.round > 0)
+            .cloned()
+            .collect(),
+        review_queue: all
+            .iter()
+            .filter(|c| c.state == "review")
+            .cloned()
+            .collect(),
+        stale: all
+            .iter()
+            .filter(|c| c.state == "in_progress" && c.updated_at < two_days)
+            .cloned()
+            .collect(),
+        unclaimed: all
+            .iter()
+            .filter(|c| c.state == "pending")
+            .cloned()
+            .collect(),
+        escalated: all
+            .iter()
+            .filter(|c| {
+                c.round >= tasks::ESCALATE_ROUNDS && c.state != "merged" && c.state != "archived"
+            })
+            .cloned()
+            .collect(),
     })
 }
 
@@ -261,19 +329,36 @@ mod tests {
     use super::*;
 
     fn setup() -> (std::sync::MutexGuard<'static, ()>, i64, i64) {
-        let g = super::super::db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let g = super::super::db::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let p = std::env::temp_dir().join(format!(
             "collab-lead-{}-{}.db",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::env::set_var("POLARIS_COLLAB_DB", p);
         let conn = open_db().unwrap();
-        conn.execute("INSERT INTO users(username,pass_hash,created_at) VALUES('boss','x',?1)", params![now()]).unwrap();
+        conn.execute(
+            "INSERT INTO users(username,pass_hash,created_at) VALUES('boss','x',?1)",
+            params![now()],
+        )
+        .unwrap();
         let uid = conn.last_insert_rowid();
-        conn.execute("INSERT INTO projects(name,created_at) VALUES('demo',?1)", params![now()]).unwrap();
+        conn.execute(
+            "INSERT INTO projects(name,created_at) VALUES('demo',?1)",
+            params![now()],
+        )
+        .unwrap();
         let pid = conn.last_insert_rowid();
-        conn.execute("INSERT INTO project_members(project_id,user_id,role) VALUES(?1,?2,'owner')", params![pid, uid]).unwrap();
+        conn.execute(
+            "INSERT INTO project_members(project_id,user_id,role) VALUES(?1,?2,'owner')",
+            params![pid, uid],
+        )
+        .unwrap();
         (g, pid, uid)
     }
 
@@ -287,7 +372,15 @@ mod tests {
         let card = lead_create_task(pid, "卡", "做事", "src/", "标准").unwrap();
         // 改派默认无权(二问)
         assert!(lead_assign(pid, card.id, uid).is_err());
-        set_grants(pid, &LeadGrants { can_reassign: true, ..Default::default() }, "boss").unwrap();
+        set_grants(
+            pid,
+            &LeadGrants {
+                can_reassign: true,
+                ..Default::default()
+            },
+            "boss",
+        )
+        .unwrap();
         assert!(lead_assign(pid, card.id, uid).is_ok());
         // 派给非成员被拒
         assert!(lead_assign(pid, card.id, 9999).is_err());
@@ -301,13 +394,29 @@ mod tests {
         projects::set_lead(pid, Some("tech-lead"), "boss").unwrap();
         // 三问:跨项目操作拒绝
         let conn = open_db().unwrap();
-        conn.execute("INSERT INTO projects(name,created_at) VALUES('other',?1)", params![now()]).unwrap();
+        conn.execute(
+            "INSERT INTO projects(name,created_at) VALUES('other',?1)",
+            params![now()],
+        )
+        .unwrap();
         let other = conn.last_insert_rowid();
-        conn.execute("UPDATE projects SET lead_expert_id='x' WHERE id=?1", params![other]).unwrap();
+        conn.execute(
+            "UPDATE projects SET lead_expert_id='x' WHERE id=?1",
+            params![other],
+        )
+        .unwrap();
         let card = lead_create_task(pid, "卡", "做事", "src/", "标准").unwrap();
         assert!(lead_review(other, card.id, true, "[]").is_err());
         // 预算烧穿 → 指挥暂停
-        set_grants(pid, &LeadGrants { token_budget: 100, ..Default::default() }, "boss").unwrap();
+        set_grants(
+            pid,
+            &LeadGrants {
+                token_budget: 100,
+                ..Default::default()
+            },
+            "boss",
+        )
+        .unwrap();
         add_usage(pid, 200).unwrap();
         assert!(lead_create_task(pid, "又一张", "做事", "src/", "标准").is_err());
         // 但看板(纯读盘点)照常

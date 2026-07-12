@@ -88,8 +88,8 @@ pub fn build_pptx_inner(
         }
     }
     let cy: u64 = 6_858_000; // 7.5 inch
-    // 比例钳制:sldSz 受 ST_SlideSizeCoordinate 限制(914400–51206400 EMU),畸形首图
-    // (超宽长图/损坏 IHDR)会写出 schema 非法值致 Office 修复/拒开。常规比例都在 [0.5,4]。
+                             // 比例钳制:sldSz 受 ST_SlideSizeCoordinate 限制(914400–51206400 EMU),畸形首图
+                             // (超宽长图/损坏 IHDR)会写出 schema 非法值致 Office 修复/拒开。常规比例都在 [0.5,4]。
     let ratio = first_ratio
         .filter(|r| r.is_finite() && (0.5..=4.0).contains(r))
         .unwrap_or(16.0 / 9.0);
@@ -106,16 +106,19 @@ pub fn build_pptx_inner(
     // Windows 上目标被 PowerPoint 占用时,截图成果只损失落位一步,旧文件完好。
     let tmp_path = format!("{out_path}.tmp");
     let mut guard = TmpGuard(std::path::PathBuf::from(&tmp_path), true);
-    let file = std::fs::File::create(&tmp_path).map_err(|e| format!("创建 {tmp_path} 失败: {e}"))?;
+    let file =
+        std::fs::File::create(&tmp_path).map_err(|e| format!("创建 {tmp_path} 失败: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
     let opt = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    let put = |zip: &mut zip::ZipWriter<std::fs::File>, name: &str, data: &[u8]| -> Result<(), String> {
-        zip.start_file(name, opt)
-            .map_err(|e| format!("zip 写 {name} 失败: {e}"))?;
-        zip.write_all(data).map_err(|e| format!("zip 写入 {name} 失败: {e}"))?;
-        Ok(())
-    };
+    let put =
+        |zip: &mut zip::ZipWriter<std::fs::File>, name: &str, data: &[u8]| -> Result<(), String> {
+            zip.start_file(name, opt)
+                .map_err(|e| format!("zip 写 {name} 失败: {e}"))?;
+            zip.write_all(data)
+                .map_err(|e| format!("zip 写入 {name} 失败: {e}"))?;
+            Ok(())
+        };
 
     // ── [Content_Types].xml ──
     let mut ct = String::from(xml_decl());
@@ -144,11 +147,19 @@ pub fn build_pptx_inner(
 
     // ── ppt/presentation.xml ── rId1=master, rId2..=slides
     let mut pres = String::from(xml_decl());
-    pres.push_str(&format!("<p:presentation xmlns:a=\"{NS_A}\" xmlns:r=\"{NS_R}\" xmlns:p=\"{NS_P}\">"));
-    pres.push_str("<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId1\"/></p:sldMasterIdLst>");
+    pres.push_str(&format!(
+        "<p:presentation xmlns:a=\"{NS_A}\" xmlns:r=\"{NS_R}\" xmlns:p=\"{NS_P}\">"
+    ));
+    pres.push_str(
+        "<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId1\"/></p:sldMasterIdLst>",
+    );
     pres.push_str("<p:sldIdLst>");
     for i in 1..=n {
-        pres.push_str(&format!("<p:sldId id=\"{}\" r:id=\"rId{}\"/>", 255 + i, i + 1));
+        pres.push_str(&format!(
+            "<p:sldId id=\"{}\" r:id=\"rId{}\"/>",
+            255 + i,
+            i + 1
+        ));
     }
     pres.push_str("</p:sldIdLst>");
     pres.push_str(&format!("<p:sldSz cx=\"{cx}\" cy=\"{cy}\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>"));
@@ -159,15 +170,29 @@ pub fn build_pptx_inner(
     prels.push_str(&format!("<Relationships xmlns=\"{NS_REL}\">"));
     prels.push_str(&format!("<Relationship Id=\"rId1\" Type=\"{NS_R}/slideMaster\" Target=\"slideMasters/slideMaster1.xml\"/>"));
     for i in 1..=n {
-        prels.push_str(&format!("<Relationship Id=\"rId{}\" Type=\"{NS_R}/slide\" Target=\"slides/slide{i}.xml\"/>", i + 1));
+        prels.push_str(&format!(
+            "<Relationship Id=\"rId{}\" Type=\"{NS_R}/slide\" Target=\"slides/slide{i}.xml\"/>",
+            i + 1
+        ));
     }
-    prels.push_str(&format!("<Relationship Id=\"rId{}\" Type=\"{NS_R}/theme\" Target=\"theme/theme1.xml\"/>", n + 2));
+    prels.push_str(&format!(
+        "<Relationship Id=\"rId{}\" Type=\"{NS_R}/theme\" Target=\"theme/theme1.xml\"/>",
+        n + 2
+    ));
     prels.push_str("</Relationships>");
-    put(&mut zip, "ppt/_rels/presentation.xml.rels", prels.as_bytes())?;
+    put(
+        &mut zip,
+        "ppt/_rels/presentation.xml.rels",
+        prels.as_bytes(),
+    )?;
 
     // ── theme / master / layout(最小可用)──
     put(&mut zip, "ppt/theme/theme1.xml", theme_xml().as_bytes())?;
-    put(&mut zip, "ppt/slideMasters/slideMaster1.xml", slide_master_xml(cx, cy).as_bytes())?;
+    put(
+        &mut zip,
+        "ppt/slideMasters/slideMaster1.xml",
+        slide_master_xml(cx, cy).as_bytes(),
+    )?;
     put(
         &mut zip,
         "ppt/slideMasters/_rels/slideMaster1.xml.rels",
@@ -177,7 +202,11 @@ pub fn build_pptx_inner(
         )
         .as_bytes(),
     )?;
-    put(&mut zip, "ppt/slideLayouts/slideLayout1.xml", slide_layout_xml(cx, cy).as_bytes())?;
+    put(
+        &mut zip,
+        "ppt/slideLayouts/slideLayout1.xml",
+        slide_layout_xml(cx, cy).as_bytes(),
+    )?;
     put(
         &mut zip,
         "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
@@ -203,7 +232,7 @@ pub fn build_pptx_inner(
         };
         put(&mut zip, &format!("ppt/media/image{i}.{media_ext}"), &bytes)?;
         drop(bytes); // ── 立即释放(任务 c §A.4.1 关键)──
-        // 该页的文本框(若启用文本层且该页有 rects):editable=可见可编辑,否则 alpha=0 隐形。
+                     // 该页的文本框(若启用文本层且该页有 rects):editable=可见可编辑,否则 alpha=0 隐形。
         let boxes = match &text_layer {
             Some(tl) if idx < tl.pages.len() => {
                 let editable = tl.editable.get(idx).copied().unwrap_or(false);
@@ -211,7 +240,11 @@ pub fn build_pptx_inner(
             }
             _ => String::new(),
         };
-        put(&mut zip, &format!("ppt/slides/slide{i}.xml"), slide_xml(cx, cy, &boxes).as_bytes())?;
+        put(
+            &mut zip,
+            &format!("ppt/slides/slide{i}.xml"),
+            slide_xml(cx, cy, &boxes).as_bytes(),
+        )?;
         put(
             &mut zip,
             &format!("ppt/slides/_rels/slide{i}.xml.rels"),
@@ -280,7 +313,14 @@ pub(crate) fn xml_escape(s: &str) -> String {
 /// editable=false(旧 deck 降级):alpha=0 隐形层,仅可搜索/读屏。
 /// 工业级化(任务 c §A.1.3 双保险):alpha=0 + `<a:effectLst><a:noFill/></a:effectLst>` 整框透明,
 /// 应对 Keynote16 实测会把 alpha=0 渲成可见白块。
-fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32, editable: bool) -> String {
+fn text_boxes_xml(
+    rects: &[Value],
+    cx: u64,
+    cy: u64,
+    win_w: u32,
+    win_h: u32,
+    editable: bool,
+) -> String {
     if rects.is_empty() || win_w == 0 || win_h == 0 {
         return String::new();
     }
@@ -309,9 +349,17 @@ fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32, edi
         let ew = cl(pw * wbuf * cx as f64 / win_w as f64, 1, cxi * 2);
         let eh = cl(ph * cy as f64 / win_h as f64, 1, cyi * 2);
         let sz = cl(getf("size").max(8.0) * 75.0, 100, 400_000);
-        let bold = if r.get("bold").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
+        let bold = if r.get("bold").and_then(|v| v.as_bool()).unwrap_or(false) {
+            1
+        } else {
+            0
+        };
         if editable {
-            let italic = if r.get("italic").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
+            let italic = if r.get("italic").and_then(|v| v.as_bool()).unwrap_or(false) {
+                1
+            } else {
+                0
+            };
             // 颜色/对齐来自页面提取,白名单校验防 XML 注入(deck 内容不可信)。
             let color = r.get("color").and_then(|v| v.as_str()).unwrap_or("000000");
             let color = if color.len() == 6 && color.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -327,11 +375,18 @@ fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32, edi
             };
             let serif = r.get("serif").and_then(|v| v.as_bool()).unwrap_or(false);
             // 安全字体链:中文 ea 必须写,否则 CJK 落到 latin 字体出豆腐块。
-            let (latin, ea) = if serif { ("Georgia", "SimSun") } else { ("Calibri", "Microsoft YaHei") };
+            let (latin, ea) = if serif {
+                ("Georgia", "SimSun")
+            } else {
+                ("Calibri", "Microsoft YaHei")
+            };
             let lh = getf("lh");
             let lnspc = if lh > 0.0 && lh.is_finite() {
                 // spcPts 上限 158400(ST_TextSpacingPoint),越界同样触发修复。
-                format!("<a:lnSpc><a:spcPts val=\"{}\"/></a:lnSpc>", cl(lh * 75.0, 1, 158_400))
+                format!(
+                    "<a:lnSpc><a:spcPts val=\"{}\"/></a:lnSpc>",
+                    cl(lh * 75.0, 1, 158_400)
+                )
             } else {
                 String::new()
             };
@@ -414,8 +469,9 @@ pub fn screenshot(
     height: u32,
     device_scale: u32,
 ) -> Result<Value, String> {
-    let chromium = crate::forge::find_chromium()
-        .ok_or_else(|| "未找到 chromium/chrome：Docker 需 full 镜像，桌面需装 Chrome/Edge".to_string())?;
+    let chromium = crate::forge::find_chromium().ok_or_else(|| {
+        "未找到 chromium/chrome：Docker 需 full 镜像，桌面需装 Chrome/Edge".to_string()
+    })?;
     // 本地文件转 file:// URL。
     let target = if url_or_file.starts_with("http://")
         || url_or_file.starts_with("https://")
@@ -462,9 +518,14 @@ pub fn screenshot(
 /// **无需 chromiumoxide/CDP**。返回 (rect 数组, notext_capable):
 /// capable=true 表示该 deck 的 runtime.js 支持 ?notext=1 去字渲染(新版能力标记),
 /// 调用方可走「无字背景+可见文本框」;false=旧 deck,降级 alpha=0 隐形层。
-pub fn extract_text_rects(deck: &str, slide: usize, width: u32, height: u32) -> Result<(Vec<Value>, bool), String> {
-    let chromium = crate::forge::find_chromium()
-        .ok_or_else(|| "未找到 chromium/chrome".to_string())?;
+pub fn extract_text_rects(
+    deck: &str,
+    slide: usize,
+    width: u32,
+    height: u32,
+) -> Result<(Vec<Value>, bool), String> {
+    let chromium =
+        crate::forge::find_chromium().ok_or_else(|| "未找到 chromium/chrome".to_string())?;
     let file_base = if deck.starts_with("http://")
         || deck.starts_with("https://")
         || deck.starts_with("file://")
@@ -568,7 +629,10 @@ pub fn capture_slides(
 
 /// 解析 deck → (file://或 http 基底 URL, 页数)。capture_slides / render_deck_to_pptx 共用。
 /// 上限护栏:畸形 deck/参数别 spawn 成千上万个 chromium 进程拖垮机器。
-fn resolve_deck_pages(deck: &str, slides_override: Option<usize>) -> Result<(String, usize), String> {
+fn resolve_deck_pages(
+    deck: &str,
+    slides_override: Option<usize>,
+) -> Result<(String, usize), String> {
     const MAX_SLIDES: usize = 300;
     const MAX_DECK_BYTES: u64 = 50 * 1024 * 1024;
     if let Some(n) = slides_override {
@@ -603,9 +667,7 @@ fn resolve_deck_pages(deck: &str, slides_override: Option<usize>) -> Result<(Str
         }
     };
     if n > MAX_SLIDES {
-        return Err(format!(
-            "幻灯页数 {n} 超过上限 {MAX_SLIDES}(疑似畸形 deck)"
-        ));
+        return Err(format!("幻灯页数 {n} 超过上限 {MAX_SLIDES}(疑似畸形 deck)"));
     }
     Ok((file_base, n))
 }
@@ -714,29 +776,48 @@ pub fn validate_pptx(path: &str) -> Result<PptxValidation, String> {
     let mut v = PptxValidation::default();
     let mut slide_n_pattern = 0u32;
     for i in 0..z.len() {
-        let name = z.by_index(i).map_err(|e| format!("读 zip entry: {e}"))?.name().to_string();
+        let name = z
+            .by_index(i)
+            .map_err(|e| format!("读 zip entry: {e}"))?
+            .name()
+            .to_string();
         match name.as_str() {
             "[Content_Types].xml" => v.has_content_types = true,
             "ppt/presentation.xml" => v.has_presentation = true,
             "ppt/slideMasters/slideMaster1.xml" => v.has_slide_master = true,
             "ppt/slideLayouts/slideLayout1.xml" => v.has_slide_layout = true,
             "ppt/theme/theme1.xml" => v.has_theme = true,
-            _ if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") => slide_n_pattern += 1,
+            _ if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") => {
+                slide_n_pattern += 1
+            }
             _ if name.starts_with("ppt/media/") => v.media_count += 1,
             _ => {}
         }
     }
     v.slides_found = slide_n_pattern;
-    if !v.has_content_types { v.errors.push("missing [Content_Types].xml".into()); }
-    if !v.has_presentation { v.errors.push("missing ppt/presentation.xml".into()); }
-    if !v.has_slide_master { v.errors.push("missing ppt/slideMasters/slideMaster1.xml".into()); }
-    if !v.has_slide_layout { v.errors.push("missing ppt/slideLayouts/slideLayout1.xml".into()); }
-    if !v.has_theme { v.errors.push("missing ppt/theme/theme1.xml".into()); }
-    if slide_n_pattern == 0 { v.errors.push("no slideN.xml found".into()); }
+    if !v.has_content_types {
+        v.errors.push("missing [Content_Types].xml".into());
+    }
+    if !v.has_presentation {
+        v.errors.push("missing ppt/presentation.xml".into());
+    }
+    if !v.has_slide_master {
+        v.errors
+            .push("missing ppt/slideMasters/slideMaster1.xml".into());
+    }
+    if !v.has_slide_layout {
+        v.errors
+            .push("missing ppt/slideLayouts/slideLayout1.xml".into());
+    }
+    if !v.has_theme {
+        v.errors.push("missing ppt/theme/theme1.xml".into());
+    }
+    if slide_n_pattern == 0 {
+        v.errors.push("no slideN.xml found".into());
+    }
     v.ok = v.errors.is_empty();
     Ok(v)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -804,7 +885,12 @@ mod tests {
         let r = build_pptx_inner(
             &[img.to_string_lossy().into()],
             &out.to_string_lossy(),
-            Some(TextLayer { pages: &rects, editable: &[false], win_w: 1280, win_h: 720 }),
+            Some(TextLayer {
+                pages: &rects,
+                editable: &[false],
+                win_w: 1280,
+                win_h: 720,
+            }),
         )
         .unwrap();
         assert_eq!(r["slides"], 1);
@@ -837,20 +923,40 @@ mod tests {
         build_pptx_inner(
             &[img.to_string_lossy().into()],
             &out.to_string_lossy(),
-            Some(TextLayer { pages: &rects, editable: &[true], win_w: 1280, win_h: 720 }),
+            Some(TextLayer {
+                pages: &rects,
+                editable: &[true],
+                win_w: 1280,
+                win_h: 720,
+            }),
         )
         .unwrap();
         let f = std::fs::File::open(&out).unwrap();
         let mut z = zip::ZipArchive::new(f).unwrap();
         let mut s = String::new();
         use std::io::Read;
-        z.by_name("ppt/slides/slide1.xml").unwrap().read_to_string(&mut s).unwrap();
-        assert!(!s.contains("<a:alpha val=\"0\"/>"), "可编辑模式不应有隐形 alpha");
+        z.by_name("ppt/slides/slide1.xml")
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        assert!(
+            !s.contains("<a:alpha val=\"0\"/>"),
+            "可编辑模式不应有隐形 alpha"
+        );
         assert!(s.contains("val=\"FF6600\""), "应带真实颜色");
         assert!(s.contains("algn=\"ctr\""), "应带对齐");
-        assert!(s.contains("typeface=\"Microsoft YaHei\""), "中文 ea 字体必须写,防豆腐块");
-        assert!(s.contains("<a:normAutofit/>"), "应有 autofit 防换行差异撑爆");
-        assert!(s.contains("<a:lnSpc><a:spcPts val=\"3600\"/></a:lnSpc>"), "行距 48px→3600(1/100pt)");
+        assert!(
+            s.contains("typeface=\"Microsoft YaHei\""),
+            "中文 ea 字体必须写,防豆腐块"
+        );
+        assert!(
+            s.contains("<a:normAutofit/>"),
+            "应有 autofit 防换行差异撑爆"
+        );
+        assert!(
+            s.contains("<a:lnSpc><a:spcPts val=\"3600\"/></a:lnSpc>"),
+            "行距 48px→3600(1/100pt)"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -869,14 +975,22 @@ mod tests {
         build_pptx_inner(
             &[img.to_string_lossy().into()],
             &out.to_string_lossy(),
-            Some(TextLayer { pages: &rects, editable: &[true], win_w: 1280, win_h: 720 }),
+            Some(TextLayer {
+                pages: &rects,
+                editable: &[true],
+                win_w: 1280,
+                win_h: 720,
+            }),
         )
         .unwrap();
         let f = std::fs::File::open(&out).unwrap();
         let mut z = zip::ZipArchive::new(f).unwrap();
         let mut s = String::new();
         use std::io::Read;
-        z.by_name("ppt/slides/slide1.xml").unwrap().read_to_string(&mut s).unwrap();
+        z.by_name("ppt/slides/slide1.xml")
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
         assert!(!s.contains("<evil>"), "畸形值不得注入 XML");
         assert!(s.contains("val=\"000000\""), "坏颜色应回退黑色");
         assert!(s.contains("algn=\"l\""), "坏对齐应回退左对齐");

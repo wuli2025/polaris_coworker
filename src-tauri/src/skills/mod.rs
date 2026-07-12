@@ -13,16 +13,16 @@ pub(crate) use std::fs;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::process::Command;
 
-mod templates;
 mod catalog;
-mod store;
-mod intent;
 mod commands;
+mod intent;
 mod seed;
+mod store;
+mod templates;
 
-pub use templates::*;
 pub use catalog::*;
-pub use store::*;
-pub use intent::*;
 pub use commands::*;
+pub use intent::*;
 pub use seed::*;
+pub use store::*;
+pub use templates::*;

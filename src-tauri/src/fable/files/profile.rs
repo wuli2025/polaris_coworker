@@ -53,7 +53,13 @@ pub(crate) struct WorkflowHint {
 
 /// 据类型分布派生建议工作流(命中阈值才给,避免无中生有)。
 pub(crate) fn workflow_hints(ov: &FileOverview) -> Vec<WorkflowHint> {
-    let cnt = |k: &str| -> u64 { ov.by_kind.iter().find(|x| x.kind == k).map(|x| x.count).unwrap_or(0) };
+    let cnt = |k: &str| -> u64 {
+        ov.by_kind
+            .iter()
+            .find(|x| x.kind == k)
+            .map(|x| x.count)
+            .unwrap_or(0)
+    };
     let mut out: Vec<WorkflowHint> = Vec::new();
     if cnt("video") >= 5 {
         out.push(WorkflowHint {
@@ -94,7 +100,10 @@ pub(crate) fn workflow_hints(ov: &FileOverview) -> Vec<WorkflowHint> {
     if cnt("archive") >= 3 {
         out.push(WorkflowHint {
             title: "解包并整理压缩资料".into(),
-            detail: format!("你有 {} 个压缩包。我可以梳理里面有什么,把有用的内容归进资源库。", cnt("archive")),
+            detail: format!(
+                "你有 {} 个压缩包。我可以梳理里面有什么,把有用的内容归进资源库。",
+                cnt("archive")
+            ),
         });
     }
     if out.is_empty() {
@@ -129,7 +138,9 @@ pub(crate) fn understanding_lines(ov: &FileOverview) -> Vec<String> {
             ov.embedded_files, ov.text_files
         ));
     } else if ov.text_files > 0 {
-        out.push("文本的语义索引正在后台建,建好后我就能按意思(而不只是文件名)帮你找东西了。".into());
+        out.push(
+            "文本的语义索引正在后台建,建好后我就能按意思(而不只是文件名)帮你找东西了。".into(),
+        );
     }
     out
 }
@@ -183,7 +194,11 @@ pub(crate) fn recent_parent_label(relpath: &str) -> String {
         return "(根目录)".to_string();
     }
     let dirs = &segs[..segs.len() - 1]; // 去掉文件名本身
-    let tail = if dirs.len() > 2 { &dirs[dirs.len() - 2..] } else { dirs };
+    let tail = if dirs.len() > 2 {
+        &dirs[dirs.len() - 2..]
+    } else {
+        dirs
+    };
     tail.join("/")
 }
 
@@ -223,7 +238,11 @@ pub(crate) fn recent_activity_digest(root: &Option<String>) -> String {
         return String::new();
     };
     let Ok(rows) = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     }) else {
         return String::new();
     };
@@ -240,7 +259,11 @@ pub(crate) fn recent_activity_digest(root: &Option<String>) -> String {
         let dir = recent_parent_label(&relpath);
         let e = map.entry(dir.clone()).or_insert_with(|| {
             order.push(dir.clone());
-            Agg { count: 0, newest: mtime, examples: Vec::new() }
+            Agg {
+                count: 0,
+                newest: mtime,
+                examples: Vec::new(),
+            }
         });
         e.count += 1;
         let nm = name.trim();
@@ -337,10 +360,22 @@ pub(crate) fn suggest_workflows_directive(ov: &FileOverview, recent: &str) -> St
 [{{"title":"…","why":"…","prompt":"…"}}, ...]"#,
         total = ov.total_files,
         bytes = human_bytes(ov.total_bytes),
-        kinds = if kinds.is_empty() { "—".into() } else { kinds.join("、") },
-        langs = if langs.is_empty() { "—".into() } else { langs.join("、") },
+        kinds = if kinds.is_empty() {
+            "—".into()
+        } else {
+            kinds.join("、")
+        },
+        langs = if langs.is_empty() {
+            "—".into()
+        } else {
+            langs.join("、")
+        },
         themes = themes,
-        recent = if recent.trim().is_empty() { "(暂无近期改动记录)\n" } else { recent },
+        recent = if recent.trim().is_empty() {
+            "(暂无近期改动记录)\n"
+        } else {
+            recent
+        },
     )
 }
 
@@ -360,11 +395,15 @@ pub fn suggest_workflows(root: Option<String>) -> Result<Vec<SuggestedFlow>, Str
             chat_complete(&cfg, &prompt)?
         } else {
             let kb_root = PathBuf::from(crate::kb::kb_root());
-            let cwd = if kb_root.exists() { kb_root } else { std::env::temp_dir() };
+            let cwd = if kb_root.exists() {
+                kb_root
+            } else {
+                std::env::temp_dir()
+            };
             crate::kb::run_claude_readonly(&cwd, &prompt, |_k, _t| {})?
         };
-        let raw = crate::kb::extract_balanced_json(&collected)
-            .ok_or("模型没有返回可解析的 JSON")?;
+        let raw =
+            crate::kb::extract_balanced_json(&collected).ok_or("模型没有返回可解析的 JSON")?;
         let flows: Vec<SuggestedFlow> =
             serde_json::from_str(&raw).map_err(|e| format!("建议 JSON 解析失败: {e}"))?;
         let flows: Vec<SuggestedFlow> = flows
@@ -417,7 +456,9 @@ pub(crate) fn profile_html(root: Option<String>) -> Result<String, String> {
         ));
     }
     if themes.is_empty() {
-        themes.push_str(r#"<span class="theme dim">还没归主题 —— 在文件中心点「智能归类」即可</span>"#);
+        themes.push_str(
+            r#"<span class="theme dim">还没归主题 —— 在文件中心点「智能归类」即可</span>"#,
+        );
     }
 
     let mut understanding = String::new();

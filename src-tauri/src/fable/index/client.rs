@@ -85,8 +85,9 @@ pub fn embed_texts(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     if crate::fable::embed_local::enabled() {
         return crate::fable::embed_local::embed(texts);
     }
-    let p = crate::sense::active_provider("embed")
-        .ok_or("没有可用的嵌入服务商:在「设置 › 寓言计划 API」给硅基流动填 key(免费),或检查云感官总闸")?;
+    let p = crate::sense::active_provider("embed").ok_or(
+        "没有可用的嵌入服务商:在「设置 › 寓言计划 API」给硅基流动填 key(免费),或检查云感官总闸",
+    )?;
     let key = crate::sense::effective_key(&p);
     let base = p.base_url.trim_end_matches('/');
     let url = format!("{base}/v1/embeddings");
@@ -99,7 +100,9 @@ pub fn embed_texts(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
             .send_json(json!({ "model": p.default_model, "input": texts }));
         match resp {
             Ok(r) => {
-                let v: Value = r.into_json().map_err(|e| format!("嵌入响应解析失败: {e}"))?;
+                let v: Value = r
+                    .into_json()
+                    .map_err(|e| format!("嵌入响应解析失败: {e}"))?;
                 let data = v
                     .get("data")
                     .and_then(|d| d.as_array())
@@ -110,7 +113,12 @@ pub fn embed_texts(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
                         .get("embedding")
                         .and_then(|e| e.as_array())
                         .ok_or("嵌入响应缺 embedding")?;
-                    out.push(emb.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect());
+                    out.push(
+                        emb.iter()
+                            .filter_map(|x| x.as_f64())
+                            .map(|x| x as f32)
+                            .collect(),
+                    );
                 }
                 if out.len() != texts.len() {
                     return Err(format!("嵌入条数不符: 发 {} 回 {}", texts.len(), out.len()));
@@ -153,7 +161,9 @@ pub fn rerank(query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, 
             "top_n": top_n,
         }))
         .map_err(|e| format!("重排接口失败: {e}"))?;
-    let v: Value = resp.into_json().map_err(|e| format!("重排响应解析失败: {e}"))?;
+    let v: Value = resp
+        .into_json()
+        .map_err(|e| format!("重排响应解析失败: {e}"))?;
     let results = v
         .get("results")
         .and_then(|r| r.as_array())

@@ -86,7 +86,9 @@ pub fn kb_graph() -> KbGraph {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_lowercase();
-        title_to_path.entry(stem).or_insert_with(|| d.rel_path.clone());
+        title_to_path
+            .entry(stem)
+            .or_insert_with(|| d.rel_path.clone());
         path_set.insert(d.rel_path.clone());
     }
 
@@ -102,7 +104,11 @@ pub fn kb_graph() -> KbGraph {
             id: d.rel_path.clone(),
             title: d.title.clone(),
             category: d.category.clone(),
-            kind: if is_memory { "feedback".into() } else { "doc".into() },
+            kind: if is_memory {
+                "feedback".into()
+            } else {
+                "doc".into()
+            },
             summary: None,
         });
     }
@@ -201,7 +207,11 @@ pub fn kb_graph() -> KbGraph {
 
     let edges = edge_set
         .into_iter()
-        .map(|(source, target)| KbEdge { source, target, rel: None })
+        .map(|(source, target)| KbEdge {
+            source,
+            target,
+            rel: None,
+        })
         .collect();
 
     KbGraph { nodes, edges }
@@ -258,7 +268,9 @@ pub fn kb_lint() -> KbLintReport {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_lowercase();
-        title_to_path.entry(stem).or_insert_with(|| d.rel_path.clone());
+        title_to_path
+            .entry(stem)
+            .or_insert_with(|| d.rel_path.clone());
     }
 
     // 被任意页面双链指向的目标 (用于孤儿判定)
@@ -296,7 +308,12 @@ pub fn kb_lint() -> KbLintReport {
         for link in &d.wikilinks {
             if !title_to_path.contains_key(&link.to_lowercase()) {
                 dead_links += 1;
-                push(&mut issues, "dead-link", &rp, format!("[[{}]] 无对应页面", link));
+                push(
+                    &mut issues,
+                    "dead-link",
+                    &rp,
+                    format!("[[{}]] 无对应页面", link),
+                );
             }
         }
 
@@ -315,7 +332,12 @@ pub fn kb_lint() -> KbLintReport {
         // ③ 缺 frontmatter type
         if d.doc_type.trim().is_empty() {
             missing_type += 1;
-            push(&mut issues, "missing-type", &rp, "frontmatter 缺 type 字段".into());
+            push(
+                &mut issues,
+                "missing-type",
+                &rp,
+                "frontmatter 缺 type 字段".into(),
+            );
         }
 
         // ④ 孤儿页: 既不链接别人, 也没人链接它
@@ -323,7 +345,12 @@ pub fn kb_lint() -> KbLintReport {
         let linked_in = referenced.contains(&d.rel_path);
         if !links_out && !linked_in {
             orphans += 1;
-            push(&mut issues, "orphan", &rp, "无入链也无出链, 未接入知识网".into());
+            push(
+                &mut issues,
+                "orphan",
+                &rp,
+                "无入链也无出链, 未接入知识网".into(),
+            );
         }
     }
 
@@ -336,4 +363,3 @@ pub fn kb_lint() -> KbLintReport {
         issues,
     }
 }
-

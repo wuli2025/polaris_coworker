@@ -154,11 +154,7 @@ pub(crate) fn scan_all(root: &Path) -> Vec<KbDoc> {
             continue;
         }
         if let Ok(rel) = p.strip_prefix(root) {
-            if rel
-                .components()
-                .next()
-                .and_then(|c| c.as_os_str().to_str())
-                == Some("conversations")
+            if rel.components().next().and_then(|c| c.as_os_str().to_str()) == Some("conversations")
             {
                 continue;
             }
@@ -240,7 +236,10 @@ pub(crate) fn parse_doc(abs_path: &Path, rel: &Path) -> Option<KbDoc> {
     let mut fm_title: Option<String> = None;
     for cap in RE_YAML_KV.captures_iter(&fm) {
         let k = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_lowercase();
-        let v = cap.get(2).map(|m| m.as_str().trim().trim_matches('"')).unwrap_or("");
+        let v = cap
+            .get(2)
+            .map(|m| m.as_str().trim().trim_matches('"'))
+            .unwrap_or("");
         match k.as_str() {
             "category" => category = v.to_string(),
             "type" => doc_type = v.to_string(),
@@ -360,7 +359,11 @@ mod tests {
         fs::write(conv.join("c.md"), "# 对话产物\n").unwrap(); // conversations/:排除
 
         let docs = scan_all(&root);
-        assert_eq!(docs.len(), N, "应收全部 {N} 篇 wiki(不含 txt / conversations)");
+        assert_eq!(
+            docs.len(),
+            N,
+            "应收全部 {N} 篇 wiki(不含 txt / conversations)"
+        );
 
         let paths: Vec<&str> = docs.iter().map(|d| d.rel_path.as_str()).collect();
         let uniq: std::collections::HashSet<&str> = paths.iter().copied().collect();
@@ -371,10 +374,16 @@ mod tests {
         );
         let mut sorted = paths.clone();
         sorted.sort();
-        assert_eq!(paths, sorted, "结果应按 rel_path 稳定有序(分片合并不打乱顺序)");
+        assert_eq!(
+            paths, sorted,
+            "结果应按 rel_path 稳定有序(分片合并不打乱顺序)"
+        );
 
         // 抽查解析正确性(frontmatter 标题 + 双链)
-        let p0 = docs.iter().find(|d| d.rel_path.ends_with("p000.md")).unwrap();
+        let p0 = docs
+            .iter()
+            .find(|d| d.rel_path.ends_with("p000.md"))
+            .unwrap();
         assert_eq!(p0.title, "标题0");
         assert!(p0.wikilinks.iter().any(|w| w == "标题1"), "双链应被解析出");
 

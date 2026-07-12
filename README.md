@@ -112,10 +112,10 @@ npm install          # 首次
 npm run tauri:dev
 ```
 
-Vite 端口固定 1420。若被占用先清端口：
+Vite 端口固定 1421（与 `src-tauri/tauri.conf.json` 的 `devUrl` 一致）。若被占用先查明并关闭占用进程：
 
 ```powershell
-Get-NetTCPConnection -LocalPort 1420 -ErrorAction SilentlyContinue |
+Get-NetTCPConnection -LocalPort 1421 -ErrorAction SilentlyContinue |
   Select-Object -ExpandProperty OwningProcess | ForEach-Object {
     Stop-Process -Id $_ -Force
   }

@@ -14,14 +14,73 @@ pub(crate) const CLUSTER_PALETTE: &[&str] = &[
 /// 「html」「dist」「log」这类机器味分类——用户要主题(报税/装修),不是格式或工程目录。
 pub(crate) const GENERIC_DIRS: &[&str] = &[
     // 通用容器
-    "raw", "wiki", "output", "memory", "src", "docs", "doc", "data", "assets", "public",
-    "dist", "build", "tmp", "temp", "files", "file", "新建文件夹", "downloads", "下载",
-    "documents", "文档", "desktop", "桌面", "untitled", "misc", "other", "others", "杂项", "其它", "其他",
+    "raw",
+    "wiki",
+    "output",
+    "memory",
+    "src",
+    "docs",
+    "doc",
+    "data",
+    "assets",
+    "public",
+    "dist",
+    "build",
+    "tmp",
+    "temp",
+    "files",
+    "file",
+    "新建文件夹",
+    "downloads",
+    "下载",
+    "documents",
+    "文档",
+    "desktop",
+    "桌面",
+    "untitled",
+    "misc",
+    "other",
+    "others",
+    "杂项",
+    "其它",
+    "其他",
     // 技术/格式/工程目录(常是软件生成、非人看)
-    "html", "htm", "css", "js", "ts", "jsx", "tsx", "json", "xml", "yaml", "yml",
-    "log", "logs", "cache", "caches", "bin", "obj", "lib", "libs", "include", "vendor",
-    "target", "node_modules", "venv", "__pycache__", ".git", ".idea", ".vscode",
-    "static", "scripts", "styles", "fonts", "icons", "thumbnails", "thumbs", "cache_data",
+    "html",
+    "htm",
+    "css",
+    "js",
+    "ts",
+    "jsx",
+    "tsx",
+    "json",
+    "xml",
+    "yaml",
+    "yml",
+    "log",
+    "logs",
+    "cache",
+    "caches",
+    "bin",
+    "obj",
+    "lib",
+    "libs",
+    "include",
+    "vendor",
+    "target",
+    "node_modules",
+    "venv",
+    "__pycache__",
+    ".git",
+    ".idea",
+    ".vscode",
+    "static",
+    "scripts",
+    "styles",
+    "fonts",
+    "icons",
+    "thumbnails",
+    "thumbs",
+    "cache_data",
 ];
 
 // ───────────────────────── 通用小工具 ─────────────────────────
@@ -53,8 +112,16 @@ pub(crate) fn b64(input: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(T[((n >> 18) & 63) as usize] as char);
         out.push(T[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -153,9 +220,9 @@ pub(crate) fn resolve_root_ids(conn: &rusqlite::Connection, root: &Option<String
     // 全部根 → 取极大根去重叠。
     let mut all: Vec<(i64, String)> = Vec::new();
     if let Ok(mut stmt) = conn.prepare("SELECT id, path FROM roots") {
-        if let Ok(rows) =
-            stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
-        {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        }) {
             all.extend(rows.flatten());
         }
     }
@@ -323,12 +390,14 @@ pub fn overview(root: Option<String>) -> Result<FileOverview, String> {
         }
     }
 
-    let one = |sql: &str| -> u64 {
-        conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
-    };
-    let text_files = one(&format!("SELECT COUNT(*) FROM files f WHERE f.kind='text'{filter}"));
-    let embedded_files =
-        one(&format!("SELECT COUNT(*) FROM files f WHERE f.kind='text' AND f.chunked=1{filter}"));
+    let one =
+        |sql: &str| -> u64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64 };
+    let text_files = one(&format!(
+        "SELECT COUNT(*) FROM files f WHERE f.kind='text'{filter}"
+    ));
+    let embedded_files = one(&format!(
+        "SELECT COUNT(*) FROM files f WHERE f.kind='text' AND f.chunked=1{filter}"
+    ));
 
     Ok(FileOverview {
         active_root: root,
@@ -437,7 +506,11 @@ pub fn grid(
         where_sql.push_str(&format!(" AND f.kind IN ({})", list.join(",")));
     }
     // 按语言过滤:代码/标记语言按扩展名集合(不依赖回填)、媒体按 kind、自然语言按回填好的 lang 列。
-    if let Some(l) = lang.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "all") {
+    if let Some(l) = lang
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
         let exts = crate::fable::inventory::exts_for_lang(l);
         if !exts.is_empty() {
             let list: Vec<String> = exts.iter().map(|e| format!("'{e}'")).collect();
@@ -445,8 +518,10 @@ pub fn grid(
         } else if let Some(k) = crate::fable::inventory::kind_for_media_lang(l) {
             where_sql.push_str(&format!(" AND f.kind='{k}'"));
         } else if l == "文档·待识别" {
-            let codes: Vec<String> =
-                crate::fable::inventory::CODE_EXTS.iter().map(|e| format!("'{e}'")).collect();
+            let codes: Vec<String> = crate::fable::inventory::CODE_EXTS
+                .iter()
+                .map(|e| format!("'{e}'"))
+                .collect();
             where_sql.push_str(&format!(
                 " AND f.lang='' AND f.kind IN ('text','doc') AND LOWER(f.ext) NOT IN ({})",
                 codes.join(",")
@@ -461,7 +536,9 @@ pub fn grid(
     let q = q.trim();
     if !q.is_empty() {
         let safe = q.replace('\'', "''").to_lowercase();
-        where_sql.push_str(&format!(" AND (LOWER(f.name) LIKE '%{safe}%' OR LOWER(f.relpath) LIKE '%{safe}%')"));
+        where_sql.push_str(&format!(
+            " AND (LOWER(f.name) LIKE '%{safe}%' OR LOWER(f.relpath) LIKE '%{safe}%')"
+        ));
     }
     let order = match sort.as_deref() {
         Some("name") => "f.name ASC",
@@ -471,9 +548,11 @@ pub fn grid(
     };
 
     let total: u64 = conn
-        .query_row(&format!("SELECT COUNT(*) FROM files f {where_sql}"), [], |r| {
-            r.get::<_, i64>(0)
-        })
+        .query_row(
+            &format!("SELECT COUNT(*) FROM files f {where_sql}"),
+            [],
+            |r| r.get::<_, i64>(0),
+        )
         .unwrap_or(0) as u64;
 
     let page_size = page_size.clamp(12, 400);
@@ -518,5 +597,10 @@ pub fn grid(
         })
         .map_err(|e| e.to_string())?;
     let items: Vec<FileCard> = rows.flatten().collect();
-    Ok(FileGridPage { items, total, page, page_size })
+    Ok(FileGridPage {
+        items,
+        total,
+        page,
+        page_size,
+    })
 }

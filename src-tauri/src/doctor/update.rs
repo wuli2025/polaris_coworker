@@ -3,15 +3,15 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use crate::runtime::procs::no_window;
 #[cfg(feature = "desktop")]
 use tauri::AppHandle;
-#[cfg(not(feature = "desktop"))]
-use crate::host::AppHandle;
 
-use super::types::*;
-use super::probe::*;
 use super::install::*;
+use super::probe::*;
+use super::types::*;
 
 /// 把 "1.0.44 (Claude Code)" 这类串里第一个形如 a.b.c 的版本号解析成元组。
 fn parse_triplet(tok: &str) -> Option<(u64, u64, u64)> {
@@ -127,7 +127,10 @@ pub fn env_claude_update_check() -> ClaudeUpdateInfo {
                 _ => false,
             };
             let message = if update_available {
-                format!("发现新版本 {l} (当前 {})。", current.clone().unwrap_or_default())
+                format!(
+                    "发现新版本 {l} (当前 {})。",
+                    current.clone().unwrap_or_default()
+                )
             } else {
                 format!("已是最新版本 ({})。", current.clone().unwrap_or_default())
             };

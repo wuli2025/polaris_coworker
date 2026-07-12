@@ -131,7 +131,10 @@ pub struct KbOverview {
 
 pub fn kb_overview() -> KbOverview {
     let idx = INDEX.read();
-    let mut ov = KbOverview { root: kb_root(), ..Default::default() };
+    let mut ov = KbOverview {
+        root: kb_root(),
+        ..Default::default()
+    };
     for d in idx.iter() {
         ov.total_docs += 1;
         let p = d.rel_path.as_str();
@@ -226,4 +229,3 @@ pub fn render_kb_context(query: &str, top_k: usize) -> String {
     }
     out
 }
-

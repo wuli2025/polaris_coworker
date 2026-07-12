@@ -25,7 +25,13 @@ pub(crate) fn parse_expansions(raw: &str, original: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let orig_norm = original.trim().to_lowercase();
     let mut push = |s: &str, out: &mut Vec<String>| {
-        let t: String = s.trim().trim_matches('"').trim().chars().take(120).collect();
+        let t: String = s
+            .trim()
+            .trim_matches('"')
+            .trim()
+            .chars()
+            .take(120)
+            .collect();
         if t.chars().count() >= 2
             && t.to_lowercase() != orig_norm
             && !out.iter().any(|x: &String| x.eq_ignore_ascii_case(&t))
@@ -50,9 +56,9 @@ pub(crate) fn parse_expansions(raw: &str, original: &str) -> Vec<String> {
     // JSON 没解出来 → 逐行兜底(剥列表符号/序号)
     if out.is_empty() {
         for line in raw.lines() {
-            let l = line
-                .trim()
-                .trim_start_matches(|c: char| c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')' || c == ' ');
+            let l = line.trim().trim_start_matches(|c: char| {
+                c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')' || c == ' '
+            });
             if !l.is_empty() {
                 push(l, &mut out);
             }
@@ -105,7 +111,11 @@ fn fuse_multi_query(
         a.score += coverage_phrase_boost(&doc_lower, &q_full, &terms, cov_w, phrase_w);
     }
     let mut merged: Vec<Acc> = acc.into_values().collect();
-    merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     merged
         .into_iter()
         .take(top_k)
@@ -130,12 +140,18 @@ pub(crate) fn search_ai_sync(
     let base = search(query, top_k, "hybrid", scope)?;
     // 不值得扩写(长精确短语)→ 直接返回原结果(标注 mode 便于前端识别)
     if !worth_ai_expand(query) {
-        return Ok(FableSearchResult { mode: "ai(skip)".into(), ..base });
+        return Ok(FableSearchResult {
+            mode: "ai(skip)".into(),
+            ..base
+        });
     }
     // 起 headless claude 要扩写;失败/超时一律退回 base
     let variants = ai_expand_query(query).unwrap_or_default();
     if variants.is_empty() {
-        return Ok(FableSearchResult { mode: "ai(noexp)".into(), ..base });
+        return Ok(FableSearchResult {
+            mode: "ai(noexp)".into(),
+            ..base
+        });
     }
     // 宽召回:每路多取候选给融合(top_k*4,clamp≤50)。变体走快档 grep_vec(不重排)。
     // 原查询 + 各变体并行(thread::scope):每路 ~250ms,串行 4 路要 ~1s,并行归到最慢一路。
@@ -213,7 +229,10 @@ mod tests {
     #[test]
     fn parse_expansions_handles_json_and_lines() {
         // JSON 数组(主路):去重、剔除与原查询同形
-        let v = parse_expansions(r#"前言 ["知识库检索","召回准确率","retrieval accuracy","知识库检索"]"#, "原查询");
+        let v = parse_expansions(
+            r#"前言 ["知识库检索","召回准确率","retrieval accuracy","知识库检索"]"#,
+            "原查询",
+        );
         assert_eq!(v, vec!["知识库检索", "召回准确率", "retrieval accuracy"]);
         // 逐行兜底(JSON 解不出时):剥列表符号/序号
         let v2 = parse_expansions("1. 向量重排\n- 精排序\n* embedding rerank", "x");
@@ -221,7 +240,7 @@ mod tests {
         // 与原查询同形被剔除
         let v3 = parse_expansions(r#"["abc","ABC","def"]"#, "abc");
         assert_eq!(v3, vec!["def"]); // "abc"/"ABC" 都判同形剔除
-        // 截到 6 条
+                                     // 截到 6 条
         let many: Vec<String> = (0..10).map(|i| format!("\"t{i}\"")).collect();
         let v4 = parse_expansions(&format!("[{}]", many.join(",")), "q");
         assert_eq!(v4.len(), 6);
@@ -240,14 +259,27 @@ mod tests {
         };
         // 原查询命中 a(rank0) b(rank1);变体命中 b(rank0) c(rank1) —— b 两路同中应上浮。
         let orig = FableSearchResult {
-            query: "退款 政策".into(), mode: "grep_vec".into(),
+            query: "退款 政策".into(),
+            mode: "grep_vec".into(),
             hits: vec![mk("a.md", "退款说明", 0.0), mk("b.md", "退款政策细则", 0.0)],
-            grep_hits: 2, vector_hits: 2, reranked: false, grep_truncated: false, ms: 1,
+            grep_hits: 2,
+            vector_hits: 2,
+            reranked: false,
+            grep_truncated: false,
+            ms: 1,
         };
         let var = FableSearchResult {
-            query: "refund policy".into(), mode: "grep_vec".into(),
-            hits: vec![mk("b.md", "退款政策细则", 0.0), mk("c.md", "policy doc", 0.0)],
-            grep_hits: 2, vector_hits: 2, reranked: false, grep_truncated: false, ms: 1,
+            query: "refund policy".into(),
+            mode: "grep_vec".into(),
+            hits: vec![
+                mk("b.md", "退款政策细则", 0.0),
+                mk("c.md", "policy doc", 0.0),
+            ],
+            grep_hits: 2,
+            vector_hits: 2,
+            reranked: false,
+            grep_truncated: false,
+            ms: 1,
         };
         let fused = fuse_multi_query("退款 政策", &[orig, var], 0.6, 3);
         // b 被两路命中 + 含全部内容词(退款/政策)→ 覆盖加权 → 应排第一

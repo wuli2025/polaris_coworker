@@ -74,7 +74,10 @@ pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
         return s.to_string();
     }
     let cut: String = s.chars().take(max).collect();
-    format!("{}\n\n…(本页过长已截断, 需要全文请用 `Read` 打开)", cut.trim_end())
+    format!(
+        "{}\n\n…(本页过长已截断, 需要全文请用 `Read` 打开)",
+        cut.trim_end()
+    )
 }
 
 /// Karpathy 式「结构化 wiki + 长上下文 + 双链导航」上下文块, 供 chat 发送前注入。
@@ -191,10 +194,7 @@ pub fn kb_context_block_scoped(scope: Option<&str>) -> String {
         if nav_total > effective_nav {
             // 触发了截断 (整体超上限)
             if nav_total <= nav_budget {
-                out.push_str(&format!(
-                    "*(导航段共 {} 字符, 触达上限)*\n\n",
-                    nav_total
-                ));
+                out.push_str(&format!("*(导航段共 {} 字符, 触达上限)*\n\n", nav_total));
             } else {
                 out.push_str(&format!(
                     "*(还有 {} 篇导航页/总计 {} 字符未注入, 用 `Read` 打开 wiki/index.md 或对应 _index.md 查看)*\n\n",
@@ -205,7 +205,9 @@ pub fn kb_context_block_scoped(scope: Option<&str>) -> String {
         // 提示: 其他 40+ 篇 wiki 的目录清单在 wiki/index.md / 概念/_index.md / 实体/_index.md 里
         let wiki_total = idx
             .iter()
-            .filter(|d| norm(&d.rel_path).starts_with("wiki/") && norm(&d.rel_path).ends_with(".md"))
+            .filter(|d| {
+                norm(&d.rel_path).starts_with("wiki/") && norm(&d.rel_path).ends_with(".md")
+            })
             .count();
         out.push_str(&format!(
             "*(wiki/ 共 {} 篇, 此处仅注入 {} 篇导航页;要看某篇正文请用 Read 打开对应 .md)*\n\n",
@@ -444,17 +446,35 @@ mod tests {
     #[test]
     fn path_contains_handles_verbatim_prefix_and_case() {
         // 同根, 子在内: 放行
-        assert!(path_contains(Path::new(r"C:\Users\a\Polaris"), Path::new(r"C:\Users\a\Polaris\x.md")));
+        assert!(path_contains(
+            Path::new(r"C:\Users\a\Polaris"),
+            Path::new(r"C:\Users\a\Polaris\x.md")
+        ));
         // 关键回归: 一端带 Windows `\\?\` 扩展长度前缀、一端没有, 仍判为包含 (旧裸 starts_with 会误判越界)
-        assert!(path_contains(Path::new(r"C:\Users\a\Polaris"), Path::new(r"\\?\C:\Users\a\Polaris\x.md")));
-        assert!(path_contains(Path::new(r"\\?\C:\Users\a\Polaris"), Path::new(r"C:\Users\a\Polaris\x.md")));
+        assert!(path_contains(
+            Path::new(r"C:\Users\a\Polaris"),
+            Path::new(r"\\?\C:\Users\a\Polaris\x.md")
+        ));
+        assert!(path_contains(
+            Path::new(r"\\?\C:\Users\a\Polaris"),
+            Path::new(r"C:\Users\a\Polaris\x.md")
+        ));
         // 伪前缀: 组件级比较不应把 `Polaris-bak` 当成 `Polaris` 的子树
-        assert!(!path_contains(Path::new(r"C:\Users\a\Polaris"), Path::new(r"C:\Users\a\Polaris-bak\x.md")));
+        assert!(!path_contains(
+            Path::new(r"C:\Users\a\Polaris"),
+            Path::new(r"C:\Users\a\Polaris-bak\x.md")
+        ));
         // 真越界: 不在根下
-        assert!(!path_contains(Path::new(r"C:\Users\a\Polaris"), Path::new(r"C:\Windows\System32\drivers\etc\hosts")));
+        assert!(!path_contains(
+            Path::new(r"C:\Users\a\Polaris"),
+            Path::new(r"C:\Windows\System32\drivers\etc\hosts")
+        ));
         // Windows 上大小写不敏感: 根与子大小写不一致也应判为包含
         if cfg!(windows) {
-            assert!(path_contains(Path::new(r"C:\Users\A\Polaris"), Path::new(r"c:\users\a\polaris\x.md")));
+            assert!(path_contains(
+                Path::new(r"C:\Users\A\Polaris"),
+                Path::new(r"c:\users\a\polaris\x.md")
+            ));
         }
     }
 

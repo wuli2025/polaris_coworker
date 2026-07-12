@@ -13,16 +13,16 @@
 // 模块拆分(纯移动): 原 `crate::fable::files::xxx` 公有路径经 `pub use 子模块::*` 门面保持零变化,
 // lib.rs generate_handler! 与 server.rs 等外部引用一律不用改。
 
-pub mod overview;
-pub mod thumbs;
-pub mod gist;
 pub mod cluster;
+pub mod commands;
+pub mod gist;
 pub mod graph;
 pub mod llm;
+pub mod overview;
 pub mod profile;
-pub mod commands;
 #[cfg(test)]
 mod tests;
+pub mod thumbs;
 
 // 共享依赖统一在此升为 pub(crate) 供子模块 `use super::*` 取用(与原单文件同一作用域语义)。
 
@@ -36,16 +36,16 @@ pub(crate) use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub(crate) use std::sync::Mutex;
 pub(crate) use std::time::Duration;
 
-#[cfg(feature = "desktop")]
-pub(crate) use tauri::{AppHandle, Emitter};
 #[cfg(not(feature = "desktop"))]
 pub(crate) use crate::host::AppHandle;
+#[cfg(feature = "desktop")]
+pub(crate) use tauri::{AppHandle, Emitter};
 
-pub use overview::*;
-pub use thumbs::*;
-pub use gist::*;
 pub use cluster::*;
+pub use commands::*;
+pub use gist::*;
 pub(crate) use graph::*; // graph 子模块目前只有 pub(crate) 项(build_file_graph)
 pub use llm::*;
+pub use overview::*;
 pub use profile::*;
-pub use commands::*;
+pub use thumbs::*;

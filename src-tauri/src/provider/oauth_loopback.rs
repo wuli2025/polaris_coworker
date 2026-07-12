@@ -44,9 +44,14 @@ pub struct LoginPollResult {
     pub message: String,
 }
 
-pub(crate) fn loopback_poll(slot: &parking_lot::Mutex<Option<Arc<LoopbackSession>>>) -> LoginPollResult {
+pub(crate) fn loopback_poll(
+    slot: &parking_lot::Mutex<Option<Arc<LoopbackSession>>>,
+) -> LoginPollResult {
     match slot.lock().as_ref() {
-        None => LoginPollResult { status: "idle".into(), message: String::new() },
+        None => LoginPollResult {
+            status: "idle".into(),
+            message: String::new(),
+        },
         Some(s) => {
             let (status, message) = s.status.lock().clone();
             LoginPollResult { status, message }
@@ -207,7 +212,12 @@ pub(crate) fn loopback_run(
         let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
 
         if path != want_path {
-            loopback_respond(&mut stream, "404 Not Found", "text/plain; charset=utf-8", "not found");
+            loopback_respond(
+                &mut stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                "not found",
+            );
             continue;
         }
         if let Some(err) = loopback_query_param(query, "error") {
@@ -229,7 +239,11 @@ pub(crate) fn loopback_run(
                 &mut stream,
                 "200 OK",
                 "text/html; charset=utf-8",
-                &loopback_page(false, brand, "回调参数不完整或不属于本次授权, 请回 Polaris 重新发起"),
+                &loopback_page(
+                    false,
+                    brand,
+                    "回调参数不完整或不属于本次授权, 请回 Polaris 重新发起",
+                ),
             );
             return Err("回调缺少授权码或 state 不一致, 请重新发起授权".into());
         }

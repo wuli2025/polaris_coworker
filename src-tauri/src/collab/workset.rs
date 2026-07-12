@@ -48,7 +48,10 @@ fn git(repo: &Path, args: &[&str]) -> Result<(String, bool), String> {
         .args(args)
         .output()
         .map_err(|e| format!("git 启动失败: {e}"))?;
-    Ok((String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success()))
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    ))
 }
 
 /// 判断 dest 是否已是 git 仓库(有 .git 目录/文件即算)。
@@ -67,7 +70,10 @@ pub fn clone_partial(remote_url: &str, dest: &Path, sparse_dirs: &[&str]) -> Res
             .output()
             .map_err(|e| format!("git 启动失败: {e}"))?;
         if !out.status.success() {
-            return Err(format!("部分克隆失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            return Err(format!(
+                "部分克隆失败: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
         }
         git_ok(dest, &["sparse-checkout", "init", "--cone"])?;
         if !sparse_dirs.is_empty() {
@@ -95,11 +101,30 @@ pub fn task_setup(repo: &Path, branch: &str, scope_csv: &str) -> Result<SetupRep
     let offline = !git(repo, &["fetch", "origin"])?.1;
 
     // ② 本地有该分支就切过去,没有就从 origin/main(离线退化到本地 main)新开。
-    let has_branch = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])?.1;
+    let has_branch = git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )?
+    .1;
     if has_branch {
         git_ok(repo, &["switch", branch])?;
     } else {
-        let base = if git(repo, &["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"])?.1 {
+        let base = if git(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/main",
+            ],
+        )?
+        .1
+        {
             "origin/main"
         } else {
             "main"
@@ -108,8 +133,11 @@ pub fn task_setup(repo: &Path, branch: &str, scope_csv: &str) -> Result<SetupRep
     }
 
     // ③ scope 目录并入稀疏集(add 是增量,不动别的卡已就位的目录)。
-    let dirs: Vec<String> =
-        scope_csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let dirs: Vec<String> = scope_csv
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     if !dirs.is_empty() {
         let mut args: Vec<&str> = vec!["sparse-checkout", "add"];
         args.extend(dirs.iter().map(String::as_str));
@@ -123,7 +151,12 @@ pub fn task_setup(repo: &Path, branch: &str, scope_csv: &str) -> Result<SetupRep
         .parse::<u64>()
         .unwrap_or(0);
 
-    Ok(SetupReport { branch: branch.to_string(), behind_main, offline, sparse_dirs: dirs })
+    Ok(SetupReport {
+        branch: branch.to_string(),
+        behind_main,
+        offline,
+        sparse_dirs: dirs,
+    })
 }
 
 /// 网络类 git 操作重试:3 次指数退避(1s/3s/9s)。只重试传入闭包返回的 Err;
@@ -154,7 +187,8 @@ fn retry_net<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
 /// 先拉后推之「拉」:fetch + merge origin/main。fetch 带 3 次退避重试(网络抖动兜底)。
 /// 冲突时列出冲突文件、立即 abort(不把半截冲突留在工作区),返回 Err 给上层去走冲突流程。
 pub fn sync_main(repo: &Path) -> Result<String, String> {
-    retry_net(|| git_ok(repo, &["fetch", "origin"])).map_err(|e| format!("拉取失败(离线?): {e}"))?;
+    retry_net(|| git_ok(repo, &["fetch", "origin"]))
+        .map_err(|e| format!("拉取失败(离线?): {e}"))?;
     let (out, ok) = git(repo, &["merge", "origin/main", "--no-edit"])?;
     if ok {
         return Ok(out.trim().to_string());
@@ -181,11 +215,21 @@ pub fn push_branch(repo: &Path, branch: &str) -> Result<(), String> {
             return Ok(());
         }
         let err = String::from_utf8_lossy(&out.stderr);
-        if err.contains("non-fast-forward") || err.contains("fetch first") || err.contains("behind") {
-            return Err(format!("REJECT:推送被拒:远端分支已前进,请先「先拉后推」同步再推。({})", err.trim()));
+        if err.contains("non-fast-forward") || err.contains("fetch first") || err.contains("behind")
+        {
+            return Err(format!(
+                "REJECT:推送被拒:远端分支已前进,请先「先拉后推」同步再推。({})",
+                err.trim()
+            ));
         }
-        if err.contains("protected") || err.contains("pre-receive hook declined") || err.contains("GH006") {
-            return Err(format!("REJECT:推送被拒:{branch} 是保护分支,不允许直推,请走合并闸门。({})", err.trim()));
+        if err.contains("protected")
+            || err.contains("pre-receive hook declined")
+            || err.contains("GH006")
+        {
+            return Err(format!(
+                "REJECT:推送被拒:{branch} 是保护分支,不允许直推,请走合并闸门。({})",
+                err.trim()
+            ));
         }
         Err(format!("推送失败: {}", err.trim()))
     })
@@ -204,7 +248,17 @@ pub fn out_of_scope_files(repo: &Path, scope_csv: &str) -> Result<Vec<String>, S
     if prefixes.is_empty() {
         return Ok(Vec::new());
     }
-    let base = if git(repo, &["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"])?.1 {
+    let base = if git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/main",
+        ],
+    )?
+    .1
+    {
         "origin/main...HEAD"
     } else {
         "main...HEAD"
@@ -214,7 +268,11 @@ pub fn out_of_scope_files(repo: &Path, scope_csv: &str) -> Result<Vec<String>, S
         .lines()
         .map(str::trim)
         .filter(|f| !f.is_empty())
-        .filter(|f| !prefixes.iter().any(|p| *f == p.as_str() || f.starts_with(&format!("{p}/"))))
+        .filter(|f| {
+            !prefixes
+                .iter()
+                .any(|p| *f == p.as_str() || f.starts_with(&format!("{p}/")))
+        })
         .map(String::from)
         .collect())
 }
@@ -248,7 +306,8 @@ pub fn scope_status(repo: &Path, scope_csv: &str) -> Result<ScopeStatus, String>
 /// 打开(必要时建表)outbox 小库。独立于 collab.db,坏了也不连累主库。
 fn outbox_conn(dir: &Path) -> Result<rusqlite::Connection, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败: {e}"))?;
-    let conn = rusqlite::Connection::open(dir.join("outbox.db")).map_err(|e| format!("打开 outbox.db 失败: {e}"))?;
+    let conn = rusqlite::Connection::open(dir.join("outbox.db"))
+        .map_err(|e| format!("打开 outbox.db 失败: {e}"))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS outbox(
             idem_key   TEXT PRIMARY KEY,
@@ -274,7 +333,8 @@ fn gen_idem_key() -> String {
             .as_nanos()
             .hash(&mut h);
         std::process::id().hash(&mut h);
-        CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed).hash(&mut h);
+        CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .hash(&mut h);
         salt.hash(&mut h);
         out.push_str(&format!("{:016x}", h.finish()));
     }
@@ -301,7 +361,9 @@ pub fn queue_message(dir: &Path, payload_json: &str) -> Result<String, String> {
 pub fn pending_messages(dir: &Path) -> Result<Vec<(String, String)>, String> {
     let conn = outbox_conn(dir)?;
     let mut stmt = conn
-        .prepare("SELECT idem_key, payload FROM outbox WHERE sent_at IS NULL ORDER BY created_at, rowid")
+        .prepare(
+            "SELECT idem_key, payload FROM outbox WHERE sent_at IS NULL ORDER BY created_at, rowid",
+        )
         .map_err(|e| format!("查询失败: {e}"))?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
@@ -407,7 +469,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!(
             "workset-{name}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -421,7 +486,12 @@ mod tests {
             .args(args)
             .output()
             .unwrap();
-        assert!(st.status.success(), "git {:?} 失败: {}", args, String::from_utf8_lossy(&st.stderr));
+        assert!(
+            st.status.success(),
+            "git {:?} 失败: {}",
+            args,
+            String::from_utf8_lossy(&st.stderr)
+        );
     }
 
     fn write_commit(repo: &Path, file: &str, content: &str, msg: &str) {

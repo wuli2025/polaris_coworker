@@ -47,9 +47,11 @@ pub fn project_profile(project_id: i64) -> String {
     open_db()
         .ok()
         .and_then(|c| {
-            c.query_row("SELECT check_profile FROM projects WHERE id=?1", [project_id], |r| {
-                r.get::<_, String>(0)
-            })
+            c.query_row(
+                "SELECT check_profile FROM projects WHERE id=?1",
+                [project_id],
+                |r| r.get::<_, String>(0),
+            )
             .ok()
         })
         .unwrap_or_else(|| "code".into())
@@ -60,8 +62,11 @@ pub fn set_project_profile(project_id: i64, profile: &str) -> Result<(), String>
         return Err("档位只能是 code/creative/off".into());
     }
     let conn = open_db()?;
-    conn.execute("UPDATE projects SET check_profile=?1 WHERE id=?2", params![profile, project_id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE projects SET check_profile=?1 WHERE id=?2",
+        params![profile, project_id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -70,9 +75,11 @@ pub fn project_check_skill(project_id: i64) -> String {
     let id: String = open_db()
         .ok()
         .and_then(|c| {
-            c.query_row("SELECT check_skill FROM projects WHERE id=?1", [project_id], |r| {
-                r.get::<_, String>(0)
-            })
+            c.query_row(
+                "SELECT check_skill FROM projects WHERE id=?1",
+                [project_id],
+                |r| r.get::<_, String>(0),
+            )
             .ok()
         })
         .unwrap_or_default();
@@ -90,8 +97,11 @@ pub fn set_project_check_skill(project_id: i64, skill_id: &str) -> Result<(), St
         crate::skills::resolve_check_skill(skill_id)?; // 不合法/未安装直接拒,不留到跑检查才炸
     }
     let conn = open_db()?;
-    conn.execute("UPDATE projects SET check_skill=?1 WHERE id=?2", params![skill_id, project_id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE projects SET check_skill=?1 WHERE id=?2",
+        params![skill_id, project_id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -103,7 +113,13 @@ pub fn list(task_id: i64, round: i64) -> Result<Vec<CheckRun>, String> {
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![task_id, round], |r| {
-            Ok(CheckRun { name: r.get(0)?, status: r.get(1)?, output: r.get(2)?, started_at: r.get(3)?, ended_at: r.get(4)? })
+            Ok(CheckRun {
+                name: r.get(0)?,
+                status: r.get(1)?,
+                output: r.get(2)?,
+                started_at: r.get(3)?,
+                ended_at: r.get(4)?,
+            })
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
@@ -115,7 +131,9 @@ pub fn all_green(task_id: i64, round: i64) -> Result<bool, String> {
     if runs.is_empty() {
         return Ok(false);
     }
-    Ok(runs.iter().all(|r| r.status == "pass" || r.status == "skipped"))
+    Ok(runs
+        .iter()
+        .all(|r| r.status == "pass" || r.status == "skipped"))
 }
 
 /// 最近一次跑检查的轮次(=最后一次 submit 的 round)。**关键**:review 通过会把
@@ -156,7 +174,10 @@ fn record(task_id: i64, round: i64, r: &CheckRun) {
 
 fn clear_round(task_id: i64, round: i64) {
     if let Ok(conn) = open_db() {
-        let _ = conn.execute("DELETE FROM check_runs WHERE task_id=?1 AND round=?2", params![task_id, round]);
+        let _ = conn.execute(
+            "DELETE FROM check_runs WHERE task_id=?1 AND round=?2",
+            params![task_id, round],
+        );
     }
 }
 
@@ -172,14 +193,31 @@ pub fn run_for_task(
     if profile == "off" {
         return Ok(());
     }
-    // 全局安全阀:检查会在主机上执行仓库自带的构建(npm run build 跑 package.json 脚本;cargo check
-    // 运行 build.rs 与 proc-macro)—— 本质是「运行不可信代码」。默认仍开(团队 CI 语义,push 者已是
-    // 邀请进来的可信成员),但主机管理员可用 POLARIS_CHECKS_DISABLED=1 一键全关,彻底断掉这条 RCE 路径。
-    if std::env::var("POLARIS_CHECKS_DISABLED")
+    // 检查会执行仓库自带脚本/npm lifecycle/build.rs，本质是宿主 RCE。未接隔离 runner 前
+    // 必须默认关闭；只有管理员明确接受风险并设置开关才运行。关闭态落一条 fail 记录，既让
+    // UI 可见原因，也确保合并闸不会把「根本没检查」误当全绿。
+    let explicitly_disabled = std::env::var("POLARIS_CHECKS_DISABLED")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        return Ok(());
+        .unwrap_or(false);
+    let unsafe_host_enabled = !explicitly_disabled
+        && std::env::var("POLARIS_CHECKS_UNSAFE_HOST")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    if !unsafe_host_enabled {
+        clear_round(task_id, round);
+        record(
+            task_id,
+            round,
+            &CheckRun {
+                name: "安全隔离".into(),
+                status: "fail".into(),
+                output: "宿主执行检查默认关闭。请接入隔离 runner；仅明确接受不可信代码执行风险时，管理员才可设置 POLARIS_CHECKS_UNSAFE_HOST=1。".into(),
+                started_at: now(),
+                ended_at: now(),
+            },
+        );
+        emit();
+        return Err("宿主检查未启用（需要隔离 runner）".into());
     }
     // 全局排队:一次只跑一轮(主机不是 CI 农场);同卡重跑也被天然互斥。
     let _run = RUN_LOCK.lock();
@@ -192,15 +230,29 @@ pub fn run_for_task(
         .map(|(_, s)| s.trim().to_string())
         .unwrap_or_default();
     // 临时 worktree(检完即删;失败也尽力清)。
-    let wt = std::env::temp_dir().join(format!("polaris-check-{task_id}-{round}-{}", std::process::id()));
+    let wt = std::env::temp_dir().join(format!(
+        "polaris-check-{task_id}-{round}-{}",
+        std::process::id()
+    ));
     let wts = wt.to_string_lossy().to_string();
     let _ = run_cmd(repo, &["worktree", "prune"], STEP_TIMEOUT);
-    let out = run_cmd(repo, &["worktree", "add", "--detach", &wts, branch], STEP_TIMEOUT)?;
+    let out = run_cmd(
+        repo,
+        &["worktree", "add", "--detach", &wts, branch],
+        STEP_TIMEOUT,
+    )?;
     if !out.0 {
-        record(task_id, round, &CheckRun {
-            name: "checkout".into(), status: "fail".into(),
-            output: tail(&out.1), started_at: now(), ended_at: now(),
-        });
+        record(
+            task_id,
+            round,
+            &CheckRun {
+                name: "checkout".into(),
+                status: "fail".into(),
+                output: tail(&out.1),
+                started_at: now(),
+                ended_at: now(),
+            },
+        );
         emit();
         return Err("worktree 检出失败".into());
     }
@@ -225,7 +277,12 @@ fn changed_files(wt: &Path) -> Option<Vec<String>> {
     // 必须用 -z(NUL 分隔、原始路径)!默认 `--name-only` 会把非 ASCII 路径 C-quote 成
     // "\347\247\230.txt" 这种转义串,wt.join() 找不到真实文件 → 中文名文件里的密钥/大文件
     // 全逃过扫描(独立审计实测的高危绕过)。-z 输出 UTF-8 原始字节,中文名原样保留。
-    let (ok, out) = run_cmd(wt, &["diff", "-z", "--name-only", "main...HEAD"], STEP_TIMEOUT).ok()?;
+    let (ok, out) = run_cmd(
+        wt,
+        &["diff", "-z", "--name-only", "main...HEAD"],
+        STEP_TIMEOUT,
+    )
+    .ok()?;
     if !ok {
         return None;
     }
@@ -237,18 +294,30 @@ fn changed_files(wt: &Path) -> Option<Vec<String>> {
     )
 }
 
-fn run_steps(wt: &Path, task_id: i64, round: i64, profile: &str, emit: &dyn Fn()) -> Result<(), String> {
+fn run_steps(
+    wt: &Path,
+    task_id: i64,
+    round: i64,
+    profile: &str,
+    emit: &dyn Fn(),
+) -> Result<(), String> {
     // 增量语义:密钥/大文件只审分支改动的文件 —— 老仓库 main 上的存量大素材/历史密钥
     // 不该挡住每一张卡(那会逼人人 force,闸门形同虚设)。构建类检查仍是全树(编译本来就是整体)。
     let diff = changed_files(wt);
     // ① 密钥扫描 + ② 大文件闸:所有档位都跑(creative 只是上限放宽)。不可关的前置硬闸。
-    step(task_id, round, "密钥扫描", emit, || secret_scan(wt, diff.as_deref()));
+    step(task_id, round, "密钥扫描", emit, || {
+        secret_scan(wt, diff.as_deref())
+    });
     let max_mb: u64 = if profile == "creative" { 500 } else { 50 };
-    step(task_id, round, "大文件闸", emit, || big_file_scan(wt, max_mb, diff.as_deref()));
+    step(task_id, round, "大文件闸", emit, || {
+        big_file_scan(wt, max_mb, diff.as_deref())
+    });
     // ③ 地盘越界闸:改动必须落在任务卡 scope 内(所有档位;卡没圈 scope 则跳过)。
     let card = super::tasks::get(task_id).ok();
     let scope_csv = card.as_ref().map(|c| c.scope.clone()).unwrap_or_default();
-    step(task_id, round, "地盘越界", emit, || scope_gate(diff.as_deref(), &scope_csv));
+    step(task_id, round, "地盘越界", emit, || {
+        scope_gate(diff.as_deref(), &scope_csv)
+    });
     if profile == "creative" {
         return Ok(()); // 视频/游戏素材仓:不跑构建/静态检查
     }
@@ -256,7 +325,9 @@ fn run_steps(wt: &Path, task_id: i64, round: i64, profile: &str, emit: &dyn Fn()
     // 硬编码的 cargo/npm/ruff 探测搬进了技能脚本)。技能缺失/坏协议 = fail,不静默放行。
     let project_id = card.as_ref().map(|c| c.project_id).unwrap_or(0);
     let skill_id = project_check_skill(project_id);
-    step(task_id, round, "项目检测", emit, || skill_check_step(wt, task_id, profile, &skill_id));
+    step(task_id, round, "项目检测", emit, || {
+        skill_check_step(wt, task_id, profile, &skill_id)
+    });
     Ok(())
 }
 
@@ -272,22 +343,36 @@ fn scope_gate(diff: Option<&[String]>, scope_csv: &str) -> (String, String) {
         return ("skipped".into(), "任务卡未圈定 scope,跳过越界检查".into());
     }
     let Some(files) = diff else {
-        return ("skipped".into(), "拿不到分支增量(仓库无 main?),跳过越界检查".into());
+        return (
+            "skipped".into(),
+            "拿不到分支增量(仓库无 main?),跳过越界检查".into(),
+        );
     };
     let outside: Vec<&String> = files
         .iter()
-        .filter(|f| !prefixes.iter().any(|p| **f == *p || f.starts_with(&format!("{p}/"))))
+        .filter(|f| {
+            !prefixes
+                .iter()
+                .any(|p| **f == *p || f.starts_with(&format!("{p}/")))
+        })
         .take(20)
         .collect();
     if outside.is_empty() {
-        ("pass".into(), format!("改动均在任务地盘内(scope: {})", prefixes.join(", ")))
+        (
+            "pass".into(),
+            format!("改动均在任务地盘内(scope: {})", prefixes.join(", ")),
+        )
     } else {
         (
             "fail".into(),
             format!(
                 "以下改动越出任务地盘(scope: {}):\n{}",
                 prefixes.join(", "),
-                outside.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+                outside
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ),
         )
     }
@@ -302,7 +387,16 @@ fn skill_check_step(wt: &Path, task_id: i64, profile: &str, skill_id: &str) -> (
     };
     let entry_s = entry.entry.to_string_lossy().to_string();
     let (prog, args): (&str, Vec<&str>) = if entry.windows {
-        ("powershell", vec!["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &entry_s])
+        (
+            "powershell",
+            vec![
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &entry_s,
+            ],
+        )
     } else {
         ("sh", vec![&entry_s])
     };
@@ -314,23 +408,45 @@ fn skill_check_step(wt: &Path, task_id: i64, profile: &str, skill_id: &str) -> (
         ("POLARIS_TASK_ID", tid.as_str()),
     ];
     match run_prog_env(wt, prog, &args, &envs, entry.timeout_secs) {
-        Ok((true, out)) => ("pass".into(), format!("技能 {skill_id} 通过\n{}", tail(&out))),
-        Ok((false, out)) => ("fail".into(), format!("技能 {skill_id} 判不通过\n{}", tail(&out))),
+        Ok((true, out)) => (
+            "pass".into(),
+            format!("技能 {skill_id} 通过\n{}", tail(&out)),
+        ),
+        Ok((false, out)) => (
+            "fail".into(),
+            format!("技能 {skill_id} 判不通过\n{}", tail(&out)),
+        ),
         Err(e) if e.contains("timeout") => (
             "fail".into(),
-            format!("技能 {skill_id} 超时({}s)未跑完,判失败(防卡死绕过)", entry.timeout_secs),
+            format!(
+                "技能 {skill_id} 超时({}s)未跑完,判失败(防卡死绕过)",
+                entry.timeout_secs
+            ),
         ),
         Err(e) => ("fail".into(), format!("技能 {skill_id} 无法执行: {e}")),
     }
 }
 
 /// 单步骨架:先落 running(前端能看到进度),跑完覆写终态。
-fn step(task_id: i64, round: i64, name: &str, emit: &dyn Fn(), f: impl FnOnce() -> (String, String)) {
+fn step(
+    task_id: i64,
+    round: i64,
+    name: &str,
+    emit: &dyn Fn(),
+    f: impl FnOnce() -> (String, String),
+) {
     let started = now();
-    record(task_id, round, &CheckRun {
-        name: name.into(), status: "running".into(), output: String::new(),
-        started_at: started, ended_at: 0,
-    });
+    record(
+        task_id,
+        round,
+        &CheckRun {
+            name: name.into(),
+            status: "running".into(),
+            output: String::new(),
+            started_at: started,
+            ended_at: 0,
+        },
+    );
     emit();
     let (status, output) = f();
     if let Ok(conn) = open_db() {
@@ -486,9 +602,15 @@ fn secret_scan(wt: &Path, diff: Option<&[String]>) -> (String, String) {
         ("私钥块", r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"),
         ("GitHub Token", r"ghp_[A-Za-z0-9]{36}"),
         ("Slack Token", r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-        ("通用 api_key 赋值", r#"(?i)(api[_-]?key|secret[_-]?key)\s*[:=]\s*['"][A-Za-z0-9_\-]{20,}['"]"#),
+        (
+            "通用 api_key 赋值",
+            r#"(?i)(api[_-]?key|secret[_-]?key)\s*[:=]\s*['"][A-Za-z0-9_\-]{20,}['"]"#,
+        ),
     ];
-    let res: Vec<regex::Regex> = pats.iter().filter_map(|(_, p)| regex::Regex::new(p).ok()).collect();
+    let res: Vec<regex::Regex> = pats
+        .iter()
+        .filter_map(|(_, p)| regex::Regex::new(p).ok())
+        .collect();
     let mut hits = Vec::new();
     'files: for (path, rel) in scan_targets(wt, diff) {
         let Ok(md) = path.metadata() else { continue };
@@ -497,7 +619,9 @@ fn secret_scan(wt: &Path, diff: Option<&[String]>) -> (String, String) {
         }
         // 读字节后 lossy 转字符串:非 UTF-8 文件(.env 混一个坏字节)不再整体跳过,
         // ASCII 密钥 token 在 lossy 转换后原样保留,仍能被正则命中。
-        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
         let text = String::from_utf8_lossy(&bytes);
         for (i, re) in res.iter().enumerate() {
             if re.is_match(&text) {
@@ -508,7 +632,11 @@ fn secret_scan(wt: &Path, diff: Option<&[String]>) -> (String, String) {
             }
         }
     }
-    let scope = if diff.is_some() { "分支改动" } else { "全仓" };
+    let scope = if diff.is_some() {
+        "分支改动"
+    } else {
+        "全仓"
+    };
     if hits.is_empty() {
         ("pass".into(), format!("未发现疑似密钥(范围:{scope})"))
     } else {
@@ -531,11 +659,18 @@ fn big_file_scan(wt: &Path, max_mb: u64, diff: Option<&[String]>) -> (String, St
             }
         }
     }
-    let scope = if diff.is_some() { "分支改动" } else { "全仓" };
+    let scope = if diff.is_some() {
+        "分支改动"
+    } else {
+        "全仓"
+    };
     if hits.is_empty() {
         ("pass".into(), format!("无 >{max_mb}MB 文件(范围:{scope})"))
     } else {
-        ("fail".into(), format!("超过 {max_mb}MB 上限:\n{}", hits.join("\n")))
+        (
+            "fail".into(),
+            format!("超过 {max_mb}MB 上限:\n{}", hits.join("\n")),
+        )
     }
 }
 
@@ -545,8 +680,16 @@ mod tests {
     use crate::collab::db::TEST_LOCK;
 
     fn git(repo: &Path, args: &[&str]) {
-        let out = Command::new("git").args(args).current_dir(repo).output().expect("git 启动失败");
-        assert!(out.status.success(), "git {args:?} 失败: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git 启动失败");
+        assert!(
+            out.status.success(),
+            "git {args:?} 失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// code 档:密钥扫描抓到假 AWS key=fail,大文件闸 pass,all_green=false;
@@ -567,7 +710,10 @@ mod tests {
         let elapsed = t0.elapsed().as_secs();
         assert!(r.is_err(), "应超时返回 Err,实际 {r:?}");
         assert!(r.unwrap_err().contains("timeout"), "Err 应含 timeout");
-        assert!(elapsed < 15, "应在 ~2s 超时附近返回,而非等满 30s(实际 {elapsed}s)");
+        assert!(
+            elapsed < 15,
+            "应在 ~2s 超时附近返回,而非等满 30s(实际 {elapsed}s)"
+        );
     }
 
     /// 地盘越界闸纯函数路径:界内 pass、越界 fail 且列出文件、空 scope / 无 diff 跳过。
@@ -593,11 +739,20 @@ mod tests {
         let tmpdb = std::env::temp_dir().join(format!("collab-checks-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&tmpdb);
         std::env::set_var("POLARIS_COLLAB_DB", &tmpdb);
+        std::env::set_var("POLARIS_CHECKS_UNSAFE_HOST", "1");
         // check_runs 有 tasks 外键(foreign_keys=ON),先种上项目+卡。
         {
             let conn = open_db().unwrap();
-            conn.execute("INSERT INTO projects(id,name,repo,created_at) VALUES(1,'t','',0)", []).unwrap();
-            conn.execute("INSERT INTO tasks(id,project_id,title,created_at,updated_at) VALUES(1,1,'t',0,0)", []).unwrap();
+            conn.execute(
+                "INSERT INTO projects(id,name,repo,created_at) VALUES(1,'t','',0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks(id,project_id,title,created_at,updated_at) VALUES(1,1,'t',0,0)",
+                [],
+            )
+            .unwrap();
         }
         // 临时 git 仓:main 干净,feat/t1 上有个带假 AWS key 的文件。
         let repo = std::env::temp_dir().join(format!("collab-checks-repo-{}", std::process::id()));
@@ -621,15 +776,25 @@ mod tests {
         // code 档(仓里没有 Cargo.toml/package.json/pyproject → 只有两项内置检查)。
         run_for_task(&repo, "feat/t1", 1, 0, "code", &|| {}).unwrap();
         let runs = list(1, 0).unwrap();
-        let sec = runs.iter().find(|r| r.name == "密钥扫描").expect("缺密钥扫描项");
+        let sec = runs
+            .iter()
+            .find(|r| r.name == "密钥扫描")
+            .expect("缺密钥扫描项");
         assert_eq!(sec.status, "fail", "假 AWS key 应被抓到: {}", sec.output);
-        assert!(sec.output.contains("leak.txt"), "输出应指出文件: {}", sec.output);
+        assert!(
+            sec.output.contains("leak.txt"),
+            "输出应指出文件: {}",
+            sec.output
+        );
         assert!(
             !sec.output.contains("legacy.txt"),
             "main 上的历史密钥不该挡这张卡(增量语义): {}",
             sec.output
         );
-        let big = runs.iter().find(|r| r.name == "大文件闸").expect("缺大文件闸项");
+        let big = runs
+            .iter()
+            .find(|r| r.name == "大文件闸")
+            .expect("缺大文件闸项");
         assert_eq!(big.status, "pass");
         assert!(!all_green(1, 0).unwrap(), "有 fail 不该全绿");
         // SHA 钉住:本轮记录应带分支头提交。
@@ -637,17 +802,29 @@ mod tests {
         assert_eq!(sha.len(), 40, "应是完整 commit sha: {sha}");
 
         // 地盘越界:测试卡没圈 scope → 跳过(不误伤)。
-        let gate = runs.iter().find(|r| r.name == "地盘越界").expect("缺地盘越界项");
+        let gate = runs
+            .iter()
+            .find(|r| r.name == "地盘越界")
+            .expect("缺地盘越界项");
         assert_eq!(gate.status, "skipped", "无 scope 应跳过: {}", gate.output);
         // 项目检测(code 档才有):技能存在与否都必须有终态记录,绝不静默消失。
-        let sk = runs.iter().find(|r| r.name == "项目检测").expect("缺项目检测项");
-        assert!(sk.status == "pass" || sk.status == "fail", "项目检测应有终态: {}", sk.status);
+        let sk = runs
+            .iter()
+            .find(|r| r.name == "项目检测")
+            .expect("缺项目检测项");
+        assert!(
+            sk.status == "pass" || sk.status == "fail",
+            "项目检测应有终态: {}",
+            sk.status
+        );
 
         // creative 档:clear_round 后重跑,只剩三项(不跑项目检测/构建类)。
         run_for_task(&repo, "feat/t1", 1, 0, "creative", &|| {}).unwrap();
         let runs = list(1, 0).unwrap();
         assert_eq!(runs.len(), 3, "creative 档只留密钥扫描+大文件闸+地盘越界");
-        assert!(runs.iter().all(|r| r.name == "密钥扫描" || r.name == "大文件闸" || r.name == "地盘越界"));
+        assert!(runs
+            .iter()
+            .all(|r| r.name == "密钥扫描" || r.name == "大文件闸" || r.name == "地盘越界"));
 
         // off 档:直接返回,不清也不写。
         run_for_task(&repo, "feat/t1", 1, 0, "off", &|| {}).unwrap();
@@ -660,6 +837,7 @@ mod tests {
         assert!(set_project_profile(1, "yolo").is_err());
 
         std::env::remove_var("POLARIS_COLLAB_DB");
+        std::env::remove_var("POLARIS_CHECKS_UNSAFE_HOST");
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_file(&tmpdb);
     }

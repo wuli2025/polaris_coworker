@@ -110,7 +110,12 @@ pub(crate) fn chunk_text(s: &str) -> Vec<String> {
 
 /// 解析 `[[page:N]]` 页码标记段(convert.rs 从 PDF 逐页抽取时注入)。
 fn parse_page_marker(t: &str) -> Option<u32> {
-    t.trim().strip_prefix("[[page:")?.strip_suffix("]]")?.trim().parse().ok()
+    t.trim()
+        .strip_prefix("[[page:")?
+        .strip_suffix("]]")?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// 解析 ATX 标题行 `#`..`######`(须 `#` 后有空白,避免误判 `#话题标签`)。返回(层级, 标题文本)。
@@ -240,7 +245,10 @@ pub(crate) fn bits_of(v: &[f32]) -> Vec<u8> {
 
 /// 两个等长二值码的汉明距离(位不同的个数)。
 pub(crate) fn hamming(a: &[u8], b: &[u8]) -> u32 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x ^ y).count_ones()).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x ^ y).count_ones())
+        .sum()
 }
 
 /// 当前生效的嵌入模型标识(= provider.default_model)。用于 P2-2 版本隔离与查询缓存键。
@@ -290,7 +298,11 @@ impl QueryCache {
     }
 }
 static QUERY_CACHE: Lazy<Mutex<QueryCache>> = Lazy::new(|| {
-    Mutex::new(QueryCache { cap: 256, map: HashMap::new(), order: VecDeque::new() })
+    Mutex::new(QueryCache {
+        cap: 256,
+        map: HashMap::new(),
+        order: VecDeque::new(),
+    })
 });
 
 /// 查询嵌入(P1-5):LRU 缓存命中直接返回**归一化**向量(高并发下重复查询零接口开销);
@@ -338,8 +350,16 @@ mod tests {
                    ## 付款方式\n\n乙方应于每月五日前支付当期款项,逾期按日计息处理。";
         let cs = chunk_text(doc);
         assert_eq!(cs.len(), 2, "两个章节 → 硬边界切成两块");
-        assert!(cs[0].starts_with("【合同总则】\n"), "首块带章节面包屑: {}", cs[0]);
-        assert!(cs[1].starts_with("【合同总则 › 付款方式】\n"), "子节面包屑含父路径: {}", cs[1]);
+        assert!(
+            cs[0].starts_with("【合同总则】\n"),
+            "首块带章节面包屑: {}",
+            cs[0]
+        );
+        assert!(
+            cs[1].starts_with("【合同总则 › 付款方式】\n"),
+            "子节面包屑含父路径: {}",
+            cs[1]
+        );
         assert!(cs[1].contains("逾期按日计息"), "正文保留");
     }
 
@@ -358,7 +378,11 @@ mod tests {
         let doc = "[[page:5]]\n\n## 第二章 交付\n\n交付标准依照附件甲所列各项技术指标逐条进行验收并书面确认。";
         let cs = chunk_text(doc);
         assert_eq!(cs.len(), 1);
-        assert!(cs[0].starts_with("【第二章 交付｜p5】\n"), "章节+页码合并面包屑: {}", cs[0]);
+        assert!(
+            cs[0].starts_with("【第二章 交付｜p5】\n"),
+            "章节+页码合并面包屑: {}",
+            cs[0]
+        );
     }
 
     #[test]
@@ -367,7 +391,10 @@ mod tests {
         let doc = format!("## 长章\n\n{long}");
         let cs = chunk_text(&doc);
         assert!(cs.len() >= 3, "4000 字应硬切多块: {}", cs.len());
-        assert!(cs.iter().all(|c| c.starts_with("【长章】\n")), "每片都带面包屑");
+        assert!(
+            cs.iter().all(|c| c.starts_with("【长章】\n")),
+            "每片都带面包屑"
+        );
     }
 
     #[test]
@@ -377,6 +404,43 @@ mod tests {
         let cs = chunk_text(doc);
         assert_eq!(cs.len(), 1);
         assert!(!cs[0].starts_with("【"), "无结构不加面包屑: {}", cs[0]);
+    }
+
+    /// 建索引效果实测:POLARIS_DEMO_FILE=<真实文件> 走真实代码路径(convert → chunk_text),
+    /// 打印总块数与前几块(含面包屑/页码标记),肉眼看新版结构感知分块在真实文档上的产出。
+    /// 默认 #[ignore],手动跑:
+    ///   cargo test --lib --features desktop chunk_build_index_demo -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn chunk_build_index_demo() {
+        let Ok(path) = std::env::var("POLARIS_DEMO_FILE") else {
+            eprintln!("设 POLARIS_DEMO_FILE=<文件路径> 后再跑");
+            return;
+        };
+        let p = std::path::Path::new(&path);
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let text = if matches!(ext.as_str(), "md" | "txt" | "markdown") {
+            String::from_utf8_lossy(&std::fs::read(p).expect("读文件")).into_owned()
+        } else {
+            crate::convert::convert_to_markdown(p)
+                .expect("convert 失败")
+                .expect("无可抽取文本")
+        };
+        let chunks = chunk_text(&text);
+        eprintln!("\n════ {path}");
+        eprintln!("原文 {} 字 → {} 块", text.chars().count(), chunks.len());
+        let has_page = text.contains("[[page:");
+        eprintln!("含PDF页码标记: {has_page}");
+        for (i, c) in chunks.iter().take(4).enumerate() {
+            let head: String = c.chars().take(160).collect();
+            eprintln!("\n── 块#{i} ({}字) ──\n{head}", c.chars().count());
+        }
+        // 健壮性断言:无空块、无低于最小门槛的裸碎块。
+        assert!(chunks.iter().all(|c| !c.trim().is_empty()), "不应有空块");
     }
 
     #[test]
@@ -434,7 +498,11 @@ mod tests {
         let qv = [0.1f32, -0.2, 0.3, 0.5, -0.7];
         let dv = [0.4f32, 0.4, -0.1, 0.2, 0.9];
         let blob = vec_to_blob(&dv);
-        let want: f32 = blob_to_vec(&blob).iter().zip(qv.iter()).map(|(a, b)| a * b).sum();
+        let want: f32 = blob_to_vec(&blob)
+            .iter()
+            .zip(qv.iter())
+            .map(|(a, b)| a * b)
+            .sum();
         let got = dot_blob(&qv, &blob).expect("维度一致应返回 Some");
         assert!((got - want).abs() < 1e-6, "got={got} want={want}");
         // 维度不符(脏数据/旧维度向量)→ None,调用方跳过而非误算。
@@ -444,7 +512,11 @@ mod tests {
 
     #[test]
     fn query_cache_lru_evicts_oldest() {
-        let mut c = QueryCache { cap: 2, map: HashMap::new(), order: VecDeque::new() };
+        let mut c = QueryCache {
+            cap: 2,
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        };
         c.put("a".into(), vec![1.0]);
         c.put("b".into(), vec![2.0]);
         assert!(c.get("a").is_some()); // 访问 a → a 变最近

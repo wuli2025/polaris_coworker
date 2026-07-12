@@ -54,16 +54,42 @@ pub(crate) fn doc_key(name: &str) -> String {
         }
         matches!(
             t,
-            "final" | "finalversion" | "copy" | "draft" | "new" | "old" | "latest"
-                | "最终" | "最终版" | "定稿" | "副本" | "草稿" | "最新" | "修改" | "修订"
+            "final"
+                | "finalversion"
+                | "copy"
+                | "draft"
+                | "new"
+                | "old"
+                | "latest"
+                | "最终"
+                | "最终版"
+                | "定稿"
+                | "副本"
+                | "草稿"
+                | "最新"
+                | "修改"
+                | "修订"
         )
     };
     let mut kept = String::new();
     for tok in lower.split(|c: char| {
         matches!(
             c,
-            ' ' | '\t' | '　' | '-' | '_' | '.' | '(' | ')' | '[' | ']'
-                | '（' | '）' | '【' | '】' | '·' | ','
+            ' ' | '\t'
+                | '　'
+                | '-'
+                | '_'
+                | '.'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '·'
+                | ','
         )
     }) {
         let t = tok.trim();
@@ -140,7 +166,11 @@ fn flush_embed_buffer(
         }
     }
     if flat.len() != keys.len() {
-        return Err(format!("嵌入返回数与请求数不符({} vs {})", flat.len(), keys.len()));
+        return Err(format!(
+            "嵌入返回数与请求数不符({} vs {})",
+            flat.len(),
+            keys.len()
+        ));
     }
     // 涉及的 file_id(保序去重)——DELETE 旧 chunk 与 UPDATE chunked 各做一次
     let mut file_ids: Vec<i64> = Vec::new();
@@ -309,9 +339,7 @@ pub fn build_index(
         // 中途 `?` 上抛时连接随函数退出回滚 —— 本批标记重做,幂等无害。
         conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
         for (file_id, root, rel, ext, size, chunked, ftsed) in batch {
-            if cancelled()
-                || chunks_added >= max_chunks as u64
-                || files_done >= MAX_FILES_PER_BUILD
+            if cancelled() || chunks_added >= max_chunks as u64 || files_done >= MAX_FILES_PER_BUILD
             {
                 break;
             }
@@ -386,7 +414,13 @@ pub fn build_index(
                         // flush 自带事务 → 先提交批事务(把本批已做的轻量写落盘),成功后再开新批事务。
                         if buf_texts.len() >= coalesce_target {
                             conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
-                            match flush_embed_buffer(&conn, &buf_keys, &buf_texts, &model, embed_batch()) {
+                            match flush_embed_buffer(
+                                &conn,
+                                &buf_keys,
+                                &buf_texts,
+                                &model,
+                                embed_batch(),
+                            ) {
                                 Ok(n) => chunks_added += n,
                                 Err(e) => {
                                     // 整个 flush 放弃:涉及文件保持 chunked=0(旧 chunk 未动),下轮重试。
@@ -472,7 +506,9 @@ pub fn build_index_full(progress: &dyn Fn(u64, u64, u64)) -> Result<IndexSummary
     let mut stalled = 0u32;
     let stopped = loop {
         // 大预算单轮:尽量多消化、少轮次开销;MAX_FILES_PER_BUILD 仍在内部封顶单轮文件数。
-        let s = build_index(200_000, &|f, c, _cur| progress(total_files + f, total_chunks + c, 0))?;
+        let s = build_index(200_000, &|f, c, _cur| {
+            progress(total_files + f, total_chunks + c, 0)
+        })?;
         total_files += s.files_done;
         total_chunks += s.chunks_added;
         progress(total_files, total_chunks, s.files_pending);
@@ -486,7 +522,10 @@ pub fn build_index_full(progress: &dyn Fn(u64, u64, u64)) -> Result<IndexSummary
         if s.files_done == 0 || s.files_pending >= last_pending {
             stalled += 1;
             if stalled >= 2 {
-                break format!("剩 {} 个文件无法嵌入(超限/不可读),已尽力完成", s.files_pending);
+                break format!(
+                    "剩 {} 个文件无法嵌入(超限/不可读),已尽力完成",
+                    s.files_pending
+                );
             }
         } else {
             stalled = 0;
@@ -541,7 +580,11 @@ mod tests {
         assert_eq!(doc_key("季度报告 final.docx"), base);
         assert_eq!(doc_key("季度报告(1).docx"), base);
         assert_eq!(doc_key("季度报告_副本.docx"), base);
-        assert_eq!(doc_key("季度报告-20230101.pdf"), base, "扩展名不进 key,日期被剪");
+        assert_eq!(
+            doc_key("季度报告-20230101.pdf"),
+            base,
+            "扩展名不进 key,日期被剪"
+        );
         // 不同资料 → 不同 key
         assert_ne!(doc_key("季度报告.docx"), doc_key("年度预算.docx"));
         // 年份是有意义的 4 位数字,不当副本序号剪掉

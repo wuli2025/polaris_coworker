@@ -30,7 +30,11 @@ pub fn discover_key() -> Option<String> {
         let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("");
         if id == "minimax" || name.to_lowercase().contains("minimax") {
             if let Some(env) = it.get("settings_config").and_then(|s| s.get("env")) {
-                for key in ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY"] {
+                for key in [
+                    "ANTHROPIC_AUTH_TOKEN",
+                    "ANTHROPIC_API_KEY",
+                    "MINIMAX_API_KEY",
+                ] {
                     if let Some(k) = env.get(key).and_then(|x| x.as_str()) {
                         if !k.trim().is_empty() {
                             return Some(k.trim().to_string());
@@ -111,7 +115,8 @@ fn synth_minimax(
     language_boost: Option<&str>,
     key: &str,
 ) -> Result<Value, String> {
-    let endpoint = std::env::var("MINIMAX_T2A_URL").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string());
+    let endpoint =
+        std::env::var("MINIMAX_T2A_URL").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string());
     let model = std::env::var("MINIMAX_TTS_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let voice = voice
         .map(|s| s.to_string())
@@ -176,21 +181,23 @@ fn synth_minimax(
 /// 阶梯 L0/L1/L2/L3 enum
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Tier {
-    MiniMax,         // L0 主力
-    MacSay,          // L3 macOS 系统
-    WinSapi,         // L3 Windows SAPI 5.4
-    LinuxEspeak,     // L3 Linux espeak-ng
-    Silent,          // 兜底,生成 1s 静音
+    MiniMax,     // L0 主力
+    MacSay,      // L3 macOS 系统
+    WinSapi,     // L3 Windows SAPI 5.4
+    LinuxEspeak, // L3 Linux espeak-ng
+    Silent,      // 兜底,生成 1s 静音
 }
 
 impl Tier {
-    pub fn name(self) -> &'static str { match self {
-        Self::MiniMax => "MiniMax",
-        Self::MacSay => "MacSay",
-        Self::WinSapi => "WinSapi",
-        Self::LinuxEspeak => "LinuxEspeak",
-        Self::Silent => "Silent",
-    }}
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MiniMax => "MiniMax",
+            Self::MacSay => "MacSay",
+            Self::WinSapi => "WinSapi",
+            Self::LinuxEspeak => "LinuxEspeak",
+            Self::Silent => "Silent",
+        }
+    }
 }
 
 /// chunk_text:按句末标点切,优先句号;切不出时按硬长(>1800 硬切)
@@ -204,7 +211,11 @@ pub fn chunk_text(text: &str, max_chars: usize) -> Vec<(usize, usize, String)> {
             last_punct = i;
         }
         if i - start + 1 >= max_chars {
-            let cut = if last_punct > start { last_punct + 1 } else { i + 1 };
+            let cut = if last_punct > start {
+                last_punct + 1
+            } else {
+                i + 1
+            };
             let sub: String = chars[start..cut].iter().collect();
             out.push((start, cut, sub));
             start = cut;
@@ -215,35 +226,49 @@ pub fn chunk_text(text: &str, max_chars: usize) -> Vec<(usize, usize, String)> {
         let sub: String = chars[start..].iter().collect();
         out.push((start, chars.len(), sub));
     }
-    out.into_iter().filter(|(_, _, s)| !s.trim().is_empty()).collect()
+    out.into_iter()
+        .filter(|(_, _, s)| !s.trim().is_empty())
+        .collect()
 }
 
 /// 阶梯选择:按环境返回最佳 tier
 pub fn discover_strategy() -> Tier {
-    if discover_key().is_some() { return Tier::MiniMax; }
+    if discover_key().is_some() {
+        return Tier::MiniMax;
+    }
     #[cfg(target_os = "macos")]
-    { Tier::MacSay }
+    {
+        Tier::MacSay
+    }
     #[cfg(target_os = "windows")]
-    { Tier::WinSapi }
+    {
+        Tier::WinSapi
+    }
     #[cfg(target_os = "linux")]
-    { Tier::LinuxEspeak }
+    {
+        Tier::LinuxEspeak
+    }
 }
 
 /// MiniMax 重试链(同源不同 voice_id,403/429 静默降)
 /// 真实实现在 P1.5 落,本期给 1 个 voice 列表
 fn minimax_retry_voices(base_voice: &str) -> Vec<String> {
     let mut v = vec![base_voice.to_string()];
-    if base_voice != "male-qn-jingying" { v.push("male-qn-jingying".into()); }
-    if base_voice != "female-shaonv" { v.push("female-shaonv".into()); }
+    if base_voice != "male-qn-jingying" {
+        v.push("male-qn-jingying".into());
+    }
+    if base_voice != "female-shaonv" {
+        v.push("female-shaonv".into());
+    }
     v
 }
 
 /// Silent 兜底:生成 1s 静音 mp3
 fn synth_silent(out_mp3: &str) -> Result<Value, String> {
     let silent_mp3: &[u8] = &[
-        0xFF, 0xFB, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0xFF, 0xFB, 0x90, 0x00,
+        0xFF, 0xFB, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFB,
+        0x90, 0x00,
     ];
     if let Some(parent) = Path::new(out_mp3).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -268,12 +293,16 @@ fn synth_windows_sapi(_text: &str, out_mp3: &str) -> Result<Value, String> {
 fn synth_linux_espeak(text: &str, out_mp3: &str) -> Result<Value, String> {
     let wav = Path::new(out_mp3).with_extension("wav");
     let wav_str = wav.to_string_lossy().to_string();
-    if let Some(p) = wav.parent() { let _ = std::fs::create_dir_all(p); }
+    if let Some(p) = wav.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
     // 优先 espeak-ng,fallback espeak
     for bin in &["espeak-ng", "espeak"] {
         if let Ok(out) = std::process::Command::new(bin)
-            .arg("-v").arg("zh+f3")
-            .arg("-w").arg(&wav_str)
+            .arg("-v")
+            .arg("zh+f3")
+            .arg("-w")
+            .arg(&wav_str)
             .arg(text)
             .output()
         {
@@ -341,7 +370,13 @@ fn synth_minimax_strategy(
                 Err(e) => last_err = e,
             }
         }
-        if !ok { return Err(format!("chunk 失败(已重试 {} voice): {}", minimax_retry_voices(base_voice).len(), last_err)); }
+        if !ok {
+            return Err(format!(
+                "chunk 失败(已重试 {} voice): {}",
+                minimax_retry_voices(base_voice).len(),
+                last_err
+            ));
+        }
     }
     Ok(json!({
         "ok": true,
@@ -362,7 +397,12 @@ mod tests {
     fn chunk_text_splits_on_punctuation() {
         let s = "第一句。第二句!第三句?第四句;第五句,第六句。";
         let chunks = chunk_text(s, 6);
-        assert!(chunks.len() >= 4, "应按句号切,实际 {} 块: {:?}", chunks.len(), chunks);
+        assert!(
+            chunks.len() >= 4,
+            "应按句号切,实际 {} 块: {:?}",
+            chunks.len(),
+            chunks
+        );
         for (_, _, sub) in &chunks {
             assert!(!sub.is_empty());
         }

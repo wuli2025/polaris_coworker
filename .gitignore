@@ -2,6 +2,12 @@ node_modules
 dist
 dist-ssr
 *.local
+
+# 本机/部署密钥永不入库。仅提交无值模板。
+.env
+.env.*
+!.env.example
+!.env.server.example
 .vscode/*
 !.vscode/extensions.json
 .idea

@@ -5476,6 +5476,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-http",
  "ureq 2.12.1",
@@ -5486,7 +5487,7 @@ dependencies = [
 
 [[package]]
 name = "polaris-cli"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "polaris-app",
  "serde_json",

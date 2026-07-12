@@ -13,7 +13,11 @@ use std::path::PathBuf;
 /// 探测 agent 可调用的 polaris-forge CLI。
 /// 顺序:~/Polaris/bin(桌面播种位)→ PATH → /usr/local/bin(Docker 镜像内置位)。
 pub fn resolve_cli() -> Option<String> {
-    let exe = if cfg!(windows) { "polaris-forge.exe" } else { "polaris-forge" };
+    let exe = if cfg!(windows) {
+        "polaris-forge.exe"
+    } else {
+        "polaris-forge"
+    };
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(u) = directories::UserDirs::new() {
         candidates.push(u.home_dir().join("Polaris").join("bin").join(exe));
@@ -42,7 +46,9 @@ pub fn resolve_cli() -> Option<String> {
 /// chat 注入块:检索枢纽就绪(盘点过)才注入;否则返回空串零开销。
 /// `full=false`(知识库开关关着)只给一行提示;`full=true` 给完整编排指令。
 pub fn fable_context_block(full: bool) -> String {
-    let Ok(st) = super::status() else { return String::new() };
+    let Ok(st) = super::status() else {
+        return String::new();
+    };
     if st.files_total == 0 {
         return String::new();
     }

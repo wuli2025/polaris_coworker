@@ -289,4 +289,3 @@ pub(crate) fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
     let dest_s = dest.to_string_lossy();
     run_cmd("tar", &["-xf", zip_s.as_ref(), "-C", dest_s.as_ref()])
 }
-

@@ -293,12 +293,14 @@ fn ensure_admin_table(conn: &rusqlite::Connection) -> Result<(), String> {
 fn stored_admin_token() -> Result<Option<String>, String> {
     let conn = open_db()?;
     ensure_admin_table(&conn)?;
-    conn.query_row("SELECT token FROM gitea_admin WHERE id=1", [], |r| r.get::<_, String>(0))
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            e => Err(e.to_string()),
-        })
+    conn.query_row("SELECT token FROM gitea_admin WHERE id=1", [], |r| {
+        r.get::<_, String>(0)
+    })
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        e => Err(e.to_string()),
+    })
 }
 
 /// 跑一条 gitea CLI,返回 stdout(失败带 stderr 报错)。
@@ -312,7 +314,9 @@ fn run_cli(args: &[&str]) -> Result<String, String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.output().map_err(|e| format!("执行 gitea CLI 失败: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("执行 gitea CLI 失败: {e}"))?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() {
         Ok(stdout)
@@ -334,23 +338,35 @@ pub fn ensure_admin() -> Result<String, String> {
     let pwd = rand_hex()?;
     // 建号;「已存在」类报错忽略(幂等)
     if let Err(e) = run_cli(&[
-        "admin", "user", "create", "--admin",
-        "--username", ADMIN_USER,
-        "--password", &pwd,
-        "--email", "admin@polaris.local",
+        "admin",
+        "user",
+        "create",
+        "--admin",
+        "--username",
+        ADMIN_USER,
+        "--password",
+        &pwd,
+        "--email",
+        "admin@polaris.local",
         "--must-change-password=false",
-        "-c", &ini_s,
+        "-c",
+        &ini_s,
     ]) {
         if !e.contains("already exists") && !e.contains("已存在") {
             return Err(e);
         }
     }
     let token = run_cli(&[
-        "admin", "user", "generate-access-token",
-        "--username", ADMIN_USER,
-        "--scopes", "all",
+        "admin",
+        "user",
+        "generate-access-token",
+        "--username",
+        ADMIN_USER,
+        "--scopes",
+        "all",
         "--raw",
-        "-c", &ini_s,
+        "-c",
+        &ini_s,
     ])?;
     let token = token.lines().last().unwrap_or("").trim().to_string();
     if token.is_empty() {
@@ -369,7 +385,9 @@ pub fn ensure_admin() -> Result<String, String> {
 // ───────────────────────── REST 薄封装 ─────────────────────────
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).build()
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .build()
 }
 
 /// 带 Bearer 的 POST/PUT,把「已存在」状态码集合视为成功(幂等)。
@@ -481,9 +499,18 @@ pub fn protect_main(owner: &str, repo: &str) -> Result<(), String> {
 }
 
 /// 加协作者(默认 write)。PUT 天然幂等。
-pub fn add_collaborator(owner: &str, repo: &str, username: &str, permission: &str) -> Result<(), String> {
+pub fn add_collaborator(
+    owner: &str,
+    repo: &str,
+    username: &str,
+    permission: &str,
+) -> Result<(), String> {
     let token = ensure_admin()?;
-    let perm = if permission.is_empty() { "write" } else { permission };
+    let perm = if permission.is_empty() {
+        "write"
+    } else {
+        permission
+    };
     send_json(
         "PUT",
         &api(&format!("/repos/{owner}/{repo}/collaborators/{username}")),
@@ -503,7 +530,9 @@ mod tests {
     /// app.ini 首次生成 + 幂等:第二次调用不覆盖,SECRET_KEY 两次读到同值。
     #[test]
     fn test_ensure_config_idempotent() {
-        let _g = super::super::db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = super::super::db::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("polaris-gitea-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::env::set_var("POLARIS_GITEA_HOME", &dir);
@@ -523,7 +552,10 @@ mod tests {
         let ini2 = ensure_config().expect("二次调用");
         assert_eq!(ini, ini2);
         let c2 = std::fs::read_to_string(&ini2).unwrap();
-        assert_eq!(c1, c2, "app.ini 不应被覆盖,SECRET_KEY/INTERNAL_TOKEN 只随机一次");
+        assert_eq!(
+            c1, c2,
+            "app.ini 不应被覆盖,SECRET_KEY/INTERNAL_TOKEN 只随机一次"
+        );
 
         std::env::remove_var("POLARIS_GITEA_HOME");
         std::env::remove_var("POLARIS_GITEA_PORT");
@@ -543,7 +575,9 @@ mod tests {
     /// token 缓存表读写:gitea_admin 单行 + gitea_user_tokens 按用户名缓存。
     #[test]
     fn test_token_tables() {
-        let _g = super::super::db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = super::super::db::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let db = std::env::temp_dir().join(format!("polaris-gitea-db-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&db);
         std::env::set_var("POLARIS_COLLAB_DB", &db);
@@ -565,10 +599,17 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(stored_admin_token().unwrap().as_deref(), Some("tok-admin-1"));
+        assert_eq!(
+            stored_admin_token().unwrap().as_deref(),
+            Some("tok-admin-1")
+        );
         let conn = open_db().unwrap();
         let t: String = conn
-            .query_row("SELECT token FROM gitea_user_tokens WHERE username=?1", params!["alice"], |r| r.get(0))
+            .query_row(
+                "SELECT token FROM gitea_user_tokens WHERE username=?1",
+                params!["alice"],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(t, "tok-alice");
         // 覆盖写(INSERT OR REPLACE)也幂等
@@ -578,7 +619,11 @@ mod tests {
         )
         .unwrap();
         let t2: String = conn
-            .query_row("SELECT token FROM gitea_user_tokens WHERE username=?1", params!["alice"], |r| r.get(0))
+            .query_row(
+                "SELECT token FROM gitea_user_tokens WHERE username=?1",
+                params!["alice"],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(t2, "tok-alice-2");
         drop(conn);

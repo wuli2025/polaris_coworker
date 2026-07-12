@@ -48,7 +48,12 @@ pub(crate) fn apply_wikilink(body: &str, term: &str, target: &str) -> Option<Str
     let mut at_line_start = true;
     while i < n {
         // 围栏: 行首三连反引号切换
-        if at_line_start && i + 2 < n && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+        if at_line_start
+            && i + 2 < n
+            && chars[i] == '`'
+            && chars[i + 1] == '`'
+            && chars[i + 2] == '`'
+        {
             in_fence = !in_fence;
             i += 3;
             at_line_start = false;
@@ -78,7 +83,12 @@ pub(crate) fn apply_wikilink(body: &str, term: &str, target: &str) -> Option<Str
             continue;
         }
         // 命中明文 term?
-        if !in_fence && !in_inline && link_depth == 0 && i + tn <= n && chars[i..i + tn] == term_chars[..] {
+        if !in_fence
+            && !in_inline
+            && link_depth == 0
+            && i + tn <= n
+            && chars[i..i + tn] == term_chars[..]
+        {
             // 前一个非空白字符不能是 `[`(避免 [[ 紧邻) — link_depth 已挡住, 这里再防 `[term`
             let prev_ok = i == 0 || chars[i - 1] != '[';
             if prev_ok {
@@ -144,7 +154,10 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
     let titles: Vec<String> = {
         let idx = INDEX.read();
         idx.iter()
-            .filter(|d| d.rel_path.starts_with("wiki/") && !is_wiki_meta_page(&d.rel_path.replace('\\', "/")))
+            .filter(|d| {
+                d.rel_path.starts_with("wiki/")
+                    && !is_wiki_meta_page(&d.rel_path.replace('\\', "/"))
+            })
             .map(|d| d.title.clone())
             .filter(|t| t.chars().count() >= 2)
             .collect()
@@ -168,7 +181,11 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
                 },
             );
         };
-        emit("phase", Some("分析 wiki 页面、寻找可补的双链…".into()), None);
+        emit(
+            "phase",
+            Some("分析 wiki 页面、寻找可补的双链…".into()),
+            None,
+        );
 
         let vocab = titles.join("\n");
         let prompt = format!(
@@ -203,7 +220,11 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
         let suggestions: Vec<LinkSuggestion> = extract_balanced_json(&raw)
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default();
-        emit("phase", Some(format!("收到 {} 条建议, 代码执行替换…", suggestions.len())), None);
+        emit(
+            "phase",
+            Some(format!("收到 {} 条建议, 代码执行替换…", suggestions.len())),
+            None,
+        );
 
         // 现存 wiki 标题集 (校验 target 合法)
         let valid_targets: std::collections::HashSet<String> = {
@@ -218,7 +239,10 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
         use std::collections::BTreeMap;
         let mut by_page: BTreeMap<String, Vec<LinkSuggestion>> = BTreeMap::new();
         for s in suggestions {
-            by_page.entry(s.page.replace('\\', "/")).or_default().push(s);
+            by_page
+                .entry(s.page.replace('\\', "/"))
+                .or_default()
+                .push(s);
         }
 
         let mut applied = 0usize;
@@ -244,7 +268,14 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
             }
             if changed {
                 if kb_atomic_write(&full, &content).is_ok() {
-                    emit("phase", Some(format!("已补链: {}", page.rsplit('/').next().unwrap_or(&page))), None);
+                    emit(
+                        "phase",
+                        Some(format!(
+                            "已补链: {}",
+                            page.rsplit('/').next().unwrap_or(&page)
+                        )),
+                        None,
+                    );
                 }
             }
         }
@@ -252,7 +283,11 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
         // 重扫刷新索引/图谱
         let docs = scan_all(&root);
         *INDEX.write() = docs;
-        emit("done", Some(format!("补链完成: 共应用 {applied} 处双链")), Some(applied));
+        emit(
+            "done",
+            Some(format!("补链完成: 共应用 {applied} 处双链")),
+            Some(applied),
+        );
     });
 
     Ok(run_id)
@@ -379,10 +414,11 @@ pub fn kb_dedup(app: AppHandle) -> Result<String, String> {
             let snippet: String = read_doc_body(&d.rel_path)
                 .map(|b| b.trim().chars().take(160).collect())
                 .unwrap_or_default();
-            by_norm
-                .entry(normalize_title(&d.title))
-                .or_default()
-                .push((rp, d.title.clone(), snippet));
+            by_norm.entry(normalize_title(&d.title)).or_default().push((
+                rp,
+                d.title.clone(),
+                snippet,
+            ));
         }
         by_norm.into_values().filter(|g| g.len() >= 2).collect()
     };
@@ -406,7 +442,14 @@ pub fn kb_dedup(app: AppHandle) -> Result<String, String> {
                 },
             );
         };
-        emit("phase", Some(format!("规则粗筛出 {} 组疑似重复, 请 AI 细判…", groups.len())), None);
+        emit(
+            "phase",
+            Some(format!(
+                "规则粗筛出 {} 组疑似重复, 请 AI 细判…",
+                groups.len()
+            )),
+            None,
+        );
 
         // 拼候选清单给 claude
         let mut cand = String::new();
@@ -446,7 +489,11 @@ pub fn kb_dedup(app: AppHandle) -> Result<String, String> {
         let verdicts: Vec<DedupVerdict> = extract_balanced_json(&raw)
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default();
-        emit("phase", Some("AI 判定完成, 代码执行合并…".to_string()), None);
+        emit(
+            "phase",
+            Some("AI 判定完成, 代码执行合并…".to_string()),
+            None,
+        );
 
         let mut merged = 0usize;
         for v in verdicts {
@@ -466,16 +513,26 @@ pub fn kb_dedup(app: AppHandle) -> Result<String, String> {
                 }
                 if merge_duplicate_page(&root, &canonical, &dup).is_ok() {
                     merged += 1;
-                    emit("phase", Some(format!("已合并 {} → {}",
-                        dup.rsplit('/').next().unwrap_or(&dup),
-                        canonical.rsplit('/').next().unwrap_or(&canonical))), None);
+                    emit(
+                        "phase",
+                        Some(format!(
+                            "已合并 {} → {}",
+                            dup.rsplit('/').next().unwrap_or(&dup),
+                            canonical.rsplit('/').next().unwrap_or(&canonical)
+                        )),
+                        None,
+                    );
                 }
             }
         }
 
         let docs = scan_all(&root);
         *INDEX.write() = docs;
-        emit("done", Some(format!("去重完成: 合并 {merged} 个重复页")), Some(merged));
+        emit(
+            "done",
+            Some(format!("去重完成: 合并 {merged} 个重复页")),
+            Some(merged),
+        );
     });
 
     Ok(run_id)
@@ -509,10 +566,7 @@ pub(crate) fn merge_duplicate_page(root: &Path, canonical: &str, dup: &str) -> R
     let canon_full = root.join(canonical);
     let dup_body = fs::read_to_string(&dup_full).map_err(|e| e.to_string())?;
     // 剥掉 dup 的 frontmatter, 只并正文
-    let dup_content = RE_FRONTMATTER
-        .replace(&dup_body, "")
-        .trim()
-        .to_string();
+    let dup_content = RE_FRONTMATTER.replace(&dup_body, "").trim().to_string();
 
     // ① 并入主页末尾 (主页 frontmatter 不动 → 锁定 type/title/created)
     let mut canon_body = fs::read_to_string(&canon_full).map_err(|e| e.to_string())?;
@@ -611,7 +665,10 @@ mod tests {
     #[test]
     fn normalize_title_collapses_punctuation_and_case() {
         assert_eq!(normalize_title("矛盾论"), normalize_title("矛盾论 "));
-        assert_eq!(normalize_title("On Practice"), normalize_title("on  practice"));
+        assert_eq!(
+            normalize_title("On Practice"),
+            normalize_title("on  practice")
+        );
         assert_eq!(normalize_title("实践-论(草)"), normalize_title("实践论草"));
     }
 

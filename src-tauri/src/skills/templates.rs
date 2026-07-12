@@ -5,11 +5,14 @@ use super::*;
 // 三个 Polaris 助手脚本（这里编译期内嵌），最后拼出 skill.md。
 pub(crate) const WVP_ID: &str = "web-video-presentation";
 pub(crate) const WVP_REPO: &str = "https://github.com/ConardLi/garden-skills";
-pub(crate) const WVP_ADDENDUM: &str = include_str!("../templates/skills/web-video-presentation/addendum.md");
+pub(crate) const WVP_ADDENDUM: &str =
+    include_str!("../templates/skills/web-video-presentation/addendum.md");
 pub(crate) const WVP_MINIMAX_TTS: &str =
     include_str!("../templates/skills/web-video-presentation/minimax-tts.mjs");
-pub(crate) const WVP_SCAFFOLD: &str = include_str!("../templates/skills/web-video-presentation/scaffold.mjs");
-pub(crate) const WVP_BOOTSTRAP: &str = include_str!("../templates/skills/web-video-presentation/bootstrap.mjs");
+pub(crate) const WVP_SCAFFOLD: &str =
+    include_str!("../templates/skills/web-video-presentation/scaffold.mjs");
+pub(crate) const WVP_BOOTSTRAP: &str =
+    include_str!("../templates/skills/web-video-presentation/bootstrap.mjs");
 
 // ───────── 「课件视频工坊」多文件技能（Polaris 自研，编译期内嵌，启动落盘）─────────
 // 支撑「生成课件类视频」UI 的基础设施技能：含 SKILL.md + 三个脚本 + 链路文档。
@@ -18,11 +21,14 @@ pub(crate) const WVP_BOOTSTRAP: &str = include_str!("../templates/skills/web-vid
 pub(crate) const PVS_ID: &str = "polaris-video-studio";
 // 改动内嵌脚本/SKILL.md 后必须 +1，让已安装用户在下次启动时拿到更新。
 pub(crate) const PVS_VERSION: &str = "4";
-pub(crate) const PVS_SKILL_MD: &str = include_str!("../templates/skills/polaris-video-studio/SKILL.md");
-pub(crate) const PVS_MANIFEST: &str = include_str!("../templates/skills/polaris-video-studio/manifest.json");
+pub(crate) const PVS_SKILL_MD: &str =
+    include_str!("../templates/skills/polaris-video-studio/SKILL.md");
+pub(crate) const PVS_MANIFEST: &str =
+    include_str!("../templates/skills/polaris-video-studio/manifest.json");
 pub(crate) const PVS_INSTALL_DEPS: &str =
     include_str!("../templates/skills/polaris-video-studio/scripts/install-deps.mjs");
-pub(crate) const PVS_RUN: &str = include_str!("../templates/skills/polaris-video-studio/scripts/run.mjs");
+pub(crate) const PVS_RUN: &str =
+    include_str!("../templates/skills/polaris-video-studio/scripts/run.mjs");
 pub(crate) const PVS_RECORD: &str =
     include_str!("../templates/skills/polaris-video-studio/scripts/pipeline/03-record.mjs");
 pub(crate) const PVS_FIND_BROWSER: &str =
@@ -37,10 +43,14 @@ pub(crate) const PVS_WORKFLOW: &str =
 pub(crate) const DECK_ID: &str = "polaris-deck-studio";
 // 改动任一内嵌资源后必须 +1，让已安装用户下次启动拿到更新。
 pub(crate) const DECK_VERSION: &str = "11";
-pub(crate) const DECK_SKILL_MD: &str = include_str!("../templates/skills/polaris-deck-studio/SKILL.md");
-pub(crate) const DECK_DESIGN_MD: &str = include_str!("../templates/skills/polaris-deck-studio/design.md");
-pub(crate) const DECK_LICENSE: &str = include_str!("../templates/skills/polaris-deck-studio/LICENSE");
-pub(crate) const DECK_BASE_CSS: &str = include_str!("../templates/skills/polaris-deck-studio/assets/base.css");
+pub(crate) const DECK_SKILL_MD: &str =
+    include_str!("../templates/skills/polaris-deck-studio/SKILL.md");
+pub(crate) const DECK_DESIGN_MD: &str =
+    include_str!("../templates/skills/polaris-deck-studio/design.md");
+pub(crate) const DECK_LICENSE: &str =
+    include_str!("../templates/skills/polaris-deck-studio/LICENSE");
+pub(crate) const DECK_BASE_CSS: &str =
+    include_str!("../templates/skills/polaris-deck-studio/assets/base.css");
 pub(crate) const DECK_THEMES_CSS: &str =
     include_str!("../templates/skills/polaris-deck-studio/assets/themes.css");
 pub(crate) const DECK_RUNTIME_JS: &str =
@@ -62,21 +72,66 @@ pub(crate) const DECK_FIND_BROWSER: &str =
 // 「选设计师」体系：11 位设计师人格 + 美学地基(_foundation) + 总索引(INDEX.md)。
 // auto 模式按 INDEX.md 路由表按内容气质选人；用户指定则用指定的。网站生成复用同一份包。
 pub(crate) const DECK_DESIGNERS: &[(&str, &str)] = &[
-    ("INDEX.md", include_str!("../templates/skills/polaris-deck-studio/designers/INDEX.md")),
-    ("_foundation/aesthetics.md", include_str!("../templates/skills/polaris-deck-studio/designers/_foundation/aesthetics.md")),
-    ("_foundation/rubric.md", include_str!("../templates/skills/polaris-deck-studio/designers/_foundation/rubric.md")),
-    ("_foundation/taste.md", include_str!("../templates/skills/polaris-deck-studio/designers/_foundation/taste.md")),
-    ("bento-grid.md", include_str!("../templates/skills/polaris-deck-studio/designers/bento-grid.md")),
-    ("clay-soft.md", include_str!("../templates/skills/polaris-deck-studio/designers/clay-soft.md")),
-    ("doodle-hand.md", include_str!("../templates/skills/polaris-deck-studio/designers/doodle-hand.md")),
-    ("glass-crisp.md", include_str!("../templates/skills/polaris-deck-studio/designers/glass-crisp.md")),
-    ("keynote-tech.md", include_str!("../templates/skills/polaris-deck-studio/designers/keynote-tech.md")),
-    ("memphis-pop.md", include_str!("../templates/skills/polaris-deck-studio/designers/memphis-pop.md")),
-    ("mist-gradient.md", include_str!("../templates/skills/polaris-deck-studio/designers/mist-gradient.md")),
-    ("oriental-grandeur.md", include_str!("../templates/skills/polaris-deck-studio/designers/oriental-grandeur.md")),
-    ("pedagogy-clarity.md", include_str!("../templates/skills/polaris-deck-studio/designers/pedagogy-clarity.md")),
-    ("swiss-modernist.md", include_str!("../templates/skills/polaris-deck-studio/designers/swiss-modernist.md")),
-    ("xhs-life.md", include_str!("../templates/skills/polaris-deck-studio/designers/xhs-life.md")),
+    (
+        "INDEX.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/INDEX.md"),
+    ),
+    (
+        "_foundation/aesthetics.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/_foundation/aesthetics.md"),
+    ),
+    (
+        "_foundation/rubric.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/_foundation/rubric.md"),
+    ),
+    (
+        "_foundation/taste.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/_foundation/taste.md"),
+    ),
+    (
+        "bento-grid.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/bento-grid.md"),
+    ),
+    (
+        "clay-soft.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/clay-soft.md"),
+    ),
+    (
+        "doodle-hand.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/doodle-hand.md"),
+    ),
+    (
+        "glass-crisp.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/glass-crisp.md"),
+    ),
+    (
+        "keynote-tech.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/keynote-tech.md"),
+    ),
+    (
+        "memphis-pop.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/memphis-pop.md"),
+    ),
+    (
+        "mist-gradient.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/mist-gradient.md"),
+    ),
+    (
+        "oriental-grandeur.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/oriental-grandeur.md"),
+    ),
+    (
+        "pedagogy-clarity.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/pedagogy-clarity.md"),
+    ),
+    (
+        "swiss-modernist.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/swiss-modernist.md"),
+    ),
+    (
+        "xhs-life.md",
+        include_str!("../templates/skills/polaris-deck-studio/designers/xhs-life.md"),
+    ),
 ];
 
 /// 把设计师人格包写到 <dest>/designers/（含 _foundation 子目录）。deck-studio 与 web-studio 共用。
@@ -111,9 +166,11 @@ pub(crate) fn write_designers(dest: &Path) -> Result<(), String> {
 // 配一套网站组件 site.css + 滚动揭示 runtime.js + 站点模板 + SKILL.md。
 pub(crate) const WEB_ID: &str = "polaris-web-studio";
 pub(crate) const WEB_VERSION: &str = "6";
-pub(crate) const WEB_SKILL_MD: &str = include_str!("../templates/skills/polaris-web-studio/SKILL.md");
+pub(crate) const WEB_SKILL_MD: &str =
+    include_str!("../templates/skills/polaris-web-studio/SKILL.md");
 pub(crate) const WEB_LICENSE: &str = include_str!("../templates/skills/polaris-web-studio/LICENSE");
-pub(crate) const WEB_SITE_CSS: &str = include_str!("../templates/skills/polaris-web-studio/assets/site.css");
+pub(crate) const WEB_SITE_CSS: &str =
+    include_str!("../templates/skills/polaris-web-studio/assets/site.css");
 pub(crate) const WEB_RUNTIME_JS: &str =
     include_str!("../templates/skills/polaris-web-studio/assets/runtime.js");
 pub(crate) const WEB_MOTION_CSS: &str =
@@ -192,7 +249,8 @@ pub(crate) const TURBO_FLAGS_MD: &str =
 pub(crate) const BROWSER_USE_ID: &str = "browser-use";
 // 改动 SKILL.md / browser_use_runner.py 后必须 +1,让已安装用户下次启动拿到更新。
 pub(crate) const BROWSER_USE_VERSION: &str = "1";
-pub(crate) const BROWSER_USE_SKILL_MD: &str = include_str!("../templates/skills/browser-use/SKILL.md");
+pub(crate) const BROWSER_USE_SKILL_MD: &str =
+    include_str!("../templates/skills/browser-use/SKILL.md");
 pub(crate) const BROWSER_USE_RUNNER: &str =
     include_str!("../templates/skills/browser-use/scripts/browser_use_runner.py");
 
@@ -204,7 +262,8 @@ pub(crate) const BROWSER_USE_RUNNER: &str =
 pub(crate) const WECHAT_TASKS_ID: &str = "wechat-tasks";
 // 改动 SKILL.md / wx_daily.py / wx_setup.py 后必须 +1，让已安装用户下次启动拿到更新。
 pub(crate) const WECHAT_TASKS_VERSION: &str = "1";
-pub(crate) const WECHAT_TASKS_SKILL_MD: &str = include_str!("../templates/skills/wechat-tasks/SKILL.md");
+pub(crate) const WECHAT_TASKS_SKILL_MD: &str =
+    include_str!("../templates/skills/wechat-tasks/SKILL.md");
 pub(crate) const WECHAT_TASKS_DAILY_PY: &str =
     include_str!("../templates/skills/wechat-tasks/scripts/wx_daily.py");
 pub(crate) const WECHAT_TASKS_SETUP_PY: &str =
@@ -219,7 +278,9 @@ pub(crate) const WECHAT_TASKS_CONFIG_EXAMPLE: &str =
 pub const PROJECT_CHECK_ID: &str = "project-check-default";
 // 改动 SKILL.md / check.ps1 / check.sh 后必须 +1,让已安装用户下次启动拿到更新。
 pub(crate) const PROJECT_CHECK_VERSION: &str = "1";
-pub(crate) const PROJECT_CHECK_SKILL_MD: &str = include_str!("../templates/skills/project-check/SKILL.md");
-pub(crate) const PROJECT_CHECK_PS1: &str = include_str!("../templates/skills/project-check/check.ps1");
-pub(crate) const PROJECT_CHECK_SH: &str = include_str!("../templates/skills/project-check/check.sh");
-
+pub(crate) const PROJECT_CHECK_SKILL_MD: &str =
+    include_str!("../templates/skills/project-check/SKILL.md");
+pub(crate) const PROJECT_CHECK_PS1: &str =
+    include_str!("../templates/skills/project-check/check.ps1");
+pub(crate) const PROJECT_CHECK_SH: &str =
+    include_str!("../templates/skills/project-check/check.sh");

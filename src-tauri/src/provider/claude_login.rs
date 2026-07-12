@@ -264,9 +264,11 @@ fn claude_write_credentials(
         "expiresAt": expires_at,
         "scopes": scopes,
     });
-    let content = serde_json::to_string_pretty(&root).map_err(|e| format!("序列化凭据失败: {e}"))?;
+    let content =
+        serde_json::to_string_pretty(&root).map_err(|e| format!("序列化凭据失败: {e}"))?;
     // 原子写防撕裂(外部 claude CLI 并发读不会读到坏 JSON);Unix 收紧 0600 不让同机他人读走凭证。
-    atomic_write(&path, &content).map_err(|e| format!("写入 ~/.claude/.credentials.json 失败: {e}"))?;
+    atomic_write(&path, &content)
+        .map_err(|e| format!("写入 ~/.claude/.credentials.json 失败: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -324,7 +326,9 @@ pub(crate) fn claude_url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -399,7 +403,10 @@ mod claude_oauth_tests {
     #[test]
     fn loopback_query_param_decode() {
         let q = "code=ac_1%2Babc%3D%3D&state=st-42&error_description=Access+denied%21";
-        assert_eq!(loopback_query_param(q, "code").as_deref(), Some("ac_1+abc=="));
+        assert_eq!(
+            loopback_query_param(q, "code").as_deref(),
+            Some("ac_1+abc==")
+        );
         assert_eq!(loopback_query_param(q, "state").as_deref(), Some("st-42"));
         assert_eq!(
             loopback_query_param(q, "error_description").as_deref(),
@@ -407,7 +414,10 @@ mod claude_oauth_tests {
         );
         assert_eq!(loopback_query_param(q, "missing"), None);
         // 裸键(无 =)与坏 percent 序列不 panic
-        assert_eq!(loopback_query_param("flag&x=1", "flag").as_deref(), Some(""));
+        assert_eq!(
+            loopback_query_param("flag&x=1", "flag").as_deref(),
+            Some("")
+        );
         assert_eq!(loopback_pct_decode("%zz%"), "%zz%");
     }
 
@@ -452,7 +462,8 @@ mod claude_oauth_tests {
         // 杂请求(favicon): 404, 会话继续等
         {
             let mut s = TcpStream::connect(addr).unwrap();
-            s.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            s.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
             let mut buf = String::new();
             let _ = s.read_to_string(&mut buf);
             assert!(buf.starts_with("HTTP/1.1 404"), "杂请求应 404: {buf}");

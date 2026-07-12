@@ -43,8 +43,10 @@ nano .env
 
 必填两项：
 
-- `POLARIS_AUTH_TOKEN`：访问口令，随便设一串长随机字符（公网必设！）。
-  生成一个：`openssl rand -hex 16`
+- `POLARIS_AUTH_TOKEN`：机器级 owner 访问口令，必须使用独立强随机值。
+  生成一个：`openssl rand -hex 32`
+- `POLARIS_BIND_IP`：保持默认 `127.0.0.1`。这让 8080 只供宿主机上的 HTTPS
+  反向代理访问，避免 owner 口令、聊天和文件走公网明文。
 - LLM 接入（三选一）：`ANTHROPIC_API_KEY`，或第三方端点的
   `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`，或都留空、起服务后在
   App 内「供应商」面板登录 Claude 订阅。
@@ -65,26 +67,47 @@ docker compose logs -f polaris
 
 ```bash
 curl http://localhost:8080/api/health
-# 期望返回含 "service":"polaris-server" 的 JSON
+# 期望返回 ok
+curl -f http://localhost:8080/api/ready
+# 期望返回 ready；数据卷、SQLite 或前端入口异常时会返回 503
 docker compose ps   # polaris 应为 healthy
 ```
 
-云厂商安全组记得放行 TCP 8080（若开中继还要 443 TCP/UDP）。
+不要在云安全组开放 8080。先用 Caddy / Nginx / Traefik 把你的 HTTPS 域名反代到
+`127.0.0.1:8080`，只开放 TCP 443；证书必须有效，并建议开启 HSTS。以下是最小 Caddyfile
+示意（把域名换成已解析到本机的域名）：
+
+```caddyfile
+polaris.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+若开 iroh 中继，按需另放行 443 TCP/UDP。只有在完全可信的隔离内网调试时，才可把
+`POLARIS_BIND_IP` 改为 `0.0.0.0`；不要用这个设置直接暴露公网。
 
 ## 5. 首次打开：建 owner 账号
 
 浏览器访问：
 
 ```
-http://服务器IP:8080/?token=你的POLARIS_AUTH_TOKEN
+https://polaris.example.com/?token=你的POLARIS_AUTH_TOKEN
 ```
+
+页面读取口令后会立即从地址栏和浏览器历史中清除，并只保留在本次浏览器会话。不要把含
+`?token=` 的初始链接发到群聊、工单或截图中。
 
 首次进入会引导创建 **owner（所有者）账号**——这是多人协作的最高权限账号，
 账号密码务必记牢。之后队友的账号由 owner 在管理面板发「邀请票据」加入。
 
-## 6.（可选）初始化 Gitea 管理员
+协作项目当前只绑定 `POLARIS_REPO_ROOT` 内已经存在的本地 Git 仓库，不接受远程 URL，
+也不会自动 clone。Docker 默认目录是 `/home/polaris/Polaris/repos`；请先把仓库放入对应
+volume/挂载目录，再由 owner 在界面创建项目。此限制用于阻止成员借 Git 操作触达宿主机任意目录。
 
-compose 已带无头 Gitea（仅容器内可访问，未对公网开端口，且已禁自助注册）。
+## 6.（实验性）Gitea 管理员
+
+compose 带无头 Gitea（仅容器内可访问，未对公网开端口，且已禁自助注册），但当前项目
+创建→仓库创建/克隆→成员 ACL 尚未自动编排，生产流程不要依赖这一 profile。
 第一次需要创建管理员：
 
 ```bash
@@ -95,9 +118,11 @@ docker compose exec -u git gitea gitea admin user create \
 
 （变量即 .env 里 GITEA_ADMIN_* 三项；也可直接写明文。）
 
-## 7.（可选）开 iroh-relay 中继（profile: relay）
+## 7.（实验性，当前未接入产品流程）iroh-relay
 
-用于 P2P 打洞失败时的中继兜底。需要 443 端口空闲、安全组放行 443 TCP+UDP。
+该容器只是中继实验组件；当前桌面发布未启用并接通完整的 NodeId 配对/隧道流程，不能靠
+它实现“粘贴配对码自动连主机”。生产多人协作请使用上面的 HTTPS Docker 主机。若仅做
+协议开发，需要 443 端口空闲并放行 443 TCP+UDP。
 
 ```bash
 # 1) 生成纯 IP 自签证书（把 IP 换成你的公网 IP）

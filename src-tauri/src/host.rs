@@ -56,7 +56,12 @@ impl AppHandle {
 
     /// 定向 emit:只投递给指定用户的连接(以及 owner)。协作事件(任务卡流转、
     /// 打回意见、个人对话流)用这个,避免 A 的对话流推给所有人(方案硬伤2)。
-    pub fn emit_to<S: Serialize>(&self, user: &str, topic: &str, payload: S) -> Result<(), serde_json::Error> {
+    pub fn emit_to<S: Serialize>(
+        &self,
+        user: &str,
+        topic: &str,
+        payload: S,
+    ) -> Result<(), serde_json::Error> {
         let value = serde_json::to_value(payload)?;
         let _ = self.tx.send(Event {
             topic: topic.to_string(),
@@ -79,8 +84,8 @@ impl PathShim {
     /// 资源目录：镜像把 `src-tauri/resources` 拷到 `$POLARIS_RESOURCE_DIR`(默认 `/app/resources`)，
     /// kb.rs `seed_source` 会在其下找 `seed-kb/`（默认资料库种子）。
     pub fn resource_dir(&self) -> Result<PathBuf, std::io::Error> {
-        let dir = std::env::var("POLARIS_RESOURCE_DIR")
-            .unwrap_or_else(|_| "/app/resources".to_string());
+        let dir =
+            std::env::var("POLARIS_RESOURCE_DIR").unwrap_or_else(|_| "/app/resources".to_string());
         Ok(PathBuf::from(dir))
     }
 }

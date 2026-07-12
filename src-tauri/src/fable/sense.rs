@@ -20,10 +20,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "desktop")]
-use tauri::{AppHandle, Emitter};
 #[cfg(not(feature = "desktop"))]
 use crate::host::AppHandle;
+#[cfg(feature = "desktop")]
+use tauri::{AppHandle, Emitter};
 
 // ───────────────────────── 数据模型 ─────────────────────────
 
@@ -92,7 +92,12 @@ pub struct SenseSwitches {
 
 impl Default for SenseSwitches {
     fn default() -> Self {
-        Self { cloud_enabled: true, audio_egress: false, image_egress: true, budget_monthly_cny: 0.0 }
+        Self {
+            cloud_enabled: true,
+            audio_egress: false,
+            image_egress: true,
+            budget_monthly_cny: 0.0,
+        }
     }
 }
 
@@ -139,7 +144,12 @@ fn persist() {
 // MiniMax 无 ASR、embo-01 已实质下架、无 rerank → 听=本地免费,嵌/排=硅基免费。
 
 fn m(id: &str, name: &str, note: &str, rec: bool) -> SenseModel {
-    SenseModel { id: id.into(), name: name.into(), note: note.into(), recommended: rec }
+    SenseModel {
+        id: id.into(),
+        name: name.into(),
+        note: note.into(),
+        recommended: rec,
+    }
 }
 
 fn builtin_registry() -> Vec<SenseProvider> {
@@ -242,12 +252,28 @@ fn builtin_registry() -> Vec<SenseProvider> {
 
 /// 感官分组的展示元数据(顺序即页面顺序)。
 const SENSE_GROUPS: &[(&str, &str, &str)] = &[
-    ("asr_fast", "听 · 速览转写", "L1 身份卡用:快、免费、不要时间戳"),
-    ("asr_timed", "听 · 深读转写(字级时间戳)", "L2 全文转写:时间码定位回放;本地 Paraformer 免费直出"),
-    ("vision", "看 · 视觉理解", "无声视频关键帧描述/照片打标;采样件出域,原文件永不出域"),
+    (
+        "asr_fast",
+        "听 · 速览转写",
+        "L1 身份卡用:快、免费、不要时间戳",
+    ),
+    (
+        "asr_timed",
+        "听 · 深读转写(字级时间戳)",
+        "L2 全文转写:时间码定位回放;本地 Paraformer 免费直出",
+    ),
+    (
+        "vision",
+        "看 · 视觉理解",
+        "无声视频关键帧描述/照片打标;采样件出域,原文件永不出域",
+    ),
     ("embed", "嵌入", "混合检索的向量腿"),
     ("rerank", "重排", "检索精排"),
-    ("docparse", "读 · 扫描件解析", "扫描 PDF/图片文档 → Markdown(LLMWiki 进料口)"),
+    (
+        "docparse",
+        "读 · 扫描件解析",
+        "扫描 PDF/图片文档 → Markdown(LLMWiki 进料口)",
+    ),
 ];
 
 // ───────────────────────── 感官包(本地模型下载)─────────────────────────
@@ -323,7 +349,9 @@ fn pack_dir(id: &str) -> Option<PathBuf> {
 
 /// 包是否已就位:目录里每个文件都存在且非空。
 fn pack_installed(pack: &SensePack) -> bool {
-    let Some(dir) = pack_dir(pack.id) else { return false };
+    let Some(dir) = pack_dir(pack.id) else {
+        return false;
+    };
     pack.files.iter().all(|f| {
         dir.join(f.name)
             .metadata()
@@ -333,7 +361,9 @@ fn pack_installed(pack: &SensePack) -> bool {
 }
 
 fn pack_size_mb(pack: &SensePack) -> f64 {
-    let Some(dir) = pack_dir(pack.id) else { return 0.0 };
+    let Some(dir) = pack_dir(pack.id) else {
+        return 0.0;
+    };
     pack.files
         .iter()
         .filter_map(|f| dir.join(f.name).metadata().ok())
@@ -401,11 +431,18 @@ fn download_file(
         .build();
     let mut last_err = String::new();
     for url in file.urls {
-        emit_pack(app, PackEvent {
-            id: pack_id.into(), kind: "phase".into(), file: Some(file.name.into()),
-            pct: None, received_mb: None, total_mb: None,
-            message: Some(format!("连接 {url}")),
-        });
+        emit_pack(
+            app,
+            PackEvent {
+                id: pack_id.into(),
+                kind: "phase".into(),
+                file: Some(file.name.into()),
+                pct: None,
+                received_mb: None,
+                total_mb: None,
+                message: Some(format!("连接 {url}")),
+            },
+        );
         let resp = match agent.get(url).call() {
             Ok(r) => r,
             Err(e) => {
@@ -445,14 +482,27 @@ fn download_file(
             received += n as u64;
             if received - last_emit >= 1024 * 1024 {
                 last_emit = received;
-                let pct = if total > 0 { ((received as f64 / total as f64) * 100.0) as u32 } else { 0 };
-                emit_pack(app, PackEvent {
-                    id: pack_id.into(), kind: "progress".into(), file: Some(file.name.into()),
-                    pct: Some(pct.min(99)),
-                    received_mb: Some(received as f64 / 1048576.0),
-                    total_mb: if total > 0 { Some(total as f64 / 1048576.0) } else { None },
-                    message: None,
-                });
+                let pct = if total > 0 {
+                    ((received as f64 / total as f64) * 100.0) as u32
+                } else {
+                    0
+                };
+                emit_pack(
+                    app,
+                    PackEvent {
+                        id: pack_id.into(),
+                        kind: "progress".into(),
+                        file: Some(file.name.into()),
+                        pct: Some(pct.min(99)),
+                        received_mb: Some(received as f64 / 1048576.0),
+                        total_mb: if total > 0 {
+                            Some(total as f64 / 1048576.0)
+                        } else {
+                            None
+                        },
+                        message: None,
+                    },
+                );
             }
         }
         if received == u64::MAX {
@@ -473,7 +523,11 @@ fn download_file(
         fs::rename(&part, dst).map_err(|e| format!("落位失败: {e}"))?;
         return Ok(());
     }
-    Err(if last_err.is_empty() { "全部下载源不可达".into() } else { last_err })
+    Err(if last_err.is_empty() {
+        "全部下载源不可达".into()
+    } else {
+        last_err
+    })
 }
 
 /// 安装感官包:后台线程逐文件下载,进度走 `sense:pack` 事件。立即返回。
@@ -507,14 +561,30 @@ pub fn sense_pack_install(app: AppHandle, id: String) -> Result<(), String> {
         })();
         PACK_BUSY.lock().remove(&pack_id);
         match result {
-            Ok(()) => emit_pack(&app, PackEvent {
-                id: pack_id.clone(), kind: "done".into(), file: None, pct: Some(100),
-                received_mb: None, total_mb: None, message: Some("安装完成".into()),
-            }),
-            Err(e) => emit_pack(&app, PackEvent {
-                id: pack_id.clone(), kind: "error".into(), file: None, pct: None,
-                received_mb: None, total_mb: None, message: Some(e),
-            }),
+            Ok(()) => emit_pack(
+                &app,
+                PackEvent {
+                    id: pack_id.clone(),
+                    kind: "done".into(),
+                    file: None,
+                    pct: Some(100),
+                    received_mb: None,
+                    total_mb: None,
+                    message: Some("安装完成".into()),
+                },
+            ),
+            Err(e) => emit_pack(
+                &app,
+                PackEvent {
+                    id: pack_id.clone(),
+                    kind: "error".into(),
+                    file: None,
+                    pct: None,
+                    received_mb: None,
+                    total_mb: None,
+                    message: Some(e),
+                },
+            ),
         }
     });
     Ok(())
@@ -635,7 +705,14 @@ fn mask_key(k: &str) -> String {
     if t.is_empty() {
         return String::new();
     }
-    let tail: String = t.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: String = t
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("●●●●●●{tail}")
 }
 
@@ -740,7 +817,9 @@ pub fn sense_list() -> SenseOverview {
         groups,
         switches: store.switches.clone(),
         packs: pack_views(),
-        models_dir: models_root().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        models_dir: models_root()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     }
 }
 
@@ -847,7 +926,11 @@ pub fn sense_test(id: String) -> Result<SenseTestResult, String> {
     }
     let key = effective_key(&p);
     if key.is_empty() {
-        return Ok(SenseTestResult { ok: false, latency_ms: 0, message: "未填 API Key".into() });
+        return Ok(SenseTestResult {
+            ok: false,
+            latency_ms: 0,
+            message: "未填 API Key".into(),
+        });
     }
     // 探活路径按服务商风格区分
     enum Probe {
@@ -856,7 +939,9 @@ pub fn sense_test(id: String) -> Result<SenseTestResult, String> {
         None,
     }
     let probe = match p.id.as_str() {
-        "siliconflow-asr" | "siliconflow-embed" | "siliconflow-rerank" => Probe::Models("/v1/models"),
+        "siliconflow-asr" | "siliconflow-embed" | "siliconflow-rerank" => {
+            Probe::Models("/v1/models")
+        }
         "groq-whisper" => Probe::Models("/v1/models"),
         "minimax-vl" => Probe::Chat("/v1/chat/completions"),
         "zhipu-glm4v" => Probe::Chat("/chat/completions"),
@@ -891,7 +976,11 @@ pub fn sense_test(id: String) -> Result<SenseTestResult, String> {
     };
     let ms = started.elapsed().as_millis() as u64;
     Ok(match resp {
-        Ok(_) => SenseTestResult { ok: true, latency_ms: ms, message: format!("连通正常({ms}ms)") },
+        Ok(_) => SenseTestResult {
+            ok: true,
+            latency_ms: ms,
+            message: format!("连通正常({ms}ms)"),
+        },
         Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => SenseTestResult {
             ok: false,
             latency_ms: ms,

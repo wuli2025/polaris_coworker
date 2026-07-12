@@ -152,20 +152,32 @@ fn handle(stream: &mut TcpStream, html: &str) -> Option<Captured> {
         let mut body = vec![0u8; content_length.min(8192)];
         let _ = reader.read_exact(&mut body);
         write_resp(stream, "200 OK", "text/plain; charset=utf-8", b"ok");
-        let v: serde_json::Value =
-            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
         if let Some(err) = v.get("error").and_then(|x| x.as_str()) {
             return Some(Captured::Err(err.to_string()));
         }
-        let bot_id = v.get("botid").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let secret = v.get("secret").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let bot_id = v
+            .get("botid")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let secret = v
+            .get("secret")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         if bot_id.is_empty() {
             return Some(Captured::Err("回传缺少 botid".into()));
         }
         return Some(Captured::Bot(WecomBotInfo { bot_id, secret }));
     }
     if method == "GET" && (path_only == "/" || path_only.is_empty()) {
-        write_resp(stream, "200 OK", "text/html; charset=utf-8", html.as_bytes());
+        write_resp(
+            stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            html.as_bytes(),
+        );
         return None;
     }
     write_resp(stream, "404 Not Found", "text/plain", b"not found");
@@ -185,11 +197,17 @@ fn open_browser(url: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg(url).spawn().map_err(|e| e.to_string())?;
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        Command::new("xdg-open").arg(url).spawn().map_err(|e| e.to_string())?;
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

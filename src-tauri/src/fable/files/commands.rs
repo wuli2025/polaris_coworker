@@ -115,7 +115,11 @@ pub(crate) static SMART_CLUSTERING: AtomicBool = AtomicBool::new(false);
 /// `deep=false`(快速档)只跑 T0 词法全覆盖 + T1 AI 命名就收尾——几秒归全库 + 一次 AI 调用,
 /// 远低于 2 分钟,**给新用户向导用**(向导自己在收尾另起后台建索引,这里再触发 T2 全量向量化
 /// 会与之冲突、且大库要几十分钟爆掉「2 分钟」预期)。`deep=true`(文件中心按钮)才追加 T2。
-pub(crate) fn smart_cluster_progressive(app: &AppHandle, root: Option<String>, deep: bool) -> Result<(), String> {
+pub(crate) fn smart_cluster_progressive(
+    app: &AppHandle,
+    root: Option<String>,
+    deep: bool,
+) -> Result<(), String> {
     // ── T0:结构骨架(秒级,零嵌入)──
     emit_cluster(
         app,
@@ -203,7 +207,10 @@ pub(crate) fn smart_cluster_progressive(app: &AppHandle, root: Option<String>, d
         }
     }
 
-    emit_cluster(app, json!({ "kind": "done", "report": report, "note": "智能归类完成" }));
+    emit_cluster(
+        app,
+        json!({ "kind": "done", "report": report, "note": "智能归类完成" }),
+    );
     Ok(())
 }
 
@@ -218,7 +225,10 @@ pub fn file_cluster_build(app: AppHandle, root: Option<String>) -> Result<(), St
     let Some(guard) = FlagGuard::acquire(&CLUSTERING) else {
         return Err("归类正在进行中".into());
     };
-    emit_cluster(&app, json!({ "kind": "phase", "text": "正在把相似文件归类…" }));
+    emit_cluster(
+        &app,
+        json!({ "kind": "phase", "text": "正在把相似文件归类…" }),
+    );
     std::thread::spawn(move || {
         let _guard = guard; // panic 栈展开也释放闸,防永久锁死
         match cluster_build(root) {
@@ -242,12 +252,19 @@ pub fn file_cluster_build(app: AppHandle, root: Option<String>) -> Result<(), St
 /// `quick=Some(true)`:只跑 T0+T1(全覆盖词法 + AI 命名)就收尾,不追加耗时的 T2 全量向量化
 /// —— 新用户向导用(几秒 + 一次 AI 调用,远低于 2 分钟);其余(含文件中心按钮)默认深档跑全程。
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn file_smart_cluster(app: AppHandle, root: Option<String>, quick: Option<bool>) -> Result<(), String> {
+pub fn file_smart_cluster(
+    app: AppHandle,
+    root: Option<String>,
+    quick: Option<bool>,
+) -> Result<(), String> {
     let Some(guard) = FlagGuard::acquire(&SMART_CLUSTERING) else {
         return Err("智能归类正在进行中".into());
     };
     let deep = !quick.unwrap_or(false);
-    emit_cluster(&app, json!({ "kind": "phase", "tier": "skeleton", "text": "正在启动智能归类…" }));
+    emit_cluster(
+        &app,
+        json!({ "kind": "phase", "tier": "skeleton", "text": "正在启动智能归类…" }),
+    );
     std::thread::spawn(move || {
         let _guard = guard; // panic 栈展开也释放闸,防永久锁死
         if let Err(e) = smart_cluster_progressive(&app, root, deep) {
@@ -344,7 +361,8 @@ pub fn file_titles_llm(app: AppHandle, root: Option<String>) -> Result<(), Strin
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn file_titles_clear() -> Result<usize, String> {
     let conn = open_db()?;
-    conn.execute("DELETE FROM titles", []).map_err(|e| e.to_string())
+    conn.execute("DELETE FROM titles", [])
+        .map_err(|e| e.to_string())
 }
 
 /// 读「归类专用模型」配置(key 只回 key_set,不回明文)。

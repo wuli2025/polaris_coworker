@@ -24,14 +24,17 @@ pub fn create(name: &str, creator_user_id: i64, actor: &str) -> Result<Team, Str
         return Err("团队名不能为空".into());
     }
     let conn = open_db()?;
-    conn.execute("INSERT INTO teams(name,created_at) VALUES(?1,?2)", params![name, now()])
-        .map_err(|e| {
-            if e.to_string().contains("UNIQUE") {
-                "团队名已存在".to_string()
-            } else {
-                format!("建团队失败: {e}")
-            }
-        })?;
+    conn.execute(
+        "INSERT INTO teams(name,created_at) VALUES(?1,?2)",
+        params![name, now()],
+    )
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            "团队名已存在".to_string()
+        } else {
+            format!("建团队失败: {e}")
+        }
+    })?;
     let id = conn.last_insert_rowid();
     conn.execute(
         "INSERT INTO team_members(team_id,user_id,role) VALUES(?1,?2,'owner')",
@@ -39,7 +42,13 @@ pub fn create(name: &str, creator_user_id: i64, actor: &str) -> Result<Team, Str
     )
     .map_err(|e| e.to_string())?;
     db::audit(actor, "team.create", &id.to_string(), name);
-    Ok(Team { id, name: name.into(), created_at: now(), my_role: "owner".into(), member_count: 1 })
+    Ok(Team {
+        id,
+        name: name.into(),
+        created_at: now(),
+        my_role: "owner".into(),
+        member_count: 1,
+    })
 }
 
 /// 我所在的团队列表(带我的角色与人数)。
@@ -96,14 +105,24 @@ pub fn members(team_id: i64) -> Result<Vec<TeamMember>, String> {
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![team_id], |r| {
-            Ok(TeamMember { user_id: r.get(0)?, username: r.get(1)?, display_name: r.get(2)?, role: r.get(3)? })
+            Ok(TeamMember {
+                user_id: r.get(0)?,
+                username: r.get(1)?,
+                display_name: r.get(2)?,
+                role: r.get(3)?,
+            })
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
 /// 按用户名拉人进团队(GitHub 式邀请)。返回被拉用户名。
-pub fn add_member_by_username(team_id: i64, username: &str, role: &str, actor: &str) -> Result<String, String> {
+pub fn add_member_by_username(
+    team_id: i64,
+    username: &str,
+    role: &str,
+    actor: &str,
+) -> Result<String, String> {
     let conn = open_db()?;
     let uid: i64 = conn
         .query_row(
@@ -118,7 +137,12 @@ pub fn add_member_by_username(team_id: i64, username: &str, role: &str, actor: &
         params![team_id, uid, role],
     )
     .map_err(|e| e.to_string())?;
-    db::audit(actor, "team.member.add", &format!("{team_id}/{username}"), role);
+    db::audit(
+        actor,
+        "team.member.add",
+        &format!("{team_id}/{username}"),
+        role,
+    );
     Ok(username.trim().to_string())
 }
 
@@ -141,7 +165,12 @@ pub fn remove_member(team_id: i64, user_id: i64, actor: &str) -> Result<(), Stri
         params![team_id, user_id],
     )
     .map_err(|e| e.to_string())?;
-    db::audit(actor, "team.member.remove", &format!("{team_id}/{user_id}"), "");
+    db::audit(
+        actor,
+        "team.member.remove",
+        &format!("{team_id}/{user_id}"),
+        "",
+    );
     Ok(())
 }
 
@@ -169,7 +198,11 @@ pub fn search_users(q: &str) -> Result<Vec<UserHit>, String> {
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![pat], |r| {
-            Ok(UserHit { id: r.get(0)?, username: r.get(1)?, display_name: r.get(2)? })
+            Ok(UserHit {
+                id: r.get(0)?,
+                username: r.get(1)?,
+                display_name: r.get(2)?,
+            })
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
@@ -180,13 +213,29 @@ mod tests {
     use super::*;
 
     fn setup() -> (std::sync::MutexGuard<'static, ()>, i64, i64) {
-        let g = super::super::db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        std::env::set_var("POLARIS_COLLAB_DB", std::env::temp_dir().join(format!("teams-{ts}.db")));
+        let g = super::super::db::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::set_var(
+            "POLARIS_COLLAB_DB",
+            std::env::temp_dir().join(format!("teams-{ts}.db")),
+        );
         let conn = open_db().unwrap();
-        conn.execute("INSERT INTO users(username,pass_hash,created_at) VALUES('alice','x',0)", []).unwrap();
+        conn.execute(
+            "INSERT INTO users(username,pass_hash,created_at) VALUES('alice','x',0)",
+            [],
+        )
+        .unwrap();
         let a = conn.last_insert_rowid();
-        conn.execute("INSERT INTO users(username,pass_hash,created_at) VALUES('bob','x',0)", []).unwrap();
+        conn.execute(
+            "INSERT INTO users(username,pass_hash,created_at) VALUES('bob','x',0)",
+            [],
+        )
+        .unwrap();
         let b = conn.last_insert_rowid();
         (g, a, b)
     }
@@ -206,7 +255,9 @@ mod tests {
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].member_count, 2);
         // 拉不存在的用户报清晰错误
-        assert!(add_member_by_username(t.id, "ghost", "member", "alice").unwrap_err().contains("找不到用户"));
+        assert!(add_member_by_username(t.id, "ghost", "member", "alice")
+            .unwrap_err()
+            .contains("找不到用户"));
         // 团队名唯一
         assert!(create("剧本组", bob, "bob").is_err());
         // 搜索

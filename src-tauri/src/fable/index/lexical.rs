@@ -53,7 +53,11 @@ pub fn build_lexical_index(progress: &dyn Fn(u64, u64)) -> Result<LexSummary, St
             let mut stmt = conn.prepare(PENDING_SQL).map_err(|e| e.to_string())?;
             let rows: Vec<(i64, String, String)> = stmt
                 .query_map([MAX_LEX_FILE_BYTES], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
                 })
                 .map_err(|e| e.to_string())?
                 .flatten()
@@ -80,7 +84,8 @@ pub fn build_lexical_index(progress: &dyn Fn(u64, u64)) -> Result<LexSummary, St
                 }
                 Err(_) => String::new(), // 文件已消失/不可读:标记完成,下轮重扫会清
             };
-            conn.execute("DELETE FROM lex WHERE rowid=?1", [file_id]).map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM lex WHERE rowid=?1", [file_id])
+                .map_err(|e| e.to_string())?;
             if !text.is_empty() {
                 conn.execute(
                     "INSERT INTO lex(rowid, body) VALUES(?1, ?2)",

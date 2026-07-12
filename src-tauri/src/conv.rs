@@ -3,6 +3,8 @@
 //! MVP: 单文件 JSON (`~/Polaris/data/state.json`), 全局 RwLock 保护
 //! 后续接 ② Wiki 的 storage::* (SQLite), API 不动
 
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use anyhow::Result;
 use directories::UserDirs;
 use once_cell::sync::Lazy;
@@ -13,8 +15,6 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 use tauri::AppHandle;
-#[cfg(not(feature = "desktop"))]
-use crate::host::AppHandle;
 
 // ───────────────────────── Types ─────────────────────────
 
@@ -137,7 +137,11 @@ pub fn init(_app: &AppHandle) -> Result<()> {
 pub fn ensure_mao_project() {
     {
         let mut state = STATE.write();
-        let mao_pid = match state.projects.iter().position(|p| p.name == MAO_PROJECT_NAME) {
+        let mao_pid = match state
+            .projects
+            .iter()
+            .position(|p| p.name == MAO_PROJECT_NAME)
+        {
             Some(i) => state.projects[i].id.clone(),
             None => {
                 let pid = new_id("p");
@@ -278,6 +282,93 @@ fn new_id(prefix: &str) -> String {
     format!("{}-{:x}-{:x}", prefix, ts, c)
 }
 
+/// 项目/对话 id 最终会成为目录名。只接受本程序生成 id 所需的 ASCII 安全集，既挡路径
+/// 穿越，也给异常超长输入设硬上限。旧版本生成的 id 同样只含这些字符。
+fn is_safe_storage_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+pub fn is_safe_conversation_id(id: &str) -> bool {
+    is_safe_storage_id(id)
+}
+
+/// 写消息/附件/启动 Agent 前统一确认：对话存在、未归档，且所属项目仍处于活动态。
+pub fn ensure_conversation_writable(id: &str) -> Result<(), String> {
+    if !is_safe_conversation_id(id) {
+        return Err("对话 ID 无效".into());
+    }
+    let st = STATE.read();
+    let c = st
+        .conversations
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| format!("对话 {id} 不存在"))?;
+    if c.archived {
+        return Err("对话已归档，不能继续写入".into());
+    }
+    let p = st
+        .projects
+        .iter()
+        .find(|p| p.id == c.project_id)
+        .ok_or("对话所属项目不存在")?;
+    if p.archived {
+        return Err("项目已归档，请先切换到活动项目".into());
+    }
+    Ok(())
+}
+
+/// 供远程客户端(手机/中继网关)用:conversationId 已存在 → 等价 ensure_conversation_writable
+/// (归档拒写);不存在 → 在默认项目(第一个未归档,没有就新建「远程会话」)下以该 id 自动建会话。
+/// 手机是瘦客户端,用本地生成的 `m-<ts>` 作 convId,服务端 conv 表本没有它,若不自动建则
+/// chat_send 会因「对话不存在」失败,手机根本发不出消息。桌面 UI 总是先 conv_create_conversation
+/// 再发,走「已存在」分支,行为与原先完全一致。
+pub fn ensure_writable_or_create(id: &str) -> Result<(), String> {
+    if !is_safe_conversation_id(id) {
+        return Err("对话 ID 无效".into());
+    }
+    {
+        let st = STATE.read();
+        if let Some(c) = st.conversations.iter().find(|c| c.id == id) {
+            if c.archived {
+                return Err("对话已归档，不能继续写入".into());
+            }
+            if let Some(p) = st.projects.iter().find(|p| p.id == c.project_id) {
+                if p.archived {
+                    return Err("项目已归档，请先切换到活动项目".into());
+                }
+            }
+            return Ok(());
+        }
+    }
+    // 不存在 → 远程客户端场景,自动建到默认项目。
+    let existing = STATE
+        .read()
+        .projects
+        .iter()
+        .find(|p| !p.archived)
+        .map(|p| p.id.clone());
+    let project_id = match existing {
+        Some(pid) => pid,
+        None => conv_create_project("远程会话".into())?.id,
+    };
+    let now = now_ms();
+    let c = Conversation {
+        id: id.to_string(),
+        project_id,
+        title: "远程对话".into(),
+        created_at: now,
+        updated_at: now,
+        archived: false,
+    };
+    STATE.write().conversations.push(c);
+    persist();
+    Ok(())
+}
+
 // ───────────────────────── Internal API (chat::send 用) ──
 
 /// 反查 conversation 对应的 project_id (chat::send 注入 CLAUDE.md 时用)
@@ -341,11 +432,7 @@ pub fn project_kb_scope(project_id: &str) -> Option<String> {
 }
 
 /// 设置项目的人格与知识库 scope（persona::persona_apply 用）。
-pub fn set_project_persona(
-    project_id: &str,
-    persona_id: Option<String>,
-    kb_scope: Option<String>,
-) {
+pub fn set_project_persona(project_id: &str, persona_id: Option<String>, kb_scope: Option<String>) {
     {
         let mut st = STATE.write();
         if let Some(p) = st.projects.iter_mut().find(|p| p.id == project_id) {
@@ -357,6 +444,7 @@ pub fn set_project_persona(
 }
 
 pub fn append_message(conversation_id: &str, role: &str, content: &str) -> Result<String> {
+    ensure_conversation_writable(conversation_id).map_err(anyhow::Error::msg)?;
     let id = new_id("m");
     let now = now_ms();
     {
@@ -452,14 +540,21 @@ pub fn conv_project_bind_collab(
 
 /// 手动设置项目的知识库 scope（人格工坊里的下拉）。persona_id 维持不变。
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn conv_set_project_kb_scope(project_id: String, kb_scope: Option<String>) -> Result<(), String> {
+pub fn conv_set_project_kb_scope(
+    project_id: String,
+    kb_scope: Option<String>,
+) -> Result<(), String> {
     let persona = STATE
         .read()
         .projects
         .iter()
         .find(|p| p.id == project_id)
         .and_then(|p| p.persona_id.clone());
-    set_project_persona(&project_id, persona, kb_scope.filter(|s| !s.trim().is_empty()));
+    set_project_persona(
+        &project_id,
+        persona,
+        kb_scope.filter(|s| !s.trim().is_empty()),
+    );
     Ok(())
 }
 
@@ -467,11 +562,7 @@ pub fn conv_set_project_kb_scope(project_id: String, kb_scope: Option<String>) -
 /// 否则前端传 `..\..\dir` 可让 create_dir_all / 写 CLAUDE.md 越出 projects 根。
 /// 真实 id 由 `new_id("p")` 生成(纯字母数字), 故该闸不会误伤合法项目。
 pub fn is_safe_project_id(id: &str) -> bool {
-    !id.is_empty()
-        && !id.contains('/')
-        && !id.contains('\\')
-        && !id.contains("..")
-        && !id.contains(':')
+    is_safe_storage_id(id)
 }
 
 /// 该项目在磁盘上的工作目录 `~/Polaris/projects/<id>/`(须与 write_mao_persona / claude_md 一致)。
@@ -524,11 +615,12 @@ pub fn conv_open_project_dir(project_id: String) -> Result<(), String> {
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_archive_project(project_id: String) -> Result<(), String> {
     let mut st = STATE.write();
-    for p in st.projects.iter_mut() {
-        if p.id == project_id {
-            p.archived = true;
-        }
-    }
+    let p = st
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("项目 {project_id} 不存在"))?;
+    p.archived = true;
     drop(st);
     persist();
     Ok(())
@@ -551,8 +643,16 @@ pub fn conv_list_conversations(project_id: String) -> Vec<Conversation> {
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_create_conversation(project_id: String) -> Result<Conversation, String> {
     let st = STATE.read();
-    if !st.projects.iter().any(|p| p.id == project_id) {
-        return Err(format!("project {} 不存在", project_id));
+    if !is_safe_project_id(&project_id) {
+        return Err("项目 ID 无效".into());
+    }
+    let project = st
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project {} 不存在", project_id))?;
+    if project.archived {
+        return Err("项目已归档，不能新建对话".into());
     }
     drop(st);
     let now = now_ms();
@@ -665,7 +765,11 @@ pub(crate) fn transcript_of(id: &str) -> Option<(String, String)> {
 /// transcripts_since / transcript_of 的共用截取口径,抽出来给老项目采样复用。
 fn render_transcript(state: &State, conv_id: &str, cap: usize) -> String {
     let mut buf = String::new();
-    for msg in state.messages.iter().filter(|m| m.conversation_id == conv_id) {
+    for msg in state
+        .messages
+        .iter()
+        .filter(|m| m.conversation_id == conv_id)
+    {
         let who = match msg.role.as_str() {
             "user" => "用户",
             "assistant" => "助手",
@@ -702,8 +806,16 @@ pub(crate) fn stale_unfinished_transcripts(
     per_conv_chars: usize,
 ) -> Vec<(String, String)> {
     const DAY: i64 = 24 * 3600 * 1000;
-    const CUES: [&str; 8] =
-        ["待办", "继续", "下一步", "未完成", "回头", "稍后", "下次", "todo"];
+    const CUES: [&str; 8] = [
+        "待办",
+        "继续",
+        "下一步",
+        "未完成",
+        "回头",
+        "稍后",
+        "下次",
+        "todo",
+    ];
     let cold_after = now_ms - 14 * DAY; // 14 天没动过才算冷
     let lookback_from = now_ms - 240 * DAY; // ~8 个月内才算「几个月前」
 
@@ -739,7 +851,11 @@ pub(crate) fn stale_unfinished_transcripts(
 
     // 每天轮换一个起点,避免天天提同几个搁置项目
     let n = cand.len();
-    let offset = if n > max_convs { (now_ms / DAY) as usize % n } else { 0 };
+    let offset = if n > max_convs {
+        (now_ms / DAY) as usize % n
+    } else {
+        0
+    };
     (0..max_convs.min(n))
         .map(|i| {
             let (c, _) = cand[(offset + i) % n];
@@ -771,6 +887,9 @@ pub fn clear_messages(conversation_id: &str) -> usize {
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_delete_conversation(conversation_id: String) -> Result<(), String> {
     let mut st = STATE.write();
+    if !st.conversations.iter().any(|c| c.id == conversation_id) {
+        return Err(format!("对话 {conversation_id} 不存在"));
+    }
     st.conversations.retain(|c| c.id != conversation_id);
     st.messages.retain(|m| m.conversation_id != conversation_id);
     drop(st);

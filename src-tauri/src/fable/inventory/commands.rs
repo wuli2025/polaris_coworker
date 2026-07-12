@@ -80,7 +80,11 @@ pub(crate) fn app_data_roots() -> Vec<ScanRootInfo> {
         if p.is_dir() {
             let path = p.to_string_lossy().to_string();
             if seen.insert(path.clone()) {
-                out.push(ScanRootInfo { path, label: (*label).to_string(), default_on: true });
+                out.push(ScanRootInfo {
+                    path,
+                    label: (*label).to_string(),
+                    default_on: true,
+                });
             }
         }
     }
@@ -125,7 +129,11 @@ pub fn fable_inventory_start(
     let mut roots: Vec<String> = Vec::new();
     let mut unreachable: Vec<String> = Vec::new();
     for r in candidates {
-        let secs = if is_remote_root(&r) { probe_secs().max(25) } else { probe_secs() };
+        let secs = if is_remote_root(&r) {
+            probe_secs().max(25)
+        } else {
+            probe_secs()
+        };
         if super::sched::dir_reachable(std::path::Path::new(&r), secs) {
             roots.push(r);
         } else {

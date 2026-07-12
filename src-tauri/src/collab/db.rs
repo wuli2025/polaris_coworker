@@ -259,8 +259,11 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         })
         .unwrap_or(false);
     if !has_profile {
-        conn.execute("ALTER TABLE projects ADD COLUMN check_profile TEXT NOT NULL DEFAULT 'code'", [])
-            .map_err(|e| format!("补 check_profile 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN check_profile TEXT NOT NULL DEFAULT 'code'",
+            [],
+        )
+        .map_err(|e| format!("补 check_profile 列失败: {e}"))?;
     }
 
     // 增量列:projects.shared_scope —— 管理者放行的全项目共享可见路径(CSV),
@@ -273,8 +276,11 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         })
         .unwrap_or(false);
     if !has_shared {
-        conn.execute("ALTER TABLE projects ADD COLUMN shared_scope TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| format!("补 shared_scope 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN shared_scope TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("补 shared_scope 列失败: {e}"))?;
     }
 
     // 增量列:projects.check_skill —— 项目检查用的技能 id;空 = 内置 project-check-default。
@@ -286,8 +292,11 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         })
         .unwrap_or(false);
     if !has_check_skill {
-        conn.execute("ALTER TABLE projects ADD COLUMN check_skill TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| format!("补 check_skill 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN check_skill TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("补 check_skill 列失败: {e}"))?;
     }
 
     // 增量列:check_runs.sha —— 今日早版建过无 sha 的表(未发版但开发库存在),探测补齐。
@@ -299,8 +308,11 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         })
         .unwrap_or(false);
     if !has_sha {
-        conn.execute("ALTER TABLE check_runs ADD COLUMN sha TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| format!("补 check_runs.sha 列失败: {e}"))?;
+        conn.execute(
+            "ALTER TABLE check_runs ADD COLUMN sha TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("补 check_runs.sha 列失败: {e}"))?;
     }
     Ok(())
 }
@@ -331,8 +343,10 @@ pub fn audit(actor: &str, action: &str, target: &str, detail: &str) {
 /// meta 键值读(主机标识等库级小状态)。
 pub fn meta_get(k: &str) -> Option<String> {
     let conn = open_db().ok()?;
-    conn.query_row("SELECT v FROM meta WHERE k=?1", [k], |r| r.get::<_, String>(0))
-        .ok()
+    conn.query_row("SELECT v FROM meta WHERE k=?1", [k], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()
 }
 
 /// meta 键值写(upsert)。

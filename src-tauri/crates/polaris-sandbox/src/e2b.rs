@@ -120,10 +120,17 @@ pub fn cube_status() -> CubeStatus {
             if o.status.success() && code != "000" && !code.is_empty() {
                 (true, format!("端点可达 (HTTP {}).", code))
             } else {
-                (false, "端点无响应 (curl 未拿到状态码)。检查 URL / 网络 / CubeSandbox 是否在运行。".into())
+                (
+                    false,
+                    "端点无响应 (curl 未拿到状态码)。检查 URL / 网络 / CubeSandbox 是否在运行。"
+                        .into(),
+                )
             }
         }
-        Err(e) => (false, format!("curl 调用失败: {}。Windows 10+ 自带 curl。", e)),
+        Err(e) => (
+            false,
+            format!("curl 调用失败: {}。Windows 10+ 自带 curl。", e),
+        ),
     };
 
     CubeStatus {

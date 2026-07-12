@@ -48,8 +48,8 @@ pub(crate) fn ensure_recognizer() -> Result<(), String> {
         num_threads: Some(num_threads()),
         ..Default::default()
     };
-    let rec = SenseVoiceRecognizer::new(config)
-        .map_err(|e| format!("加载 SenseVoice 失败: {e}"))?;
+    let rec =
+        SenseVoiceRecognizer::new(config).map_err(|e| format!("加载 SenseVoice 失败: {e}"))?;
     *REC.lock() = Some(rec);
     Ok(())
 }
@@ -111,7 +111,13 @@ mod tests {
         }
         let r = transcribe_file(&wav.to_string_lossy()).expect("识别失败");
         eprintln!("[asr_smoke] 原文 = {}", r.raw);
-        eprintln!("[asr_smoke] 终稿 = {}  (档位 {}, {} 处改动, {}ms)", r.text, r.tier, r.changes.len(), r.ms);
+        eprintln!(
+            "[asr_smoke] 终稿 = {}  (档位 {}, {} 处改动, {}ms)",
+            r.text,
+            r.tier,
+            r.changes.len(),
+            r.ms
+        );
         assert!(!r.raw.is_empty(), "识别结果为空");
 
         // 多语种:英文 wav 若在位也跑一遍
@@ -128,7 +134,7 @@ mod tests {
     #[test]
     fn asr_pipeline_demo() {
         crate::voice::init(); // 装入种子词表(含 扣带式→codex / 北极心→北极星)
-        // 模拟一段「听岔了」的转写:把 codex 听成「扣带式」、北极星听成「北极心」、群晖听成「群辉」
+                              // 模拟一段「听岔了」的转写:把 codex 听成「扣带式」、北极星听成「北极心」、群晖听成「群辉」
         let misheard = "帮我把设置改成扣带式那种形态，名字叫北极心，部署到群辉上";
         let r = crate::voice::anti_pollute(misheard);
         eprintln!("[pipeline] 听岔的原文 = {misheard}");

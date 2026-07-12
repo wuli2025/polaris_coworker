@@ -8,8 +8,11 @@
 //! 这是 Forge 工程的**第一块落地件**:在写任何重后端之前,先有一个诚实的能力地图,让用户
 //! 一眼看清「我这环境出 PPT/视频走哪条路、要不要补东西」,而不是跑到一半报错。
 
-pub mod capture;     // 工业级化:持久 CDP + 5 档 fallback 链(替 video 的 per-frame CLI)
-pub mod fx_safe;     // 工业级化:动效错误隔离 + spring 闭式解(任务 c §C.2 §C.3)
+pub mod capture; // 工业级化:持久 CDP + 5 档 fallback 链(替 video 的 per-frame CLI)
+                 // Figma 往返桥(REST 拉节点树+图片内嵌):设计成品域,分仓规划 v2 同落 polaris-forge 仓
+                 // (Phase 0 文件归位; lib.rs 有 crate 根别名保持 `crate::figma_bridge` 旧路径)。
+pub mod figma_bridge;
+pub mod fx_safe; // 工业级化:动效错误隔离 + spring 闭式解(任务 c §C.2 §C.3)
 pub mod pptx;
 pub mod pptx_native; // 路线 B:spec JSON → 原生可编辑 .pptx(零浏览器,Docker slim 可用)
 pub mod tts;
@@ -22,7 +25,11 @@ use std::process::Command;
 /// 跑外部命令并设超时:超时则杀进程树返回 Err,防 chromium/ffmpeg/say 挂死永久阻塞整个请求
 /// (「让模块再也不会有问题」的硬化——看门狗只管 claude,管不到这些 forge 子进程)。
 /// 调用方传入已配好 args 的 Command(stdio 由本函数置 null)。成功且退出码 0 → Ok。
-pub fn run_with_timeout(mut cmd: std::process::Command, secs: u64, what: &str) -> Result<(), String> {
+pub fn run_with_timeout(
+    mut cmd: std::process::Command,
+    secs: u64,
+    what: &str,
+) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -174,7 +181,10 @@ pub fn path_to_file_url(path: &str) -> Result<String, String> {
         s = rest.to_string();
     }
     // 只编码会破坏 URL 结构的字符(% 必须最先,避免二次编码)。
-    let s = s.replace('%', "%25").replace('#', "%23").replace('?', "%3F");
+    let s = s
+        .replace('%', "%25")
+        .replace('#', "%23")
+        .replace('?', "%3F");
     Ok(format!("file:///{}", s.trim_start_matches('/')))
 }
 
@@ -429,7 +439,11 @@ pub async fn forge_deck_to_pptx(
 /// Docker slim / mac / win 三平台恒可用。spec 既可传 JSON 字符串也可传 .json 文件路径。
 pub fn spec_to_pptx_sync(spec: String, out: String) -> Result<Value, String> {
     // BOM(U+FEFF)不算 whitespace,带 BOM 的 JSON 会被误判成文件路径 → 先剥掉再判。
-    let json = if spec.trim_start_matches('\u{feff}').trim_start().starts_with('{') {
+    let json = if spec
+        .trim_start_matches('\u{feff}')
+        .trim_start()
+        .starts_with('{')
+    {
         spec
     } else {
         std::fs::read_to_string(&spec).map_err(|e| format!("读 spec 文件 {spec} 失败: {e}"))?
@@ -496,8 +510,17 @@ pub async fn forge_deck_to_video(
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         deck_to_video_sync(
-            deck, out, seconds_per_slide, fps, width, height, slides, audio, narration,
-            transition, motion,
+            deck,
+            out,
+            seconds_per_slide,
+            fps,
+            width,
+            height,
+            slides,
+            audio,
+            narration,
+            transition,
+            motion,
         )
     })
     .await
@@ -589,7 +612,12 @@ pub fn forge_screenshot(
 }
 
 /// 汇总当前环境出片的拦路项(给 UI 红灯直接展示)。
-fn preflight_blockers(plat: &str, chromium: &Option<String>, ffmpeg: bool, cjk: Option<bool>) -> Vec<String> {
+fn preflight_blockers(
+    plat: &str,
+    chromium: &Option<String>,
+    ffmpeg: bool,
+    cjk: Option<bool>,
+) -> Vec<String> {
     let mut b = Vec::new();
     if (plat == "docker" || plat == "linux") && chromium.is_none() {
         b.push("缺 chromium：用 full 镜像(--build-arg POLARIS_RENDER=1)".to_string());

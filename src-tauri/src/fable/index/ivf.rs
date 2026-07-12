@@ -62,8 +62,9 @@ fn train_binary_centroids(sample: &[Vec<u8>], k: usize, iters: usize) -> Vec<Vec
     let nbytes = sample[0].len();
     let k = k.min(sample.len());
     let stride = (sample.len() / k).max(1);
-    let mut centroids: Vec<Vec<u8>> =
-        (0..k).map(|i| sample[(i * stride).min(sample.len() - 1)].clone()).collect();
+    let mut centroids: Vec<Vec<u8>> = (0..k)
+        .map(|i| sample[(i * stride).min(sample.len() - 1)].clone())
+        .collect();
     for _ in 0..iters {
         let mut buckets: Vec<Vec<&[u8]>> = vec![Vec::new(); centroids.len()];
         for s in sample {
@@ -95,8 +96,7 @@ pub struct OptimizeSummary {
 pub fn optimize_vectors() -> Result<OptimizeSummary, String> {
     let started = std::time::Instant::now();
     let conn = open_db()?;
-    let model = active_embed_model()
-        .ok_or("没有可用的嵌入服务商,无法确定向量模型")?;
+    let model = active_embed_model().ok_or("没有可用的嵌入服务商,无法确定向量模型")?;
     let (n, dim): (i64, i64) = conn
         .query_row(
             "SELECT COUNT(*), COALESCE(MAX(dim),0) FROM chunks WHERE model=?1 AND bits IS NOT NULL",
@@ -144,7 +144,8 @@ pub fn optimize_vectors() -> Result<OptimizeSummary, String> {
     }
 
     // 落质心:先清本模型旧 cell,再插入新质心并记下各自 rowid。
-    conn.execute("DELETE FROM vec_cells WHERE model=?1", [&model]).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM vec_cells WHERE model=?1", [&model])
+        .map_err(|e| e.to_string())?;
     let mut cell_ids: Vec<i64> = Vec::with_capacity(centroids.len());
     {
         conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
@@ -153,7 +154,8 @@ pub fn optimize_vectors() -> Result<OptimizeSummary, String> {
                 .prepare_cached("INSERT INTO vec_cells(model, dim, bits, n) VALUES(?1,?2,?3,0)")
                 .map_err(|e| e.to_string())?;
             for c in &centroids {
-                ins.execute(rusqlite::params![model, dim, c]).map_err(|e| e.to_string())?;
+                ins.execute(rusqlite::params![model, dim, c])
+                    .map_err(|e| e.to_string())?;
                 cell_ids.push(conn.last_insert_rowid());
             }
         }
@@ -195,7 +197,8 @@ pub fn optimize_vectors() -> Result<OptimizeSummary, String> {
                 .map_err(|e| e.to_string())?;
             for (id, bits) in &batch {
                 let ci = nearest_centroid(bits, &centroids);
-                up.execute(rusqlite::params![id, cell_ids[ci]]).map_err(|e| e.to_string())?;
+                up.execute(rusqlite::params![id, cell_ids[ci]])
+                    .map_err(|e| e.to_string())?;
             }
         }
         conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
@@ -221,7 +224,11 @@ pub fn optimize_vectors() -> Result<OptimizeSummary, String> {
         cells: cell_ids.len() as u64,
         assigned,
         seconds: started.elapsed().as_secs_f64(),
-        note: if cancelled() { "已取消(部分分配)".into() } else { "完成".into() },
+        note: if cancelled() {
+            "已取消(部分分配)".into()
+        } else {
+            "完成".into()
+        },
     })
 }
 
@@ -249,8 +256,7 @@ pub struct RepairSummary {
 pub fn repair_vectors() -> Result<RepairSummary, String> {
     let started = std::time::Instant::now();
     let conn = open_db()?;
-    let model = active_embed_model()
-        .ok_or("没有可用的嵌入服务商,无法确定向量模型")?;
+    let model = active_embed_model().ok_or("没有可用的嵌入服务商,无法确定向量模型")?;
 
     // ── ① 清陈旧向量 + 重置受影响文件 ──
     let stale_files: Vec<i64> = {
@@ -268,7 +274,10 @@ pub fn repair_vectors() -> Result<RepairSummary, String> {
         rows
     };
     let purged_stale = conn
-        .execute("DELETE FROM chunks WHERE model='' OR model IS NULL OR bits IS NULL", [])
+        .execute(
+            "DELETE FROM chunks WHERE model='' OR model IS NULL OR bits IS NULL",
+            [],
+        )
         .map_err(|e| e.to_string())? as u64;
     let mut reset_files = 0u64;
     for fid in &stale_files {
@@ -282,7 +291,10 @@ pub fn repair_vectors() -> Result<RepairSummary, String> {
             .unwrap_or(0);
         if remain == 0 {
             reset_files += conn
-                .execute("UPDATE files SET chunked=0 WHERE id=?1 AND chunked=1", [fid])
+                .execute(
+                    "UPDATE files SET chunked=0 WHERE id=?1 AND chunked=1",
+                    [fid],
+                )
                 .map_err(|e| e.to_string())? as u64;
         }
     }
@@ -293,7 +305,9 @@ pub fn repair_vectors() -> Result<RepairSummary, String> {
             .prepare("SELECT id, bits FROM vec_cells WHERE model=?1 ORDER BY id")
             .map_err(|e| e.to_string())?;
         let rows: Vec<Vec<u8>> = stmt
-            .query_map([&model], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+            .query_map([&model], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
             .map_err(|e| e.to_string())?
             .flatten()
             .map(|(_, b)| b)
@@ -346,7 +360,8 @@ pub fn repair_vectors() -> Result<RepairSummary, String> {
                     .map_err(|e| e.to_string())?;
                 for (id, bits) in &batch {
                     let ci = nearest_centroid(bits, &centroids);
-                    up.execute(rusqlite::params![id, cell_ids[ci]]).map_err(|e| e.to_string())?;
+                    up.execute(rusqlite::params![id, cell_ids[ci]])
+                        .map_err(|e| e.to_string())?;
                 }
             }
             conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
@@ -395,7 +410,11 @@ pub(crate) fn maybe_optimize(conn: &rusqlite::Connection, model: &str) {
         return;
     }
     let cells: i64 = conn
-        .query_row("SELECT COUNT(*) FROM vec_cells WHERE model=?1", [model], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM vec_cells WHERE model=?1",
+            [model],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     if cells == 0 {
         let _ = optimize_vectors(); // 首次自动建;失败不影响构建结果(检索退回全扫)
@@ -428,7 +447,7 @@ mod tests {
         let c = vec![0b0000_0010u8];
         let maj = majority_bits(&[&a, &b, &c], 1);
         assert_eq!(maj[0], 0b0000_0011); // bit0(a,b)、bit1(b,c)各 2/3 > 半数
-        // 汉明最近质心。
+                                         // 汉明最近质心。
         let cents = vec![vec![0b0000_0000u8], vec![0b1111_1111u8]];
         assert_eq!(nearest_centroid(&[0b0000_0001u8], &cents), 0);
         assert_eq!(nearest_centroid(&[0b1111_1110u8], &cents), 1);
@@ -478,7 +497,8 @@ mod tests {
         )
         .unwrap();
         let n = |id: i64| -> i64 {
-            conn.query_row("SELECT n FROM vec_cells WHERE id=?1", [id], |r| r.get(0)).unwrap()
+            conn.query_row("SELECT n FROM vec_cells WHERE id=?1", [id], |r| r.get(0))
+                .unwrap()
         };
         assert_eq!(n(10), 3, "cell 10 应有 3 个 m 成员(不含 other 的同号干扰)");
         assert_eq!(n(11), 1);

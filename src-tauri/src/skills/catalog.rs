@@ -454,20 +454,33 @@ pub(crate) fn skill_category(id: &str) -> &'static str {
         // 财务会计
         "financial-model" | "invoice-audit" | "bookkeeping-recon" => "财务会计",
         // 开发编程
-        "project-skill" | "git-commit" | "gh-cli" | "frontend-ui" | "rest-api-design"
-        | "docker-deploy" | "sql-optimization" | "security-audit" | "tech-writing"
-        | "systematic-debugging" | "writing-plans" | "verification-before-completion"
+        "project-skill"
+        | "git-commit"
+        | "gh-cli"
+        | "frontend-ui"
+        | "rest-api-design"
+        | "docker-deploy"
+        | "sql-optimization"
+        | "security-audit"
+        | "tech-writing"
+        | "systematic-debugging"
+        | "writing-plans"
+        | "verification-before-completion"
         | "mcp-builder" => "开发编程",
         // 测试质检
         "webapp-testing" | "e2e-test-pipeline" | "bug-report-repro" => "测试质检",
         // 设计美工
         "canvas-design" | "brand-guidelines" | "algorithmic-art" | "image-gen" => "设计美工",
         // 自媒体运营
-        "wechat-pipeline" | "xiaohongshu-pipeline" | "hot-topic-radar"
-        | "content-analytics-report" | "community-engagement" | "xhs-mao-pipeline"
-        | "wechat-md-typesetter" | "gz-wechat-article-writer" | "gz-notion-infographic" => {
-            "自媒体运营"
-        }
+        "wechat-pipeline"
+        | "xiaohongshu-pipeline"
+        | "hot-topic-radar"
+        | "content-analytics-report"
+        | "community-engagement"
+        | "xhs-mao-pipeline"
+        | "wechat-md-typesetter"
+        | "gz-wechat-article-writer"
+        | "gz-notion-infographic" => "自媒体运营",
         // 音视频
         "edge-tts" | "hyperframes" | "web-video-presentation" | "web-video-presentation-guide" => {
             "音视频"
@@ -477,4 +490,3 @@ pub(crate) fn skill_category(id: &str) -> &'static str {
         _ => "通用",
     }
 }
-

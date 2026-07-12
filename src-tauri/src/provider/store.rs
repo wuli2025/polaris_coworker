@@ -126,7 +126,10 @@ fn website_from_base(base: &str) -> String {
         return String::new();
     }
     // 取 scheme://host 作为官网链接 (去掉路径与 ${占位})
-    if let Some(rest) = b.strip_prefix("https://").or_else(|| b.strip_prefix("http://")) {
+    if let Some(rest) = b
+        .strip_prefix("https://")
+        .or_else(|| b.strip_prefix("http://"))
+    {
         let host = rest.split('/').next().unwrap_or(rest);
         if host.contains('$') {
             return String::new();
@@ -250,7 +253,11 @@ fn seed_gift_minimax(store: &mut Store, data_dir: &Path) -> bool {
     // 钉 MiniMax-M3(官方 Claude Code 文档推荐):四档全设成 M3, 后台小任务也走 M3,
     // 不再回落 Claude 默认 haiku 名被网关当未知模型。
     let cfg = config_with_model(
-        default_config("https://api.minimaxi.com/anthropic", DEFAULT_TOKEN_FIELD, &key),
+        default_config(
+            "https://api.minimaxi.com/anthropic",
+            DEFAULT_TOKEN_FIELD,
+            &key,
+        ),
         "MiniMax-M3",
     );
     store.items.push(StoredProvider {
@@ -623,7 +630,16 @@ pub(crate) fn build_views(store: &Store) -> Vec<ProviderView> {
             .unwrap_or_else(|| default_config(p.base_url, &token_field, ""));
         let note = stored.map(|s| s.note.as_str()).unwrap_or("");
         out.push(make_view(
-            p.id, p.name, note, &token_field, p.category, p.kind, true, p.base_url, "", cfg,
+            p.id,
+            p.name,
+            note,
+            &token_field,
+            p.category,
+            p.kind,
+            true,
+            p.base_url,
+            "",
+            cfg,
         ));
     }
 
@@ -711,7 +727,10 @@ fn read_live_env() -> Map<String, Value> {
     let Ok(v) = serde_json::from_str::<Value>(&txt) else {
         return Map::new();
     };
-    v.get("env").and_then(|e| e.as_object()).cloned().unwrap_or_default()
+    v.get("env")
+        .and_then(|e| e.as_object())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// 隔离模式下判定「全局 settings.json 的受管 env 是不是我们(联动时代/旧版本)写的」。
@@ -807,9 +826,7 @@ fn apply_settings_config(cfg: &Value) -> Result<(), String> {
         obj.remove(*k);
     }
     // env: 清受管键后套用 cfg.env
-    let env = obj
-        .entry("env".to_string())
-        .or_insert_with(|| json!({}));
+    let env = obj.entry("env".to_string()).or_insert_with(|| json!({}));
     if !env.is_object() {
         *env = json!({});
     }
@@ -1245,7 +1262,10 @@ mod per_conv_scope_tests {
     #[test]
     fn forced_official_clears_inherited_global_env() {
         // 模拟「全局当前 = 某第三方」在父进程 env 里留下的痕迹
-        std::env::set_var("ANTHROPIC_BASE_URL", "https://global-thirdparty.example/anthropic");
+        std::env::set_var(
+            "ANTHROPIC_BASE_URL",
+            "https://global-thirdparty.example/anthropic",
+        );
         std::env::set_var("ANTHROPIC_AUTH_TOKEN", "global-token");
 
         let mut cmd = Command::new("claude");
@@ -1253,11 +1273,23 @@ mod per_conv_scope_tests {
         let ov = cmd_env_overrides(&cmd);
 
         // 受管键必须被显式移除(值为 None), 而不是放任继承全局那家
-        for k in ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"] {
-            assert_eq!(ov.get(k), Some(&None), "受管键 {k} 应被 env_remove 顶掉继承值");
+        for k in [
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_MODEL",
+        ] {
+            assert_eq!(
+                ov.get(k),
+                Some(&None),
+                "受管键 {k} 应被 env_remove 顶掉继承值"
+            );
         }
         // 官方档不套私有 CLAUDE_CONFIG_DIR(OAuth 凭据在共享 ~/.claude)
-        assert!(!ov.contains_key("CLAUDE_CONFIG_DIR"), "官方不应改 CLAUDE_CONFIG_DIR");
+        assert!(
+            !ov.contains_key("CLAUDE_CONFIG_DIR"),
+            "官方不应改 CLAUDE_CONFIG_DIR"
+        );
     }
 
     /// Auto 档(None/""/"auto"): 不做逐命令注入。全局当前为官方时, scope_child_claude

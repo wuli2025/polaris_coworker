@@ -19,10 +19,10 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-#[cfg(feature = "desktop")]
-use tauri::{AppHandle, Emitter};
 #[cfg(not(feature = "desktop"))]
 use crate::host::AppHandle;
+#[cfg(feature = "desktop")]
+use tauri::{AppHandle, Emitter};
 
 // ───────────────────────── 内置行业 Schema(中文化精简) ─────────────────────────
 
@@ -46,7 +46,11 @@ pub struct SchemaDef {
 
 macro_rules! t {
     ($id:expr, $name:expr, $hint:expr) => {
-        OntoTypeDef { id: $id, name: $name, hint: $hint }
+        OntoTypeDef {
+            id: $id,
+            name: $name,
+            hint: $hint,
+        }
     };
 }
 
@@ -228,7 +232,11 @@ pub struct SchemaView {
 
 fn type_views(defs: &[OntoTypeDef]) -> Vec<OntoTypeView> {
     defs.iter()
-        .map(|d| OntoTypeView { id: d.id.into(), name: d.name.into(), hint: d.hint.into() })
+        .map(|d| OntoTypeView {
+            id: d.id.into(),
+            name: d.name.into(),
+            hint: d.hint.into(),
+        })
         .collect()
 }
 
@@ -238,9 +246,11 @@ fn schemas_inner() -> Result<Vec<SchemaView>, String> {
     let mut out = Vec::new();
     for s in schemas() {
         let triples = conn
-            .query_row("SELECT COUNT(*) FROM triples WHERE schema_id=?1", [s.id], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM triples WHERE schema_id=?1",
+                [s.id],
+                |r| r.get::<_, i64>(0),
+            )
             .unwrap_or(0) as u64;
         out.push(SchemaView {
             id: s.id.into(),
@@ -259,7 +269,10 @@ fn schemas_inner() -> Result<Vec<SchemaView>, String> {
 fn overview_inner() -> Result<OntologyOverview, String> {
     let schemas = schemas_inner()?;
     let total = schemas.iter().map(|s| s.triples).sum();
-    Ok(OntologyOverview { total_triples: total, schemas })
+    Ok(OntologyOverview {
+        total_triples: total,
+        schemas,
+    })
 }
 
 // 桌面端 async + spawn_blocking:每个 schema 一条 `COUNT(*) FROM triples`,在后台索引满负荷
@@ -302,7 +315,8 @@ pub fn ontology_overview() -> Result<OntologyOverview, String> {
 pub fn ontology_seed(schema_id: String) -> Result<usize, String> {
     let s = find_schema(&schema_id).ok_or_else(|| format!("未知 schema: {schema_id}"))?;
     let conn = open_db()?;
-    conn.execute("DELETE FROM onto_types WHERE schema_id=?1", [s.id]).ok();
+    conn.execute("DELETE FROM onto_types WHERE schema_id=?1", [s.id])
+        .ok();
     let mut n = 0usize;
     conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
     {
@@ -414,7 +428,11 @@ fn validate_triple(s: &SchemaDef, t: &TripleIn) -> Option<(String, String, Strin
             .map(|e| e.name.to_string())
             .unwrap_or_else(|| raw.to_string())
     };
-    Some((rel.name.to_string(), norm_ent(&t.subject_type), norm_ent(&t.object_type)))
+    Some((
+        rel.name.to_string(),
+        norm_ent(&t.subject_type),
+        norm_ent(&t.object_type),
+    ))
 }
 
 /// 启动一次 Schema-Guided 抽取:后台 headless claude 在框内抽三元组 → Rust 校验落库。
@@ -431,7 +449,11 @@ pub fn ontology_extract(app: AppHandle, schema_id: String) -> Result<String, Str
     let c = EXTRACT_COUNTER.fetch_add(1, Ordering::Relaxed);
     let run_id = format!("onto-{c:x}");
     let root = PathBuf::from(crate::kb::kb_root());
-    let cwd = if root.exists() { root } else { std::env::temp_dir() };
+    let cwd = if root.exists() {
+        root
+    } else {
+        std::env::temp_dir()
+    };
     let root_disp = cwd.to_string_lossy().replace('\\', "/");
     let prompt = extract_directive(s, &root_disp);
     let schema_owned = s.id.to_string();
@@ -446,7 +468,10 @@ pub fn ontology_extract(app: AppHandle, schema_id: String) -> Result<String, Str
         }
         let _g = Guard;
 
-        emit_onto(&app, json!({ "kind": "phase", "text": "在框内读资料、抽关系三元组…" }));
+        emit_onto(
+            &app,
+            json!({ "kind": "phase", "text": "在框内读资料、抽关系三元组…" }),
+        );
         let collected = match crate::kb::run_claude_readonly(&cwd, &prompt, |kind, _t| {
             if kind == "delta" {
                 emit_onto(&app, json!({ "kind": "tick" }));
@@ -474,7 +499,10 @@ pub fn ontology_extract(app: AppHandle, schema_id: String) -> Result<String, Str
         let parsed: Vec<TripleIn> = match serde_json::from_str(&raw) {
             Ok(v) => v,
             Err(e) => {
-                emit_onto(&app, json!({ "kind": "error", "message": format!("三元组 JSON 解析失败: {e}") }));
+                emit_onto(
+                    &app,
+                    json!({ "kind": "error", "message": format!("三元组 JSON 解析失败: {e}") }),
+                );
                 return;
             }
         };
@@ -492,7 +520,8 @@ pub fn ontology_extract(app: AppHandle, schema_id: String) -> Result<String, Str
             }
         };
         // 本轮重抽:先清掉同 schema 旧三元组,避免重复累积。
-        conn.execute("DELETE FROM triples WHERE schema_id=?1", [&schema_owned]).ok();
+        conn.execute("DELETE FROM triples WHERE schema_id=?1", [&schema_owned])
+            .ok();
         let made_at = chrono::Local::now().timestamp_millis();
         let mut kept = 0usize;
         let mut dropped = 0usize;
@@ -600,8 +629,14 @@ mod tests {
             assert!(!s.relations.is_empty(), "{} 缺关系类型", s.id);
             // 全中文显示名(让企业看到的是中文,不是一堆英文)。
             for d in s.entities.iter().chain(s.relations.iter()) {
-                assert!(d.name.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
-                    "{}/{} 显示名应含中文", s.id, d.id);
+                assert!(
+                    d.name
+                        .chars()
+                        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                    "{}/{} 显示名应含中文",
+                    s.id,
+                    d.id
+                );
             }
         }
     }
@@ -611,16 +646,24 @@ mod tests {
         let s = find_schema("finance").unwrap();
         // 越框的谓语 → 拒。
         let bad = TripleIn {
-            subject: "张三".into(), subject_type: "人物".into(),
-            predicate: "喜欢".into(), object: "李四".into(), object_type: "人物".into(),
-            confidence: 0.9, source_file: "raw/x".into(),
+            subject: "张三".into(),
+            subject_type: "人物".into(),
+            predicate: "喜欢".into(),
+            object: "李四".into(),
+            object_type: "人物".into(),
+            confidence: 0.9,
+            source_file: "raw/x".into(),
         };
         assert!(super::validate_triple(s, &bad).is_none(), "越框关系应被拒");
         // 框内谓语(中文名)→ 收,且类型归一。
         let good = TripleIn {
-            subject: "甲公司".into(), subject_type: "company".into(),
-            predicate: "持有".into(), object: "乙公司".into(), object_type: "公司".into(),
-            confidence: 0.95, source_file: "raw/y".into(),
+            subject: "甲公司".into(),
+            subject_type: "company".into(),
+            predicate: "持有".into(),
+            object: "乙公司".into(),
+            object_type: "公司".into(),
+            confidence: 0.95,
+            source_file: "raw/y".into(),
         };
         let (p, st, ot) = super::validate_triple(s, &good).expect("框内关系应收");
         assert_eq!(p, "持有");
@@ -632,9 +675,13 @@ mod tests {
     fn empty_fields_rejected() {
         let s = find_schema("general").unwrap();
         let empty = TripleIn {
-            subject: "".into(), subject_type: "人物".into(),
-            predicate: "隶属".into(), object: "X".into(), object_type: "组织".into(),
-            confidence: 0.9, source_file: "".into(),
+            subject: "".into(),
+            subject_type: "人物".into(),
+            predicate: "隶属".into(),
+            object: "X".into(),
+            object_type: "组织".into(),
+            confidence: 0.9,
+            source_file: "".into(),
         };
         assert!(super::validate_triple(s, &empty).is_none(), "空主语应被拒");
     }

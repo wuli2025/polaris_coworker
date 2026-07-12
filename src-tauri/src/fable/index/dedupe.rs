@@ -51,7 +51,11 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([MAX_LEX_FILE_BYTES], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
                 })
                 .map_err(|e| e.to_string())?;
             rows.filter_map(|r| r.ok()).collect()
@@ -61,10 +65,11 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
                 stopped = "已取消".into();
                 break;
             }
-            let abs = super::reencode_fs_path(
-                &std::path::Path::new(&root).join(&rel).to_string_lossy(),
-            );
-            let Ok(bytes) = std::fs::read(&abs) else { continue };
+            let abs =
+                super::reencode_fs_path(&std::path::Path::new(&root).join(&rel).to_string_lossy());
+            let Ok(bytes) = std::fs::read(&abs) else {
+                continue;
+            };
             if bytes.iter().take(4096).any(|&b| b == 0) {
                 continue;
             }
@@ -163,7 +168,10 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
 
     // ── 新压旧:同 (root_id, 目录, ext, doc_key) 分组,内容互异,非最新 mtime 者降权 ──
     // 先整体清零(幂等),再全量重标;只在 dup_of=0(未被精确去重折叠)的文件间比较。
-    let _ = conn.execute("UPDATE files SET superseded_by=0 WHERE superseded_by<>0", []);
+    let _ = conn.execute(
+        "UPDATE files SET superseded_by=0 WHERE superseded_by<>0",
+        [],
+    );
     let mut superseded = 0u64;
     if !cancelled() {
         let srows: Vec<(i64, i64, i64, String, String, String, String)> = {
@@ -269,7 +277,8 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         std::env::set_var("POLARIS_FABLE_DB", &db);
         let conn = open_db().unwrap();
-        conn.execute("INSERT INTO roots(id, path) VALUES(1, '/r')", []).unwrap();
+        conn.execute("INSERT INTO roots(id, path) VALUES(1, '/r')", [])
+            .unwrap();
         let ins = |id: i64, rel: &str, name: &str, mtime: i64, hash: &str, dkey: &str| {
             conn.execute(
                 "INSERT INTO files(id, root_id, relpath, name, ext, kind, size, mtime, chunked, ftsed, seen, content_hash, doc_key)
@@ -293,12 +302,16 @@ mod tests {
         let sum = dedupe_scan(false).unwrap();
 
         let col = |id: i64, c: &str| -> i64 {
-            conn.query_row(&format!("SELECT {c} FROM files WHERE id=?1"), [id], |r| r.get(0))
-                .unwrap()
+            conn.query_row(&format!("SELECT {c} FROM files WHERE id=?1"), [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
         let nchunks = |fid: i64| -> i64 {
-            conn.query_row("SELECT COUNT(*) FROM chunks WHERE file_id=?1", [fid], |r| r.get(0))
-                .unwrap()
+            conn.query_row("SELECT COUNT(*) FROM chunks WHERE file_id=?1", [fid], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
         assert_eq!(col(1, "dup_of"), 2, "旧副本指向最新 canonical");
         assert_eq!(col(2, "dup_of"), 0, "canonical 自身 dup_of=0");

@@ -4,10 +4,11 @@ use super::*;
 
 pub(crate) const TEXT_GIST_EXTS: &[&str] = &[
     "md", "txt", "rs", "py", "js", "ts", "tsx", "jsx", "mjs", "json", "yaml", "yml", "toml",
-    "html", "htm", "css", "csv", "tsv", "log", "xml", "vue", "go", "java", "c", "cpp", "rb",
-    "php", "srt", "vtt", "tex", "rst", "org", "sql", "sh", "ps1",
+    "html", "htm", "css", "csv", "tsv", "log", "xml", "vue", "go", "java", "c", "cpp", "rb", "php",
+    "srt", "vtt", "tex", "rst", "org", "sql", "sh", "ps1",
 ];
-pub(crate) const DOC_GIST_EXTS: &[&str] = &["pdf", "docx", "doc", "pptx", "ppt", "xlsx", "xls", "epub"];
+pub(crate) const DOC_GIST_EXTS: &[&str] =
+    &["pdf", "docx", "doc", "pptx", "ppt", "xlsx", "xls", "epub"];
 
 /// 从纯文本里抽一句话速览:标题(# 或 frontmatter title)+ 首个有意义段落。
 pub(crate) fn extract_gist(text: &str) -> String {
@@ -84,9 +85,9 @@ pub fn gist(abspath: String) -> Result<String, String> {
     let key = hash_key(&[&abspath, &mtime.to_string(), &meta.len().to_string()]);
 
     let conn = open_db()?;
-    if let Ok(cached) =
-        conn.query_row("SELECT text FROM gists WHERE key=?1", [&key], |r| r.get::<_, String>(0))
-    {
+    if let Ok(cached) = conn.query_row("SELECT text FROM gists WHERE key=?1", [&key], |r| {
+        r.get::<_, String>(0)
+    }) {
         if !cached.is_empty() {
             return Ok(cached);
         }

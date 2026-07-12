@@ -14,6 +14,8 @@
 //! 一切进程都在宿主机本地跑(localhost), 内嵌 webview 的 CSP 为 null, 故 iframe 可直接加载
 //! `http://localhost:<port>`。
 
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -25,8 +27,6 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
-#[cfg(not(feature = "desktop"))]
-use crate::host::AppHandle;
 use walkdir::WalkDir;
 
 #[cfg(windows)]
@@ -196,7 +196,10 @@ fn project_name(root: &Path, m: &Manifest) -> String {
 fn port_from_url(url: &str) -> Option<u16> {
     let after = url.split("://").nth(1).unwrap_or(url);
     let hostport = after.split('/').next().unwrap_or(after);
-    hostport.rsplit(':').next().and_then(|s| s.parse::<u16>().ok())
+    hostport
+        .rsplit(':')
+        .next()
+        .and_then(|s| s.parse::<u16>().ok())
 }
 
 // ───────────────────────── 命令: 列项目 ─────────────────────────
@@ -211,11 +214,7 @@ pub fn project_list(conversation_id: Option<String>) -> Vec<ProjectInfo> {
     }
     let running = RUNNING.lock();
     // 限深度遍历, 找清单文件
-    for w in WalkDir::new(&out_dir)
-        .max_depth(5)
-        .into_iter()
-        .flatten()
-    {
+    for w in WalkDir::new(&out_dir).max_depth(5).into_iter().flatten() {
         if !w.file_type().is_file() || w.file_name() != MANIFEST_NAME {
             continue;
         }
@@ -332,13 +331,23 @@ fn run_pipeline(app: &AppHandle, root: &str, root_path: &Path, m: Manifest) {
         if let Some(install) = &s.install {
             let needs = !svc_dir.join("node_modules").exists();
             if needs {
-                log(app, root, "info", format!("[{}] 装依赖: $ {}", label, install));
+                log(
+                    app,
+                    root,
+                    "info",
+                    format!("[{}] 装依赖: $ {}", label, install),
+                );
                 if !run_blocking(app, root, &svc_dir, install) {
                     emit_exit(app, root, false, Some(format!("[{}] 装依赖失败", label)));
                     return;
                 }
             } else {
-                log(app, root, "info", format!("[{}] 依赖已就绪, 跳过安装", label));
+                log(
+                    app,
+                    root,
+                    "info",
+                    format!("[{}] 依赖已就绪, 跳过安装", label),
+                );
             }
         }
     }
@@ -356,10 +365,22 @@ fn run_pipeline(app: &AppHandle, root: &str, root_path: &Path, m: Manifest) {
                 pids.push(pid);
                 // 流式转发该服务 stdout/stderr → project:log
                 if let Some(out) = child.stdout.take() {
-                    pump(app.clone(), root.to_string(), format!("{}", label), out, "stdout");
+                    pump(
+                        app.clone(),
+                        root.to_string(),
+                        format!("{}", label),
+                        out,
+                        "stdout",
+                    );
                 }
                 if let Some(err) = child.stderr.take() {
-                    pump(app.clone(), root.to_string(), format!("{}", label), err, "stderr");
+                    pump(
+                        app.clone(),
+                        root.to_string(),
+                        format!("{}", label),
+                        err,
+                        "stderr",
+                    );
                 }
                 children.push(child);
             }
@@ -371,7 +392,12 @@ fn run_pipeline(app: &AppHandle, root: &str, root_path: &Path, m: Manifest) {
                     let _ = c.kill();
                     let _ = c.wait();
                 }
-                emit_exit(app, root, false, Some(format!("[{}] 启动失败: {}", label, e)));
+                emit_exit(
+                    app,
+                    root,
+                    false,
+                    Some(format!("[{}] 启动失败: {}", label, e)),
+                );
                 return;
             }
         }
@@ -454,16 +480,33 @@ fn run_blocking(app: &AppHandle, root: &str, cwd: &Path, cmdline: &str) -> bool 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            log(app, root, "stderr", format!("无法执行: {} ({})", cmdline, e));
+            log(
+                app,
+                root,
+                "stderr",
+                format!("无法执行: {} ({})", cmdline, e),
+            );
             return false;
         }
     };
     let mut handles = Vec::new();
     if let Some(out) = child.stdout.take() {
-        handles.push(pump(app.clone(), root.to_string(), String::new(), out, "stdout"));
+        handles.push(pump(
+            app.clone(),
+            root.to_string(),
+            String::new(),
+            out,
+            "stdout",
+        ));
     }
     if let Some(err) = child.stderr.take() {
-        handles.push(pump(app.clone(), root.to_string(), String::new(), err, "stderr"));
+        handles.push(pump(
+            app.clone(),
+            root.to_string(),
+            String::new(),
+            err,
+            "stderr",
+        ));
     }
     let status = child.wait();
     for h in handles {

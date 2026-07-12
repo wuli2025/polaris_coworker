@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::runtime::procs::no_window;
 use super::types::*;
+use crate::runtime::procs::no_window;
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
     directories::UserDirs::new().map(|u| u.home_dir().to_path_buf())
@@ -20,7 +20,10 @@ pub(crate) fn to_fwd(p: &std::path::Path) -> String {
 /// 探测类调用 (npm view / npm prefix / 版本号 / where / 读注册表 PATH 等) 用它兜底:
 /// 网络卡死或进程僵死时不让 `env_check` 的探测线程永久阻塞。
 /// stdout/stderr 各由独立线程读到 EOF, 避免子进程写满管道反压自锁。
-pub(crate) fn output_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+pub(crate) fn output_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -185,7 +188,12 @@ pub(crate) fn claude_candidates() -> Vec<PathBuf> {
         // macOS 免 sudo 装的 Node (~/.local/polaris-node) 的全局 bin: `npm i -g` 把 claude
         // 链到这里。mac GUI 从 Finder 启动时 PATH 极简、`npm prefix -g` 又拿不到 → 显式兜底,
         // 让重启后 chat spawn 仍找得到。
-        v.push(h.join(".local").join("polaris-node").join("bin").join("claude"));
+        v.push(
+            h.join(".local")
+                .join("polaris-node")
+                .join("bin")
+                .join("claude"),
+        );
     }
     // npm 全局 (用户真实前缀): 先原生 exe, 再 shim
     if let Some(prefix) = npm_global_prefix() {
@@ -281,7 +289,7 @@ fn resolve_claude_exe_uncached() -> Option<PathBuf> {
             .unwrap_or(false)
     };
     let hits = which_all("claude"); // 已过滤为「存在的」路径
-    // 1. PATH 命中里的 .exe (原生装常见)
+                                    // 1. PATH 命中里的 .exe (原生装常见)
     if let Some(p) = hits.iter().find(|p| is_exe(p)) {
         return Some(p.clone());
     }
@@ -336,9 +344,11 @@ pub(crate) fn node_dir_candidates() -> Vec<PathBuf> {
 fn is_app_exec_alias(p: &std::path::Path) -> bool {
     #[cfg(windows)]
     {
-        let in_windows_apps = p
-            .components()
-            .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("WindowsApps"));
+        let in_windows_apps = p.components().any(|c| {
+            c.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("WindowsApps")
+        });
         if !in_windows_apps {
             return false;
         }

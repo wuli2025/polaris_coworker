@@ -30,7 +30,12 @@ fn cfg_path() -> Option<PathBuf> {
             return Some(PathBuf::from(p));
         }
     }
-    directories::UserDirs::new().map(|u| u.home_dir().join("Polaris").join("data").join("lead_model.json"))
+    directories::UserDirs::new().map(|u| {
+        u.home_dir()
+            .join("Polaris")
+            .join("data")
+            .join("lead_model.json")
+    })
 }
 
 pub fn load_cfg() -> LeadModelCfg {
@@ -46,13 +51,20 @@ pub fn save_cfg(cfg: &LeadModelCfg) -> Result<(), String> {
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    std::fs::write(&path, serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn active_cfg() -> Result<LeadModelCfg, String> {
     let c = load_cfg();
-    if c.enabled && !c.base_url.trim().is_empty() && !c.api_key.trim().is_empty() && !c.model.trim().is_empty() {
+    if c.enabled
+        && !c.base_url.trim().is_empty()
+        && !c.api_key.trim().is_empty()
+        && !c.model.trim().is_empty()
+    {
         Ok(c)
     } else {
         Err("主 Agent 模型未配置(设置里填 OpenAI 兼容端点),或已停用——看板可继续纯人工使用".into())
@@ -79,9 +91,16 @@ fn complete(cfg: &LeadModelCfg, system: &str, user: &str) -> Result<(String, i64
             "stream": false,
         }));
     let v: Value = match resp {
-        Ok(r) => r.into_json().map_err(|e| format!("主 Agent 模型响应解析失败: {e}"))?,
+        Ok(r) => r
+            .into_json()
+            .map_err(|e| format!("主 Agent 模型响应解析失败: {e}"))?,
         Err(ureq::Error::Status(code, r)) => {
-            let brief: String = r.into_string().unwrap_or_default().chars().take(220).collect();
+            let brief: String = r
+                .into_string()
+                .unwrap_or_default()
+                .chars()
+                .take(220)
+                .collect();
             return Err(format!("主 Agent 模型 HTTP {code}: {brief}"));
         }
         Err(e) => return Err(format!("主 Agent 模型网络错误: {e}")),
@@ -127,7 +146,11 @@ pub struct CardDraft {
 }
 
 /// ① 拆解:owner 目标 → 卡草案列表。guard 过了才会调模型(预算闸也在 guard 里)。
-pub fn ai_decompose(project_id: i64, goal: &str, member_hint: &str) -> Result<Vec<CardDraft>, String> {
+pub fn ai_decompose(
+    project_id: i64,
+    goal: &str,
+    member_hint: &str,
+) -> Result<Vec<CardDraft>, String> {
     let actor = lead::guard(project_id, lead::LeadAction::CreateTask)?;
     let cfg = active_cfg()?;
     let system = "你是项目主脑(主 Agent)。把 owner 的目标拆成可执行的任务卡。\
@@ -138,9 +161,15 @@ pub fn ai_decompose(project_id: i64, goal: &str, member_hint: &str) -> Result<Ve
     let user = format!("目标:\n{goal}\n\n成员画像(供工作量与分工参考):\n{member_hint}");
     let (text, tokens) = complete(&cfg, system, &user)?;
     lead::add_usage(project_id, tokens)?;
-    db::audit(&actor, "lead.ai.decompose", &project_id.to_string(), &format!("tokens={tokens}"));
+    db::audit(
+        &actor,
+        "lead.ai.decompose",
+        &project_id.to_string(),
+        &format!("tokens={tokens}"),
+    );
     let v = extract_json(&text)?;
-    let drafts: Vec<CardDraft> = serde_json::from_value(v).map_err(|e| format!("卡草案结构不符: {e}"))?;
+    let drafts: Vec<CardDraft> =
+        serde_json::from_value(v).map_err(|e| format!("卡草案结构不符: {e}"))?;
     Ok(drafts
         .into_iter()
         .filter(|d| !d.title.trim().is_empty())
@@ -181,11 +210,24 @@ pub fn ai_review(project_id: i64, task_id: i64, diff_text: &str) -> Result<Revie
     let diff_capped: String = diff_text.chars().take(60_000).collect();
     let user = format!(
         "任务卡:{}\n做什么:{}\n验收标准:\n{}\n\n历史轮次:\n{}\n\n本次改动 diff:\n{}",
-        card.title, card.body, card.criteria, if history.is_empty() { "(首轮)" } else { &history }, diff_capped
+        card.title,
+        card.body,
+        card.criteria,
+        if history.is_empty() {
+            "(首轮)"
+        } else {
+            &history
+        },
+        diff_capped
     );
     let (text, tokens) = complete(&cfg, system, &user)?;
     lead::add_usage(project_id, tokens)?;
-    db::audit(&actor, "lead.ai.review", &task_id.to_string(), &format!("tokens={tokens}"));
+    db::audit(
+        &actor,
+        "lead.ai.review",
+        &task_id.to_string(),
+        &format!("tokens={tokens}"),
+    );
     let v = extract_json(&text)?;
     serde_json::from_value(v).map_err(|e| format!("验收草稿结构不符: {e}"))
 }
@@ -213,11 +255,20 @@ pub fn ai_task_reply(project_id: i64, task_id: i64) -> Result<String, String> {
         card.title,
         card.body,
         card.criteria,
-        if history.is_empty() { "(还没有消息,请开场介绍你能帮什么)" } else { &history }
+        if history.is_empty() {
+            "(还没有消息,请开场介绍你能帮什么)"
+        } else {
+            &history
+        }
     );
     let (text, tokens) = complete(&cfg, system, &user)?;
     lead::add_usage(project_id, tokens)?;
-    db::audit(&actor, "lead.ai.task_reply", &task_id.to_string(), &format!("tokens={tokens}"));
+    db::audit(
+        &actor,
+        "lead.ai.task_reply",
+        &task_id.to_string(),
+        &format!("tokens={tokens}"),
+    );
     Ok(text.trim().to_string())
 }
 
@@ -227,10 +278,16 @@ pub fn ai_fuse(project_id: i64, ours: &str, theirs: &str, context: &str) -> Resu
     let cfg = active_cfg()?;
     let system = "你是项目主脑,为一个 git 三方合并冲突块起草融合版本。\
         理解两侧意图,产出兼容双方目的的最终文本。只输出融合后的文本本身,不要解释、不要围栏。";
-    let user = format!("冲突上下文:{context}\n\n=== main 侧 ===\n{ours}\n\n=== 任务分支侧 ===\n{theirs}");
+    let user =
+        format!("冲突上下文:{context}\n\n=== main 侧 ===\n{ours}\n\n=== 任务分支侧 ===\n{theirs}");
     let (text, tokens) = complete(&cfg, system, &user)?;
     lead::add_usage(project_id, tokens)?;
-    db::audit(&actor, "lead.ai.fuse", &project_id.to_string(), &format!("tokens={tokens}"));
+    db::audit(
+        &actor,
+        "lead.ai.fuse",
+        &project_id.to_string(),
+        &format!("tokens={tokens}"),
+    );
     Ok(text)
 }
 
@@ -249,13 +306,28 @@ mod tests {
 
     #[test]
     fn unconfigured_model_gives_clear_error() {
-        let _g = super::super::db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        std::env::set_var("POLARIS_COLLAB_DB", std::env::temp_dir().join(format!("leadai-{ts}.db")));
-        std::env::set_var("POLARIS_LEAD_MODEL_CFG", std::env::temp_dir().join(format!("leadai-cfg-{ts}.json")));
+        let _g = super::super::db::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::set_var(
+            "POLARIS_COLLAB_DB",
+            std::env::temp_dir().join(format!("leadai-{ts}.db")),
+        );
+        std::env::set_var(
+            "POLARIS_LEAD_MODEL_CFG",
+            std::env::temp_dir().join(format!("leadai-cfg-{ts}.json")),
+        );
         // 建项目并任命主 Agent,但模型未配置 → 明确错误而非崩溃
         let conn = super::super::db::open_db().unwrap();
-        conn.execute("INSERT INTO projects(name,lead_expert_id,created_at) VALUES('p','tech',0)", []).unwrap();
+        conn.execute(
+            "INSERT INTO projects(name,lead_expert_id,created_at) VALUES('p','tech',0)",
+            [],
+        )
+        .unwrap();
         let pid = conn.last_insert_rowid();
         let err = ai_decompose(pid, "做个网站", "").unwrap_err();
         assert!(err.contains("未配置"), "实际: {err}");
