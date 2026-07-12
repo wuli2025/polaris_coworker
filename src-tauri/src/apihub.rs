@@ -719,6 +719,11 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
         "expert_route_debug" => ok(expert::expert_route_debug(req_str(a, "query")?)),
         "expert_recommend_from_kb" => ok(expert::expert_recommend_from_kb(opt_str(a, "scope"))),
 
+        // ── 配色引擎(全 app 配色唯一真源)──
+        // server dispatch 曾漏注册 → web/server 端 palette_generate 一律 404(codex 深测揪出)。
+        // 桌面 generate_handler 早已注册;补齐双壳一致。注意参数是 mood(不是 mode)。
+        "palette_generate" => ok(palette::palette_generate(opt_str(a, "seed"), opt_str(a, "mood"))?),
+
         // ── Chat (sync 部分) ──
         "chat_cancel" => ok(chat::chat_cancel(req_str(a, "reqId")?)?),
         "chat_build_manifest" => ok(chat::chat_build_manifest(opt_str(a, "conversationId"))),
