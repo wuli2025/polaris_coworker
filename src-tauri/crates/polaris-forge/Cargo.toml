@@ -1,0 +1,37 @@
+# ═══════════════════════════════════════════════════════════════
+# polaris-forge — 成品渲染引擎 crate(分仓规划 v2 第 4 仓的仓内形态)
+# PPT(deck→pptx / spec→pptx)/ 截图 / 视频 / TTS / Figma 往返桥。
+# 边界铁律: 只准向下依赖 polaris-runtime;不认识 kernel/fable/collab 等任何同层板块,
+#           引擎联动一律由壳(polaris-app)编排 —— 编译器物理保证。
+# 双壳: 默认(无特性)= server/CLI 形态,不拉 tauri;desktop 特性开 tauri + headless_chrome。
+# ═══════════════════════════════════════════════════════════════
+[package]
+name = "polaris-forge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+polaris-runtime = { path = "../polaris-runtime" }
+# 版本与主 crate 逐条对齐(同 workspace 共享编译产物,零增量)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+directories = "5"
+zip = "8.6.0"
+ureq = { version = "2", features = ["json"] }
+tokio = { version = "1", features = ["time", "macros", "rt-multi-thread", "sync", "net", "io-util", "signal"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+# 持久 CDP 截图主路(pin 0.9.x,理由见主 crate 注释)
+chromiumoxide = { version = "=0.9.1", default-features = false }
+# 截图兜底 tier2,桌面专属
+headless_chrome = { version = "1.0", default-features = false, features = ["offline"], optional = true }
+tauri = { version = "2.1", features = [], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# forge_capture::kill_tree 进程组回收
+libc = "0.2"
+
+[features]
+default = []
+desktop = ["dep:tauri", "dep:headless_chrome"]

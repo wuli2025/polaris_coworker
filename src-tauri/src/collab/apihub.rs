@@ -400,7 +400,7 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "kb_default_root" => ok(kb::kb_default_root()),
         "kb_set_root" => ok(kb::kb_set_root(req_str(a, "newPath")?)?),
         "kb_scan" => ok(kb::kb_scan_sync()?),
-        "kb_compile" => ok(kb::kb_compile(app)?),
+        "kb_compile" => ok(wiki::kb_compile(app)?),
         "kb_list" => ok(kb::kb_list(opt_str(a, "subdir"))),
         "kb_read" => ok(kb::kb_read(req_str(a, "relPath")?)?),
         "kb_delete" => ok(kb::kb_delete(req_str(a, "relPath")?)?),
@@ -458,6 +458,9 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
                 .and_then(|v| v.as_u64())
                 .map(|n| n as u32),
             opt_str(a, "overlayPos"),
+            opt_str(a, "polishApiBase"),
+            opt_str(a, "polishApiKey"),
+            opt_str(a, "polishModel"),
         )?),
         "voice_lexicon_get" => ok(voice::voice_lexicon_get()),
         "voice_hotword_add" => ok(voice::voice_hotword_add(req_str(a, "word")?)?),

@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use pinyin::ToPinyin;
 
@@ -59,6 +60,24 @@ pub struct VoiceConfig {
     pub pinyin_threshold: u32,
     /// 浮窗位置:"bottom"(底部居中,默认) | "cursor"(跟随光标)。
     pub overlay_pos: String,
+    /// 仿 Typeless 的「AI 整形」接入点 —— OpenAI 兼容 `/chat/completions` 的 base。
+    /// 整段识别后经它去语气词/去重复/补标点/顺句/自动分段(默认 MiniMax 国内域名)。
+    /// 老 voice.json 无此字段 → serde 默认回落,不致解析失败丢用户词表。
+    #[serde(default = "default_polish_base")]
+    pub polish_api_base: String,
+    /// 整形 API Key;留空则自动借用「供应商坞」里的 MiniMax key(含粉丝福利额度)。
+    #[serde(default)]
+    pub polish_api_key: String,
+    /// 整形模型 id;默认便宜快的 MiniMax-M2.7-highspeed。
+    #[serde(default = "default_polish_model")]
+    pub polish_model: String,
+}
+
+fn default_polish_base() -> String {
+    "https://api.minimaxi.com/v1".into()
+}
+fn default_polish_model() -> String {
+    "MiniMax-M2.7-highspeed".into()
 }
 
 impl Default for VoiceConfig {
@@ -72,6 +91,9 @@ impl Default for VoiceConfig {
             antipollute: "lite".into(),
             pinyin_threshold: 1,
             overlay_pos: "bottom".into(),
+            polish_api_base: default_polish_base(),
+            polish_api_key: String::new(),
+            polish_model: default_polish_model(),
         }
     }
 }
@@ -397,6 +419,179 @@ pub fn anti_pollute(text: &str) -> AntiPolluteResult {
     }
 }
 
+// ───────────────────────── AI 整形(仿 Typeless)─────────────────────────
+// 秒达档给的是「你说的话」(带语气词/重复/无标点);整形层用一个便宜快的 LLM 把它变成
+// 「你想写的字」(去语气词·去重复·补标点·顺句·自动列表·口头改口)。默认关(保零延迟纯本地);
+// 开 `polish` 时,整段识别后(松手/停录)在后台线程跑一次,失败静默回落原文。走 OpenAI
+// 兼容 /chat/completions 协议 → 几乎任何便宜 API 都能接;默认 MiniMax-M2.7-highspeed。
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PolishResult {
+    /// 整形前(秒达档终稿)
+    pub raw: String,
+    /// 整形后的书面文字
+    pub text: String,
+    /// 实际使用的模型 id
+    pub model: String,
+    /// 端到端耗时(含网络)
+    pub ms: u64,
+    /// key 来源:"config"(用户填的) | "borrowed"(借坞里 MiniMax) | "none"
+    pub key_source: String,
+}
+
+/// 整形器 system prompt。把热词当「不可改护栏」喂进去,防 LLM 把专名顺句顺没。
+fn build_polish_prompt(hotwords: &[String]) -> String {
+    let terms = if hotwords.is_empty() {
+        "(无)".to_string()
+    } else {
+        hotwords
+            .iter()
+            .take(60)
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    format!(
+        "你是语音输入的「整形器」。用户在用嘴说话,你把口语转成干净的书面文字。\n\
+规则:\n\
+1. 删掉语气词与口头禅:嗯、呃、那个、就是说、然后然后、um、uh、you know。\n\
+2. 删掉无意义的重复,但保留必要的强调。\n\
+3. 补全标点、合理分段;识别到清单/步骤就转成有序或无序列表。\n\
+4. 识别口头自我更正:当用户说「不对,改成X」「我是说X」时,用 X 替换前文,别把纠正过程写出来。\n\
+5. 只整形,不改写原意,不扩写,不添加任何新信息,不回答其中的问题。\n\
+6. 以下专有名词逐字保留,一个字都不许改:{terms}。\n\
+7. 只输出整形后的文字本身,不要任何解释、前后缀或引号。"
+    )
+}
+
+/// 对一段文本做 AI 整形。同步阻塞(带 4s 连接 / 20s 总超时),供 `voice_polish` 命令
+/// 与 `polish_if_enabled` 复用。key 留空则借用供应商坞里的 MiniMax key(含粉丝福利额度)。
+pub fn polish_text(text: &str) -> Result<PolishResult, String> {
+    let (base_cfg, key_cfg, model_cfg, hotwords) = {
+        let s = STORE.read();
+        (
+            s.config.polish_api_base.clone(),
+            s.config.polish_api_key.clone(),
+            s.config.polish_model.clone(),
+            s.lexicon.hotwords.clone(),
+        )
+    };
+    let raw = text.to_string();
+    let base = {
+        let b = base_cfg.trim().trim_end_matches('/');
+        if b.is_empty() {
+            "https://api.minimaxi.com/v1"
+        } else {
+            b
+        }
+    }
+    .to_string();
+    let model = {
+        let m = model_cfg.trim();
+        if m.is_empty() {
+            "MiniMax-M2.7-highspeed"
+        } else {
+            m
+        }
+    }
+    .to_string();
+
+    if raw.trim().is_empty() {
+        return Ok(PolishResult {
+            raw,
+            text: String::new(),
+            model,
+            ms: 0,
+            key_source: "none".into(),
+        });
+    }
+
+    // key:优先用户填的,否则借用坞里的 MiniMax(福利额度开箱即用)。
+    let (key, key_source) = {
+        let k = key_cfg.trim().to_string();
+        if !k.is_empty() {
+            (k, "config")
+        } else {
+            let borrowed = crate::provider::minimax_borrow_key();
+            if borrowed.trim().is_empty() {
+                (String::new(), "none")
+            } else {
+                (borrowed.trim().to_string(), "borrowed")
+            }
+        }
+    };
+    if key.is_empty() {
+        return Err(
+            "未配置整形 API Key,且供应商坞里没有可借用的 MiniMax key。请在语音设置里填入一个 API Key。"
+                .into(),
+        );
+    }
+
+    let url = if base.ends_with("/chat/completions") {
+        base.clone()
+    } else {
+        format!("{base}/chat/completions")
+    };
+    let body = serde_json::json!({
+        "model": model,
+        "temperature": 0.2,
+        "messages": [
+            { "role": "system", "content": build_polish_prompt(&hotwords) },
+            { "role": "user", "content": raw },
+        ],
+    });
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(4))
+        .timeout(Duration::from_secs(20))
+        .build();
+    let started = Instant::now();
+    let resp = agent
+        .post(&url)
+        .set("Authorization", &format!("Bearer {key}"))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+        .map_err(|e| format!("整形请求失败: {e}"))?;
+    let v: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| format!("整形响应解析失败: {e}"))?;
+    let out = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if out.is_empty() {
+        return Err(format!("整形返回空(检查模型名/额度是否有效): {v}"));
+    }
+    Ok(PolishResult {
+        raw,
+        text: out,
+        model,
+        ms: started.elapsed().as_millis() as u64,
+        key_source: key_source.into(),
+    })
+}
+
+/// 运行时入口:仅当用户开了 `polish` 才整形;任何失败(网络/额度/超时)静默回落原文,
+/// 绝不因整形层抖动吞掉用户的听写结果。
+pub fn polish_if_enabled(text: &str) -> String {
+    if !STORE.read().config.polish || text.trim().is_empty() {
+        return text.to_string();
+    }
+    match polish_text(text) {
+        Ok(r) if !r.text.trim().is_empty() => r.text,
+        Ok(_) => text.to_string(),
+        Err(e) => {
+            eprintln!("[voice] AI 整形失败,回落原文: {e}");
+            text.to_string()
+        }
+    }
+}
+
 // ───────────────────────── 词表自学(mine_terms)─────────────────────────
 
 const STOPWORDS: &[&str] = &[
@@ -454,6 +649,9 @@ pub fn voice_config_set(
     antipollute: Option<String>,
     pinyin_threshold: Option<u32>,
     overlay_pos: Option<String>,
+    polish_api_base: Option<String>,
+    polish_api_key: Option<String>,
+    polish_model: Option<String>,
 ) -> Result<VoiceConfig, String> {
     {
         let mut s = STORE.write();
@@ -491,6 +689,16 @@ pub fn voice_config_set(
             if v == "bottom" || v == "cursor" {
                 c.overlay_pos = v;
             }
+        }
+        // AI 整形接入(留空即回落默认/借用坞里的 key)。
+        if let Some(v) = polish_api_base {
+            c.polish_api_base = v.trim().to_string();
+        }
+        if let Some(v) = polish_api_key {
+            c.polish_api_key = v.trim().to_string();
+        }
+        if let Some(v) = polish_model {
+            c.polish_model = v.trim().to_string();
         }
     }
     persist();
@@ -565,13 +773,23 @@ pub fn voice_anti_pollute(text: String) -> AntiPolluteResult {
     anti_pollute(&text)
 }
 
+/// 对一段文本试跑 AI 整形(设置页「测一下整形」按钮)。不看 `polish` 开关,直接调用,
+/// 让用户能在开启前先验证 API 配置是否可用。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn voice_polish(text: String) -> Result<PolishResult, String> {
+    polish_text(&text)
+}
+
 /// 识别一个音频文件(16k 单声道 wav)→ 防污染 → 终稿。
 /// 命令恒注册(签名稳定);真识别需 `voice-asr` feature 编译 + 已下载 SenseVoice 模型。
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn voice_transcribe_file(path: String) -> Result<TranscribeResult, String> {
     #[cfg(feature = "voice-asr")]
     {
-        crate::voice::asr::transcribe_file(&path)
+        let mut r = crate::voice::asr::transcribe_file(&path)?;
+        // 开了 AI 整形就把终稿再过一遍 LLM(默认关 → 零额外延迟)。
+        r.text = polish_if_enabled(&r.text);
+        Ok(r)
     }
     #[cfg(not(feature = "voice-asr"))]
     {

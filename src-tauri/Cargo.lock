@@ -5437,30 +5437,27 @@ dependencies = [
  "argon2",
  "axum",
  "base64 0.22.1",
- "calamine",
  "chacha20poly1305",
- "chromiumoxide",
  "chrono",
  "cpal",
  "directories",
- "encoding_rs",
  "enigo",
- "fastembed",
  "futures-util",
  "getrandom 0.2.17",
- "headless_chrome",
- "image",
  "include_dir",
  "iroh",
  "libc",
  "once_cell",
  "parking_lot",
- "pdf-extract",
  "pinyin",
  "polaris-core",
+ "polaris-fable",
+ "polaris-forge",
  "polaris-forge-codec",
+ "polaris-kernel",
+ "polaris-runtime",
  "polaris-sandbox",
- "qrcode",
+ "polaris-wiki",
  "rdev",
  "regex",
  "rusqlite",
@@ -5482,7 +5479,6 @@ dependencies = [
  "ureq 2.12.1",
  "walkdir",
  "windows-sys 0.59.0",
- "zip 8.6.0",
 ]
 
 [[package]]
@@ -5502,6 +5498,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "polaris-fable"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "directories",
+ "encoding_rs",
+ "fastembed",
+ "image",
+ "libc",
+ "once_cell",
+ "parking_lot",
+ "polaris-kernel",
+ "polaris-runtime",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tauri",
+ "tokio",
+ "ureq 2.12.1",
+ "walkdir",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "polaris-forge"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chromiumoxide",
+ "directories",
+ "headless_chrome",
+ "image",
+ "libc",
+ "polaris-runtime",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tokio",
+ "ureq 2.12.1",
+ "zip 8.6.0",
+]
+
+[[package]]
 name = "polaris-forge-codec"
 version = "0.1.0"
 dependencies = [
@@ -5518,12 +5561,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "polaris-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "calamine",
+ "chrono",
+ "directories",
+ "encoding_rs",
+ "getrandom 0.2.17",
+ "libc",
+ "once_cell",
+ "parking_lot",
+ "pdf-extract",
+ "polaris-runtime",
+ "polaris-sandbox",
+ "qrcode",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tauri",
+ "tokio",
+ "ureq 2.12.1",
+ "walkdir",
+ "windows-sys 0.59.0",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "polaris-runtime"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "libc",
+ "once_cell",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq 2.12.1",
+]
+
+[[package]]
 name = "polaris-sandbox"
 version = "0.2.2"
 dependencies = [
  "anyhow",
  "directories",
  "polaris-core",
+ "serde",
+ "serde_json",
+ "tauri",
+]
+
+[[package]]
+name = "polaris-wiki"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "once_cell",
+ "parking_lot",
+ "polaris-fable",
+ "polaris-kernel",
+ "polaris-runtime",
  "serde",
  "serde_json",
  "tauri",

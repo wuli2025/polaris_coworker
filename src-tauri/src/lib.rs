@@ -1,27 +1,19 @@
 // ── 引擎模块（桌面 + Docker 两种外壳共用同一份源码）──
 pub mod accounts;
-pub mod chat;
 // 多人协作:账号/会话/设备白名单/任务卡/合并闸门(桌面主机与 Docker server 共用)。
-pub mod claude_md;
 pub mod collab;
-pub mod conv;
-pub mod convert;
-pub mod doctor;
 pub mod expert;
-pub mod fable;
-pub mod forge;
+// ── 板块已抽为独立 crate(分仓规划 v2 Phase 1), 别名保持全部旧路径 ──
+// (含 generate_handler! 的 __cmd__ 宏解析与 server dispatch 的 `crate::X::…`)零改动。
+pub use polaris_fable::{fable, kb};
+pub use polaris_forge::forge;
+pub use polaris_kernel::{chat, claude_md, conv, convert, doctor, integrations, provider, skills};
+pub use polaris_wiki::wiki;
 pub mod infer;
-pub mod integrations;
-pub mod kb;
 pub mod palette;
 pub mod persona;
 pub mod project;
-pub mod provider;
-pub mod runtime;
-pub mod skills;
 pub mod voice;
-// llmwiki 知识网构建域(分仓规划 v2 第 12 仓雏形): 构建管线原 kb/compile.rs 归位于此。
-pub mod wiki;
 
 // ── Phase 0 文件归位的 crate 根别名(分仓规划 v2)──
 // echo/sense/scan 归 fable(懂你+检索板块)、figma_bridge 归 forge(设计成品板块);
@@ -29,6 +21,9 @@ pub mod wiki;
 // 抽仓时删别名、调用方一次性切新路径。
 pub use fable::{echo, scan, sense};
 pub use forge::figma_bridge;
+// runtime 已抽为独立 crate(polaris-runtime, 目录→crate 强制边界第一块):
+// 别名保持 `crate::runtime::…` 全部旧路径零改动;边界由编译器物理保证。
+pub use polaris_runtime as runtime;
 // 外壳拼装点: 把引擎实现注入内核桥(chat::bridges), 桌面 setup 与 server serve 共用。
 pub mod wiring;
 // 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。
@@ -39,7 +34,8 @@ pub mod updater;
 pub mod titlebar;
 
 // ── host shim(broadcast 事件壳):server 壳与桌面内嵌协作主机(collab-host)共用 ──
-pub mod host;
+// 已下沉 polaris-runtime(引擎 crate 双壳签名共用它);别名保 `crate::host::…` 旧路径零改动。
+pub use polaris_runtime::host;
 // ── Docker(server) 外壳：axum HTTP/WS 服务 ──
 #[cfg(feature = "server")]
 pub mod server;
@@ -201,7 +197,7 @@ pub fn run() {
             kb::kb_default_root,
             kb::kb_set_root,
             kb::kb_scan,
-            kb::kb_compile,
+            wiki::kb_compile,
             kb::kb_list,
             kb::kb_read,
             kb::kb_delete,
@@ -385,6 +381,7 @@ pub fn run() {
             voice::voice_correction_add,
             voice::voice_correction_remove,
             voice::voice_anti_pollute,
+            voice::voice_polish,
             voice::voice_learn_correction,
             voice::voice_lexicon_learn,
             voice::voice_transcribe_file,

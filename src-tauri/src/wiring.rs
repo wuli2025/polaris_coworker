@@ -28,6 +28,14 @@ impl KbBridge for ShellKbBridge {
         }
     }
 
+    fn context_block_scoped(&self, scope: Option<&str>) -> String {
+        crate::kb::kb_context_block_scoped(scope)
+    }
+
+    fn fable_context_block(&self, full: bool) -> String {
+        crate::fable::agent::fable_context_block(full)
+    }
+
     fn search_sync(&self, query: String, top_k: Option<usize>) -> Vec<KbHitLite> {
         crate::kb::kb_search_sync(query, top_k)
             .into_iter()

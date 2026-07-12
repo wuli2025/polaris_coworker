@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from "vue";
 import { marked } from "marked";
 import { sanitizeHtml } from "../lib/sanitize";
 import {
@@ -31,7 +31,9 @@ import {
   Boxes,
   Terminal,
 } from "@lucide/vue";
-import ArtifactEditor from "./ArtifactEditor.vue";
+// 懒加载(与 App.vue 的四个 Studio 同模式): 编辑器 149KB+figmaPull/deckThemes 只在
+// 用户真正进入编辑态(artifacts.editing)时才拉取, 不再吸进首屏 chunk。
+const ArtifactEditor = defineAsyncComponent(() => import("./ArtifactEditor.vue"));
 import { useAppStore } from "../stores/app";
 import { useArtifactsStore } from "../stores/artifacts";
 import { useWorkflowsStore, type WorkflowPack } from "../stores/workflows";

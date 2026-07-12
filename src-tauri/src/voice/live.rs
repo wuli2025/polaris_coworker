@@ -112,7 +112,12 @@ fn dictate_session(app: AppHandle) {
     }
     match crate::voice::asr::transcribe_samples(16000, &samples) {
         Ok(r) => {
-            let _ = app.emit("voice:dictation", json!({ "text": r.text, "raw": r.raw }));
+            // 开了 AI 整形则松手后再过一遍 LLM(去语气词/顺句/列表化);默认关 = 零额外延迟。
+            let polished = crate::voice::polish_if_enabled(&r.text);
+            let _ = app.emit(
+                "voice:dictation",
+                json!({ "text": polished, "raw": r.raw, "polished": polished != r.text }),
+            );
         }
         Err(e) => {
             let _ = app.emit("voice:dictation", json!({ "error": e }));
@@ -218,8 +223,20 @@ fn record_and_recognize(app: &AppHandle, rx: &Receiver<Ctrl>) {
     }
     match crate::voice::asr::transcribe_samples(16000, &samples) {
         Ok(r) => {
-            let _ = app.emit("voice:final", &r);
-            inject_text(&r.text);
+            // 松手后整形(若开启),注入的是「想写的字」而非「说的话」;失败回落原文。
+            let polished = crate::voice::polish_if_enabled(&r.text);
+            let _ = app.emit(
+                "voice:final",
+                json!({
+                    "text": polished,
+                    "raw": r.raw,
+                    "changes": r.changes,
+                    "tier": r.tier,
+                    "ms": r.ms,
+                    "polished": polished != r.text,
+                }),
+            );
+            inject_text(&polished);
         }
         Err(e) => {
             let _ = app.emit("voice:final", json!({ "error": e }));
