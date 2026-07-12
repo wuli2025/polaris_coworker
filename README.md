@@ -10,7 +10,7 @@
 
 ![Tauri 2](https://img.shields.io/badge/Tauri-2.x-24C8DB?logo=tauri&logoColor=white)
 ![Vue 3](https://img.shields.io/badge/Vue-3.x-42b883?logo=vuedotjs&logoColor=white)
-![Rust Workspace](https://img.shields.io/badge/Rust-10_crate_workspace-d97757?logo=rust&logoColor=white)
+![Rust Workspace](https://img.shields.io/badge/Rust-12_crate_workspace-d97757?logo=rust&logoColor=white)
 ![Platforms](https://img.shields.io/badge/桌面-Windows%20%7C%20macOS-4c8dff)
 ![Server](https://img.shields.io/badge/服务端-Docker%20%7C%20NAS-2496ED?logo=docker&logoColor=white)
 
@@ -30,7 +30,7 @@ Polaris 是一个**跑在你自己电脑上**的 AI 工作台。它把 Claude Co
 
 ## 🧱 积木架构 · 想要什么，拼什么
 
-Polaris 不是一块铁板，而是一套 **Cargo workspace 里的 10 块积木**。板块之间的边界不靠口头约定，靠编译器物理保证：引擎互相不认识，联动一律由壳层编排；内核对引擎的需要走 trait 桥注入，未注入时优雅降级。
+Polaris 不是一块铁板，而是一套 **Cargo workspace 里的 12 块积木**。板块之间的边界不靠口头约定，靠编译器物理保证：引擎互相不认识，联动一律由壳层编排；内核对引擎的需要走 trait 桥注入，未注入时优雅降级。
 
 ```mermaid
 graph TB
@@ -46,6 +46,7 @@ graph TB
         FORGE["polaris-forge<br/>成品引擎<br/>PPT/截图/视频/TTS/Figma桥"]
         CODEC["forge-codec<br/>纯Rust音视频编解码"]
         SBX["polaris-sandbox<br/>Docker 安全沙箱"]
+        COLLAB["polaris-collab<br/>多人协作<br/>账号/任务卡/隧道/中继"]
     end
     subgraph L1["第 1 层 · 内核"]
         KERNEL["polaris-kernel ⭐<br/>chat 对话管线 · provider 供应商坞<br/>doctor 环境医生 · skills 技能框架<br/>integrations · conv · headless"]
@@ -53,8 +54,10 @@ graph TB
     subgraph L0["第 0 层 · 地基"]
         RT["polaris-runtime<br/>路径/子进程池/超时看门/HTTP/host shim"]
         CORE["polaris-core<br/>跨板块契约 trait"]
+        PROTO["polaris-protocol<br/>命令契约:invoke信封+参数记账"]
     end
-    APP --> WIKI & FABLE & FORGE & SBX & KERNEL
+    APP --> WIKI & FABLE & FORGE & SBX & COLLAB & KERNEL
+    COLLAB --> KERNEL
     CLI --> APP
     WIKI --> FABLE
     WIKI --> KERNEL
@@ -78,11 +81,12 @@ graph TB
 | `polaris-fable` | 引擎 | 检索枢纽（全盘盘点 / 向量+词法混检 / SQLite 落盘）· 维基知识库（双链图谱/拖拽入库）· 文件中心 · 回声层（对话蒸馏/每日做梦/晨报）· 感官坞 | ✅ |
 | `polaris-forge` | 引擎 | deck→PPTX / spec→原生可编辑 PPTX / 持久 CDP 截图 / 视频合成 / TTS / Figma 往返桥 | ✅ |
 | `polaris-wiki` | 上层引擎 | llmwiki 知识网构建管线：摄入即编译，LLM 抽实体/概念、写 wiki 词条、结双链成网 | ✅ |
-| `polaris-collab`* | 引擎 | 多人协作：账号/任务卡/合并闸门/iroh 隧道/云中继（*当前在壳仓 `src/collab`，Phase 2 抽出） | — |
+| `polaris-collab` | 引擎 | 多人协作：账号/授权表/任务卡/合并闸门/检查工作流/iroh 隧道/云中继（壳件 apihub/hosting 留壳仓） | ✅ |
 | `forge-codec` | 引擎 | 纯 Rust 音视频编解码（openh264 + 自写 BMFF muxer + ebur128 + symphonia），替 ffmpeg CLI | ✅ |
 | `polaris-sandbox` | 引擎 | Docker 安全沙箱（轻量镜像 + docker CLI 包装），经 `polaris-core::KbLocator` 反转依赖 | ✅ |
 | `polaris-runtime` | 地基 | 路径单源 / 子进程池与超时看门 / HTTP 构造 / 双壳事件 host shim——不依赖 tauri、不认识任何业务板块 | ✅ |
 | `polaris-core` | 地基 | 跨板块契约 trait（依赖反转的落点） | ✅ |
+| `polaris-protocol` | 地基 | 命令契约层：invoke 信封 + 参数访问记账——未读参数经 `x-polaris-unknown-args` 曝光，`POLARIS_STRICT_ARGS=1` 严格拒绝 | ✅ |
 | `polaris-cli` | 外壳 | `polaris-forge`（渲染引擎 CLI，给 agent/脚本/Docker 直调）与 `polaris-server`（Docker 服务端入口） | ✅ |
 
 ---
@@ -247,7 +251,8 @@ polaris-app/
 │   │   ├── lib.rs                #   入口 + generate_handler 注册(全别名保旧路径)
 │   │   ├── wiring.rs             #   引擎实现注入内核桥(全仓唯一同时认识两侧的地方)
 │   │   ├── server.rs             #   axum server 壳
-│   │   ├── collab/ expert/ voice/#   待 Phase 2 抽出的板块
+│   │   ├── apihub.rs hosting.rs #   双壳数据面 + 一键当主机(壳件)
+│   │   ├── expert/ voice/        #   待后续抽出的板块
 │   │   └── templates/            #   技能/专家/KB 模板(内容资产)
 │   └── crates/
 │       ├── polaris-core/         # 契约 trait
@@ -256,6 +261,8 @@ polaris-app/
 │       ├── polaris-fable/        # 检索枢纽 + 维基知识库
 │       ├── polaris-forge/        # 成品引擎(PPT/截图/视频/TTS)
 │       ├── polaris-wiki/         # llmwiki 知识网构建
+│       ├── polaris-collab/       # 多人协作引擎
+│       ├── polaris-protocol/     # 命令契约层
 │       ├── forge-codec/          # 纯 Rust 音视频编解码
 │       ├── polaris-sandbox/      # Docker 沙箱
 │       └── polaris-cli/          # polaris-forge CLI + polaris-server 入口
