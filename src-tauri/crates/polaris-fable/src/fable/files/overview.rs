@@ -278,7 +278,73 @@ pub(crate) fn language_label(stored: &str, ext: &str, kind: &str) -> String {
     }
 }
 
+// ───────────────────────── 概览缓存 + 单飞(并发合并) ─────────────────────────
+//
+// file_overview 对 files 表(可达百万行)跑多个全表 GROUP BY 聚合, 每次开一个带 mmap/cache
+// 预算的连接。UI 挂载/刷新常并发触发同一概览 → N 路各扫全表 + 各占一份 cache, 延迟随并发
+// 放大(实测 8 路 ≈5.7× 单路)且内存高水位。修法: 同 root 的并发调用**单飞**(只一个真算,
+// 其余等它的结果), 并对结果做**短 TTL 缓存**(概览是只读聚合, 秒级陈旧无害)——一阵并发
+// 爆发塌缩成一次扫描。TTL=0 关闭缓存(eval/需强一致时), 经 POLARIS_FABLE_OVERVIEW_TTL_MS 覆写。
+
+struct OverviewCacheEntry {
+    at: std::time::Instant,
+    val: FileOverview,
+}
+
+static OVERVIEW_CACHE: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<String, OverviewCacheEntry>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+// 每 root 一把单飞锁: 并发同 root 调用在此串行, 只有第一个真算, 其余醒来即命中新鲜缓存。
+static OVERVIEW_FLIGHT: once_cell::sync::Lazy<
+    parking_lot::Mutex<HashMap<String, std::sync::Arc<parking_lot::Mutex<()>>>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+fn overview_ttl() -> std::time::Duration {
+    let ms = std::env::var("POLARIS_FABLE_OVERVIEW_TTL_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(5000);
+    std::time::Duration::from_millis(ms)
+}
+
+/// 概览(带并发合并 + 短 TTL 缓存)。缓存键 = 规范化 root(None → 空串 = 全库)。
 pub fn overview(root: Option<String>) -> Result<FileOverview, String> {
+    let ttl = overview_ttl();
+    if ttl.is_zero() {
+        return overview_uncached(root); // 关闭缓存: 直算(eval/强一致)
+    }
+    let key = root.clone().unwrap_or_default();
+
+    // 快路径: 命中新鲜缓存直接返回(短锁, 不跨计算)。
+    if let Some(e) = OVERVIEW_CACHE.lock().get(&key) {
+        if e.at.elapsed() < ttl {
+            return Ok(e.val.clone());
+        }
+    }
+
+    // 取本 key 的单飞锁(并发同 root 在此串行)。
+    let flight = OVERVIEW_FLIGHT.lock().entry(key.clone()).or_default().clone();
+    let _g = flight.lock();
+
+    // 二次检查: 等锁期间别的调用可能刚算完并填了缓存。
+    if let Some(e) = OVERVIEW_CACHE.lock().get(&key) {
+        if e.at.elapsed() < ttl {
+            return Ok(e.val.clone());
+        }
+    }
+
+    // 由我真算一次并回填缓存(只我持单飞锁, 不阻塞别的 root)。
+    let val = overview_uncached(root)?;
+    OVERVIEW_CACHE.lock().insert(
+        key,
+        OverviewCacheEntry {
+            at: std::time::Instant::now(),
+            val: val.clone(),
+        },
+    );
+    Ok(val)
+}
+
+fn overview_uncached(root: Option<String>) -> Result<FileOverview, String> {
     let conn = open_db()?;
     // 根列表(给前端做切换器)
     let mut roots = Vec::new();

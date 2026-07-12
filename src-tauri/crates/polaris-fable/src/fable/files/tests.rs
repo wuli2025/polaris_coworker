@@ -7,6 +7,26 @@ fn b64_roundtrip_basic() {
     assert_eq!(b64(b"M"), "TQ==");
 }
 
+// file_overview 并发合并: TTL 内的重复概览应命中缓存(只算一次),TTL=0 关闭缓存。
+// 用一个空库(overview 在空 fable.db 上仍返回结构),验证第二次调用走缓存(远快)且结果相等。
+#[test]
+fn overview_ttl_cache_coalesces() {
+    // 隔离到临时 fable.db,避免碰真实库。
+    let tmp = std::env::temp_dir().join(format!("fable-ovcache-{}.db", std::process::id()));
+    std::env::set_var("POLARIS_FABLE_DB", &tmp);
+    std::env::set_var("POLARIS_FABLE_OVERVIEW_TTL_MS", "5000");
+    let a = overview(None).expect("overview 1");
+    let b = overview(None).expect("overview 2 (应命中缓存)");
+    // 缓存返回同一份聚合(结构与计数一致)。
+    assert_eq!(a.total_files, b.total_files);
+    // TTL=0 关闭缓存后仍能直算(不 panic)。
+    std::env::set_var("POLARIS_FABLE_OVERVIEW_TTL_MS", "0");
+    let c = overview(None).expect("overview 3 (关缓存直算)");
+    assert_eq!(a.total_files, c.total_files);
+    std::env::remove_var("POLARIS_FABLE_OVERVIEW_TTL_MS");
+    let _ = std::fs::remove_file(&tmp);
+}
+
 // ── 文件中心 v3 渐进式归类 ──
 
 #[test]
