@@ -5445,16 +5445,17 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.17",
  "include_dir",
- "iroh",
  "libc",
  "once_cell",
  "parking_lot",
  "pinyin",
+ "polaris-collab",
  "polaris-core",
  "polaris-fable",
  "polaris-forge",
  "polaris-forge-codec",
  "polaris-kernel",
+ "polaris-protocol",
  "polaris-runtime",
  "polaris-sandbox",
  "polaris-wiki",
@@ -5473,7 +5474,6 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "tokio",
- "tokio-tungstenite",
  "tower",
  "tower-http",
  "ureq 2.12.1",
@@ -5488,6 +5488,38 @@ dependencies = [
  "polaris-app",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "polaris-collab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "chrono",
+ "directories",
+ "futures-util",
+ "getrandom 0.2.17",
+ "iroh",
+ "once_cell",
+ "parking_lot",
+ "polaris-kernel",
+ "polaris-runtime",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tauri",
+ "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "tower-http",
+ "ureq 2.12.1",
+ "walkdir",
 ]
 
 [[package]]
@@ -5576,7 +5608,6 @@ dependencies = [
  "parking_lot",
  "pdf-extract",
  "polaris-runtime",
- "polaris-sandbox",
  "qrcode",
  "regex",
  "serde",
@@ -5588,6 +5619,15 @@ dependencies = [
  "walkdir",
  "windows-sys 0.59.0",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "polaris-protocol"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

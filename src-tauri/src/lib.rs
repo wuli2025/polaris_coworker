@@ -1,7 +1,12 @@
 // ── 引擎模块（桌面 + Docker 两种外壳共用同一份源码）──
 pub mod accounts;
-// 多人协作:账号/会话/设备白名单/任务卡/合并闸门(桌面主机与 Docker server 共用)。
-pub mod collab;
+// 多人协作已抽为独立 crate(polaris-collab);壳件留本仓:
+// apihub=应用数据面分发(认识全部引擎), hosting=桌面一键当主机拼装。
+pub use polaris_collab::collab;
+#[cfg(feature = "collab-host")]
+pub mod apihub;
+#[cfg(feature = "desktop")]
+pub mod hosting;
 pub mod expert;
 // ── 板块已抽为独立 crate(分仓规划 v2 Phase 1), 别名保持全部旧路径 ──
 // (含 generate_handler! 的 __cmd__ 宏解析与 server dispatch 的 `crate::X::…`)零改动。
@@ -156,7 +161,7 @@ pub fn run() {
             // 寓言计划:检索枢纽(fable.db 表结构就位;盘点/索引由用户在设置页触发)。
             fable::init();
             // 协作主机自启:上次点过「设为主机」就静默续上(不阻塞启动)。
-            collab::hosting::auto_start_if_enabled(h.clone());
+            hosting::auto_start_if_enabled(h.clone());
             // 云机网关自启重挂:上次挂过牌就重新向云机注册(云机重启后注册表清空需重挂)。
             #[cfg(feature = "collab-net")]
             collab::commands::gateway_auto_reattach();
@@ -188,10 +193,10 @@ pub fn run() {
             // 云机中继网关:桌面主机挂牌/断开(真·中继完整形态)
             collab::commands::collab_gateway_attach,
             collab::commands::collab_gateway_detach,
-            // 多人协作:一键把本机变成协作主机(内嵌 axum 协作路由)
-            collab::hosting::collab_host_start,
-            collab::hosting::collab_host_status,
-            collab::hosting::collab_host_stop,
+            // 多人协作:一键把本机变成协作主机(内嵌 axum 协作路由;壳件)
+            hosting::collab_host_start,
+            hosting::collab_host_status,
+            hosting::collab_host_stop,
             // KB
             kb::kb_root,
             kb::kb_default_root,

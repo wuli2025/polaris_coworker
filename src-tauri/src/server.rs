@@ -8,7 +8,7 @@
 //!
 //! 设计要点：引擎模块（kb/chat/conv/...）源码与桌面版**完全相同**，仅外壳不同。
 
-use crate::collab::apihub::{api_router, mime_for, ApiState};
+use crate::apihub::{api_router, mime_for, ApiState};
 use crate::host::{AppHandle, Event};
 use axum::{
     body::Body,
@@ -158,7 +158,7 @@ pub async fn serve() -> anyhow::Result<()> {
             init_errors,
         }),
     };
-    // 应用数据面(invoke/upload/file/ws)已抽至 crate::collab::apihub(双壳共用);
+    // 应用数据面(invoke/upload/file/ws)已抽至 crate::apihub(双壳共用);
     // server 壳与桌面 hosting 各自构造 ApiState 并 merge api_router。
     let api_state = ApiState {
         app: app.clone(),
@@ -273,7 +273,7 @@ static STATUS_CACHE: Lazy<tokio::sync::Mutex<Option<(Instant, Value)>>> =
 
 async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
     // 鉴权复用 apihub 的基础面解析(与 /api/invoke 同语义);role_rank 在 collab::http。
-    let Some(ctx) = crate::collab::apihub::app_ctx_headers(&state.auth_token, &headers) else {
+    let Some(ctx) = crate::apihub::app_ctx_headers(&state.auth_token, &headers) else {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error":"未授权"}))).into_response();
     };
     if crate::collab::http::role_rank(&ctx.role) < 3 {

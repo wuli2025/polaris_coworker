@@ -60,6 +60,8 @@ libc = { version = "0.2", features = [] }
 
 # 板块 crate (架构重构 Phase 0–1)
 polaris-core = { path = "crates/polaris-core" }
+# 命令契约层(分仓规划 v2 第 1 仓种子):invoke 信封 + 参数访问记账(未知参数曝光/严格模式)。
+polaris-protocol = { path = "crates/polaris-protocol" }
 # Forge 渲染引擎(分仓规划 v2 Phase 1):PPT/截图/视频/TTS/Figma 桥。
 # desktop 特性经下方 [features] 转发;server/CLI 形态用默认(无 tauri)。
 polaris-forge = { path = "crates/polaris-forge" }
@@ -69,6 +71,8 @@ polaris-kernel = { path = "crates/polaris-kernel" }
 polaris-fable = { path = "crates/polaris-fable" }
 # llmwiki 知识网构建(分仓规划 v2 第 6 仓):唯一获批的 3→2 依赖(骑在 fable 之上)。
 polaris-wiki = { path = "crates/polaris-wiki" }
+# 多人协作引擎(分仓规划 v2 第 5 仓):壳件 apihub/hosting 留本仓 src/。
+polaris-collab = { path = "crates/polaris-collab" }
 # 横切基建(路径/子进程池/超时看门/HTTP):最底层 crate,不依赖 tauri 与任何业务板块。
 # 主 crate 经 `pub use polaris_runtime as runtime;` 别名,业务代码仍写 crate::runtime::…
 polaris-runtime = { path = "crates/polaris-runtime" }
@@ -94,12 +98,7 @@ base64 = "0.22"
 argon2 = "0.5"
 # 多人协作:账号镜像加密(云端双存,零知识——云端只见密文,解密钥=host.key 派生,永不出主机)。
 chacha20poly1305 = "0.10"
-# 多人协作组网隧道(v8 方案):iroh QUIC 打洞 + relay 兜底。编译极重,务必保持
-# optional,只随 collab-net feature 进来,永不进 default。
-iroh = { version = "1", optional = true }
-# 云机中继网关的 WS 反代:把手机的 /ws 双向 pump 到经隧道的桌面主机 /ws。
-# 0.24 与 axum 0.7 的 ws 同版本 → 复用已编译产物,零增量。只随 collab-net 进。
-tokio-tungstenite = { version = "0.24", optional = true }
+# iroh / tokio-tungstenite 已随 collab 板块迁入 crates/polaris-collab(collab-net 特性)。
 # qrcode 已随 integrations 板块迁入 crates/polaris-kernel。
 # 回声层「每日做梦」调度需要本地时区的钟点(std 拿不到 local hour)。
 # clock-only:不拉 wasm/serde 等默认特性,增量极小。
@@ -157,6 +156,7 @@ desktop = [
     "polaris-forge/desktop", # forge 引擎的桌面形态(tauri 事件 + headless_chrome 兜底)
     "polaris-fable/desktop", # 检索引擎的桌面形态(tauri 事件/async_runtime)
     "polaris-wiki/desktop",  # llmwiki 构建管线的桌面形态
+    "polaris-collab/desktop", # 协作引擎的桌面命令
     "custom-protocol",
     "collab-host",           # 桌面一键当主机:内嵌协作 axum 路由
 ]
@@ -164,8 +164,8 @@ custom-protocol = ["tauri?/custom-protocol"]
 # Docker/Web 构建：axum HTTP/WS 外壳，复用全部 Rust 引擎，不含 Tauri。
 # collab-host 提供共用的协作路由(collab/http.rs)与全部 axum 依赖。
 server = ["collab-host", "polaris-fable/server"]
-# 协作路由双壳共用(collab/http.rs)+ 桌面内嵌主机(collab/hosting.rs)所需 HTTP 依赖。
-collab-host = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util"]
+# 协作路由双壳共用(collab crate 的 http.rs)+ 壳件 apihub/hosting 所需 HTTP 依赖。
+collab-host = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util", "polaris-collab/collab-host"]
 # 语音识别运行时:本地 SenseVoice(sherpa-onnx),**桌面 / Docker server 皆可**。
 # 只拉 sherpa-rs,不含麦克风/热键/注入 → Docker server 可开它跑「浏览器上传音频→服务端识别」。
 # 默认不开(保护 build + 镜像体积),实测/发版显式开 `--features voice-asr`。
@@ -179,9 +179,8 @@ voice-live = ["voice-asr", "dep:cpal", "dep:rdev", "dep:enigo"]
 # 运行时 POLARIS_LOCAL_EMBED=1 才真正启用本地路径(否则仍走云 API)。勿与 voice-asr 同开(双 onnxruntime)。
 # fastembed 依赖已随 fable 板块迁入 crates/polaris-fable,此处只做特性转发。
 local-embed = ["polaris-fable/local-embed"]
-# 多人协作组网隧道:iroh 打洞直连 + relay 兜底,把成员端 TCP 流量转发到主机 127.0.0.1:8080。
-# iroh 依赖树很大 → 默认不开,发多人协作版显式 `--features collab-net`。
-collab-net = ["dep:iroh", "dep:tokio-tungstenite"]
+# 多人协作组网隧道:iroh 打洞直连 + relay 兜底(依赖已随 collab 板块迁入 crate)。
+collab-net = ["polaris-collab/collab-net"]
 
 # server 二进制：浏览器前端 + REST/WS 后端（替代 Tauri 外壳）。
 # 构建：cargo build --release --bin polaris-server --no-default-features --features server

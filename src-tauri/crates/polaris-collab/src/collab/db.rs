@@ -318,8 +318,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 }
 
 /// 测试串行锁:POLARIS_COLLAB_DB 是进程级环境变量,并行测试互设会串库。
-/// 各测试第一行拿这把锁再 set_var。
-#[cfg(test)]
+/// 各测试第一行拿这把锁再 set_var。**不设 cfg(test)**:壳仓(hosting)的集成测试也要跨 crate 用它,
+/// 依赖方 test 构建看不到本 crate 的 cfg(test) 项;常驻只是一把惰性空锁,零成本。
 pub static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// 当前 Unix 秒。

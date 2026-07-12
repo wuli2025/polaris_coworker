@@ -1417,7 +1417,9 @@ fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
         "-i",
         "-w",
         "/workspace",
-        polaris_sandbox::CONTAINER_NAME,
+        // 与 polaris_sandbox::CONTAINER_NAME 同值。字面内联以斩断 kernel→sandbox 的
+        // 向上依赖(红线 R3);本函数是 dead_code 保留路径,真启用时应经壳层桥接注入。
+        "polaris-sandbox",
         "claude",
         "--print",
         "--output-format",

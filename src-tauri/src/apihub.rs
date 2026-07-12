@@ -132,12 +132,10 @@ fn required_role(_cmd: &str) -> u8 {
 
 // ───────────────────────── /api/invoke 分发 ─────────────────────────
 
-#[derive(serde::Deserialize)]
-struct InvokeReq {
-    cmd: String,
-    #[serde(default)]
-    args: Value,
-}
+// 信封与参数记账下沉契约层(polaris-protocol, 分仓规划 v2 第 1 仓种子):
+// Args 记录分发代码实际读过哪些顶层参数, 没被读的 = 拼错名/契约漂移 —— 默认经
+// `x-polaris-unknown-args` 响应头曝光, POLARIS_STRICT_ARGS=1 时直接 400。
+use polaris_protocol::{strict_args_enabled, Args, InvokeRequest};
 
 /// 把命令错误串按「客户端错误 vs 服务端错误」映射到合适的 HTTP 状态码,而非一律 500。
 fn invoke_err_resp(e: String) -> Response {
@@ -162,7 +160,7 @@ fn invoke_err_resp(e: String) -> Response {
 async fn invoke(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(req): Json<InvokeReq>,
+    Json(req): Json<InvokeRequest>,
 ) -> Response {
     let Some(ctx) = app_ctx(&state, &headers) else {
         return (
@@ -210,8 +208,12 @@ async fn invoke(
     //    走精简 dispatch_desktop(覆盖手机数据面所需命令;全量命令用 Docker/NAS server 版)。
     // out 统一成 Result<Result<Value,String>, tokio::task::JoinError> 供下方一致处理。
     #[cfg(not(feature = "desktop"))]
-    let out: Result<Result<Value, String>, tokio::task::JoinError> = {
-        let fut = tokio::task::spawn_blocking(move || dispatch_sync(&cmd, &args, app));
+    let out: Result<(Result<Value, String>, Vec<String>), tokio::task::JoinError> = {
+        let fut = tokio::task::spawn_blocking(move || {
+            let a = Args::new(args);
+            let r = dispatch_sync(&cmd, &a, app);
+            (r, a.unknown_keys())
+        });
         if timeout_secs == 0 {
             fut.await
         } else {
@@ -232,13 +234,14 @@ async fn invoke(
         }
     };
     #[cfg(feature = "desktop")]
-    let out: Result<Result<Value, String>, tokio::task::JoinError> = {
+    let out: Result<(Result<Value, String>, Vec<String>), tokio::task::JoinError> = {
+        let a = Args::new(args);
         let res = if timeout_secs == 0 {
-            dispatch_desktop(&cmd, &args, app).await
+            dispatch_desktop(&cmd, &a, app).await
         } else {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
-                dispatch_desktop(&cmd, &args, app),
+                dispatch_desktop(&cmd, &a, app),
             )
             .await
             {
@@ -256,12 +259,33 @@ async fn invoke(
                 }
             }
         };
-        Ok(res)
+        Ok((res, a.unknown_keys()))
     };
 
     match out {
-        Ok(Ok(v)) => Json(v).into_response(),
-        Ok(Err(e)) => invoke_err_resp(e),
+        Ok((Ok(v), unknown)) => {
+            if unknown.is_empty() {
+                return Json(v).into_response();
+            }
+            // 未知参数 = 客户端拼错名/契约漂移(top_k vs topK 一类),此前被静默容忍产生
+            // 错误业务结果。默认曝光不破坏既有客户端;严格模式直接拒绝。
+            if strict_args_enabled() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!(
+                        "未知参数: {}(命令 {} 未读取任何同名参数;各命令参数名以 tauri.ts 为准)",
+                        unknown.join(", "), cmd_for_err
+                    )})),
+                )
+                    .into_response();
+            }
+            let mut resp = Json(v).into_response();
+            if let Ok(hv) = axum::http::HeaderValue::from_str(&unknown.join(",")) {
+                resp.headers_mut().insert("x-polaris-unknown-args", hv);
+            }
+            resp
+        }
+        Ok((Err(e), _)) => invoke_err_resp(e),
         Err(e) => err_resp(format!("内部任务失败: {e}")),
     }
 }
@@ -271,7 +295,7 @@ async fn invoke(
 /// 其余命令请用 Docker/NAS server 版(全量 dispatch_sync)。手机的账号/项目/任务走
 /// /api/collab/*(collab_router),不经此分发。
 #[cfg(feature = "desktop")]
-async fn dispatch_desktop(cmd: &str, a: &Value, _app: AppHandle) -> Result<Value, String> {
+async fn dispatch_desktop(cmd: &str, a: &Args, _app: AppHandle) -> Result<Value, String> {
     use crate::*;
     match cmd {
         // ── 文件中心(手机「文件」页 + 预览) ──
@@ -333,13 +357,13 @@ async fn dispatch_desktop(cmd: &str, a: &Value, _app: AppHandle) -> Result<Value
 }
 
 // 参数提取器（前端 invoke 走 camelCase 键）
-fn req_str(a: &Value, k: &str) -> Result<String, String> {
+fn req_str(a: &Args, k: &str) -> Result<String, String> {
     a.get(k)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| format!("缺少字符串参数 `{k}`"))
 }
-fn opt_str(a: &Value, k: &str) -> Option<String> {
+fn opt_str(a: &Args, k: &str) -> Option<String> {
     a.get(k).and_then(|v| {
         if v.is_null() {
             None
@@ -348,22 +372,22 @@ fn opt_str(a: &Value, k: &str) -> Option<String> {
         }
     })
 }
-fn opt_usize(a: &Value, k: &str) -> Option<usize> {
+fn opt_usize(a: &Args, k: &str) -> Option<usize> {
     a.get(k).and_then(|v| v.as_u64()).map(|n| n as usize)
 }
-fn opt_bool(a: &Value, k: &str) -> Option<bool> {
+fn opt_bool(a: &Args, k: &str) -> Option<bool> {
     a.get(k).and_then(|v| v.as_bool())
 }
-fn opt_f64(a: &Value, k: &str) -> Option<f64> {
+fn opt_f64(a: &Args, k: &str) -> Option<f64> {
     a.get(k).and_then(|v| v.as_f64())
 }
-fn opt_u8(a: &Value, k: &str) -> Option<u8> {
+fn opt_u8(a: &Args, k: &str) -> Option<u8> {
     a.get(k).and_then(|v| v.as_u64()).map(|n| n.min(255) as u8)
 }
-fn bool_def(a: &Value, k: &str, d: bool) -> bool {
+fn bool_def(a: &Args, k: &str, d: bool) -> bool {
     a.get(k).and_then(|v| v.as_bool()).unwrap_or(d)
 }
-fn vec_str(a: &Value, k: &str) -> Vec<String> {
+fn vec_str(a: &Args, k: &str) -> Vec<String> {
     a.get(k)
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -374,7 +398,7 @@ fn vec_str(a: &Value, k: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 /// 必填字符串数组:缺失/非数组/元素非字符串都报 400,避免参数错被伪装成「空结果」
-fn req_vec_str(a: &Value, k: &str) -> Result<Vec<String>, String> {
+fn req_vec_str(a: &Args, k: &str) -> Result<Vec<String>, String> {
     let arr = a
         .get(k)
         .ok_or_else(|| format!("缺少数组参数 `{k}`"))?
@@ -392,7 +416,7 @@ fn req_vec_str(a: &Value, k: &str) -> Result<Vec<String>, String> {
 /// server 壳全量命令分发(≈200 命令,同步直调各引擎函数)。desktop 下这些引擎命令是
 /// async 薄包装(见 dispatch_desktop),签名不兼容,故本函数**仅 server flavor 编译**。
 #[cfg(not(feature = "desktop"))]
-fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> {
+fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
     use crate::*;
     match cmd {
         // ── KB ──

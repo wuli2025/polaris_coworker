@@ -40,8 +40,6 @@ encoding_rs = "0.8"
 # 飞书建应用二维码(integrations/feishu)
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tauri = { version = "2.1", features = [], optional = true }
-# chat 沙箱档位(Docker-in-Docker)仅桌面: 只用到容器名常量与状态查询
-polaris-sandbox = { path = "../polaris-sandbox", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_NetworkManagement_WNet", "Win32_System_SystemInformation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
@@ -51,4 +49,4 @@ libc = "0.2"
 
 [features]
 default = []
-desktop = ["dep:tauri", "dep:polaris-sandbox"]
+desktop = ["dep:tauri"]

@@ -7,7 +7,7 @@
 //! 事件转发给本机 Tauri UI(主机人自己的看板实时刷新)。
 #![cfg(feature = "desktop")]
 
-use crate::collab::apihub::{api_router, ApiState};
+use crate::apihub::{api_router, ApiState};
 use crate::collab::http::{collab_router, detect_advertise_urls, CollabState};
 use crate::host::AppHandle as BusHandle;
 use parking_lot::Mutex;
