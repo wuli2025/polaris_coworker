@@ -201,9 +201,42 @@ function scheduleEnhance(key: string, html: string) {
 }
 
 // ── 懒加载 shiki / katex ──
-let shikiMod: Promise<typeof import("shiki")> | null = null;
+// shiki 走细粒度 core:只注册常用语言 + 单主题(one-dark-pro),用 JS 正则引擎免 wasm。
+// 全量 bundle(import("shiki"))会把 200+ 语言 + 全部主题打进 dist,体积不可接受。
+let shikiMod: Promise<import("shiki/core").HighlighterCore> | null = null;
 function getShiki() {
-  if (!shikiMod) shikiMod = import("shiki");
+  if (!shikiMod) {
+    shikiMod = Promise.all([
+      import("shiki/core"),
+      import("shiki/engine/javascript"),
+    ]).then(([core, js]) =>
+      core.createHighlighterCore({
+        // forgiving:个别语法含 JS 正则不支持的 pattern 时跳过该规则,不整体报错
+        engine: js.createJavaScriptRegexEngine({ forgiving: true }),
+        themes: [import("shiki/themes/one-dark-pro.mjs")],
+        langs: [
+          import("shiki/langs/typescript.mjs"), // 含 ts 别名
+          import("shiki/langs/tsx.mjs"),
+          import("shiki/langs/javascript.mjs"), // 含 js 别名
+          import("shiki/langs/jsx.mjs"),
+          import("shiki/langs/json.mjs"),
+          import("shiki/langs/python.mjs"), // 含 py 别名
+          import("shiki/langs/rust.mjs"), // 含 rs 别名
+          import("shiki/langs/go.mjs"),
+          import("shiki/langs/shellscript.mjs"), // 含 bash/sh/shell/zsh 别名
+          import("shiki/langs/html.mjs"),
+          import("shiki/langs/css.mjs"),
+          import("shiki/langs/vue.mjs"),
+          import("shiki/langs/markdown.mjs"), // 含 md 别名
+          import("shiki/langs/sql.mjs"),
+          import("shiki/langs/yaml.mjs"), // 含 yml 别名
+          import("shiki/langs/toml.mjs"),
+          import("shiki/langs/diff.mjs"),
+          import("shiki/langs/dockerfile.mjs"), // 含 docker 别名
+        ],
+      })
+    );
+  }
   return shikiMod;
 }
 let katexMod: Promise<any> | null = null;
@@ -228,7 +261,8 @@ async function enhanceHtml(
   let changed = false;
 
   if (needCode) {
-    const { codeToHtml } = await getShiki();
+    const highlighter = await getShiki();
+    const loadedLangs = new Set(highlighter.getLoadedLanguages());
     const blocks = tpl.content.querySelectorAll(".code-block");
     for (const blk of Array.from(blocks)) {
       const codeEl = blk.querySelector("pre > code");
@@ -236,8 +270,10 @@ async function enhanceHtml(
       if (!codeEl || !pre) continue;
       const lang = (blk.getAttribute("data-lang") || "").toLowerCase();
       if (!lang || lang === "text" || lang === "plain") continue;
+      // 未注册语言:core 版 codeToHtml 会直接抛错,预判后保留无高亮原样
+      if (!loadedLangs.has(lang)) continue;
       try {
-        const out = await codeToHtml(codeEl.textContent || "", {
+        const out = highlighter.codeToHtml(codeEl.textContent || "", {
           lang,
           theme: "one-dark-pro",
         });

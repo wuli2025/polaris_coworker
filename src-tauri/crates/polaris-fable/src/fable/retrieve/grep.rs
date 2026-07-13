@@ -50,7 +50,15 @@ fn scan_and_score(
                         break;
                     }
                 }
-                let abs = std::path::Path::new(&root).join(&rel);
+                // 显示路径 → 真实字节路径(GBK 名文件在 Unix 上直接 read 恒失败,
+                // 实时扫描会静默跳过它们)。IO 用还原路径;**返回给上层的 abspath 必须
+                // 保留 UTF-8 显示路径**——对还原路径再 to_string_lossy 会把 GBK 字节
+                // 打成 �,前端打开/agent 取证/二次 reencode 全都还原不回真实文件。
+                let abs_display = std::path::Path::new(&root)
+                    .join(&rel)
+                    .to_string_lossy()
+                    .into_owned();
+                let abs = crate::fable::reencode_fs_path(&abs_display);
                 let Ok(bytes) = std::fs::read(&abs) else {
                     continue;
                 };
@@ -91,7 +99,7 @@ fn scan_and_score(
                         let context: String = lines[lo..hi].join("\n").chars().take(700).collect();
                         hits.lock().unwrap().push(GrepHit {
                             path: rel.clone(),
-                            abspath: abs.to_string_lossy().into_owned(),
+                            abspath: abs_display.clone(),
                             line: i + 1,
                             snippet,
                             context,

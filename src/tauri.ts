@@ -255,6 +255,11 @@ export async function uploadToBackend(
 let ws: WebSocket | null = null;
 const wsListeners = new Map<string, Set<(p: unknown) => void>>();
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+// 指数退避:1s 起,每次失败翻倍 + 少量抖动,封顶 30s;连上即复位。
+// 避免后端宕机/重启时每 1.5s 硬敲(语义对齐 mobile/src/lib/net.ts)。
+const WS_BACKOFF_MIN = 1000;
+const WS_BACKOFF_MAX = 30000;
+let wsBackoff = WS_BACKOFF_MIN;
 
 /** WS 连接状态变化（仅 Docker/Web 模式有意义）：true=已连上, false=断开重连中 */
 const wsStatusCbs = new Set<(connected: boolean) => void>();
@@ -276,7 +281,10 @@ function ensureWs(): void {
       t ? `?token=${encodeURIComponent(t)}` : ""
     }`;
     ws = new WebSocket(url);
-    ws.onopen = () => dispatchWsStatus(true);
+    ws.onopen = () => {
+      wsBackoff = WS_BACKOFF_MIN;
+      dispatchWsStatus(true);
+    };
     ws.onmessage = (e) => {
       try {
         const { topic, payload } = JSON.parse(e.data);
@@ -291,7 +299,11 @@ function ensureWs(): void {
       dispatchWsStatus(false);
       if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
       // 仍有监听者才自动重连（避免空连接刷日志）。
-      if (wsListeners.size > 0) wsReconnectTimer = setTimeout(ensureWs, 1500);
+      if (wsListeners.size > 0) {
+        const jitter = Math.floor(Math.random() * 300);
+        wsReconnectTimer = setTimeout(ensureWs, wsBackoff + jitter);
+        wsBackoff = Math.min(wsBackoff * 2, WS_BACKOFF_MAX);
+      }
     };
     ws.onerror = () => {
       try {

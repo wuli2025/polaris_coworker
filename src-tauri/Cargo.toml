@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "polaris-app"
-version = "1.7.2"
+version = "2.0.1"
 description = "Polaris - 本地优先 AI 工作台 (MVP)"
 authors = ["winner3388"]
 edition = "2021"
@@ -79,9 +79,11 @@ polaris-runtime = { path = "crates/polaris-runtime" }
 # sandbox 含 #[tauri::command]，依赖 tauri → 仅桌面构建编译；
 # Docker 内「Docker-in-Docker」沙箱本期降级（dispatch 层给 stub）。
 polaris-sandbox = { path = "crates/polaris-sandbox", optional = true }
-# Forge codec 板块:openh264-rs + 自写 BMFF muxer + ebur128 + cosmic-text + symphonia + audiopus
+# Forge codec 板块:openh264-rs(source feature 从源码编译,编译开销大)+ 自写 BMFF muxer
 # 替 ffmpeg CLI;二进制增量 3.3-5MB;详 workspace/research-notes/task-b.md
-polaris-forge-codec = { path = "crates/forge-codec" }
+# ⚠ 当前主 crate 源码零引用它(原生编码是 P1.5 stub),却被无条件编译 = 纯死编译开销
+# (openh264 source 构建很重)。改为 optional,仅 native-codec 特性下才拉,默认不编。
+polaris-forge-codec = { path = "crates/forge-codec", optional = true }
 # 文件转换 convert.rs(zip/calamine/pdf-extract)已随内核迁入 crates/polaris-kernel。
 # Codex(ChatGPT) OAuth Device Code 流程 —— 同步阻塞 HTTP 客户端 (rustls, 无 tokio)。
 # 只用于授权三步: 取设备码 / 轮询 / code 换 token。比 cc-switch 的 reqwest+tokio 轻得多。
@@ -181,6 +183,9 @@ voice-live = ["voice-asr", "dep:cpal", "dep:rdev", "dep:enigo"]
 local-embed = ["polaris-fable/local-embed"]
 # 多人协作组网隧道:iroh 打洞直连 + relay 兜底(依赖已随 collab 板块迁入 crate)。
 collab-net = ["polaris-collab/collab-net"]
+# 原生编解码(openh264 source 从源码编译,重):P1.5 真实现视频原生编码时才开。
+# 默认关——当前主 crate 零引用 forge-codec,开着只是白白拖长编译 + 撑大缓存。
+native-codec = ["dep:polaris-forge-codec"]
 
 # server 二进制：浏览器前端 + REST/WS 后端（替代 Tauri 外壳）。
 # 构建：cargo build --release --bin polaris-server --no-default-features --features server
@@ -201,6 +206,18 @@ collab-net = ["polaris-collab/collab-net"]
 [[bin]]
 name = "polaris-app"
 path = "src/main.rs"
+
+# ═══════════════════════════════════════════════════════════════
+# Dev/check 体积优化 — target/ 曾达 ~120GB(debug deps 58G + incremental 51G)
+# ═══════════════════════════════════════════════════════════════
+# 第三方依赖的调试信息几乎从不用到(断点基本落在自家 crate),却占 debug 构建的大头。
+# 关掉「所有依赖」的 debuginfo,自家 crate 仍保留(下方 [profile.dev] 默认 debug=true),
+# 增量/全量 target 体积可降一大截,且不影响自己代码的断点/回溯。
+[profile.dev.package."*"]
+debug = false
+# 同理作用于 test/bench 用的 dev 变体。
+[profile.test.package."*"]
+debug = false
 
 # ═══════════════════════════════════════════════════════════════
 # Release 体积优化 — 工业级减负配置

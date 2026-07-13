@@ -147,8 +147,15 @@ pub fn resolve_auth(auth_token: &Option<String>, token: Option<&str>) -> Option<
     None
 }
 
-pub fn auth_ctx(state: &CollabState, headers: &HeaderMap) -> Option<AuthCtx> {
-    resolve_auth(&state.auth_token, bearer_of(headers).as_deref())
+/// header → AuthCtx。鉴权的同步 SQLite 查询挪进阻塞线程池:直接跑在 axum async worker
+/// 上会钉住 reactor(会话短缓存命中时不落库,这层 spawn_blocking 兜的是未命中/首次)。
+pub async fn auth_ctx(state: &CollabState, headers: &HeaderMap) -> Option<AuthCtx> {
+    let auth_token = state.auth_token.clone();
+    let token = bearer_of(headers);
+    tokio::task::spawn_blocking(move || resolve_auth(&auth_token, token.as_deref()))
+        .await
+        .ok()
+        .flatten()
 }
 
 pub fn role_rank(role: &str) -> u8 {
@@ -291,7 +298,7 @@ async fn collab_logout(headers: HeaderMap) -> Response {
 }
 
 async fn collab_me(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    match auth_ctx(&state, &headers) {
+    match auth_ctx(&state, &headers).await {
         Some(ctx) => Json(json!({"username": ctx.username, "role": ctx.role})).into_response(),
         None => (StatusCode::UNAUTHORIZED, Json(json!({"error":"未登录"}))).into_response(),
     }
@@ -319,7 +326,7 @@ async fn collab_ticket(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -345,7 +352,7 @@ async fn collab_ticket(
 }
 
 async fn collab_users(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -360,7 +367,7 @@ async fn collab_user_disable(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -379,7 +386,7 @@ async fn collab_user_disable(
 }
 
 async fn collab_devices(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -411,7 +418,7 @@ async fn collab_device_revoke(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -463,7 +470,7 @@ async fn collab_user_search(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(_ctx) = auth_ctx(&state, &headers) else {
+    let Some(_ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let kw = q.get("q").cloned().unwrap_or_default();
@@ -474,7 +481,7 @@ async fn collab_user_search(
 }
 
 async fn team_list(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let out = tokio::task::spawn_blocking(move || {
@@ -490,7 +497,7 @@ async fn team_create(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 2 {
@@ -514,7 +521,7 @@ async fn team_members_api(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(tid) = q.get("teamId").and_then(|s| s.parse::<i64>().ok()) else {
@@ -535,7 +542,7 @@ async fn team_member_add(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(tid) = i_of(&v, "teamId") else {
@@ -566,7 +573,7 @@ async fn team_member_remove(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let (Some(tid), Some(uid)) = (i_of(&v, "teamId"), i_of(&v, "userId")) else {
@@ -595,7 +602,7 @@ async fn team_member_remove(
 
 /// 主机侧:导出加密镜像(owner)。返回 blob,调用方可 POST 给云端 /mirror/store。
 async fn mirror_export_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -614,7 +621,7 @@ async fn mirror_store_api(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -629,7 +636,7 @@ async fn mirror_store_api(
 }
 
 async fn mirror_pull_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -652,7 +659,7 @@ async fn mirror_restore_api(
     Json(v): Json<Value>,
 ) -> Response {
     // 灾后恢复也必须持机器访问口令；空库不再自动合成 owner。
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -692,7 +699,7 @@ async fn project_create(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let team_id = i_of(&v, "teamId");
@@ -719,7 +726,7 @@ async fn project_create(
 }
 
 async fn project_list(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let is_owner = role_rank(&ctx.role) >= 3;
@@ -735,7 +742,7 @@ async fn project_members(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
@@ -760,7 +767,7 @@ async fn project_member_add(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(pid) = i_of(&v, "projectId") else {
@@ -803,7 +810,7 @@ async fn project_set_lead(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let global_owner = role_rank(&ctx.role) >= 3;
@@ -831,7 +838,7 @@ async fn project_shared_scope_set(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let global_owner = role_rank(&ctx.role) >= 3;
@@ -852,7 +859,7 @@ async fn task_list(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
@@ -902,7 +909,7 @@ async fn task_messages_get(
     axum::extract::Path(tid): axum::extract::Path<i64>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let after_id = q
@@ -933,7 +940,7 @@ async fn task_messages_post(
     axum::extract::Path(tid): axum::extract::Path<i64>,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 2 {
@@ -971,7 +978,7 @@ async fn task_ai_reply(
     headers: HeaderMap,
     axum::extract::Path(tid): axum::extract::Path<i64>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let st = state.clone();
@@ -996,7 +1003,7 @@ async fn task_create(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(pid) = i_of(&v, "projectId") else {
@@ -1033,7 +1040,7 @@ async fn task_create(
 macro_rules! task_op {
     ($fn_name:ident, $body:expr) => {
         async fn $fn_name(State(state): State<CollabState>, headers: HeaderMap, Json(v): Json<Value>) -> Response {
-            let Some(ctx) = auth_ctx(&state, &headers) else { return forbid(); };
+            let Some(ctx) = auth_ctx(&state, &headers).await else { return forbid(); };
             if role_rank(&ctx.role) < 2 { return forbid(); }
             let Some(tid) = i_of(&v, "taskId") else {
                 return (StatusCode::BAD_REQUEST, Json(json!({"error":"缺 taskId"}))).into_response();
@@ -1168,7 +1175,7 @@ async fn task_rounds(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(tid) = q.get("taskId").and_then(|s| s.parse::<i64>().ok()) else {
@@ -1197,7 +1204,7 @@ async fn collab_activity(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
@@ -1230,7 +1237,7 @@ async fn checks_get(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(tid) = q.get("taskId").and_then(|s| s.parse::<i64>().ok()) else {
@@ -1279,7 +1286,7 @@ async fn checks_profile_set(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let global_owner = role_rank(&ctx.role) >= 3;
@@ -1306,7 +1313,7 @@ async fn checks_profile_set(
 
 /// 主机本机已安装、可用作检查项的技能清单(检查设置下拉)。
 async fn checks_skills_list(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(_ctx) = auth_ctx(&state, &headers) else {
+    let Some(_ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
@@ -1327,7 +1334,7 @@ async fn lead_grants_get(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
@@ -1352,7 +1359,7 @@ async fn lead_grants_set(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let global_owner = role_rank(&ctx.role) >= 3;
@@ -1375,7 +1382,7 @@ async fn lead_morning(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let Some(pid) = q.get("projectId").and_then(|s| s.parse::<i64>().ok()) else {
@@ -1400,7 +1407,7 @@ async fn lead_assign_api(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let st = state.clone();
@@ -1429,7 +1436,7 @@ async fn lead_nudge_api(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
@@ -1447,7 +1454,7 @@ async fn lead_nudge_api(
 // ── 主 Agent AI ──
 
 async fn lead_model_get(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -1466,7 +1473,7 @@ async fn lead_model_set(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -1492,7 +1499,7 @@ async fn lead_ai_decompose(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 2 {
@@ -1539,7 +1546,7 @@ async fn lead_ai_review(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 2 {
@@ -1572,7 +1579,7 @@ async fn lead_ai_fuse(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 2 {
@@ -1760,9 +1767,12 @@ async fn merge_trial_api(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
+    // 注意不能按全局角色早拒(role_rank<2):全局 visitor 可以是团队/项目管理者
+    // (can_admin 认项目成员表),早拒会把合法管理者挡在裁决台数据源之外。
+    // 资源面由下面的项目成员闸兜住:非成员(含普通 visitor)照旧 403。
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let tid = i_of(&v, "taskId").ok_or("缺 taskId")?;
         let card = crate::collab::tasks::get(tid)?;
@@ -1809,7 +1819,7 @@ async fn merge_resolve_api(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
@@ -1853,24 +1863,26 @@ async fn merge_squash_api(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let st = state.clone();
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let tid = i_of(&v, "taskId").ok_or("缺 taskId")?;
         let card = crate::collab::tasks::get(tid)?;
-        // 放行闸:owner 直通;主 Agent 路径走 lead_approve_merge(查 can_merge 位);
-        // 其余角色一律拒绝——协作者不能给自己放行。
+        // 放行闸:owner 直通;主 Agent 路径走 lead_approve_merge(查 can_merge 位)。
+        // asLead 与 task_review 同一铁律:也只能由项目/团队管理者代为发起——否则任意
+        // 登录账号(含 visitor)都能借 asLead 抢先放行合并,且落痕记成 lead 误导审计。
         let as_lead = v.get("asLead").and_then(|x| x.as_bool()).unwrap_or(false);
         let can_admin = crate::collab::projects::can_admin(card.project_id, ctx.user_id, role_rank(&ctx.role) >= 3);
-        let actor = if can_admin && !as_lead {
-            ctx.username.clone()
-        } else if as_lead {
+        if !can_admin {
+            return Err("合并放行需要项目/团队管理者(主 Agent 路径也须由管理者代为发起)".into());
+        }
+        let actor = if as_lead {
             crate::collab::lead::lead_approve_merge(card.project_id, tid)?;
             format!("lead(申请人:{})", ctx.username)
         } else {
-            return Err("合并放行需要 owner,或已授权的主 Agent".into());
+            ctx.username.clone()
         };
         // 验收闸:最新一轮必须 pass。
         let rounds = crate::collab::tasks::rounds(tid)?;
@@ -1916,7 +1928,8 @@ async fn merge_squash_api(
                     }
                 }
                 Ok(false) => return Err("检查闸未过:本轮检查未全绿(或未跑完)。owner 可带 force 强推".into()),
-                Err(_) => {}
+                // 查询出错必须 fail-closed:SQLite busy 等偶发错误不能被当成「通过」放行。
+                Err(e) => return Err(format!("检查闸未过:检查结果查询失败({e}),请重试")),
             }
         }
         if force {
@@ -1925,7 +1938,20 @@ async fn merge_squash_api(
         // 机器闸 + 执行(squash_merge 内部会重跑试算,不干净即拒)。
         let title = format!("#{} {}", card.id, card.title);
         let oid = crate::collab::mergectl::squash_merge(&repo, "main", &card.branch, &title, &actor)?;
-        let merged = crate::collab::tasks::mark_merged(tid, &actor)?;
+        // 合并已落 main,此后状态机推进失败不能当普通 400 吞掉——那会让仓库与卡状态
+        // 永久不一致且无人知晓。留审计并明确告知需人工核对。
+        let merged = crate::collab::tasks::mark_merged(tid, &actor).map_err(|e| {
+            // 双保险留痕:audit 与 mark_merged 同库,库级故障(只读/满盘)时 audit 也会
+            // 静默失败——stderr 是唯一不依赖该库的持久痕迹(容器/服务日志可查)。
+            eprintln!("[collab] merge.state_drift task={tid} commit={oid} err={e}");
+            crate::collab::db::audit(
+                &actor,
+                "merge.state_drift",
+                &tid.to_string(),
+                &format!("squash 已落 main({oid}) 但状态机推进失败: {e}"),
+            );
+            format!("合并已落地(提交 {oid}),但任务状态更新失败: {e}。请手动核对该卡状态")
+        })?;
         emit_task(&st, &merged);
         Ok(json!({"ok": true, "commit": oid, "card": merged}))
     })
@@ -1939,7 +1965,7 @@ async fn merge_revert_api(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let global_owner = role_rank(&ctx.role) >= 3;
@@ -1963,7 +1989,7 @@ async fn merge_revert_api(
 // ── iroh 隧道控制 ──
 
 async fn tunnel_status_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(_ctx) = auth_ctx(&state, &headers) else {
+    let Some(_ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     #[cfg(feature = "collab-net")]
@@ -1976,7 +2002,7 @@ async fn tunnel_status_api(State(state): State<CollabState>, headers: HeaderMap)
 }
 
 async fn tunnel_start_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -2001,7 +2027,7 @@ async fn tunnel_relays_api(
     headers: HeaderMap,
     Json(_v): Json<Value>,
 ) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -2033,7 +2059,7 @@ async fn gw_register(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(_ctx) = auth_ctx(&state, &headers) else {
+    let Some(_ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     let host_node_id = s_of(&v, "hostNodeId");
@@ -2065,14 +2091,14 @@ async fn gw_register(
 // ── Gitea 托管与 /git/* 反代 ──
 
 async fn gitea_status_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(_ctx) = auth_ctx(&state, &headers) else {
+    let Some(_ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     Json(crate::collab::gitea::status()).into_response()
 }
 
 async fn gitea_start_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -2085,7 +2111,7 @@ async fn gitea_start_api(State(state): State<CollabState>, headers: HeaderMap) -
 }
 
 async fn gitea_stop_api(State(state): State<CollabState>, headers: HeaderMap) -> Response {
-    let Some(ctx) = auth_ctx(&state, &headers) else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
     if role_rank(&ctx.role) < 3 {
@@ -2118,7 +2144,16 @@ async fn git_proxy(
             if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(basic) {
                 if let Ok(s) = String::from_utf8(raw) {
                     if let Some((user, pass)) = s.split_once(':') {
-                        if let Some(c) = resolve_auth(&state.auth_token, Some(pass)) {
+                        // 同步查库挪阻塞池(与 auth_ctx 同理),git 客户端每请求都走这里。
+                        let auth_token = state.auth_token.clone();
+                        let pass = pass.to_string();
+                        let resolved = tokio::task::spawn_blocking(move || {
+                            resolve_auth(&auth_token, Some(pass.as_str()))
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some(c) = resolved {
                             if c.username == user || c.role == "owner" {
                                 break 'auth Some(c);
                             }
@@ -2128,7 +2163,7 @@ async fn git_proxy(
             }
             None
         } else {
-            auth_ctx(&state, &headers)
+            auth_ctx(&state, &headers).await
         }
     };
     let Some(ctx) = ctx else {
@@ -2244,8 +2279,13 @@ pub async fn ws_loop(socket: WebSocket, mut rx: broadcast::Receiver<Event>, ctx:
                         None if !is_owner => continue,
                         _ => {}
                     }
-                    let frame = json!({ "topic": ev.topic, "payload": ev.payload });
-                    if sender.send(Message::Text(frame.to_string())).await.is_err() {
+                    // 帧在 emit 时已预序列化(Event::frame),N 条连接共享同一份 Arc<str>,
+                    // 这里只剩 Arc<str> → String 一次拷贝(axum 0.7 Message::Text 要 String)。
+                    if sender
+                        .send(Message::Text((*ev.frame).to_string()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -2268,7 +2308,14 @@ async fn collab_ws_handler(
     Query(params): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(ctx) = resolve_auth(&state.auth_token, params.get("token").map(String::as_str)) else {
+    // 鉴权同步查库挪阻塞池(与 auth_ctx 同理;WS token 走 query 而非 header)。
+    let auth_token = state.auth_token.clone();
+    let token = params.get("token").cloned();
+    let ctx = tokio::task::spawn_blocking(move || resolve_auth(&auth_token, token.as_deref()))
+        .await
+        .ok()
+        .flatten();
+    let Some(ctx) = ctx else {
         return (StatusCode::UNAUTHORIZED, "未授权").into_response();
     };
     let rx = state.app.subscribe();

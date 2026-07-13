@@ -192,15 +192,23 @@ fn write_mao_persona(project_id: &str) {
     }
 }
 
-/// 原子落盘: 临时文件 + rename。每条消息都会 persist(), 裸 fs::write 在断电/崩溃时
+/// 原子落盘: 临时文件 + fsync + rename。每条消息都会 persist(), 裸 fs::write 在断电/崩溃时
 /// 会把 state.json 截成半截 JSON, 下次启动解析失败 → 全部项目/对话静默蒸发。rename
 /// 在同卷原子, 目标要么旧要么新, 绝不残缺。范式同 provider::atomic_write。
+/// rename 前必须 sync_all: rename 只保证「目录项切换」原子, 不保证 tmp 的**数据**已刷盘 ——
+/// 断电时元数据(rename)可能先于数据落盘, state.json 落成 0 字节/半截, 「绝不残缺」失效。
 fn atomic_write_state(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".polaris.tmp");
     let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, contents)?;
+    let mut f = fs::File::create(&tmp)?;
+    f.write_all(contents.as_bytes())?;
+    f.sync_all()?; // 数据+元数据刷盘后再 rename, 否则原子性只对进程崩溃成立、对断电不成立
+    drop(f);
     fs::rename(&tmp, path)
+    // 不再 fsync 父目录: rename 后目录项未刷盘的最坏情况是「回到旧文件」, 仍是完整 JSON,
+    // 可接受; 换取免去 unix/Windows 分叉打开目录句柄的复杂度。
 }
 
 /// 落盘互斥锁: persist() 只持 STATE **读**锁, 多线程可同时进入, 而 tmp 文件名固定
@@ -364,7 +372,17 @@ pub fn ensure_writable_or_create(id: &str) -> Result<(), String> {
         updated_at: now,
         archived: false,
     };
-    STATE.write().conversations.push(c);
+    {
+        // TOCTOU 复查: 上面的读锁检查与这里的写锁之间有窗口, 同一 convId 的两条首发
+        // 消息并发到达时会双双走进「不存在」分支, 各 push 一条同 id 对话(侧栏双胞胎、
+        // 后续按 id 查找行为未定义)。写锁内 push 前再查一次 —— 已被并发者抢先建好
+        // 就直接复用(它刚建出来必然未归档, 等价「已存在」分支的成功返回)。
+        let mut st = STATE.write();
+        if st.conversations.iter().any(|c| c.id == id) {
+            return Ok(());
+        }
+        st.conversations.push(c);
+    }
     persist();
     Ok(())
 }
@@ -393,6 +411,30 @@ pub fn get_messages(conversation_id: &str) -> Vec<Message> {
         .collect();
     list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     list
+}
+
+/// 单遍分组版 get_messages: 一次遍历全局 messages, 把属于给定对话集合的消息按
+/// conversation_id 分组返回(各组内按时间升序, 与 get_messages 同口径)。
+/// chat::prompt 构建「跨对话产物地图」时若对项目每个对话逐一调 get_messages,
+/// 是 O(对话数 × 全表) 的重复全表扫 —— 一年后几十万条消息 × 几十个对话即秒级卡顿,
+/// 且发生在每次发消息的 prompt 组装路径上。本接口一遍扫完, 只克隆命中的消息。
+pub fn messages_grouped(
+    conv_ids: &[&str],
+) -> std::collections::HashMap<String, Vec<Message>> {
+    let idset: std::collections::HashSet<&str> = conv_ids.iter().copied().collect();
+    let mut map: std::collections::HashMap<String, Vec<Message>> =
+        std::collections::HashMap::new();
+    for m in STATE.read().messages.iter() {
+        if idset.contains(m.conversation_id.as_str()) {
+            map.entry(m.conversation_id.clone())
+                .or_default()
+                .push(m.clone());
+        }
+    }
+    for list in map.values_mut() {
+        list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    }
+    map
 }
 
 /// 列出某项目下的全部对话(按 updated_at 倒序, 最近的在前)。
@@ -702,30 +744,9 @@ pub fn transcripts_since(
     convs.truncate(max_convs);
     convs
         .iter()
-        .map(|c| {
-            let mut buf = String::new();
-            for msg in state.messages.iter().filter(|m| m.conversation_id == c.id) {
-                let who = match msg.role.as_str() {
-                    "user" => "用户",
-                    "assistant" => "助手",
-                    _ => continue,
-                };
-                buf.push_str(who);
-                buf.push_str(": ");
-                buf.push_str(msg.content.trim());
-                buf.push('\n');
-            }
-            let s = if buf.chars().count() > per_conv_chars {
-                let tail: String = {
-                    let chars: Vec<char> = buf.chars().collect();
-                    chars[chars.len() - per_conv_chars..].iter().collect()
-                };
-                format!("…(前文截断)\n{tail}")
-            } else {
-                buf
-            };
-            (c.title.clone(), s)
-        })
+        // 文字稿渲染统一走 render_transcript(角色过滤 + 超长截尾口径的唯一实现),
+        // 不再各自内联一份逐字相同的拷贝。
+        .map(|c| (c.title.clone(), render_transcript(&state, &c.id, per_conv_chars)))
         .collect()
 }
 
@@ -736,28 +757,11 @@ pub fn transcript_of(id: &str) -> Option<(String, String)> {
     const PER_CONV_CHARS: usize = 12_000;
     let state = STATE.read();
     let c = state.conversations.iter().find(|c| c.id == id)?;
-    let mut buf = String::new();
-    for msg in state.messages.iter().filter(|m| m.conversation_id == c.id) {
-        let who = match msg.role.as_str() {
-            "user" => "用户",
-            "assistant" => "助手",
-            _ => continue,
-        };
-        buf.push_str(who);
-        buf.push_str(": ");
-        buf.push_str(msg.content.trim());
-        buf.push('\n');
+    // 渲染统一走 render_transcript(与 transcripts_since 同口径的唯一实现)。
+    let s = render_transcript(&state, &c.id, PER_CONV_CHARS);
+    if s.trim().is_empty() {
+        return None; // 空对话(没有 user/assistant 消息)不沉淀
     }
-    if buf.trim().is_empty() {
-        return None;
-    }
-    let s = if buf.chars().count() > PER_CONV_CHARS {
-        let chars: Vec<char> = buf.chars().collect();
-        let tail: String = chars[chars.len() - PER_CONV_CHARS..].iter().collect();
-        format!("…(前文截断)\n{tail}")
-    } else {
-        buf
-    };
     Some((c.title.clone(), s))
 }
 

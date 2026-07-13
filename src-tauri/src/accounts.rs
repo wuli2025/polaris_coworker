@@ -139,7 +139,8 @@ pub fn media_accounts_status() -> Vec<AccountStatus> {
 
 /// 解绑某平台：删除其 profile 目录，强制下次重新扫码登录。
 /// 安全：只允许删本模块固定推导出的已知路径，杜绝任意路径删除。
-#[cfg_attr(feature = "desktop", tauri::command)]
+/// (async)：remove_dir_all 数百 MB 的 Chrome profile 要跑好几秒，同步命令会钉死主线程。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn media_account_forget(platform: String) -> Result<String, String> {
     let targets: Vec<PathBuf> = match platform.as_str() {
         "wechat" => vec![wechat_profile()],

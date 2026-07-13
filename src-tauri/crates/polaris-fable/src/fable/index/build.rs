@@ -180,8 +180,10 @@ fn flush_embed_buffer(
         }
     }
     // ── 单事务落库:DELETE 移进事务(旧 chunk 直到新 chunk 提交才消失,失败时旧向量仍可检索)──
+    // 出错必须显式 ROLLBACK:带着打开的事务返回会让同连接后续的 maybe_optimize 等写操作
+    // 撞 busy_timeout 白等 20s(事务只在连接 drop 时才隐式回滚)。
     conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-    {
+    let landed = (|| -> Result<(), String> {
         for fid in &file_ids {
             conn.execute("DELETE FROM chunks WHERE file_id=?1", [fid])
                 .map_err(|e| e.to_string())?;
@@ -208,6 +210,11 @@ fn flush_embed_buffer(
             conn.execute("UPDATE files SET chunked=1 WHERE id=?1", [fid])
                 .map_err(|e| e.to_string())?;
         }
+        Ok(())
+    })();
+    if let Err(e) = landed {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(e);
     }
     conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
     Ok(keys.len() as u64)
@@ -297,6 +304,9 @@ pub fn build_index(
     let coalesce_target = embed_coalesce_target();
     let mut buf_keys: Vec<(i64, i64)> = Vec::new();
     let mut buf_texts: Vec<String> = Vec::new();
+    // 已进缓冲但尚未 flush 的 file_id:它们 chunked 仍为 0,会被 pending 查询再次选中——
+    // 不排除会被重复读盘/切块/嵌入(小文件场景费用放大 ~3 倍,计数虚高、预算虚耗)。
+    let mut buffered_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
     'outer: loop {
         if cancelled() {
@@ -329,7 +339,32 @@ pub fn build_index(
                 .map_err(|e| e.to_string())?;
             rows.flatten().collect()
         };
+        // 剔除已在缓冲中的文件(见 buffered_ids 注释)。剔完为空但缓冲非空 = 待办只剩
+        // 缓冲中的文件 → 强制 flush 让它们 chunked 置位,否则 pending 永远选中同一批死循环。
+        let batch: Vec<_> = batch
+            .into_iter()
+            .filter(|row| !buffered_ids.contains(&row.0))
+            .collect();
         if batch.is_empty() {
+            if cancelled() {
+                stopped = "已取消".into();
+                break; // 取消优先:缓冲丢弃(chunked 保持 0 下轮补),不再发起整批网络请求
+            }
+            if !buf_texts.is_empty() {
+                match flush_embed_buffer(&conn, &buf_keys, &buf_texts, &model, embed_batch()) {
+                    Ok(n) => chunks_added += n,
+                    Err(e) => {
+                        stopped = format!("嵌入中断(可再点继续补建向量):{e}");
+                        buf_keys.clear();
+                        buf_texts.clear();
+                        break;
+                    }
+                }
+                buf_keys.clear();
+                buf_texts.clear();
+                buffered_ids.clear();
+                continue;
+            }
             break;
         }
         // 批级事务:本批全部轻量写(指纹/倒排 DELETE+INSERT/ftsed/chunked 标记)合成一笔。
@@ -343,7 +378,11 @@ pub fn build_index(
             {
                 break;
             }
-            let abs = std::path::Path::new(&root).join(&rel);
+            // DB 里存的是 decode_fs 转出的 UTF-8 显示路径;真实 IO 必须 reencode 还原字节,
+            // 否则 Unix 上 GBK 名文件读失败被当「已消失」,空文本落库成永久检索盲区。
+            let abs = super::reencode_fs_path(
+                &std::path::Path::new(&root).join(&rel).to_string_lossy(),
+            );
             let text = match std::fs::read(&abs) {
                 Ok(bytes) => {
                     if bytes.iter().take(4096).any(|&b| b == 0) {
@@ -410,6 +449,7 @@ pub fn build_index(
                             buf_texts.push(c);
                         }
                         buffered = true;
+                        buffered_ids.insert(file_id);
                         // 攒够目标就 flush:嵌完落库,chunked=1 由 flush 内对涉及文件统一置位。
                         // flush 自带事务 → 先提交批事务(把本批已做的轻量写落盘),成功后再开新批事务。
                         if buf_texts.len() >= coalesce_target {
@@ -433,6 +473,7 @@ pub fn build_index(
                             }
                             buf_keys.clear();
                             buf_texts.clear();
+                            buffered_ids.clear(); // flush 成功已统一置 chunked=1,不再需要挡重选
                             conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
                         }
                     }

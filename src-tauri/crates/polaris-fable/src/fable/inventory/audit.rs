@@ -196,7 +196,9 @@ pub fn fable_audit(mode: Option<String>, sample: Option<usize>) -> Result<AuditR
     Ok(rep)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+/// **`(async)`**:单次调用最多读 1.6 万个文件头(NAS 上更是逐个网络往返);同步命令会把
+/// 这段 IO 钉在主线程、回填期间 UI 冻住 → 同 [`fable_audit`] 派到工作线程。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn fable_backfill_lang() -> Result<u64, String> {
     let conn = open_db()?;
     let mut done = 0u64;
@@ -242,7 +244,12 @@ pub fn fable_backfill_lang() -> Result<u64, String> {
                     let mut lang = quick_lang(&ext, &kind);
                     if lang.is_empty() {
                         // 文稿:读头嗅探自然语言;不可读/二进制 → 其他。
-                        let abs = Path::new(&root).join(&rel);
+                        // DB 里存的是 decode_fs 后的显示路径;Unix 上 GBK 名文件的磁盘字节与其
+                        // 不同,直接 open 恒失败 → 先经 reencode_fs_path 还原真实路径再读
+                        // (同 scan.rs 消失判定的口径),否则这些文件被误标「未识别」且永不重试。
+                        let abs = super::reencode_fs_path(
+                            &Path::new(&root).join(&rel).to_string_lossy(),
+                        );
                         lang = read_head_sample(&abs)
                             .map(|sample| natural_lang(&sample))
                             .unwrap_or("未识别")

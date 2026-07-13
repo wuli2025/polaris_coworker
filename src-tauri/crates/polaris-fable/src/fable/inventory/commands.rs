@@ -113,7 +113,18 @@ pub fn fable_inventory_start(
     let picked: Vec<String> = roots
         .unwrap_or_default()
         .into_iter()
-        .map(|r| r.trim_end_matches(['/', '\\']).to_string())
+        .map(|r| {
+            let t = r.trim_end_matches(['/', '\\']);
+            // Win32 下剥掉尾分隔符会把 "C:\" 变成 "C:" = 盘符相对路径(指向该盘的**当前目录**,
+            // 通常就是进程 CWD)→ 整盘勾选被静默偷换成扫工作目录。补回 "\" 还原真正的盘根
+            // (同 folders.rs disk_used_bytes 的重建口径)。
+            let b = t.as_bytes();
+            if cfg!(windows) && b.len() == 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+                format!("{t}\\")
+            } else {
+                t.to_string()
+            }
+        })
         .filter(|r| !r.is_empty())
         .collect();
     let candidates: Vec<String> = if picked.is_empty() {
@@ -187,7 +198,9 @@ pub fn fable_inventory_start(
         let mut acc_skipped = 0u64;
         let mut acc_secs = 0.0f64;
         let mut workers = 0usize;
-        let mut last_err: Option<String> = None;
+        // 单根失败逐条记 (根, 错误):以前只留 last_err 且仅在颗粒无收时上报,「C 盘成功、D 盘
+        // 失败」会被「盘点完成」完全吞掉 → 现在随 done 事件如实带回(同 unreachable 的做法)。
+        let mut failed: Vec<(String, String)> = Vec::new();
         for r in &roots {
             if cancelled() {
                 break;
@@ -209,19 +222,23 @@ pub fn fable_inventory_start(
                     acc_secs += s.seconds;
                     workers = s.workers;
                 }
-                Err(e) => last_err = Some(e),
+                Err(e) => failed.push((r.clone(), e)),
             }
         }
         if cancelled() {
             emit(&app, json!({ "kind": "error", "message": "已取消" }));
         } else if acc_files == 0 {
-            let msg = match (last_err, unreachable.is_empty()) {
-                (Some(e), _) => e,
-                (None, false) => format!(
+            let msg = match (failed.is_empty(), unreachable.is_empty()) {
+                (false, _) => failed
+                    .iter()
+                    .map(|(root, e)| format!("{root}:{e}"))
+                    .collect::<Vec<_>>()
+                    .join(";"),
+                (true, false) => format!(
                     "这些位置连接不上,已跳过:{} —— 检查网络 / Tailscale / 外置盘连接后重新盘点即可。",
                     unreachable.join("、")
                 ),
-                (None, true) => "未扫描到任何文件".into(),
+                (true, true) => "未扫描到任何文件".into(),
             };
             emit(&app, json!({ "kind": "error", "message": msg }));
         } else {
@@ -235,6 +252,12 @@ pub fn fable_inventory_start(
                     "seconds": acc_secs, "workers": workers,
                     "roots": roots.len(),
                     "unreachable": unreachable,
+                    // 部分根盘点失败(权限 / DB 写入错等,可达但扫不成)也逐条带回,前端据此提示
+                    // 「XX 这次没扫成」,而不是让「盘点完成」掩盖半截结果。
+                    "failed": failed
+                        .iter()
+                        .map(|(root, e)| json!({ "root": root, "error": e }))
+                        .collect::<Vec<Value>>(),
                     "full": full,
                 }),
             );

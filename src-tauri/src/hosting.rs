@@ -18,6 +18,10 @@ use std::sync::Arc;
 const PORT_SCAN: std::ops::Range<u16> = 8484..8495;
 
 struct Running {
+    /// 启动代次:每次 start 单调递增。占位与转正/回滚都比对代次,防 ABA——
+    /// A 启动中被 stop 摘走占位、B 立即重启插入新占位后,A 完成时若只认「是占位」
+    /// 就会认领 B 的占位(A 复活/B 自毁、旧 Child 被 drop 成孤儿)。
+    gen: u64,
     port: u16,
     urls: Vec<String>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
@@ -31,6 +35,8 @@ struct Running {
     chat_bridge: Option<tauri::EventId>,
     /// 存一份 tauri 句柄仅为 stop 时能 unlisten 上面的 chat_bridge。
     app: tauri::AppHandle,
+    /// 从不读取,纯 keep-alive:随 Running 一起 drop 时 broadcast 关闭,各 ws_loop 收尾。
+    #[allow(dead_code)]
     bus: BusHandle,
     /// 仅经 Tauri IPC 返回给本机 UI，用于首次 bootstrap；绝不挂在 HTTP 路由上。
     access_token: String,
@@ -182,11 +188,39 @@ pub async fn start_core(
     Ok((port, urls, bus, access_token, stx, serve_task))
 }
 
+/// 「启动中」占位(port=0 为标记):在 start_core(...).await **之前**原子占住 RUNNING,
+/// 堵并发 start(autostart 与手点)在 await 窗口期双起并覆盖旧 Running —— 一旦覆盖,
+/// 旧的 chat_bridge 监听 / bridge_task / serve_task 句柄全丢 = 永久泄漏。
+/// bus 是临时哑频道,转正时整体替换;真实端口永远落在 8484-8494,port=0 不会撞。
+static NEXT_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn starting_placeholder(app: tauri::AppHandle, gen: u64) -> Running {
+    Running {
+        gen,
+        port: 0,
+        urls: Vec::new(),
+        shutdown: None,
+        serve_task: None,
+        bridge_task: None,
+        chat_bridge: None,
+        app,
+        bus: BusHandle::new(tokio::sync::broadcast::channel(1).0),
+        access_token: String::new(),
+    }
+}
+
 fn status_json() -> serde_json::Value {
     let g = RUNNING.lock();
     // is_bootstrap()==true 表示还没有任何账号 → 前端应引导「初始化」而非「登录」。
     let needs_bootstrap = crate::collab::auth::is_bootstrap().unwrap_or(true);
     match g.as_ref() {
+        // port=0 是「启动中占位」:还没真跑起来,按未运行上报(前端稍后轮询即见真状态)。
+        Some(r) if r.port == 0 => serde_json::json!({
+            "running": false, "starting": true, "port": 0, "urls": [],
+            "needsBootstrap": needs_bootstrap, "autostart": load_cfg().enabled,
+            "accessToken": "",
+            "remoteAccess": false,
+        }),
         Some(r) => serde_json::json!({
             "running": true, "port": r.port, "urls": r.urls,
             "needsBootstrap": needs_bootstrap, "autostart": load_cfg().enabled,
@@ -240,10 +274,11 @@ fn bridge_chat_to_bus(app: &tauri::AppHandle, bus: &BusHandle) -> tauri::EventId
     use tauri::Listener;
     let bus = bus.clone();
     app.listen("chat:stream", move |event| {
-        // event.payload() 是已序列化的 JSON 串;解析回 Value 再进 bus(host::AppHandle::emit
-        // 会重新序列化并广播为 Event{topic:"chat:stream", payload})。
+        // event.payload() 是已序列化的 JSON 串;解析回 Value 再进 bus。走 emit_value 直通
+        // (泛型 emit 对 Value 入参会经 to_value 整树深拷贝一遍),Event 构造时预序列化一次
+        // WS 帧,N 条远端连接共享 —— 逐字流热路径全程只有「1 次解析 + 1 次序列化」。
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(event.payload()) {
-            let _ = bus.emit("chat:stream", v);
+            bus.emit_value("chat:stream", v);
         }
     })
 }
@@ -253,22 +288,41 @@ pub async fn collab_host_start(
     app: tauri::AppHandle,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    if RUNNING.lock().is_some() {
-        return Ok(status_json()); // 幂等:已在跑就报状态
+    // ── 原子占位:检查与插入在同一把锁内完成。旧写法「检查通过 → start_core(...).await
+    //    → 才插 RUNNING」中间隔着整个绑端口/建路由,并发 start 双起且互相覆盖 Running。
+    let my_gen = NEXT_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    {
+        let mut g = RUNNING.lock();
+        if g.is_some() {
+            drop(g);
+            return Ok(status_json()); // 幂等:已在跑/正在启动就报状态
+        }
+        *g = Some(starting_placeholder(app.clone(), my_gen));
     }
-    let pref = port.or(load_cfg().port);
+    // 端口 0 消毒:配置里若残留 Some(0),bind(ip, 0) 会成功绑到随机端口并把「0」当真实
+    // 端口上报,还与占位哨兵(port==0)撞车 —— stop 会把真服务当占位摘走造成泄漏。
+    let pref = port.or(load_cfg().port).filter(|p| *p != 0);
     // 传入 tauri 句柄 → start_core 挂应用数据面(invoke/upload/file/ws);对话流经
     // bridge_chat_to_bus 灌进 bus 供远端 /ws。
     let (port, urls, bus, access_token, stx, serve_task) =
-        start_core(pref, Some(app.clone())).await?;
+        match start_core(pref, Some(app.clone())).await {
+            Ok(v) => v,
+            Err(e) => {
+                // 启动失败 → 回滚**自己那个代次**的占位。占位可能已被 stop 摘走、甚至
+                // 已被更晚的 start 换成新占位(ABA)—— 只认 gen,绝不误删别人的。
+                let mut g = RUNNING.lock();
+                if g.as_ref().map(|r| r.port == 0 && r.gen == my_gen).unwrap_or(false) {
+                    *g = None;
+                }
+                return Err(e);
+            }
+        };
     let bridge_task = bridge_to_ui(app.clone(), &bus);
     let chat_bridge = bridge_chat_to_bus(&app, &bus);
-    save_cfg(HostCfg {
-        enabled: true,
-        port: Some(port),
-        ..load_cfg()
-    });
-    *RUNNING.lock() = Some(Running {
+    // ── 转正:占位还在才写入。占位已被 collab_host_stop 摘走 = 启动窗口期间用户点了
+    //    停止 → 立刻收掉刚起的这套(shutdown + abort + unlisten),不留泄漏、不改配置。
+    let mut fresh = Some(Running {
+        gen: my_gen,
         port,
         urls,
         shutdown: Some(stx),
@@ -278,6 +332,44 @@ pub async fn collab_host_start(
         app,
         bus,
         access_token,
+    });
+    {
+        let mut g = RUNNING.lock();
+        if let Some(r) = g.as_mut() {
+            // 只认领自己代次的占位:占位被 stop 摘走后又被新 start 占上时(ABA),
+            // 认领别人的占位=被停掉的实例复活+新实例自毁。
+            if r.port == 0 && r.gen == my_gen {
+                *r = fresh.take().expect("fresh 尚未被取走");
+            }
+        }
+    }
+    if let Some(f) = fresh {
+        // 未转正 → 收掉刚起的这套栈,与 stop 同款优雅窗口(超时 abort 确保端口真正释放)。
+        if let Some(s) = f.shutdown {
+            let _ = s.send(());
+        }
+        if let Some(bt) = f.bridge_task {
+            bt.abort();
+        }
+        if let Some(id) = f.chat_bridge {
+            use tauri::Listener;
+            f.app.unlisten(id);
+        }
+        if let Some(mut h) = f.serve_task {
+            if tokio::time::timeout(std::time::Duration::from_secs(2), &mut h)
+                .await
+                .is_err()
+            {
+                h.abort();
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), &mut h).await;
+            }
+        }
+        return Ok(status_json());
+    }
+    save_cfg(HostCfg {
+        enabled: true,
+        port: Some(port),
+        ..load_cfg()
     });
     Ok(status_json())
 }
@@ -294,6 +386,17 @@ pub async fn collab_host_stop() -> Result<serde_json::Value, String> {
     //    (parking_lot 锁不能跨 await 持有 → 取出后立刻放锁。)
     let (shutdown, serve_task, bridge_task, chat_bridge, app) = {
         let mut g = RUNNING.lock();
+        // 「启动中占位」(port=0):还没有任何真实句柄可收,直接摘掉占位即可 ——
+        // in-flight 的 collab_host_start 转正时发现占位已消失,会自行收掉刚起的栈。
+        if g.as_ref().map(|r| r.port == 0).unwrap_or(false) {
+            *g = None;
+            drop(g);
+            save_cfg(HostCfg {
+                enabled: false,
+                ..load_cfg()
+            });
+            return Ok(status_json());
+        }
         match g.as_mut() {
             Some(r) => (
                 r.shutdown.take(),
@@ -341,29 +444,19 @@ pub async fn collab_host_stop() -> Result<serde_json::Value, String> {
 }
 
 /// App 启动时自动拉起(上次开过主机就续上,别让同事早上连不上)。
+/// 走与手点完全相同的 collab_host_start 入口:同一套「原子占位 → 转正/回滚」防线,
+/// 自启与手点并发时只会有一方真正起服务,另一方幂等返回,不再双起覆盖泄漏。
 pub fn auto_start_if_enabled(app: tauri::AppHandle) {
     let cfg = load_cfg();
     if !cfg.enabled {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        match start_core(cfg.port, Some(app.clone())).await {
-            Ok((port, urls, bus, access_token, stx, serve_task)) => {
-                let bridge_task = bridge_to_ui(app.clone(), &bus);
-                let chat_bridge = bridge_chat_to_bus(&app, &bus);
-                *RUNNING.lock() = Some(Running {
-                    port,
-                    urls,
-                    shutdown: Some(stx),
-                    serve_task: Some(serve_task),
-                    bridge_task: Some(bridge_task),
-                    chat_bridge: Some(chat_bridge),
-                    app,
-                    bus,
-                    access_token,
-                });
-                println!("[collab-host] 主机自启成功,端口 {port}");
-            }
+        match collab_host_start(app, cfg.port).await {
+            Ok(s) => println!(
+                "[collab-host] 主机自启成功,端口 {}",
+                s.get("port").and_then(|v| v.as_u64()).unwrap_or(0)
+            ),
             Err(e) => eprintln!("[collab-host] 主机自启失败: {e}"),
         }
     });

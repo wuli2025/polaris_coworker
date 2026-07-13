@@ -189,9 +189,18 @@ fn reconcile_renames(
         return moved;
     }
     let mut used_new: HashSet<i64> = HashSet::new();
+    // 指纹核验要整文件读入内存,2GB 大文本一次就分配 2GB → 超上限直接放弃 rename 判定,
+    // 维持「删旧+增新」(宁可重嵌一次也不炸内存)。
+    const FP_MAX_BYTES: i64 = 64 * 1024 * 1024;
+    // 同名同大小的候选可能被多个旧文件反复核验 → 按候选 id 缓存已算指纹,一个候选只读一次盘。
+    let mut fp_cache: std::collections::HashMap<i64, Option<String>> =
+        std::collections::HashMap::new();
     for (old_id, size, ohash, oname) in reusable {
         if cancelled() {
             break;
+        }
+        if size > FP_MAX_BYTES {
+            continue;
         }
         // 同名 + 同大小 + 本轮新增未索引的候选(通常 0 或 1 条)
         let cands: Vec<(i64, String, String, i64)> = {
@@ -221,14 +230,22 @@ fn reconcile_renames(
             if used_new.contains(&c.0) {
                 continue;
             }
-            let abs = super::reencode_fs_path(&root_base.join(&c.1).to_string_lossy());
-            let Ok(bytes) = std::fs::read(&abs) else {
-                continue;
+            let chash = fp_cache
+                .entry(c.0)
+                .or_insert_with(|| {
+                    let abs = super::reencode_fs_path(&root_base.join(&c.1).to_string_lossy());
+                    let bytes = std::fs::read(&abs).ok()?;
+                    if bytes.iter().take(4096).any(|&b| b == 0) {
+                        return None; // 伪文本,内容哈希只对文本有意义
+                    }
+                    Some(super::index::content_fingerprint(&String::from_utf8_lossy(
+                        &bytes,
+                    )))
+                })
+                .clone();
+            let Some(chash) = chash else {
+                continue; // 读不到 / 伪文本(缓存住,不再重读)
             };
-            if bytes.iter().take(4096).any(|&b| b == 0) {
-                continue; // 伪文本,内容哈希只对文本有意义
-            }
-            let chash = super::index::content_fingerprint(&String::from_utf8_lossy(&bytes));
             if chash == ohash {
                 hit_count += 1;
                 if hit_count > 1 {
@@ -583,10 +600,18 @@ pub fn scan_root(
                         for c in children {
                             let child = root_path.join(c);
                             // 本轮被取消勾选的子文件夹 → 不再往里钻(与 read_dir 路径一致地尊重 exclude)。
-                            if !exclude.is_empty()
-                                && exclude.contains(child.to_string_lossy().as_ref())
-                            {
-                                continue;
+                            // c 是缓存里 '/' 分隔的 relpath,Windows 上 join 出「\ 与 / 混排」的字符串,
+                            // 与 exclude 集合里的原生 '\' 路径永远失配 → 比较前统一成平台分隔符,
+                            // 否则增量轮里被排除的子树照样入库。
+                            if !exclude.is_empty() {
+                                let key = if std::path::MAIN_SEPARATOR == '\\' {
+                                    child.to_string_lossy().replace('/', "\\")
+                                } else {
+                                    child.to_string_lossy().into_owned()
+                                };
+                                if exclude.contains(&key) {
+                                    continue;
+                                }
                             }
                             progressed[i].fetch_add(1, Ordering::Relaxed);
                             queue.push((child, 0)); // known=0 → pop 时现 stat 比对

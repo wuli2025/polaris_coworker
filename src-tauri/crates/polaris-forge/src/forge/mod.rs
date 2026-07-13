@@ -509,7 +509,12 @@ pub async fn forge_tts(
 }
 
 /// 用 chromium/chrome headless 给 URL/本地 HTML 截图(Forge capture 原始能力)。
-#[cfg_attr(feature = "desktop", tauri::command)]
+///
+/// `command(async)`:内部 run_with_timeout 最长 90s,同步命令默认跑主线程会把 UI 钉死
+/// 90 秒。本命令被 apihub dispatch 以同名符号**同步直调**(双壳共用),不能像兄弟命令那样
+/// 拆成 async fn + spawn_blocking(会破坏 dispatch 调用点),改用 tauri 的 command(async)
+/// 让前端 invoke 走独立线程 —— fn 本体保持同步签名,apihub 直调零改动。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn forge_screenshot(
     url: String,
     out: String,
@@ -524,6 +529,107 @@ pub fn forge_screenshot(
         height.unwrap_or(1080),
         scale.unwrap_or(2), // 默认 2x 高清
     )
+}
+
+/// 带超时地跑外部命令并**捕获 stdout**(run_with_timeout 丢弃 stdout;`--dump-dom` 这类
+/// 要读输出的场景走本函数,否则裸 `output()` 挂死会让整个导出永不返回)。
+///
+/// 看门思路与 polaris-runtime procs.rs 的 run_with_timeout 同款:try_wait 前密后疏轮询 +
+/// 超时杀整棵进程树(unix 下 spawn 前 process_group(0) 置成组长,kill_tree 的 `kill -pid`
+/// 即 killpg 带走 chromium 扇出的子孙;windows 走 taskkill /T /F —— 均复用
+/// `crate::runtime::procs::kill_tree`,不重造杀树轮子)。
+/// stdout 由后台线程边读边收:既持续排空管道防子进程写满互相死锁,又设 64MB 上限防
+/// 畸形页面读爆内存(超限后仍继续排空只是不再存,让子进程能正常退出)。
+pub fn run_capture_stdout(mut cmd: Command, secs: u64, what: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    const MAX_STDOUT: usize = 64 * 1024 * 1024;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0); // 成组长 → 超时 kill_tree 的 killpg 能带走整组子孙
+    }
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{what} 启动失败: {e}"))?;
+    let pid = child.id();
+    let Some(mut so) = child.stdout.take() else {
+        let _ = child.kill();
+        return Err(format!("{what} 取 stdout 管道失败"));
+    };
+    // 后台线程排空 stdout,读完经 channel 交回(主线程只轮询 try_wait,绝不阻塞在管道上)。
+    let (tx, rx) = mpsc::channel::<Result<Vec<u8>, String>>();
+    let what_owned = what.to_string();
+    std::thread::spawn(move || {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 64 * 1024];
+        let mut overflow = false;
+        loop {
+            match so.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if overflow {
+                        continue; // 超限后仍持续排空,只是不再存
+                    }
+                    if buf.len() + n > MAX_STDOUT {
+                        overflow = true;
+                        buf = Vec::new(); // 已注定报错,提前释放
+                        continue;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                // 管道被杀进程强关等 → 按已收内容处理(失败与否由退出码路径裁决)
+                Err(_) => break,
+            }
+        }
+        let _ = tx.send(if overflow {
+            Err(format!(
+                "{what_owned} stdout 超过 {}MB 上限",
+                MAX_STDOUT / 1024 / 1024
+            ))
+        } else {
+            Ok(buf)
+        });
+    });
+    // 轮询间隔前密后疏(10ms 起步、封顶 120ms),与 procs.rs 同款:短命令快速察觉退出。
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let mut poll_ms: u64 = 10;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    crate::runtime::procs::kill_tree(pid);
+                    let _ = child.kill(); // 兜底
+                    let _ = child.wait(); // 收尸,管道随之关闭,reader 线程自行结束
+                    return Err(format!("{what} 超时({secs}s)被终止"));
+                }
+                std::thread::sleep(Duration::from_millis(poll_ms));
+                poll_ms = (poll_ms * 2).min(120);
+            }
+            Err(e) => {
+                crate::runtime::procs::kill_tree(pid);
+                let _ = child.kill();
+                return Err(format!("{what} 等待失败: {e}"));
+            }
+        }
+    };
+    if !status.success() {
+        return Err(format!("{what} 失败(退出码 {:?})", status.code()));
+    }
+    // 进程已正常退出,stdout 写端理应关闭;若有残余子进程仍持管道则限时兜底,
+    // 拿不到就杀树报错 —— 绝不无限等(本函数存在的意义)。
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(r) => r,
+        Err(_) => {
+            crate::runtime::procs::kill_tree(pid);
+            Err(format!("{what} stdout 排空超时(疑似残余子进程持管道)"))
+        }
+    }
 }
 
 /// 汇总当前环境出片的拦路项(给 UI 红灯直接展示)。

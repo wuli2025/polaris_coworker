@@ -167,6 +167,17 @@ pub(crate) fn is_remote_root(_path: &str) -> bool {
 /// 每一段目录名都不会被 [`skip_dir_scan`] 剪掉(否则 walker 会在中途剪枝、到不了 child)。
 /// 嵌套根去重用它:被剪枝挡住的子根不算「已覆盖」,须独立保留(典型=appdata 内的下载目录)。
 pub(crate) fn covered_by(parent: &str, child: &str) -> bool {
+    // Windows 路径不分大小写("C:\Data" 与 "c:\data" 是同一目录)→ 统一小写再比
+    // (对齐 files/overview.rs maximal_root_ids 的口径),否则前缀判不出嵌套、同一棵树被盘两遍。
+    // 段名喂给 skip_dir_scan 前被小写不影响判定:其内部各黑名单本就大小写无关。
+    let norm = |p: &str| {
+        if cfg!(windows) {
+            p.to_lowercase()
+        } else {
+            p.to_string()
+        }
+    };
+    let (parent, child) = (norm(parent), norm(child));
     if child == parent {
         return true;
     }

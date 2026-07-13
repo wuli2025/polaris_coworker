@@ -24,7 +24,7 @@ pub(crate) fn worth_ai_expand(query: &str) -> bool {
 pub(crate) fn parse_expansions(raw: &str, original: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let orig_norm = original.trim().to_lowercase();
-    let mut push = |s: &str, out: &mut Vec<String>| {
+    let push = |s: &str, out: &mut Vec<String>| {
         let t: String = s
             .trim()
             .trim_matches('"')

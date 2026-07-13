@@ -201,9 +201,29 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
             });
         }
 
+        // stdout 管道先摘出来,再把 child 本体登记进全局回收池:App 退出钩子 kill_all
+        // 能收割它,不再是「关 App 后继续写知识库的孤儿」(违反子进程整树回收铁律)。
+        let so_pipe = child.stdout.take();
+        polaris_runtime::procs::CHILDREN.insert(run_id_thread.clone(), child);
+        // 硬顶看门狗:claude 挂死时本线程会永远卡在 stdout 读循环,_kb_task 维护锁
+        // 随之永不释放 → 所有 KB 维护任务(enrich/dedup/compile)被锁死。超时杀树后
+        // stdout EOF,读循环自然解阻塞。默认 60 分钟,POLARIS_KB_COMPILE_CAP_SECS 可调。
+        let cap_secs: u64 = std::env::var("POLARIS_KB_COMPILE_CAP_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&s| s > 0)
+            .unwrap_or(3600);
+        {
+            let rid = run_id_thread.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(cap_secs));
+                polaris_runtime::procs::CHILDREN.kill(&rid); // 已正常结束则 no-op
+            });
+        }
+
         // stdout: 解析 stream-json, 把工具调用 / 写页面 / 文本翻成进度
         let mut pages: Vec<String> = Vec::new();
-        if let Some(so) = child.stdout.take() {
+        if let Some(so) = so_pipe {
             emit_compile(
                 &app,
                 &run_id_thread,
@@ -294,20 +314,30 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
             }
         }
 
-        let status = child.wait();
+        // 从回收池摘回并收割;None = 看门狗已超时杀掉(或 App 退出时被 kill_all 收走)。
+        let status = match polaris_runtime::procs::CHILDREN.remove(&run_id_thread) {
+            Some(mut c) => c.wait(),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("超过硬顶时限 {cap_secs}s 被看门狗终止"),
+            )),
+        };
         // 编译完成 → 重扫刷新内存索引 + 图谱
         let n = kb_reindex();
 
         let ok = matches!(&status, Ok(s) if s.success());
         if !ok {
-            let code = status.as_ref().ok().and_then(|s| s.code());
+            let code = match &status {
+                Ok(s) => format!("{:?}", s.code()),
+                Err(e) => e.to_string(), // 看门狗超时/等待失败的原因直接透传
+            };
             let se = stderr_buf.lock().clone();
             emit_compile(
                 &app,
                 &run_id_thread,
                 "error",
                 Some(format!(
-                    "claude 退出码 {code:?}{}",
+                    "claude 退出码 {code}{}",
                     if se.is_empty() {
                         String::new()
                     } else {

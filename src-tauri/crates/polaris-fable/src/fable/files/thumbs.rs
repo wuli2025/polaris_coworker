@@ -91,8 +91,13 @@ pub fn thumb(abspath: String, max: u32) -> Result<Option<String>, String> {
 /// 逐图调用(常跑在多核缩略图线程上)—— 一个挂死的 ffmpeg 进程就能拖死整个 grid 加载、表现为
 /// 「文件中心卡死」。复用 [`crate::runtime::run_with_timeout`]:超 15s 即杀进程返回,绝不永久阻塞。
 pub(crate) fn video_frame(p: &Path, max: u32) -> Option<image::DynamicImage> {
+    // tmp 名只含路径哈希时,同一视频的并发抽帧(warm_thumbs 多核预热 vs file_thumb 请求不同
+    // max)会指向同一文件 → 两个 ffmpeg 互相踩踏、其一解到半截图还顺手删掉对方的成果。
+    // 掺入目标尺寸 + 进程内原子递增序号,每次调用独占自己的 tmp。
+    static VF_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = VF_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!(
-        "polaris-vf-{}.jpg",
+        "polaris-vf-{}-{max}-{seq}.jpg",
         hash_key(&[&p.to_string_lossy()])
     ));
     let mut cmd = std::process::Command::new("ffmpeg");

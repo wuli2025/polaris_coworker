@@ -107,22 +107,42 @@ pub fn embed_texts(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
                     .get("data")
                     .and_then(|d| d.as_array())
                     .ok_or("嵌入响应缺 data 数组")?;
-                let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-                for item in data {
+                // OpenAI 兼容协议里 data[i].index 才是权威对应关系:服务商乱序返回时
+                // 按到达顺序收集会把向量静默错配到别的 chunk(无声的语义污染)。
+                // 整批统一口径:全部条目都带 index 才按 index 归位;只要有一条缺失
+                // 就整批按序(逐条回退位置会与真 index 撞槽,把合法响应误判成重复)。
+                // 越界/重复整批报错,宁可重试不落错库。
+                let all_indexed = data.iter().all(|it| it.get("index").and_then(|x| x.as_u64()).is_some());
+                let mut out: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+                for (pos, item) in data.iter().enumerate() {
+                    let idx = if all_indexed {
+                        item.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize
+                    } else {
+                        pos
+                    };
                     let emb = item
                         .get("embedding")
                         .and_then(|e| e.as_array())
                         .ok_or("嵌入响应缺 embedding")?;
-                    out.push(
+                    let slot = out
+                        .get_mut(idx)
+                        .ok_or_else(|| format!("嵌入响应 index 越界: {idx}"))?;
+                    if slot.is_some() {
+                        return Err(format!("嵌入响应 index 重复: {idx}"));
+                    }
+                    *slot = Some(
                         emb.iter()
                             .filter_map(|x| x.as_f64())
                             .map(|x| x as f32)
                             .collect(),
                     );
                 }
-                if out.len() != texts.len() {
-                    return Err(format!("嵌入条数不符: 发 {} 回 {}", texts.len(), out.len()));
-                }
+                let out: Vec<Vec<f32>> = out
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        format!("嵌入条数不符: 发 {} 回 {}", texts.len(), data.len())
+                    })?;
                 return Ok(out);
             }
             Err(ureq::Error::Status(429, _)) if attempt < 3 => {

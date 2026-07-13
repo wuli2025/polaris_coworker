@@ -70,6 +70,12 @@ easytier-panic.log
 # 本地 TLS 证书,勿入库
 docker/relay/certs/
 
+# 前端/构建工具的生成目录(勿入库,历史上误提交过,已 git rm --cached)
+marketing-site/.next/
+**/.next/
+.wrangler/
+.next/
+
 # 根目录临时产物(实验脚本/日志/截图/评测中间件),一律不入库; _collabtest/ 为可重放测试例外
 /_*
 !/_collabtest/

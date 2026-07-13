@@ -536,26 +536,22 @@ pub fn extract_text_rects(
     };
     let url = format!("{file_base}?export=1&extract=1#/{slide}");
     // --virtual-time-budget 让 chromium 跑完页面 JS(含 load/rAF)后退出,--dump-dom 输出最终 DOM。
-    let out = std::process::Command::new(&chromium)
-        .args([
-            "--headless=new",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--hide-scrollbars",
-            &format!("--window-size={width},{height}"),
-            "--virtual-time-budget=3000",
-            "--dump-dom",
-            &url,
-        ])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("启动 chromium --dump-dom 失败: {e}"))?;
-    if !out.status.success() {
-        return Err("chromium --dump-dom 失败".into());
-    }
-    parse_text_rects(&String::from_utf8_lossy(&out.stdout))
+    let mut cmd = std::process::Command::new(&chromium);
+    cmd.args([
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--hide-scrollbars",
+        &format!("--window-size={width},{height}"),
+        "--virtual-time-budget=3000",
+        "--dump-dom",
+        &url,
+    ]);
+    // 30s 超时看门:此前是裸 output() 无超时,chromium 挂死会让整个导出永不返回。
+    // run_with_timeout 丢弃 stdout,这里要读 DOM → 走带捕获版(超时同样杀整棵进程树)。
+    let stdout = crate::forge::run_capture_stdout(cmd, 30, "chromium --dump-dom")?;
+    parse_text_rects(&String::from_utf8_lossy(&stdout))
 }
 
 /// 从 dump-dom 的 HTML 里抠出 `<script id="polaris-text-rects">` 的 JSON 数组。
@@ -617,12 +613,21 @@ pub fn capture_slides(
     let (file_base, n) = resolve_deck_pages(deck, slides_override)?;
     let frames = new_frames_dir()?;
     let mut pngs: Vec<String> = Vec::new();
-    for i in 1..=n {
-        let png = frames.join(format!("slide-{i}.png"));
-        let url = format!("{file_base}?export=1#/{i}");
-        screenshot(&url, &png.to_string_lossy(), width, height, device_scale)
-            .map_err(|e| format!("第 {i} 页截图失败: {e}"))?;
-        pngs.push(png.to_string_lossy().to_string());
+    // 闭包包裹:任一页截图失败即清掉刚建的临时帧目录再返回,不留孤儿目录
+    // (与 render_deck_to_pptx 的失败清理写法同款;成功路径由调用方用完后清)。
+    let run = (|| -> Result<(), String> {
+        for i in 1..=n {
+            let png = frames.join(format!("slide-{i}.png"));
+            let url = format!("{file_base}?export=1#/{i}");
+            screenshot(&url, &png.to_string_lossy(), width, height, device_scale)
+                .map_err(|e| format!("第 {i} 页截图失败: {e}"))?;
+            pngs.push(png.to_string_lossy().to_string());
+        }
+        Ok(())
+    })();
+    if let Err(e) = run {
+        let _ = std::fs::remove_dir_all(&frames);
+        return Err(e);
     }
     Ok((frames, pngs))
 }

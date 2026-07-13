@@ -608,7 +608,8 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     //    探测不可用)退回旧的空闲即杀, 保住容器自愈。
     // 另有绝对硬顶 POLARIS_CHAT_HARD_CAP_SECS: 到点无条件收回(防失控子代理靠"有 CPU 活动"
     // 永久霸占并发槽)。桌面默认 0=不设(用户看得见, 有停止按钮, 长任务不设顶); 容器默认
-    // 3600s。杀掉后 claude stdout 随之关闭 → 下面 reader 线程照常 emit error+done, 系统自愈。
+    // 3600s。杀前 Child 已从 CHILDREN 摘出, 回收原因由看门狗自己 emit error 告知前端;
+    // 杀掉后 claude stdout 随之关闭 → 下面 reader 线程照常收尾 emit done, 系统自愈。
     let watchdog_timeout = std::env::var("POLARIS_CHAT_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -619,6 +620,8 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     if watchdog_timeout > 0 {
         let wd_req = req_id.to_string();
         let wd_activity = last_activity.clone();
+        let wd_app = app.clone();
+        let wd_conv = conv_id_opt.clone();
         std::thread::spawn(move || {
             let timeout = std::time::Duration::from_secs(watchdog_timeout);
             let started = std::time::Instant::now();
@@ -673,10 +676,52 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                     eprintln!("[chat-watchdog] req={wd_req} 总时长超硬顶 {hard_cap}s, 无条件回收");
                 }
                 // 重新确认仍是本 req 的同一进程再杀(防深检窗口内正常结束 + PID 复用误杀)。
-                let g = CHILDREN.lock();
-                if let Some(c) = g.get(&wd_req) {
-                    if c.id() == pid {
+                // 锁内只做「确认 + 摘出 Child」; kill_tree(Windows taskkill 同步等待常见
+                // 数百 ms)与 kill/wait 全在锁外 —— CHILDREN 是全局锁, 锁内阻塞会把**所有
+                // 对话**的 insert/remove(每次发送与收尾)一起钉住(范式同 chat_cancel /
+                // ChildRegistry::kill)。摘出而非借用: 持有 Child 所有权 = reader 线程
+                // 无法先 remove+reap → pid 在 kill 前绝不会被复用。
+                let victim = {
+                    let mut g = CHILDREN.lock();
+                    let same_proc = g.get(&wd_req).is_some_and(|c| c.id() == pid);
+                    if same_proc {
+                        g.remove(&wd_req)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(mut c) = victim {
+                    // 深检与摘出之间进程可能恰好正常结束:先 try_wait, 已退出就只 reap,
+                    // 不把一次成功的请求误报成「被看门狗回收」。
+                    if matches!(c.try_wait(), Ok(Some(_))) {
+                        let _ = c.wait();
+                    } else {
+                        // 先杀干净**再**告知前端:反过来的话, 管道里已缓冲的 delta 会在
+                        // error 之后继续上屏, 而移动端把 error 当终态立即放行下一问,
+                        // 旧进程的尾巴会混进新一轮气泡。
                         kill_tree(pid); // 杀进程组: 一并带走 cwd=/ 的子代理
+                        let _ = c.kill(); // 兜底杀本体 (taskkill /T 通常已带走它)
+                        let _ = c.wait(); // reap, 防 Unix 僵尸进程泄漏
+                        // Child 已摘出, reader 线程收尾时查不到 → 不再发「异常退出」error
+                        // (同 chat_cancel 语义)。回收原因由这里告知前端, 不至于无声中断。
+                        let reason = if over_cap {
+                            format!("本轮总时长超过硬顶 {hard_cap}s, 已被看门狗强制回收")
+                        } else {
+                            format!(
+                                "claude 进程空闲 {}s 无任何输出且进程树静止, 判定挂死, 已被看门狗回收",
+                                idle.as_secs()
+                            )
+                        };
+                        emit_event(
+                            &wd_app,
+                            ChatStreamEvent {
+                                req_id: wd_req.clone(),
+                                kind: "error".into(),
+                                text: Some(reason),
+                                tool: None,
+                                conversation_id: wd_conv.clone(),
+                            },
+                        );
                     }
                 }
                 break;
@@ -784,6 +829,11 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                     // 非 JSON 行: 当作 delta 直接显示 (调试友好)。先 flush 挂起的合批
                     // delta, 保证屏上文本顺序与到达顺序一致。
                     batcher.flush(&app_out, &req_out, conv_id_thread.as_deref());
+                    // 正文已进 accum 且已上屏 → 置记账位, 否则后续 result 携带同一内容时
+                    // 会因 saw_assistant_text=false 再补一遍, 屏上/落库都成双份。
+                    if !line.trim().is_empty() {
+                        partial.saw_assistant_text = true;
+                    }
                     target.push_str(&line);
                     target.push('\n');
                     emit_event(
@@ -1172,6 +1222,10 @@ struct PartialStreamState {
     msg_streamed: bool,
     /// 本请求曾流出过任何 token delta → result 兜底不再重复显示(正文已经在屏上)。
     ever_streamed: bool,
+    /// 本请求曾收到过**整块 assistant 事件**的非空文本(权威记账口径)→ result 兜底不再补账。
+    /// 不能复用「accum 非空」判断: image_notice 会把中文说明预置进 accum, 使它永远非空,
+    /// 整块事件真缺席(进程中途崩)时 result 兜底被废、最终文本丢失 —— 预置 notice 不置本位。
+    saw_assistant_text: bool,
 }
 
 /// delta 合批器: 纯 text_delta 文本先攒进缓冲, 距上次 emit ≥30ms 才发一条合并 delta
@@ -1276,6 +1330,10 @@ fn handle_stream_event(
                         "text" => {
                             if let Some(txt) = block.get("text").and_then(|x| x.as_str()) {
                                 accum.push_str(txt);
+                                // 非空整块文本已记账 → result 兜底不必再补(见 saw_assistant_text 注释)。
+                                if !txt.is_empty() {
+                                    ps.saw_assistant_text = true;
+                                }
                                 // 本消息的文本已经逐字流出过 → 整块事件只记账,不再重复上屏。
                                 if !ps.msg_streamed {
                                     emit_event(
@@ -1351,8 +1409,10 @@ fn handle_stream_event(
             batcher.flush(app, req_id, conv_id);
             // result 事件: claude --print 模式收尾, result 字段是最终文本
             if let Some(txt) = v.get("result").and_then(|x| x.as_str()) {
-                // 若前面已经有 assistant text, result 通常是同一内容的最终版, 不重复显示
-                if accum.is_empty() {
+                // 若前面已经有整块 assistant text, result 通常是同一内容的最终版, 不重复记账。
+                // 判据是 saw_assistant_text 而非「accum 非空」: image_notice 预置会让 accum
+                // 永远非空, 把这条「整块事件缺席」的兜底彻底废掉(最终文本静默丢失)。
+                if !ps.saw_assistant_text {
                     accum.push_str(txt);
                     // 曾逐字流出过 → 正文已在屏上(只是整块事件缺席没记上账),补账不补屏。
                     if !ps.ever_streamed {

@@ -186,20 +186,39 @@ fn health_check() -> bool {
 
 /// 启动无头 Gitea:确保配置 → spawn → 守护线程(每 10s 健康检查,连挂 3 次带退避重启)。
 pub fn start() -> Result<(), String> {
-    if SHOULD_RUN.load(Ordering::Relaxed) {
+    // start/stop 全程互斥:SHOULD_RUN 既是「运行意愿」又是「占位」,若 stop 在
+    // start 的配置/spawn 中途清零标志,会留下无守护的 gitea 子进程且 status 报未运行。
+    // 锁内完成「占位→spawn→起守护」整个序列,stop 只能在其前或其后完整发生。
+    let _guard = START_STOP_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // compare_exchange 原子占位:load+store 分离时两个并发 start 都能读到 false,
+    // 各 spawn 一个 gitea(端口冲突/PID 覆盖)+ 各起一个守护线程。占位失败即已在运行。
+    if SHOULD_RUN
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return Err("Gitea 已在运行".into());
     }
-    let bin = gitea_bin()?;
-    if !bin.exists() {
-        return Err(format!(
-            "未找到 gitea 二进制,请从 https://about.gitea.com/products/gitea/ 下载对应平台版本放到 {}",
-            bin.display()
-        ));
-    }
-    let home = gitea_home()?;
-    let ini = ensure_config()?;
-    spawn_once(&bin, &ini, &home)?;
-    SHOULD_RUN.store(true, Ordering::Relaxed);
+    // 占位后任何失败路径都要回滚标志,否则以后永远启不动。
+    let prep = (|| {
+        let bin = gitea_bin()?;
+        if !bin.exists() {
+            return Err(format!(
+                "未找到 gitea 二进制,请从 https://about.gitea.com/products/gitea/ 下载对应平台版本放到 {}",
+                bin.display()
+            ));
+        }
+        let home = gitea_home()?;
+        let ini = ensure_config()?;
+        spawn_once(&bin, &ini, &home)?;
+        Ok((bin, ini, home))
+    })();
+    let (bin, ini, home) = match prep {
+        Ok(t) => t,
+        Err(e) => {
+            SHOULD_RUN.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
     RESTARTS.store(0, Ordering::Relaxed);
 
     // 守护线程:每 10s 摸一次 /api/healthz;连续 3 次失败且用户没喊停 → kill 重启,
@@ -250,8 +269,12 @@ pub fn start() -> Result<(), String> {
     Ok(())
 }
 
+/// start/stop 互斥锁(见 [`start`] 头注释):防 stop 撤销一个正在启动中的实例。
+static START_STOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 停止:置 should_run=false 并 kill 子进程,守护线程随即退出。
 pub fn stop() {
+    let _guard = START_STOP_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     SHOULD_RUN.store(false, Ordering::Relaxed);
     kill_child();
     HEALTHY.store(false, Ordering::Relaxed);

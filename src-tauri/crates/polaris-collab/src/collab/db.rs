@@ -15,6 +15,15 @@ use directories::UserDirs;
 // 按库路径记录已迁移——测试用 POLARIS_COLLAB_DB 切换多个临时库时,每个库都要建表。
 static MIGRATED: Lazy<Mutex<HashSet<PathBuf>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
+thread_local! {
+    // 每线程缓存一条已设好 PRAGMA 的连接(rusqlite::Connection 非 Send,thread_local 正合适;
+    // axum 的 spawn_blocking 线程池会复用线程,同线程二次调用零建连/零 PRAGMA 开销)。
+    // 与 MIGRATED 同一手法**按 db_path 记账**:测试用 POLARIS_COLLAB_DB 切临时库时
+    // 路径不同即弃旧重开,不串库。
+    static TL_CONN: std::cell::RefCell<Option<(PathBuf, Connection)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// 库位置：默认 `~/Polaris/data/collab.db`，可经 `POLARIS_COLLAB_DB` 覆写（测试用临时库）。
 pub fn db_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("POLARIS_COLLAB_DB") {
@@ -45,6 +54,27 @@ pub fn open_db() -> Result<Connection, String> {
         }
     }
     Ok(conn)
+}
+
+/// 每线程复用连接执行闭包(热路径鉴权等高频只读查询用):首次调用经 `open_db()` 建连
+/// (PRAGMA/迁移只跑这一次),之后同线程直接复用。`open_db()` 签名与 ~100 处调用方不动。
+/// 嵌套调用(闭包内再 `with_conn`)不会 panic:检测到 RefCell 已借出时退回一个临时连接执行,
+/// 语义正确(只是不复用),而非 BorrowMutError 崩溃。写事务请仍用 `open_db()`。
+pub fn with_conn<T>(f: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+    let path = db_path().ok_or("无法定位用户目录")?;
+    TL_CONN.with(|cell| {
+        // try_borrow_mut:嵌套调用时外层已持借用 → 走临时连接兜底,不 panic。
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            let conn = open_db()?;
+            return f(&conn);
+        };
+        // 路径变了(测试切库)→ 弃旧连接重开;否则复用。
+        if !matches!(&*slot, Some((p, _)) if *p == path) {
+            *slot = Some((path.clone(), open_db()?));
+        }
+        let (_, conn) = slot.as_ref().expect("上面刚填充");
+        f(conn)
+    })
 }
 
 /// 全部建表。只加不改（对齐兜底 7「API/schema 只加不改」），迁移幂等。

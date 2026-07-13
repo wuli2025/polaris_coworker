@@ -303,6 +303,8 @@ pub fn revoke_device(device_id: &str) -> Result<(), String> {
     tx.execute("DELETE FROM sessions WHERE device_id=?1", params![node_id])
         .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| format!("提交吊销失败: {e}"))?;
+    // 会话短缓存立即失效:否则被吊销设备的 token 还能在缓存 TTL(10s)内继续鉴权通过。
+    super::auth::bump_session_revocation();
     db::audit("owner", "device.revoke", device_id, "");
     Ok(())
 }

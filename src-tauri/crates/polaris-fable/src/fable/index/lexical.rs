@@ -73,7 +73,11 @@ pub fn build_lexical_index(progress: &dyn Fn(u64, u64)) -> Result<LexSummary, St
             if cancelled() {
                 break;
             }
-            let abs = std::path::Path::new(root).join(rel);
+            // 显示路径 → 真实字节路径(GBK 名文件在 Unix 上直接 read 恒失败,会被
+            // 当「已消失」空文本标记完成,变成永久检索盲区)。
+            let abs = super::reencode_fs_path(
+                &std::path::Path::new(root).join(rel).to_string_lossy(),
+            );
             let text = match std::fs::read(&abs) {
                 Ok(bytes) => {
                     if bytes.iter().take(4096).any(|&b| b == 0) {

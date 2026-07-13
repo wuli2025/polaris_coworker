@@ -218,6 +218,13 @@ pub(crate) fn cluster_llm_run(
     app: &AppHandle,
     root: Option<String>,
 ) -> Result<(usize, usize, String), String> {
+    // 与数学聚类共用 clusters 表重建闸:两条路都是「删全表→重建」,并发时 rowid 复用
+    // 会把一方的文件指派静默挂到另一方的新簇(见 cluster.rs::CLUSTERS_TABLE_WRITE)。
+    let Some(_rebuild) =
+        crate::fable::FlagGuard::acquire(&super::cluster::CLUSTERS_TABLE_WRITE)
+    else {
+        return Err("另一个归类任务正在重建簇表,稍后再试".into());
+    };
     emit_llm(app, json!({ "kind": "phase", "text": "收集文件清单…" }));
     let conn = open_db()?;
     let ids = resolve_root_ids(&conn, &root);
@@ -264,31 +271,6 @@ pub(crate) fn cluster_llm_run(
 
     emit_llm(app, json!({ "kind": "phase", "text": "写回归类…" }));
 
-    // 清旧簇(范围内)+ 旧关系边(簇 id 即将重排)。
-    if ids.is_empty() {
-        conn.execute("DELETE FROM clusters", []).ok();
-        conn.execute("DELETE FROM cluster_edges", []).ok();
-        conn.execute("UPDATE files SET cluster_id=0", []).ok();
-    } else {
-        let inlist: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
-        let inlist = inlist.join(",");
-        conn.execute(
-            &format!("DELETE FROM clusters WHERE root_id IN ({inlist})"),
-            [],
-        )
-        .ok();
-        conn.execute(
-            &format!("DELETE FROM cluster_edges WHERE root_id IN ({inlist})"),
-            [],
-        )
-        .ok();
-        conn.execute(
-            &format!("UPDATE files SET cluster_id=0 WHERE root_id IN ({inlist})"),
-            [],
-        )
-        .ok();
-    }
-
     let built_at = chrono::Local::now().timestamp_millis();
     let mut assigned = 0usize;
     let mut n_clusters = 0usize; // 叶簇数(实际承载文件的子主题)
@@ -307,86 +289,127 @@ pub(crate) fn cluster_llm_run(
         m
     };
 
+    // ── 原子换代:删旧簇 + 清 cluster_id + 写回新归类放进【同一个】事务 ──
+    // 旧实现先在事务外自动提交三条 DELETE/UPDATE,随后才 BEGIN 插新簇;中途任一 INSERT
+    // 失败或进程被杀 → 新簇被回滚而旧簇已永久删除,归类一夜清零。现在成败一体:要么旧
+    // 归类原样保留,要么新归类完整落地。(本路径挂簇的文件数受大模型清单上限约束,量级
+    // 小,单事务即可,不需要 cluster.rs 那种几十万行的分批指派。)
     conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-    for top in &groups {
-        let theme_label = if top.label.trim().is_empty() {
-            "未命名主题".to_string()
+    let txn_res: Result<(), String> = (|| {
+        // 清旧簇(范围内)+ 旧关系边(簇 id 即将重排)。
+        if ids.is_empty() {
+            conn.execute("DELETE FROM clusters", []).ok();
+            conn.execute("DELETE FROM cluster_edges", []).ok();
+            conn.execute("UPDATE files SET cluster_id=0", []).ok();
         } else {
-            top.label.trim().to_string()
-        };
-        // 子主题:模型给了 groups 用之;没给则把本组自身当成唯一子主题(扁平兜底,层级仍统一)
-        let mut children: Vec<(String, Vec<usize>)> = Vec::new();
-        if !top.groups.is_empty() {
-            for sub in &top.groups {
-                let m = resolve_members(sub);
-                if m.is_empty() {
-                    continue;
-                }
-                let lab = if sub.label.trim().is_empty() {
-                    theme_label.clone()
-                } else {
-                    sub.label.trim().to_string()
-                };
-                children.push((lab, m));
-            }
-        } else {
-            let m = resolve_members(top);
-            if !m.is_empty() {
-                children.push((theme_label.clone(), m));
-            }
-        }
-        if children.is_empty() {
-            continue;
-        }
-
-        let color = CLUSTER_PALETTE[color_i % CLUSTER_PALETTE.len()].to_string();
-        color_i += 1;
-        let total: usize = children.iter().map(|(_, m)| m.len()).sum();
-        let root_id: i64 = conn
-            .query_row(
-                "SELECT root_id FROM files WHERE id=?1",
-                [files[children[0].1[0]].id],
-                |r| r.get(0),
+            let inlist: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+            let inlist = inlist.join(",");
+            conn.execute(
+                &format!("DELETE FROM clusters WHERE root_id IN ({inlist})"),
+                [],
             )
-            .unwrap_or(0);
+            .ok();
+            conn.execute(
+                &format!("DELETE FROM cluster_edges WHERE root_id IN ({inlist})"),
+                [],
+            )
+            .ok();
+            conn.execute(
+                &format!("UPDATE files SET cluster_id=0 WHERE root_id IN ({inlist})"),
+                [],
+            )
+            .ok();
+        }
 
-        // 顶层主题(父簇:不直接挂文件,size = 旗下文件总数)
-        conn.execute(
-            "INSERT INTO clusters(root_id,label,color,keywords,size,built_at,parent) VALUES(?1,?2,?3,'',?4,?5,0)",
-            rusqlite::params![root_id, theme_label, color, total as i64, built_at],
-        )
-        .map_err(|e| e.to_string())?;
-        let parent_id = conn.last_insert_rowid();
+        for top in &groups {
+            let theme_label = if top.label.trim().is_empty() {
+                "未命名主题".to_string()
+            } else {
+                top.label.trim().to_string()
+            };
+            // 子主题:模型给了 groups 用之;没给则把本组自身当成唯一子主题(扁平兜底,层级仍统一)
+            let mut children: Vec<(String, Vec<usize>)> = Vec::new();
+            if !top.groups.is_empty() {
+                for sub in &top.groups {
+                    let m = resolve_members(sub);
+                    if m.is_empty() {
+                        continue;
+                    }
+                    let lab = if sub.label.trim().is_empty() {
+                        theme_label.clone()
+                    } else {
+                        sub.label.trim().to_string()
+                    };
+                    children.push((lab, m));
+                }
+            } else {
+                let m = resolve_members(top);
+                if !m.is_empty() {
+                    children.push((theme_label.clone(), m));
+                }
+            }
+            if children.is_empty() {
+                continue;
+            }
 
-        // 子主题(叶簇:与父同色,挂文件)
-        for (lab, m) in &children {
-            let croot: i64 = conn
+            let color = CLUSTER_PALETTE[color_i % CLUSTER_PALETTE.len()].to_string();
+            color_i += 1;
+            let total: usize = children.iter().map(|(_, m)| m.len()).sum();
+            let root_id: i64 = conn
                 .query_row(
                     "SELECT root_id FROM files WHERE id=?1",
-                    [files[m[0]].id],
+                    [files[children[0].1[0]].id],
                     |r| r.get(0),
                 )
-                .unwrap_or(root_id);
+                .unwrap_or(0);
+
+            // 顶层主题(父簇:不直接挂文件,size = 旗下文件总数)
             conn.execute(
-                "INSERT INTO clusters(root_id,label,color,keywords,size,built_at,parent) VALUES(?1,?2,?3,'',?4,?5,?6)",
-                rusqlite::params![croot, lab, color, m.len() as i64, built_at, parent_id],
+                "INSERT INTO clusters(root_id,label,color,keywords,size,built_at,parent) VALUES(?1,?2,?3,'',?4,?5,0)",
+                rusqlite::params![root_id, theme_label, color, total as i64, built_at],
             )
             .map_err(|e| e.to_string())?;
-            let cid = conn.last_insert_rowid();
-            {
-                let mut stmt = conn
-                    .prepare_cached("UPDATE files SET cluster_id=?1 WHERE id=?2")
-                    .map_err(|e| e.to_string())?;
-                for &i in m {
-                    stmt.execute(rusqlite::params![cid, files[i].id])
+            let parent_id = conn.last_insert_rowid();
+
+            // 子主题(叶簇:与父同色,挂文件)
+            for (lab, m) in &children {
+                let croot: i64 = conn
+                    .query_row(
+                        "SELECT root_id FROM files WHERE id=?1",
+                        [files[m[0]].id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(root_id);
+                conn.execute(
+                    "INSERT INTO clusters(root_id,label,color,keywords,size,built_at,parent) VALUES(?1,?2,?3,'',?4,?5,?6)",
+                    rusqlite::params![croot, lab, color, m.len() as i64, built_at, parent_id],
+                )
+                .map_err(|e| e.to_string())?;
+                let cid = conn.last_insert_rowid();
+                {
+                    let mut stmt = conn
+                        .prepare_cached("UPDATE files SET cluster_id=?1 WHERE id=?2")
                         .map_err(|e| e.to_string())?;
+                    for &i in m {
+                        stmt.execute(rusqlite::params![cid, files[i].id])
+                            .map_err(|e| e.to_string())?;
+                    }
                 }
+                assigned += m.len();
+                n_clusters += 1;
             }
-            assigned += m.len();
-            n_clusters += 1;
         }
+        Ok(())
+    })();
+    if let Err(e) = txn_res {
+        // 失败整体回滚:旧归类原样保留;显式 ROLLBACK 不留悬挂事务。
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(e);
     }
-    conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+    if let Err(e) = conn.execute_batch("COMMIT") {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(e.to_string());
+    }
 
     Ok((n_clusters, assigned, String::new()))
 }

@@ -141,11 +141,21 @@ pub fn cluster_build(root: Option<String>) -> Result<ClusterBuildSummary, String
     cluster_build_mode(root, ClusterMode::Auto)
 }
 
+/// clusters 表重建互斥闸:数学聚类(CLUSTERING)、LLM 聚类(LLM_CLUSTERING)、渐进归类
+/// (SMART_CLUSTERING)是三把独立的**入口**闸,彼此可并发走到「删全表重建」——由于
+/// clusters.id 无 AUTOINCREMENT,rowid 会被复用,先删后建的一方会让另一方的分批指派
+/// 把文件静默挂到语义无关的新簇上。所有真正重建 clusters 表的路径都必须先过这把闸。
+pub(crate) static CLUSTERS_TABLE_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 见 [`ClusterMode`]:按指定向量来源重建聚类。`cluster_build` = `Auto`。
 pub fn cluster_build_mode(
     root: Option<String>,
     want: ClusterMode,
 ) -> Result<ClusterBuildSummary, String> {
+    let Some(_rebuild) = crate::fable::FlagGuard::acquire(&CLUSTERS_TABLE_WRITE) else {
+        return Err("另一个归类任务正在重建簇表,稍后再试".into());
+    };
     let started = std::time::Instant::now();
     let conn = open_db()?;
     let ids = resolve_root_ids(&conn, &root);
@@ -281,105 +291,123 @@ pub(crate) fn cluster_build_on(
         .map(|m| m + 1)
         .unwrap_or(0);
 
-    // 清旧簇(对涉及的根)。簇 id 即将重排,旧关系边一并清掉,免得 cluster_edges 残留指向已删簇
-    // (虽然 build_file_graph 会按现存簇过滤、不会渲染脏边,但清掉更干净、避免长期累积)。
-    if ids.is_empty() {
-        conn.execute("DELETE FROM clusters", []).ok();
-        conn.execute("DELETE FROM cluster_edges", []).ok();
-        conn.execute("UPDATE files SET cluster_id=0", []).ok();
-    } else {
-        let list: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
-        let inlist = list.join(",");
-        conn.execute(
-            &format!("DELETE FROM clusters WHERE root_id IN ({inlist})"),
-            [],
-        )
-        .ok();
-        conn.execute(
-            &format!("DELETE FROM cluster_edges WHERE root_id IN ({inlist})"),
-            [],
-        )
-        .ok();
-        conn.execute(
-            &format!("UPDATE files SET cluster_id=0 WHERE root_id IN ({inlist})"),
-            [],
-        )
-        .ok();
-    }
-
+    // ── 原子换代:删旧簇 + 清 cluster_id + 写新簇放进【同一个】事务 ──
+    // 旧实现这三条 DELETE/UPDATE 在事务外各自自动提交,随后才 BEGIN 插新簇;中途任一
+    // INSERT 失败或进程被杀 → 新簇被回滚而旧簇已永久删除,用户归类一夜清零。现在成败
+    // 一体:要么旧归类原样保留,要么新归类完整落地,不再出现「旧的没了、新的没来」。
     let built_at = chrono::Local::now().timestamp_millis();
     let mut new_clusters = 0usize;
-    conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-
-    // 先写顶层主题(父簇:自身不直接挂文件,颜色按主题分配)。
+    // 每个叶簇的 (db id, 质心向量),供事务提交后把【全部文件】指派到最近质心(全覆盖)。
+    let mut leaf_db: Vec<(i64, Vec<f32>)> = Vec::with_capacity(n_leaf);
     let mut parent_ids: Vec<i64> = vec![0; n_parents];
-    if two_level {
-        for p in 0..n_parents {
-            // 该主题下所有文件 = 旗下叶簇成员之并
-            let mut union: Vec<usize> = Vec::new();
-            for (li, &leaf_p) in parent_of_leaf.iter().enumerate() {
-                if leaf_p == p {
-                    union.extend_from_slice(&members[li]);
-                }
-            }
-            if union.is_empty() {
-                continue;
-            }
-            let (label, keywords) = name_cluster(&files, &union);
-            let color = CLUSTER_PALETTE[p % CLUSTER_PALETTE.len()];
+    conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+    let txn_res: Result<(), String> = (|| {
+        // 清旧簇(对涉及的根)。簇 id 即将重排,旧关系边一并清掉,免得 cluster_edges 残留指向已删簇
+        // (虽然 build_file_graph 会按现存簇过滤、不会渲染脏边,但清掉更干净、避免长期累积)。
+        if ids.is_empty() {
+            conn.execute("DELETE FROM clusters", []).ok();
+            conn.execute("DELETE FROM cluster_edges", []).ok();
+            conn.execute("UPDATE files SET cluster_id=0", []).ok();
+        } else {
+            let list: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+            let inlist = list.join(",");
             conn.execute(
-                "INSERT INTO clusters(root_id,label,color,keywords,size,built_at,parent) VALUES(?1,?2,?3,?4,?5,?6,0)",
-                rusqlite::params![rep_root(&files, &union), label, color, keywords, union.len() as i64, built_at],
+                &format!("DELETE FROM clusters WHERE root_id IN ({inlist})"),
+                [],
+            )
+            .ok();
+            conn.execute(
+                &format!("DELETE FROM cluster_edges WHERE root_id IN ({inlist})"),
+                [],
+            )
+            .ok();
+            conn.execute(
+                &format!("UPDATE files SET cluster_id=0 WHERE root_id IN ({inlist})"),
+                [],
+            )
+            .ok();
+        }
+
+        // 先写顶层主题(父簇:自身不直接挂文件,颜色按主题分配)。
+        if two_level {
+            for p in 0..n_parents {
+                // 该主题下所有文件 = 旗下叶簇成员之并
+                let mut union: Vec<usize> = Vec::new();
+                for (li, &leaf_p) in parent_of_leaf.iter().enumerate() {
+                    if leaf_p == p {
+                        union.extend_from_slice(&members[li]);
+                    }
+                }
+                if union.is_empty() {
+                    continue;
+                }
+                let (label, keywords) = name_cluster(&files, &union);
+                let color = CLUSTER_PALETTE[p % CLUSTER_PALETTE.len()];
+                conn.execute(
+                    "INSERT INTO clusters(root_id,label,color,keywords,size,built_at,parent) VALUES(?1,?2,?3,?4,?5,?6,0)",
+                    rusqlite::params![rep_root(&files, &union), label, color, keywords, union.len() as i64, built_at],
+                )
+                .map_err(|e| e.to_string())?;
+                parent_ids[p] = conn.last_insert_rowid();
+            }
+        }
+
+        // 再写叶簇(两级时 parent=父 id 且与父同色;单级时 parent=0)并把【样本】文件挂到叶簇。
+        for (li, mem) in members.iter().enumerate() {
+            let (label, keywords) = name_cluster(&files, mem);
+            let p = parent_of_leaf[li];
+            let (parent, color) = if two_level {
+                (parent_ids[p], CLUSTER_PALETTE[p % CLUSTER_PALETTE.len()])
+            } else {
+                (0i64, CLUSTER_PALETTE[new_clusters % CLUSTER_PALETTE.len()])
+            };
+            conn.execute(
+                "INSERT INTO clusters(root_id,label,color,keywords,size,built_at,parent) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                rusqlite::params![rep_root(&files, mem), label, color, keywords, mem.len() as i64, built_at, parent],
             )
             .map_err(|e| e.to_string())?;
-            parent_ids[p] = conn.last_insert_rowid();
-        }
-    }
-
-    // 再写叶簇(两级时 parent=父 id 且与父同色;单级时 parent=0)并把【样本】文件挂到叶簇。
-    // 同时记下每个叶簇的 (db id, 质心向量),供下面把【全部文件】指派到最近质心(全覆盖)。
-    let mut leaf_db: Vec<(i64, Vec<f32>)> = Vec::with_capacity(n_leaf);
-    for (li, mem) in members.iter().enumerate() {
-        let (label, keywords) = name_cluster(&files, mem);
-        let p = parent_of_leaf[li];
-        let (parent, color) = if two_level {
-            (parent_ids[p], CLUSTER_PALETTE[p % CLUSTER_PALETTE.len()])
-        } else {
-            (0i64, CLUSTER_PALETTE[new_clusters % CLUSTER_PALETTE.len()])
-        };
-        conn.execute(
-            "INSERT INTO clusters(root_id,label,color,keywords,size,built_at,parent) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            rusqlite::params![rep_root(&files, mem), label, color, keywords, mem.len() as i64, built_at, parent],
-        )
-        .map_err(|e| e.to_string())?;
-        let cluster_id = conn.last_insert_rowid();
-        {
-            let mut stmt = conn
-                .prepare_cached("UPDATE files SET cluster_id=?1 WHERE id=?2")
-                .map_err(|e| e.to_string())?;
-            for &i in mem {
-                stmt.execute(rusqlite::params![cluster_id, files[i].file_id])
+            let cluster_id = conn.last_insert_rowid();
+            {
+                let mut stmt = conn
+                    .prepare_cached("UPDATE files SET cluster_id=?1 WHERE id=?2")
                     .map_err(|e| e.to_string())?;
+                for &i in mem {
+                    stmt.execute(rusqlite::params![cluster_id, files[i].file_id])
+                        .map_err(|e| e.to_string())?;
+                }
             }
+            leaf_db.push((cluster_id, leaf_centroids[leaf_idx[li]].clone()));
+            new_clusters += 1;
         }
-        leaf_db.push((cluster_id, leaf_centroids[leaf_idx[li]].clone()));
-        new_clusters += 1;
+        Ok(())
+    })();
+    if let Err(e) = txn_res {
+        // 失败整体回滚:旧归类原样保留;显式 ROLLBACK 不留悬挂事务(连接可能是测试注入、还要复用)。
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(e);
+    }
+    if let Err(e) = conn.execute_batch("COMMIT") {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(e.to_string());
     }
 
     // ── 全覆盖关键修(治「几分钟路径只归 6000、大库覆盖率暴跌」)──
     // 词法档:质心由样本(≤6000)算出,但要把**全部文件**指派到最近质心,而非只归样本。
     // 指派是 O(N·k) 纯点积,弱机也就几秒。语义档不做(无嵌入的文件没向量;全量嵌入交 T2)。
+    //
+    // 写入策略:全量指派可达几十万行,若裹在单个写事务里,持写锁会超过 open_db 的 20s
+    // busy_timeout,并行盘点的 writer COMMIT 直接报错。改为【先读后算、分批写回】:
+    // 只读扫描在事务外流式算好 (file_id → 簇 id),再每 ASSIGN_BATCH 行一个短事务提交,
+    // 批间让出写锁。中断最坏是部分文件暂留 cluster_id=0(簇本体上面已提交,下轮归类可续),不丢簇。
     let mut total_files = n;
     if mode == "lexical" && !leaf_db.is_empty() {
+        // 1) 只读扫描:逐行算最近质心,不开写事务、不持写锁。
         let sql = format!("SELECT f.id, f.relpath, f.name, f.ext FROM files f WHERE 1=1{filter}");
+        let mut pairs: Vec<(i64, i64)> = Vec::new(); // (file_id, 最近叶簇 id),47 万行也只 ~8MB
         let mut counts: HashMap<i64, i64> = HashMap::new();
         {
             let mut sel = conn.prepare(&sql).map_err(|e| e.to_string())?;
-            let mut up = conn
-                .prepare_cached("UPDATE files SET cluster_id=?1 WHERE id=?2")
-                .map_err(|e| e.to_string())?;
             let mut rows = sel.query([]).map_err(|e| e.to_string())?;
-            let mut assigned_all = 0i64;
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
                 let id: i64 = row.get(0).map_err(|e| e.to_string())?;
                 let relpath: String = row.get(1).map_err(|e| e.to_string())?;
@@ -396,14 +424,34 @@ pub(crate) fn cluster_build_on(
                         best = *cid;
                     }
                 }
-                up.execute(rusqlite::params![best, id])
-                    .map_err(|e| e.to_string())?;
+                pairs.push((id, best));
                 *counts.entry(best).or_insert(0) += 1;
-                assigned_all += 1;
             }
-            total_files = assigned_all as usize;
         }
-        // 叶簇 size = 全量指派后的真实计数;父簇 size = 旗下叶簇之和。
+        total_files = pairs.len();
+        // 2) 分批写回:每批一个短事务,提交即让锁;单批失败回滚该批并带错返回
+        //    (已提交的批仍有效,未写到的文件保持 cluster_id=0,下轮归类可续)。
+        const ASSIGN_BATCH: usize = 8000;
+        for chunk in pairs.chunks(ASSIGN_BATCH) {
+            conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+            let step: Result<(), String> = (|| {
+                let mut up = conn
+                    .prepare_cached("UPDATE files SET cluster_id=?1 WHERE id=?2")
+                    .map_err(|e| e.to_string())?;
+                for &(id, cid) in chunk {
+                    up.execute(rusqlite::params![cid, id])
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })();
+            if let Err(e) = step {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+            conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+        }
+        // 3) 叶簇 size = 全量指派后的真实计数;父簇 size = 旗下叶簇之和。
+        //    量级只有簇数(几十行),沿用自动提交的宽容写法即可。
         let mut psum: HashMap<i64, i64> = HashMap::new();
         for (li, (cid, _)) in leaf_db.iter().enumerate() {
             let c = counts.get(cid).copied().unwrap_or(0);
@@ -424,8 +472,6 @@ pub(crate) fn cluster_build_on(
             .ok();
         }
     }
-
-    conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
 
     Ok(ClusterBuildSummary {
         clusters: new_clusters,

@@ -1,6 +1,8 @@
 //! 多人协作模块族（v8 方案第六节）。
 //!
 //! 铁律:主 Agent 裁决内容,永不裁决权限——权限判断全部走 db.rs 的确定性授权表。
+/// 账号根口令:个人设备联盟的身份锚(生成/展示 + 口令→账号锚 key 派生 + 新设备绑定)。
+pub mod account_root;
 pub mod account_store;
 // 应用数据面 apihub 与桌面内嵌主机 hosting 是**壳件**(分发/拼装层, 认识全部引擎),
 // 抽 crate 时归位壳仓 src/apihub.rs 与 src/hosting.rs —— 本 crate 只装协作 domain。

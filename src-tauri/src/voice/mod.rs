@@ -775,14 +775,16 @@ pub fn voice_anti_pollute(text: String) -> AntiPolluteResult {
 
 /// 对一段文本试跑 AI 整形(设置页「测一下整形」按钮)。不看 `polish` 开关,直接调用,
 /// 让用户能在开启前先验证 API 配置是否可用。
-#[cfg_attr(feature = "desktop", tauri::command)]
+/// (async):内含 ureq 20s 超时的网络请求,同步命令会钉死主线程 → 甩到线程池跑。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn voice_polish(text: String) -> Result<PolishResult, String> {
     polish_text(&text)
 }
 
 /// 识别一个音频文件(16k 单声道 wav)→ 防污染 → 终稿。
 /// 命令恒注册(签名稳定);真识别需 `voice-asr` feature 编译 + 已下载 SenseVoice 模型。
-#[cfg_attr(feature = "desktop", tauri::command)]
+/// (async):整文件 ASR 可跑数十秒,同步命令会钉死主线程 → 甩到线程池跑。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn voice_transcribe_file(path: String) -> Result<TranscribeResult, String> {
     #[cfg(feature = "voice-asr")]
     {

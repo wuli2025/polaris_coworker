@@ -42,8 +42,11 @@ impl ChildRegistry {
     }
 
     /// 摘出并杀掉(含整棵进程树)。返回是否找到了该 child。
+    /// 锁内只摘出 Child;kill_tree/kill/wait 是外部进程操作(Windows taskkill 常见 100ms+),
+    /// 全在锁外执行,避免钉住并发的 insert(每次 chat 发送)与看门狗遍历。
     pub fn kill(&self, req_id: &str) -> bool {
-        match self.map.lock().remove(req_id) {
+        let child = self.map.lock().remove(req_id);
+        match child {
             Some(mut child) => {
                 kill_tree(child.id());
                 let _ = child.kill();
@@ -56,9 +59,10 @@ impl ChildRegistry {
 
     /// App 退出时回收所有在飞子进程,连同它们扇出的整棵进程树。
     /// 否则用户关 App 时,长任务拉起的 dev server / node / python 会变孤儿。
+    /// 同 [`kill`]:锁内只 drain,逐个收割在锁外做,防止退出期挂着多个长任务时全局停顿。
     pub fn kill_all(&self) {
-        let mut map = self.map.lock();
-        for (_id, mut child) in map.drain() {
+        let drained: Vec<(String, Child)> = self.map.lock().drain().collect();
+        for (_id, mut child) in drained {
             kill_tree(child.id());
             let _ = child.kill();
             let _ = child.wait();
@@ -88,11 +92,22 @@ pub fn kill_tree(pid: u32) {
     }
     #[cfg(not(windows))]
     {
-        // 杀进程组 (shell -c 起的子孙); 失败再退化为 kill 单进程。
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{}", pid)])
+        // 杀进程组 (shell -c 起的子孙)。注意 output() 只有 spawn 失败才 Err;
+        // killpg 因「pid 非组长/组不存在」失败时退出码非 0 但仍是 Ok,必须看 status
+        // 才能退化为单杀,否则非组长 child 的子孙全部漏杀成孤儿(mac 痛点)。
+        // `--` 分隔:部分 kill 实现会把 `-<pid>` 当非法选项而不是进程组。
+        let group_ok = Command::new("kill")
+            .args(["-TERM", "--", &format!("-{}", pid)])
             .output()
-            .or_else(|_| Command::new("kill").arg(pid.to_string()).output());
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !group_ok {
+            let _ = Command::new("kill").args(["-TERM", "--", &pid.to_string()]).output();
+        }
+        // TERM 宽限后补 KILL:chromium/node 一类可能忽略 TERM。进程已退则 kill 无害。
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let target = if group_ok { format!("-{}", pid) } else { pid.to_string() };
+        let _ = Command::new("kill").args(["-KILL", "--", &target]).output();
     }
 }
 
@@ -151,6 +166,9 @@ pub fn run_with_timeout(mut cmd: Command, secs: u64, what: &str) -> Result<(), S
         })
     });
     let deadline = Instant::now() + Duration::from_secs(secs);
+    // 轮询间隔前密后疏(10ms 起步、封顶 120ms):短命令 ~10ms 内即察觉退出;逐帧渲染路径
+    // (video 900 帧/pptx 每页 1-2 次)每次调用省 ~100ms,累计分钟级。长命令仍是 120ms 粒度。
+    let mut poll_ms: u64 = 10;
     // 循环只决定结局,把 join/格式化挪到循环外做一次,避免 reader_handle 在循环里被 move。
     let outcome: Result<std::process::ExitStatus, String> = loop {
         match child.try_wait() {
@@ -167,14 +185,18 @@ pub fn run_with_timeout(mut cmd: Command, secs: u64, what: &str) -> Result<(), S
                     let _ = child.wait(); // kill 后管道关闭,reader 线程随之结束
                     break Err(format!("{what} 超时({secs}s)被终止"));
                 }
-                std::thread::sleep(Duration::from_millis(120));
+                std::thread::sleep(Duration::from_millis(poll_ms));
+                poll_ms = (poll_ms * 2).min(120);
             }
             Err(e) => break Err(format!("{what} 等待失败: {e}")),
         }
     };
     // 不 join reader 线程:被杀进程的子进程(如 chromium 的子代理/cmd 的 ping)可能仍持 stderr
-    // 管道,join 会阻塞到它们退出。给 50ms 让常规 stderr 排空后读取(诊断 best-effort,绝不阻塞)。
-    std::thread::sleep(Duration::from_millis(50));
+    // 管道,join 会阻塞到它们退出。errtail 只在失败路径进错误信息 —— 成功路径不用等,
+    // 失败才给 50ms 让常规 stderr 排空后读取(诊断 best-effort,绝不阻塞)。
+    if !matches!(&outcome, Ok(s) if s.success()) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     drop(reader_handle); // 分离线程,随管道关闭自行结束
     let errtail = {
         let s = errbuf.lock().unwrap().trim().to_string();

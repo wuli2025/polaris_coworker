@@ -26,7 +26,9 @@ pub struct AttachedFile {
 /// 对话拖拽上传:把文件复制进「会话 uploads 目录」,返回附件清单。
 /// 与「知识库上传」是两条不同的路径 —— 这里只把文件挂到当前对话,
 /// 前端发送时把这些绝对路径写进 prompt,claude 用 Read 工具按需读取。
-#[cfg_attr(feature = "desktop", tauri::command)]
+// command(async): 最多 50 个文件复制 + PDF 文本提取是重 IO, 同步命令会钉住 UI 主线程
+// (v1.5.2 同族问题)。属性形式挪到工作线程, fn 保持同步签名(server dispatch 直调不受影响)。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn chat_attach_files(conversation_id: Option<String>, paths: Vec<String>) -> Vec<AttachedFile> {
     const MAX: usize = 50;
     if let Some(cid) = conversation_id.as_deref() {

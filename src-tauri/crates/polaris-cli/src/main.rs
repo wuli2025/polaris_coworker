@@ -162,7 +162,9 @@ fn run(cmd: &str, args: &[String]) -> Result<Value, String> {
                     let root = req(rest, "root")?;
                     let exclude = std::collections::HashSet::new();
                     // CLI 一次性盘点 → 默认完整(每目录都 read_dir;顺带建立目录缓存供桌面端后续增量)。
-                    let incremental = flag(rest, "incremental").is_some();
+                    // 布尔开关必须用 has():flag() 的「--name value」形式会把尾参/相邻 flag
+                    // 解析成 None,导致 --incremental 静默失效退回全量。
+                    let incremental = has(rest, "incremental");
                     let summary = app::fable::inventory::scan_root(
                         &root,
                         &exclude,

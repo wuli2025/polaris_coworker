@@ -901,6 +901,18 @@ struct Auth {
 }
 
 fn load_auth() -> Result<Auth, String> {
+    let mut auth = load_auth_file()?;
+    // access_token 将过期则主动刷新(失败不致命: 还可能在上游 401 时再刷一次)
+    if token_expiring(&auth.access_token) {
+        if let Ok(a2) = refresh_auth(&auth) {
+            auth = a2;
+        }
+    }
+    Ok(auth)
+}
+
+/// 只读盘解析 auth.json,不触发刷新(refresh_auth 单飞锁内重读盘要用它,避免递归/死锁)。
+fn load_auth_file() -> Result<Auth, String> {
     let path = codex_auth_path().ok_or_else(|| "无法定位 ~/.codex/auth.json".to_string())?;
     let text = std::fs::read_to_string(&path)
         .map_err(|_| "未找到 ChatGPT 授权, 请先在坞里授权 Codex".to_string())?;
@@ -916,7 +928,7 @@ fn load_auth() -> Result<Auth, String> {
     if access.is_empty() {
         return Err("ChatGPT 授权无效(缺 access_token), 请重新授权".into());
     }
-    let mut auth = Auth {
+    let auth = Auth {
         access_token: access,
         refresh_token: tokens
             .get("refresh_token")
@@ -929,12 +941,6 @@ fn load_auth() -> Result<Auth, String> {
             .unwrap_or("")
             .to_string(),
     };
-    // access_token 将过期则主动刷新(失败不致命: 还可能在上游 401 时再刷一次)
-    if token_expiring(&auth.access_token) {
-        if let Ok(a2) = refresh_auth(&auth) {
-            auth = a2;
-        }
-    }
     Ok(auth)
 }
 
@@ -959,9 +965,21 @@ fn token_expiring(access: &str) -> bool {
     now + 60 >= exp
 }
 
+/// 刷新单飞锁:claude 会并发发请求(主对话 + haiku 小任务),两个连接线程同时 401 会
+/// 同时进刷新 → 双写 auth.json 且 OAuth refresh_token 轮换时后完成者用旧 refresh_token
+/// 顶掉新的(下次刷新即失效,用户被迫重新扫码)。锁内先重读盘:别人刚刷完就直接用成果。
+static REFRESH_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 fn refresh_auth(auth: &Auth) -> Result<Auth, String> {
     if auth.refresh_token.is_empty() {
         return Err("缺少 refresh_token, 请重新授权 ChatGPT".into());
+    }
+    let _flight = REFRESH_LOCK.lock();
+    // 排队期间别的线程可能已完成刷新并回写:盘上 token 变了且没到期 → 直接复用。
+    if let Ok(cur) = load_auth_file() {
+        if cur.access_token != auth.access_token && !token_expiring(&cur.access_token) {
+            return Ok(cur);
+        }
     }
     let resp = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(30))
@@ -1039,7 +1057,9 @@ fn persist_auth(auth: &Auth, id_token: &str) {
         "last_refresh": codex_rfc3339_now(),
     });
     if let Ok(txt) = serde_json::to_string_pretty(&body) {
-        let _ = std::fs::write(&path, txt);
+        // 原子回写:auth.json 是授权凭证,裸 fs::write 崩在半截会撕坏 JSON,
+        // refresh_token 一丢用户就得重新扫码。与全仓其它落盘同款走 atomic_write。
+        let _ = crate::provider::atomic_write(&path, &txt);
     }
 }
 

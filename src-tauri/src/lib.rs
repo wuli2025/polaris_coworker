@@ -193,6 +193,9 @@ pub fn run() {
             // 云机中继网关:桌面主机挂牌/断开(真·中继完整形态)
             collab::commands::collab_gateway_attach,
             collab::commands::collab_gateway_detach,
+            // 账号根口令:个人设备联盟身份锚(展示 + 新设备绑定)
+            collab::commands::collab_account_root,
+            collab::commands::collab_account_root_bind,
             // 多人协作:一键把本机变成协作主机(内嵌 axum 协作路由;壳件)
             hosting::collab_host_start,
             hosting::collab_host_status,

@@ -60,6 +60,29 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
                 .map_err(|e| e.to_string())?;
             rows.filter_map(|r| r.ok()).collect()
         };
+        // 读盘(慢 IO)与落库解耦:指纹先攒内存,每 1000 条一笔事务快进快出——
+        // 逐条自动提交是每行一次 fsync(10 万文件 = 分钟级尾巴),而整个循环包一个
+        // 大事务又会让写锁横跨全部文件 IO,把并行写者钉过 busy_timeout。
+        let mut pending: Vec<(i64, String, String)> = Vec::new();
+        let flush = |batch: &mut Vec<(i64, String, String)>| {
+            if batch.is_empty() {
+                return;
+            }
+            // BEGIN 失败(极端:上一事务悬挂)就退回逐条自动提交,慢但不会嵌套;
+            // COMMIT 失败(SQLITE_BUSY 等)必须显式 ROLLBACK 结束事务,否则写锁悬挂
+            // 横跨后续文件 IO,并把之后各阶段的写并进同一悬挂事务。
+            let in_tx = conn.execute_batch("BEGIN").is_ok();
+            for (id, chash, dkey) in batch.iter() {
+                let _ = conn.execute(
+                    "UPDATE files SET content_hash=?1, doc_key=?2 WHERE id=?3",
+                    rusqlite::params![chash, dkey, id],
+                );
+            }
+            if in_tx && conn.execute_batch("COMMIT").is_err() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            batch.clear();
+        };
         for (id, root, rel) in targets {
             if cancelled() {
                 stopped = "已取消".into();
@@ -80,12 +103,13 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let dkey = doc_key(&name);
-            let _ = conn.execute(
-                "UPDATE files SET content_hash=?1, doc_key=?2 WHERE id=?3",
-                rusqlite::params![chash, dkey, id],
-            );
+            pending.push((id, chash, dkey));
+            if pending.len() >= 1000 {
+                flush(&mut pending);
+            }
             backfilled += 1;
         }
+        flush(&mut pending);
     }
 
     // ── 精确去重:同 content_hash 分组 ──
@@ -112,6 +136,9 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
     let mut exact_dups = 0u64;
     let mut chunks_pruned = 0u64;
     let mut i = 0usize;
+    // 整段打标裹一笔事务:纯 DB 写(分组已在内存),逐行自动提交在大库上被 fsync 拖成
+    // 分钟级。循环内无 `?` 上抛,取消 break 后照常 COMMIT(部分结果幂等,下轮补齐)。
+    let _ = conn.execute_batch("BEGIN");
     while i < rows.len() {
         if cancelled() {
             stopped = "已取消".into();
@@ -126,10 +153,11 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
         i = j;
         if group.len() < 2 {
             // 单例:若此前被标 dup(孪生已删)→ 复活为 canonical,重建向量。
+            // ftsed 也要归零:标 dup 时 lex 行已删,只重嵌不重建 FTS 会让该文件
+            // 永久退出关键词搜索(构建管线只在 ftsed=0 时写 lex)。
             let id = group[0].0;
             let _ = conn.execute(
-                "UPDATE files SET dup_of=0, chunked=CASE WHEN dup_of<>0 THEN 0 ELSE chunked END
-                 WHERE id=?1 AND dup_of<>0",
+                "UPDATE files SET dup_of=0, chunked=0, ftsed=0 WHERE id=?1 AND dup_of<>0",
                 [id],
             );
             continue;
@@ -142,9 +170,13 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
             }
         }
         let canon_id = canon.0;
-        // canonical 必须 dup_of=0;若它此前是 dup(chunks 已删)→ chunked=0 触发重建。
+        // canonical 必须 dup_of=0;若它此前是 dup(chunks/lex 已删)→ chunked/ftsed 归零
+        // 触发重建(ftsed 不归零会永久退出关键词搜索,见上面单例复活的注释)。
         let _ = conn.execute(
-            "UPDATE files SET dup_of=0, chunked=CASE WHEN dup_of<>0 THEN 0 ELSE chunked END WHERE id=?1",
+            "UPDATE files SET dup_of=0,
+                    chunked=CASE WHEN dup_of<>0 THEN 0 ELSE chunked END,
+                    ftsed=CASE WHEN dup_of<>0 THEN 0 ELSE ftsed END
+             WHERE id=?1",
             [canon_id],
         );
         for g in group {
@@ -165,13 +197,12 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
             exact_dups += 1;
         }
     }
+    if conn.execute_batch("COMMIT").is_err() {
+        let _ = conn.execute_batch("ROLLBACK"); // 结束事务防悬挂,标记下轮幂等重来
+    }
 
     // ── 新压旧:同 (root_id, 目录, ext, doc_key) 分组,内容互异,非最新 mtime 者降权 ──
     // 先整体清零(幂等),再全量重标;只在 dup_of=0(未被精确去重折叠)的文件间比较。
-    let _ = conn.execute(
-        "UPDATE files SET superseded_by=0 WHERE superseded_by<>0",
-        [],
-    );
     let mut superseded = 0u64;
     if !cancelled() {
         let srows: Vec<(i64, i64, i64, String, String, String, String)> = {
@@ -208,6 +239,13 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
                 .or_default()
                 .push((id, mtime, chash));
         }
+        // 清零 + 重标同一笔事务:读已完成(分组在内存),纯写快进快出;逐行自动提交
+        // 在大库上是每行一次 fsync。中断时随连接回滚,旧标记原样保留,幂等可重跑。
+        let _ = conn.execute_batch("BEGIN");
+        let _ = conn.execute(
+            "UPDATE files SET superseded_by=0 WHERE superseded_by<>0",
+            [],
+        );
         for (_key, mut members) in groups {
             if members.len() < 2 || cancelled() {
                 continue;
@@ -225,6 +263,9 @@ pub(crate) fn dedupe_scan(backfill: bool) -> Result<DedupeSummary, String> {
                     superseded += 1;
                 }
             }
+        }
+        if conn.execute_batch("COMMIT").is_err() {
+            let _ = conn.execute_batch("ROLLBACK"); // 同上:防悬挂事务
         }
     }
 

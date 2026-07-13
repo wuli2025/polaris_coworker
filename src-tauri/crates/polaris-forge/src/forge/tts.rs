@@ -342,6 +342,13 @@ pub fn synth_with_strategy(text: &str, out_mp3: &str) -> Result<Value, String> {
     })
 }
 
+/// 静默删除一组临时分块文件(多 chunk 拼接的收尾/失败清理共用)。
+fn remove_files(files: &[String]) {
+    for f in files {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
 fn synth_minimax_strategy(
     text: &str,
     out_mp3: &str,
@@ -353,13 +360,22 @@ fn synth_minimax_strategy(
     // 工业级化:B.3 chunk 切分(>1800 字切),单 chunk 失败仅丢该 chunk 不影响其他
     let chunks = chunk_text(text, 1800);
     let total = chunks.len();
+    // 多 chunk 时每块写独立分块文件 out.partN.mp3,最后按序拼接 —— 此前每块都整文件
+    // 覆盖同一 out_mp3,成品只剩最后一块。单 chunk 保持直写 out_mp3,零额外开销。
+    let multi = total > 1;
+    let mut part_files: Vec<String> = Vec::new();
     let mut parts: Vec<Value> = Vec::new();
     let mut bytes_total = 0usize;
-    for (_start, _end, sub) in chunks {
+    for (idx, (_start, _end, sub)) in chunks.into_iter().enumerate() {
+        let target = if multi {
+            format!("{out_mp3}.part{}.mp3", idx + 1)
+        } else {
+            out_mp3.to_string()
+        };
         let mut last_err = String::new();
         let mut ok = false;
         for v in minimax_retry_voices(base_voice) {
-            match synth_minimax(&sub, out_mp3, Some(&v), lang, &key) {
+            match synth_minimax(&sub, &target, Some(&v), lang, &key) {
                 Ok(mut val) => {
                     val["chunk_text"] = json!(_end - _start);
                     parts.push(val);
@@ -371,12 +387,34 @@ fn synth_minimax_strategy(
             }
         }
         if !ok {
+            remove_files(&part_files); // 失败早退:清掉已写的分块临时文件
             return Err(format!(
                 "chunk 失败(已重试 {} voice): {}",
                 minimax_retry_voices(base_voice).len(),
                 last_err
             ));
         }
+        if multi {
+            part_files.push(target);
+        }
+    }
+    if multi {
+        // 按序字节级拼接成 out_mp3(MP3 帧流首尾相接即可直接播放),拼完删分块临时文件。
+        let mut all: Vec<u8> = Vec::new();
+        for f in &part_files {
+            match std::fs::read(f) {
+                Ok(b) => all.extend_from_slice(&b),
+                Err(e) => {
+                    remove_files(&part_files);
+                    return Err(format!("读分块 {f} 失败: {e}"));
+                }
+            }
+        }
+        if let Err(e) = std::fs::write(out_mp3, &all) {
+            remove_files(&part_files);
+            return Err(format!("写 mp3 失败: {e}"));
+        }
+        remove_files(&part_files);
     }
     Ok(json!({
         "ok": true,

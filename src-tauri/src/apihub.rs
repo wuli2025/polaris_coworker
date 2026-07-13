@@ -116,12 +116,19 @@ pub(crate) fn app_ctx_headers(auth_token: &Option<String>, headers: &HeaderMap) 
     resolve_app_auth_token(auth_token, bearer_of(headers).as_deref())
 }
 
-fn resolve_app_auth(state: &ApiState, token: Option<&str>) -> Option<AuthCtx> {
-    resolve_app_auth_token(&state.auth_token, token)
+/// resolve_app_auth_token 的异步壳:鉴权含同步 SQLite 查询(check_session),直接跑在
+/// axum async worker 上会钉住 reactor,挪进阻塞线程池。会话短缓存(collab/auth.rs)命中
+/// 时闭包内不落库,这层 spawn_blocking 兜的是未命中/首次。
+async fn resolve_app_auth(state: &ApiState, token: Option<String>) -> Option<AuthCtx> {
+    let auth_token = state.auth_token.clone();
+    tokio::task::spawn_blocking(move || resolve_app_auth_token(&auth_token, token.as_deref()))
+        .await
+        .ok()
+        .flatten()
 }
 
-fn app_ctx(state: &ApiState, headers: &HeaderMap) -> Option<AuthCtx> {
-    app_ctx_headers(&state.auth_token, headers)
+async fn app_ctx(state: &ApiState, headers: &HeaderMap) -> Option<AuthCtx> {
+    resolve_app_auth(state, bearer_of(headers)).await
 }
 
 /// 基础 `/api/invoke` 目前操作机器级项目/知识库/供应商配置,没有逐用户资源 ACL;
@@ -169,7 +176,7 @@ async fn invoke(
     headers: HeaderMap,
     Json(req): Json<InvokeRequest>,
 ) -> Response {
-    let Some(ctx) = app_ctx(&state, &headers) else {
+    let Some(ctx) = app_ctx(&state, &headers).await else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error":"未授权 (口令错误或会话失效)"})),
@@ -356,6 +363,11 @@ async fn dispatch_desktop(cmd: &str, a: &Args, _app: AppHandle) -> Result<Value,
         "conv_delete_conversation" => {
             ok(conv::conv_delete_conversation(req_str(a, "conversationId")?)?)
         }
+        // 账号根口令(个人设备联盟身份锚):远端设备取本机账号根以展示 / 绑定入网。owner 级。
+        "collab_account_root" => ok(crate::collab::account_root::get_or_create()?),
+        "collab_account_root_bind" => {
+            ok(crate::collab::account_root::bind(&req_str(a, "code")?)?)
+        }
 
         _ => Err(format!(
             "命令 {cmd} 在桌面主机模式暂不支持(手机远程仅开放文件/对话数据面;全部命令请用 Docker/NAS server 版)"
@@ -429,6 +441,9 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
         // ── KB ──
         "kb_root" => ok(kb::kb_root()),
         "kb_default_root" => ok(kb::kb_default_root()),
+        // 账号根口令(个人设备联盟身份锚):server 壳同样暴露,供云端主机的远端设备取用。
+        "collab_account_root" => ok(crate::collab::account_root::get_or_create()?),
+        "collab_account_root_bind" => ok(crate::collab::account_root::bind(&req_str(a, "code")?)?),
         "kb_set_root" => ok(kb::kb_set_root(req_str(a, "newPath")?)?),
         "kb_scan" => ok(kb::kb_scan_sync()?),
         "kb_compile" => ok(wiki::kb_compile(app)?),
@@ -502,6 +517,8 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
         )?),
         "voice_correction_remove" => ok(voice::voice_correction_remove(req_str(a, "wrong")?)?),
         "voice_anti_pollute" => ok(voice::voice_anti_pollute(req_str(a, "text")?)),
+        // AI 整形试跑(设置页「测一下整形」):纯 HTTP 调 LLM,容器内可用
+        "voice_polish" => ok(voice::voice_polish(req_str(a, "text")?)?),
         "voice_transcribe_file" => ok(voice::voice_transcribe_file(req_str(a, "path")?)?),
         "voice_listen_start" => ok(voice::voice_listen_start(app)?),
         "voice_listen_stop" => ok(voice::voice_listen_stop()?),
@@ -893,6 +910,14 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
                     .to_string(),
             )
         }
+        // uv 未预烤进容器镜像,自动安装脚本也只支持 Win/mac 桌面 → 给明确指引而非 404
+        "env_install_uv" => Err(
+            "容器环境不支持在线安装 uv:请进容器执行 `curl -LsSf https://astral.sh/uv/install.sh | sh`,或更新预装 uv 的镜像 (docker pull)。"
+                .to_string(),
+        ),
+        // uv 缓存治理:纯子进程调用 `uv cache dir/clean`,容器内直通(没装 uv 时函数自会报「未找到」)
+        "env_uv_cache_info" => ok(doctor::env_uv_cache_info()),
+        "env_uv_cache_clean" => ok(doctor::env_uv_cache_clean()?),
         "env_cancel" => ok(doctor::env_cancel(req_str(a, "reqId")?)?),
 
         // ── 飞书 / 企微 / 自媒体账号 ──
@@ -1014,7 +1039,7 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
 ) -> Response {
     // WS 鉴权走 query token（浏览器 WS 不便带自定义 header）。
-    let Some(ctx) = resolve_app_auth(&state, params.get("token").map(String::as_str)) else {
+    let Some(ctx) = resolve_app_auth(&state, params.get("token").cloned()).await else {
         return (StatusCode::UNAUTHORIZED, "未授权").into_response();
     };
     if role_rank(&ctx.role) < 3 {
@@ -1032,7 +1057,7 @@ async fn upload(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    let Some(ctx) = app_ctx(&state, &headers) else {
+    let Some(ctx) = app_ctx(&state, &headers).await else {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error":"未授权"}))).into_response();
     };
     if role_rank(&ctx.role) < 3 {
@@ -1058,9 +1083,8 @@ async fn upload(
             .file_name()
             .map(sanitize_filename)
             .unwrap_or_else(|| "upload.bin".to_string());
-        let dst = unique_path(&base, &fname);
-        let mut f = match tokio::fs::File::create(&dst).await {
-            Ok(f) => f,
+        let (dst, mut f) = match create_unique(&base, &fname).await {
+            Ok(v) => v,
             Err(e) => return err_resp(format!("创建上传文件失败: {e}")),
         };
         let mut size: u64 = 0;
@@ -1110,26 +1134,42 @@ fn sanitize_filename(name: &str) -> String {
         .to_string()
 }
 
-fn unique_path(base: &Path, fname: &str) -> PathBuf {
-    let p = base.join(fname);
-    if !p.exists() {
-        return p;
-    }
+/// 原子占名 + 创建:`create_new` 一步完成「唯一名探测 + 建文件」。
+/// 旧写法先 `exists()` 探测再 `File::create`(截断式),两个并发同名上传会探到同一个
+/// 「唯一」名 → 互相截断写花文件;`create_new` 撞名返回 AlreadyExists,递增序号重试即可。
+async fn create_unique(base: &Path, fname: &str) -> std::io::Result<(PathBuf, tokio::fs::File)> {
     let stem = Path::new(fname)
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("file");
-    let ext = Path::new(fname).extension().and_then(|s| s.to_str());
-    let mut i = 1u32;
+        .unwrap_or("file")
+        .to_string();
+    let ext = Path::new(fname)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string());
+    let mut i = 0u32;
     loop {
-        let cand = match ext {
-            Some(e) => base.join(format!("{stem}-{i}.{e}")),
-            None => base.join(format!("{stem}-{i}")),
+        let cand = if i == 0 {
+            base.join(fname)
+        } else {
+            match &ext {
+                Some(e) => base.join(format!("{stem}-{i}.{e}")),
+                None => base.join(format!("{stem}-{i}")),
+            }
         };
-        if !cand.exists() {
-            return cand;
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&cand)
+            .await
+        {
+            Ok(f) => return Ok((cand, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                i += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
         }
-        i += 1;
     }
 }
 
@@ -1149,7 +1189,10 @@ async fn serve_file(
     headers: HeaderMap,
     Query(q): Query<FileQuery>,
 ) -> Response {
-    let ctx = app_ctx(&state, &headers).or_else(|| resolve_app_auth(&state, q.token.as_deref()));
+    let ctx = match app_ctx(&state, &headers).await {
+        Some(c) => Some(c),
+        None => resolve_app_auth(&state, q.token.clone()).await,
+    };
     let Some(ctx) = ctx else {
         return (StatusCode::UNAUTHORIZED, "未授权").into_response();
     };

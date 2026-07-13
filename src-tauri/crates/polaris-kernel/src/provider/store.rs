@@ -487,10 +487,23 @@ pub fn init(_app: &AppHandle) -> Result<()> {
 /// 故进程在写一半时崩溃/断电只会留下 `.polaris.tmp`, 目标文件要么旧内容要么新内容,
 /// 绝不会被截成半截 JSON —— 这是「torn write 破坏 claude 配置 / 静默清空 API key」的根治。
 pub(crate) fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
+    // tmp 名带进程内唯一序号:固定名下两个并发写者(如 codex 刷新回写 vs 重新授权落盘)
+    // 会互相截断对方的 tmp,先 rename 的一方可能把「对方的半截内容」提交成目标文件。
+    // 唯一名让各写各的,rename 仍原子,后完成者整体覆盖(last-wins,不会撕裂)。
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".polaris.tmp");
+    tmp.push(format!(".polaris.{}.{}.tmp", std::process::id(), n));
     let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, contents)?;
+    // 写完必须 sync_all 再 rename: rename 只保证目录项切换原子, 不保证 tmp 数据已刷盘。
+    // 断电时 rename(元数据)可能先于数据落盘 → 目标变 0 字节/半截, 「绝不残缺」失效。
+    // (rename 后不 fsync 父目录: 最坏回退到旧文件, 仍是完整 JSON, 可接受。)
+    {
+        use std::io::Write;
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+    }
     // 收紧权限:providers.json 内含明文 API key —— unix 上设 0o600(仅属主可读写),防同机其它
     // 用户、或文件被同步/备份进宽权限目录时被顺手读走。在 rename 前设,确保最终文件落地即 600。
     // (Windows 用户配置目录已按用户 ACL 隔离,此处不额外处理。真·防同用户恶意软件仍需 OS 钥匙串

@@ -257,12 +257,21 @@ pub struct FolderSize {
 
 // 累加进原子计数器(而非 `&mut u64`):这样即便外层撞上死线被中途掐断,已经数到的部分也
 // 留在计数器里能读回来 —— 大目录至少给个「下限体积」,而不是一刀切归 0。
-fn folder_size_rec(dir: &Path, files: &AtomicU64, bytes: &AtomicU64, remote: bool) {
+fn folder_size_rec(dir: &Path, files: &AtomicU64, bytes: &AtomicU64, remote: bool, stop: &AtomicBool) {
     use std::sync::atomic::Ordering::Relaxed;
+    // `stop` = 调用方的死线熄火位:with_deadline 超时只是让请求线程先走,旁路线程若继续
+    // 满盘递归会白烧几分钟 IO(整盘兜底递归场景)→ 每层进门先看停止位,置位即整棵放弃。
+    if stop.load(Relaxed) {
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in rd.flatten() {
+        // 巨型平铺目录(几十万直属文件)也要能及时收手,不能只等下一层递归边界。
+        if stop.load(Relaxed) {
+            return;
+        }
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_symlink() {
             continue;
@@ -273,7 +282,7 @@ fn folder_size_rec(dir: &Path, files: &AtomicU64, bytes: &AtomicU64, remote: boo
             if skip_dir_always(&name) {
                 continue;
             }
-            folder_size_rec(&entry.path(), files, bytes, remote);
+            folder_size_rec(&entry.path(), files, bytes, remote, stop);
         } else if ft.is_file() {
             if let Ok(m) = entry.metadata() {
                 bytes.fetch_add(on_disk_size(&entry.path(), &m, remote), Relaxed);
@@ -346,14 +355,21 @@ pub fn fable_folder_size(path: String) -> Result<FolderSize, String> {
     // 体积而非 0,避免大目录永远显示空白。
     let files = std::sync::Arc::new(AtomicU64::new(0));
     let bytes = std::sync::Arc::new(AtomicU64::new(0));
-    let (fc, bc) = (files.clone(), bytes.clone());
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let (fc, bc, sc) = (files.clone(), bytes.clone(), stop.clone());
     let remote = is_remote_root(&path); // 网络盘:跳过逐文件实占往返,直接取逻辑大小
-    super::sched::with_deadline(10, move || {
+    let timed_out = super::sched::with_deadline(10, move || {
         let p = Path::new(&path);
         if p.is_dir() {
-            folder_size_rec(p, &fc, &bc, remote);
+            folder_size_rec(p, &fc, &bc, remote, &sc);
         }
-    });
+    })
+    .is_none();
+    // 超时后旁路线程虽被 detach,但共享着停止位:置位让它在下一层递归 / 下一个目录项处就
+    // 收手,不再对整块盘满盘烧 IO(选择器逐行调本命令,detach 线程叠起来能把磁盘拖垮)。
+    if timed_out {
+        stop.store(true, Relaxed);
+    }
     Ok(FolderSize {
         files: files.load(Relaxed),
         bytes: bytes.load(Relaxed),

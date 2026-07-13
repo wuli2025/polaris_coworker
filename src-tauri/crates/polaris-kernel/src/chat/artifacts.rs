@@ -210,7 +210,10 @@ pub struct ArtifactPayload {
     pub size: u64,
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+// command(async): 读 25MB 图 + base64 编码是重 IO/CPU, 同步命令会钉住 UI 主线程
+// (v1.5.2 同族问题)。属性形式让 tauri 把它挪到工作线程跑, fn 本身仍是同步签名 ——
+// server flavor 的 apihub dispatch 直接调 fn, 签名不能变。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn artifact_read(path: String) -> Result<ArtifactPayload, String> {
     let p = ensure_artifact_path(&path)?;
     let meta = std::fs::metadata(&p).map_err(|_| format!("文件不存在或无法访问: {}", path))?;

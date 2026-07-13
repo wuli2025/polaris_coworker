@@ -89,7 +89,10 @@ fn line_cost(u: &Usage, model: &str) -> f64 {
         / 1_000_000.0
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+// command(async): WalkDir 全量遍历 ~/.claude/projects 并逐行解析 jsonl(一年后可达
+// 数百 MB), 同步命令会钉住 UI 主线程(v1.5.2 同族问题)。属性形式挪到工作线程,
+// fn 保持同步签名(server dispatch 直调不受影响)。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn usage_summary() -> Result<UsageSummary, String> {
     // 共享 ~/.claude/projects + 隔离模式的私有账本, 两处都算 —— 深隔离只是把
     // 第三方会话从外部监控的视野里挪走, Polaris 自己的看板仍要看全。
@@ -317,7 +320,10 @@ fn balance_get_json(url: &str, token: &str) -> Result<Value, String> {
 }
 
 /// 查询某供应商的「套餐额度 / 实时余额」。
-#[cfg_attr(feature = "desktop", tauri::command)]
+// command(async): 同步 ureq 网络请求(超时 12s), 同步命令会把 UI 主线程钉住整个
+// 请求时长(v1.5.2 同族问题)。属性形式挪到工作线程, fn 保持同步签名(server
+// dispatch 直调不受影响)。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn provider_balance(id: String) -> Result<ProviderBalance, String> {
     let store = STORE.read().clone();
     let views = build_views(&store);

@@ -887,14 +887,19 @@ fn path_id(path: &str) -> String {
 
 // ───────────────────────── 命令 ─────────────────────────
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+/// **`(async)`**:根枚举含对各挂载点的网络探测(死 NAS 上一个根就能卡几秒)。同步 tauri
+/// 命令跑在主线程会冻住 UI → 派到工作线程(签名不变,前端零改动)。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn scan_roots() -> Vec<ScanRoot> {
     roots_impl()
 }
 
 /// 扫描给定根下的有用资源。只读;返回多维表格行。
 /// max: 命中上限(默认 20000),达到即截断,防止极端目录拖死。
-#[cfg_attr(feature = "desktop", tauri::command)]
+///
+/// **`(async)`**:全盘 WalkDir 深度 14、上限可到 20 万文件,分钟级 IO;同步命令会把这段
+/// 活儿钉死在主线程上(扫描期间整个 UI 冻住)→ 同 fable_audit 一样派到工作线程。
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn scan_resources(roots: Vec<String>, max: Option<usize>) -> Result<ScanReport, String> {
     if roots.is_empty() {
         return Err("未选择扫描范围".into());

@@ -183,37 +183,46 @@ pub fn download() -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
-static EMBED: OnceLock<Result<Mutex<Bgem3Embedding>, String>> = OnceLock::new();
+static EMBED: OnceLock<Mutex<Bgem3Embedding>> = OnceLock::new();
+/// 初始化串行锁:并发首调只让一个线程加载 ~560MB 模型,其余等它的结果。
+static EMBED_INIT: Mutex<()> = Mutex::new(());
 
 fn embedder() -> Result<&'static Mutex<Bgem3Embedding>, String> {
-    EMBED
-        .get_or_init(|| {
-            let dir = model_dir();
-            let read = |f: &str| -> Result<Vec<u8>, String> {
-                std::fs::read(dir.join(f)).map_err(|e| {
-                    format!("读本地模型 {f} 失败(请先在「寓言计划」点「下载本地引擎」): {e}")
-                })
-            };
-            let onnx = read("model_quantized.onnx")?;
-            let tokenizer_files = TokenizerFiles {
-                tokenizer_file: read("tokenizer.json")?,
-                config_file: read("config.json")?,
-                special_tokens_map_file: read("special_tokens_map.json")?,
-                tokenizer_config_file: read("tokenizer_config.json")?,
-            };
-            let model = UserDefinedBgem3Model::new(onnx, tokenizer_files);
-            let mut opts = InitOptionsUserDefined::new();
-            // 检索用 512 token 足矣(chunk ~1600 字符≈500-800 token);**不要设 8192**——
-            // 该 ONNX 导出按 max_length 定形,设大会把每条短文档撑到满长度,colbert 输出
-            // [batch,seq,1024] 爆炸式增大 → 推理实质卡死(实测 8192 时 0 CPU 挂住)。
-            opts.max_length = 512;
-            opts.intra_threads = embed_threads();
-            Bgem3Embedding::try_new_from_user_defined(model, opts)
-                .map(Mutex::new)
-                .map_err(|e| format!("本地嵌入模型加载失败(bge-m3-int8): {e}"))
+    if let Some(m) = EMBED.get() {
+        return Ok(m);
+    }
+    // 失败**不缓存**:模型未下载时首调报错,用户点完「下载本地引擎」后无需重启即可
+    // 重试成功。(旧实现把 Err 永久存进 OnceLock,下载完也要重启进程才生效。)
+    // 初始化 panic(如 ORT 内部断言)会毒化 std Mutex;这里只当串行闸用,没有共享
+    // 状态被撕坏的问题,into_inner 恢复继续,别把一次 panic 变成永久「锁中毒」。
+    let _g = EMBED_INIT.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(m) = EMBED.get() {
+        return Ok(m); // 排队期间别的线程已加载成功
+    }
+    let dir = model_dir();
+    let read = |f: &str| -> Result<Vec<u8>, String> {
+        std::fs::read(dir.join(f)).map_err(|e| {
+            format!("读本地模型 {f} 失败(请先在「寓言计划」点「下载本地引擎」): {e}")
         })
-        .as_ref()
-        .map_err(|e| e.clone())
+    };
+    let onnx = read("model_quantized.onnx")?;
+    let tokenizer_files = TokenizerFiles {
+        tokenizer_file: read("tokenizer.json")?,
+        config_file: read("config.json")?,
+        special_tokens_map_file: read("special_tokens_map.json")?,
+        tokenizer_config_file: read("tokenizer_config.json")?,
+    };
+    let model = UserDefinedBgem3Model::new(onnx, tokenizer_files);
+    let mut opts = InitOptionsUserDefined::new();
+    // 检索用 512 token 足矣(chunk ~1600 字符≈500-800 token);**不要设 8192**——
+    // 该 ONNX 导出按 max_length 定形,设大会把每条短文档撑到满长度,colbert 输出
+    // [batch,seq,1024] 爆炸式增大 → 推理实质卡死(实测 8192 时 0 CPU 挂住)。
+    opts.max_length = 512;
+    opts.intra_threads = embed_threads();
+    let engine = Bgem3Embedding::try_new_from_user_defined(model, opts)
+        .map_err(|e| format!("本地嵌入模型加载失败(bge-m3-int8): {e}"))?;
+    let _ = EMBED.set(Mutex::new(engine));
+    Ok(EMBED.get().expect("EMBED 刚 set 必在"))
 }
 
 /// 批量本地嵌入 → 与 `index::embed_texts` 同形(Vec<Vec<f32>>,dense 1024)。

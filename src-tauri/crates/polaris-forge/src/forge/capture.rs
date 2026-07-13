@@ -24,6 +24,8 @@
 //!   - kill_tree 两段式(SIGTERM → 5s → SIGKILL)
 //!
 //! 本版骨架:结构 + 5 档 enum + 占位函数;真实 chromiumoxide 调用 P1.5 落。
+//! 注意: chromiumoxide 依赖已收进 `persistent-cdp` 特性且默认关(stub 阶段零引用,
+//! 白吃编译时间)。P1.5 落真实现时在 Cargo.toml 开该特性 + `#[cfg(feature = "persistent-cdp")]` 门控。
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -123,8 +125,8 @@ pub async fn capture_with_fallback(
     height: u32,
     full_page: bool,
 ) -> Result<CapturedFrame, String> {
-    // tier1:chromiumoxide(本期 stub → 直接降 tier3)
-    // P1.5(chromiumoxide 0.9.x 实际 API,非伪):
+    // tier1:chromiumoxide(本期 stub → 直接降 tier3;依赖在 persistent-cdp 特性后面,默认不编)
+    // P1.5(chromiumoxide 0.9.x 实际 API,非伪;落地时须 #[cfg(feature = "persistent-cdp")] 门控):
     //   use chromiumoxide::browser::{Browser, BrowserConfig};
     //   let (mut browser, mut handler) = Browser::launch(
     //       BrowserConfig::builder()

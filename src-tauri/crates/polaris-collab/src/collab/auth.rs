@@ -9,6 +9,7 @@ use base64::Engine;
 use once_cell::sync::Lazy;
 use rusqlite::{params, Transaction, TransactionBehavior};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use super::db::{self, now, open_db};
@@ -59,6 +60,37 @@ fn login_record_fail(username: &str) {
 
 fn login_clear(username: &str) {
     LOGIN_GATE.lock().unwrap().remove(username);
+}
+
+// ── 会话短缓存(token → 用户,TTL 内免开库)──────────────────────────────────
+// check_session 是每条 HTTP/WS 请求的热路径,此前每次都 open_db + JOIN 查询;手机一次
+// 请求常触发「鉴权 + 业务」两次开库。这里加进程内短缓存,命中直接返回。
+// 只缓存**成功**结果;失败(无效/过期)永不进缓存。
+const SESSION_CACHE_TTL_SECS: i64 = 10;
+/// 会话缓存硬上限:到顶先剔陈旧,仍满则清空(纯性能缓存,清空只回落查库)。
+const SESSION_CACHE_CAP: usize = 4096;
+
+/// 全局吊销版本号:登出/停用账号等任何「会话失效性」mutation 后自增。
+/// 缓存项记录写入时的版本号,版本不符即视为陈旧强制重查 —— 停用账号**即时生效**,
+/// 不用等 TTL 走完。
+static SESSION_REVOKE_GEN: AtomicU64 = AtomicU64::new(0);
+
+struct CachedSession {
+    user: User,
+    /// 会话自身到期时刻(来自 sessions.expires_at):命中也要查,否则过期会话被 TTL 延长最多 TTL 秒。
+    expires_at: i64,
+    cached_at: i64,
+    gen: u64,
+    /// 缓存所属库路径:测试用 POLARIS_COLLAB_DB 切库时,只按 token 命中会串库,故按库隔离。
+    db_path: String,
+}
+
+static SESSION_CACHE: Lazy<parking_lot::Mutex<HashMap<String, CachedSession>>> =
+    Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+/// 吊销版本 +1:整个会话缓存立即视为陈旧(下次请求落库重查一次即回暖)。
+pub(crate) fn bump_session_revocation() {
+    SESSION_REVOKE_GEN.fetch_add(1, Ordering::SeqCst);
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -306,46 +338,100 @@ pub fn login(username: &str, password: &str, device_id: &str) -> Result<(User, S
 }
 
 /// 校验会话 token → 返回用户（check_auth 的核心）。过期或吊销即失败。
+/// 短缓存命中(TTL 内且吊销版本未变)直接返回,免开库;未命中走每线程复用连接查库。
 pub fn check_session(token: &str) -> Result<User, String> {
-    let conn = open_db()?;
-    let row = conn.query_row(
-        "SELECT u.id,u.username,u.role,u.display_name,u.disabled,s.expires_at \
-         FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?1",
-        params![token],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-            ))
+    let t = now();
+    // 版本号必须在查缓存/查库**之前**读:若查询期间发生吊销,写入缓存的条目带旧版本号,
+    // 下次请求即判陈旧 —— 堵住「查到旧数据 + 吊销后才写缓存」的竞态窗口。
+    let gen = SESSION_REVOKE_GEN.load(Ordering::SeqCst);
+    // 当前库路径:缓存按库隔离(切库不串库)。取不到路径就用固定串,行为退化为不按库隔离但不 panic。
+    let cur_db = db::db_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    {
+        let mut cache = SESSION_CACHE.lock();
+        if let Some(e) = cache.get(token) {
+            // 命中四道闸:版本未变 + 同库 + TTL 内 + 会话自身未到期(缺一即落库重查)。
+            if e.gen == gen
+                && e.db_path == cur_db
+                && t - e.cached_at < SESSION_CACHE_TTL_SECS
+                && t < e.expires_at
+            {
+                return Ok(e.user.clone());
+            }
+            cache.remove(token); // 陈旧 → 惰性剔除,落库重查
+        }
+    }
+    let (user, expires_at) = check_session_db(token, t)?;
+    let mut cache = SESSION_CACHE.lock();
+    // 硬上限防 token 洪泛撑爆内存:先剔陈旧;仍超限就整体清空(纯性能缓存,清空只是回落到查库)。
+    if cache.len() >= SESSION_CACHE_CAP {
+        cache.retain(|_, e| {
+            e.gen == gen && t - e.cached_at < SESSION_CACHE_TTL_SECS && t < e.expires_at
+        });
+        if cache.len() >= SESSION_CACHE_CAP {
+            cache.clear();
+        }
+    }
+    cache.insert(
+        token.to_string(),
+        CachedSession {
+            user: user.clone(),
+            expires_at,
+            cached_at: t,
+            gen,
+            db_path: cur_db,
         },
     );
-    let (id, username, role, display_name, disabled, expires_at) =
-        row.map_err(|_| "会话无效，请重新登录".to_string())?;
-    if disabled != 0 {
-        return Err("账号已停用".into());
-    }
-    if expires_at < now() {
-        let _ = conn.execute("DELETE FROM sessions WHERE token=?1", params![token]);
-        return Err("会话已过期，请重新登录".into());
-    }
-    Ok(User {
-        id,
-        username,
-        role,
-        display_name,
-        disabled: false,
+    Ok(user)
+}
+
+/// check_session 的落库部分(原逻辑不变,连接改走每线程复用的 with_conn)。返回 (用户, 会话到期时刻)。
+fn check_session_db(token: &str, t: i64) -> Result<(User, i64), String> {
+    db::with_conn(|conn| {
+        let row = conn.query_row(
+            "SELECT u.id,u.username,u.role,u.display_name,u.disabled,s.expires_at \
+             FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?1",
+            params![token],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            },
+        );
+        let (id, username, role, display_name, disabled, expires_at) =
+            row.map_err(|_| "会话无效，请重新登录".to_string())?;
+        if disabled != 0 {
+            return Err("账号已停用".into());
+        }
+        if expires_at < t {
+            let _ = conn.execute("DELETE FROM sessions WHERE token=?1", params![token]);
+            return Err("会话已过期，请重新登录".into());
+        }
+        Ok((
+            User {
+                id,
+                username,
+                role,
+                display_name,
+                disabled: false,
+            },
+            expires_at,
+        ))
     })
 }
 
-/// 登出：删会话。
+/// 登出：删会话。吊销版本 +1,短缓存里的该会话即刻失效(不等 TTL)。
 pub fn logout(token: &str) -> Result<(), String> {
     let conn = open_db()?;
     conn.execute("DELETE FROM sessions WHERE token=?1", params![token])
         .map_err(|e| e.to_string())?;
+    bump_session_revocation();
     Ok(())
 }
 
@@ -381,6 +467,8 @@ pub fn set_user_disabled(user_id: i64, disabled: bool) -> Result<(), String> {
         conn.execute("DELETE FROM sessions WHERE user_id=?1", params![user_id])
             .ok();
     }
+    // 停用/启用都要吊销缓存:停用须即时踢下线;重新启用后角色等也应立即回到真实态。
+    bump_session_revocation();
     db::audit(
         "owner",
         "user.disable",

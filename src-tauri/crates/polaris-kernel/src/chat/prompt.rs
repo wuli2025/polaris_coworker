@@ -122,6 +122,15 @@ pub(crate) fn project_artifacts_block(
     budget: usize,
 ) -> String {
     let convs = conv::conversations_of_project(project_id); // 最近在前
+    // 单遍分组取回全部消息: 逐对话调 conv::get_messages 是每次一遍全表扫,
+    // 对话越多越慢(O(对话数 × 全表)), 且本函数跑在每次发消息的 prompt 组装路径上。
+    let mut by_conv = conv::messages_grouped(
+        &convs
+            .iter()
+            .filter(|c| Some(c.id.as_str()) != exclude_conv)
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+    );
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut lines: Vec<String> = Vec::new();
     let mut used = 0usize;
@@ -133,7 +142,7 @@ pub(crate) fn project_artifacts_block(
         // 正序遍历记住「最近的 user 问题」, 给随后的产物当描述
         let mut last_user: Option<String> = None;
         let mut entries: Vec<(String, String)> = Vec::new();
-        for m in conv::get_messages(&c.id) {
+        for m in by_conv.remove(c.id.as_str()).unwrap_or_default() {
             match m.role.as_str() {
                 "user" => last_user = Some(m.content.trim().to_string()),
                 "assistant" => {

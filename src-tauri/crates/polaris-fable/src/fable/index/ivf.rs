@@ -143,13 +143,22 @@ pub fn optimize_vectors() -> Result<OptimizeSummary, String> {
         return Err("IVF 训练得到空质心(无可用 bits)".into());
     }
 
-    // 落质心:先清本模型旧 cell,再插入新质心并记下各自 rowid。
-    conn.execute("DELETE FROM vec_cells WHERE model=?1", [&model])
-        .map_err(|e| e.to_string())?;
+    // 落质心:清旧 cell、把本模型全部 chunk 重置回 cell=-1、插入新质心,三步同一事务。
+    // 重置必须与删质心同事务:否则分配循环被取消/崩溃后,未重分配的 chunk 仍指着已删除
+    // (甚至被 rowid 复用成语义无关)的旧 cell —— 查询探针探不到、repair_vectors 只修 -1、
+    // maybe_optimize 只数 -1,没有任何机制自愈,向量召回被静默破坏。重置成 -1 后它们
+    // 走粗筛的 `cell=-1 OR ...` 兜底,慢但正确,且能被现有修复/触发机制接住。
     let mut cell_ids: Vec<i64> = Vec::with_capacity(centroids.len());
     {
         conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-        {
+        let seeded = (|| -> Result<(), String> {
+            conn.execute("DELETE FROM vec_cells WHERE model=?1", [&model])
+                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE chunks SET cell=-1 WHERE model=?1 AND cell<>-1",
+                [&model],
+            )
+            .map_err(|e| e.to_string())?;
             let mut ins = conn
                 .prepare_cached("INSERT INTO vec_cells(model, dim, bits, n) VALUES(?1,?2,?3,0)")
                 .map_err(|e| e.to_string())?;
@@ -158,6 +167,11 @@ pub fn optimize_vectors() -> Result<OptimizeSummary, String> {
                     .map_err(|e| e.to_string())?;
                 cell_ids.push(conn.last_insert_rowid());
             }
+            Ok(())
+        })();
+        if let Err(e) = seeded {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
         }
         conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
     }

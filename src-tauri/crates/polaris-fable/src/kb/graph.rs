@@ -287,7 +287,7 @@ pub fn kb_lint() -> KbLintReport {
     let mut issues: Vec<KbLintIssue> = Vec::new();
     let (mut dead_links, mut missing_type, mut orphans, mut unsafe_paths) = (0, 0, 0, 0);
     let mut wiki_pages = 0usize;
-    let mut push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
+    let push = |issues: &mut Vec<KbLintIssue>, kind: &str, path: &str, detail: String| {
         if issues.len() < MAX_ISSUES {
             issues.push(KbLintIssue {
                 kind: kind.into(),
