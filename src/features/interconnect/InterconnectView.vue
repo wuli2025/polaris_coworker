@@ -493,9 +493,10 @@ function relTime(atSec: number): string {
 }
 
 // 进对应子页即取数;设备页周期静默刷新让遥测仪表流动。
+// NAS/远程盘现归「我的设备」,故 mine 也要拉远程盘实况。
 watch(devFilter, (f) => {
   if (f === "activity") loadAudit();
-  if (f === "usable") pollRemoteStats();
+  if (f === "mine") pollRemoteStats();
 });
 
 // ── 派任务 = 左侧新建一个「标记了目标设备」的对话 ──
@@ -658,13 +659,13 @@ onMounted(async () => {
   }
   await autoReconnectRemotes();
   await sampleLocal();
+  pollRemoteStats(); // 首屏就拉一次 NAS/远程盘实况(它们在「我的设备」里)
   // 本机仪表每 4s 跳一帧;设备页每 3 拍(12s)静默刷一次远端遥测/远程盘实况。
   let tick = 0;
   statTimer = setInterval(() => {
     sampleLocal();
     if (++tick % 3 === 0 && tab.value === "devices") {
-      if (devFilter.value === "mine") loadDevices(true);
-      else if (devFilter.value === "usable") pollRemoteStats();
+      if (devFilter.value === "mine") { loadDevices(true); pollRemoteStats(); } // 含 NAS 实况
       else if (devFilter.value === "activity") loadAudit(true); // 停在活动页也持续刷新(codex #7)
     }
   }, 4000);
