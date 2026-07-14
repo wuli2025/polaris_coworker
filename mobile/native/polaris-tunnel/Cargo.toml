@@ -1,0 +1,28 @@
+# 手机端 iroh 隧道原生库(路线 B:App 内嵌 iroh,P2P 优先)。
+# 独立 crate(自成 workspace,不继承 polaris-app 的重依赖),交叉编译成 Android .so。
+# 逻辑镜像 src-tauri/src/collab/tunnel.rs 的成员端:本地 TCP 监听 → 到主机 NodeId 的
+# iroh 双向流,打洞失败自动走 relay 兜底。经 JNI 暴露给 Capacitor 插件。
+[package]
+name = "polaris-tunnel"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+name = "polaris_tunnel"
+crate-type = ["cdylib"]
+
+[dependencies]
+iroh = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time"] }
+jni = "0.21"
+base64 = "0.22"
+getrandom = "0.2"
+once_cell = "1"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

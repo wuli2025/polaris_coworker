@@ -57,6 +57,7 @@ const DeckStudio = defineAsyncComponent(() => import("./components/DeckStudio.vu
 const WebStudio = defineAsyncComponent(() => import("./components/WebStudio.vue"));
 const CollabView = defineAsyncComponent(() => import("./features/collab/CollabView.vue"));
 const ProjectHome = defineAsyncComponent(() => import("./features/collab/ProjectHome.vue"));
+const InterconnectView = defineAsyncComponent(() => import("./features/interconnect/InterconnectView.vue"));
 // 「让 AI 更懂你」向导常驻 App 级:首次打开才拉 chunk,之后保持挂载 → 扫描/归类跑着时
 // 用户可转后台、切视图、最小化窗口都不丢进度(组件不卸载,事件监听与状态都还在)。
 const OnboardingWizard = defineAsyncComponent(() => import("./components/OnboardingWizard.vue"));
@@ -395,6 +396,7 @@ function startSbDrag(e: MouseEvent) {
         <DeckStudio v-else-if="mountedView === 'deck'" />
         <WebStudio v-else-if="mountedView === 'web_studio'" />
         <CollabView v-else-if="mountedView === 'collab'" />
+        <InterconnectView v-else-if="mountedView === 'interconnect'" />
         <ProjectHome v-else-if="mountedView === 'collab_project'" />
       </KeepAlive>
       </FaultBoundary>

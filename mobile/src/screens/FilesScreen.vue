@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { invoke, fileUrl, upload } from "../lib/net";
+import { invoke, upload } from "../lib/net";
 import { toast, toastErr } from "../lib/toast";
+import { openPreview } from "../lib/preview";
 
 interface FileCard {
   id: number;
@@ -100,19 +101,13 @@ onMounted(() => load(true));
 
     <div class="list">
       <p v-if="!items.length && !loading" class="empty muted">暂无文件</p>
-      <a
-        v-for="f in items"
-        :key="f.id"
-        class="item"
-        :href="fileUrl(f.abspath)"
-        target="_blank"
-      >
+      <button v-for="f in items" :key="f.id" class="item" @click="openPreview(f.abspath)">
         <span class="fi">{{ ICON[f.kind] || "📦" }}</span>
         <span class="meta">
           <span class="nm">{{ f.title || f.name }}</span>
           <span class="sub faint">{{ f.sizeH }} · {{ f.kind }}</span>
         </span>
-      </a>
+      </button>
       <button
         v-if="items.length < total"
         class="btn ghost more"
@@ -166,10 +161,11 @@ onMounted(() => load(true));
   display: flex;
   align-items: center;
   gap: 12px;
+  width: 100%;
   padding: 12px;
   border-bottom: 1px solid var(--line);
-  text-decoration: none;
   color: var(--text);
+  text-align: left;
 }
 .fi {
   font-size: 26px;

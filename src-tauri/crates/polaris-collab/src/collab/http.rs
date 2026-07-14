@@ -2322,6 +2322,60 @@ async fn collab_ws_handler(
     ws.on_upgrade(move |socket| ws_loop(socket, rx, ctx))
 }
 
+// ───────────────────────── 远程文件浏览(fsface)─────────────────────────
+// 隧道另一端的「盘」:owner 鉴权 + 路径关押(POLARIS_FS_ROOTS 白名单)。
+// 仅需 collab-host(纯文件访问),桌面 hosting 与 Docker server 壳都挂得上。
+
+/// GET /api/fs/list?path=<rel> → { entries: [...] }
+async fn fs_list_api(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let rel = q.get("path").cloned().unwrap_or_default();
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let entries = crate::collab::fsface::list(&rel)?;
+        ok(json!({ "entries": entries }))
+    })
+    .await;
+    match out {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::FORBIDDEN, Json(json!({ "error": e }))).into_response(),
+        Err(e) => err_resp(format!("内部任务失败: {e}")),
+    }
+}
+
+/// GET /api/fs/read?path=<rel> → 原始字节(前端按 mime 预览/下载)。
+async fn fs_read_api(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let rel = q.get("path").cloned().unwrap_or_default();
+    let out = tokio::task::spawn_blocking(move || crate::collab::fsface::read_bytes(&rel)).await;
+    match out {
+        Ok(Ok(bytes)) => (
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Ok(Err(e)) => (StatusCode::FORBIDDEN, Json(json!({ "error": e }))).into_response(),
+        Err(e) => err_resp(format!("内部任务失败: {e}")),
+    }
+}
+
 // ───────────────────────── 路由表 ─────────────────────────
 
 /// 协作路由。`with_ws=true` 时附带 /ws(桌面 hosting 用;server 壳自己有全量 /ws,传 false 防 merge 撞路由)。
@@ -2420,7 +2474,10 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         // iroh 隧道(collab-net 编译才有):主机侧监听 + 状态 + RelayMap 动态下发
         .route("/api/collab/tunnel/status", get(tunnel_status_api))
         .route("/api/collab/tunnel/start", post(tunnel_start_api))
-        .route("/api/collab/tunnel/relays", post(tunnel_relays_api));
+        .route("/api/collab/tunnel/relays", post(tunnel_relays_api))
+        // 远程文件浏览(fsface):owner 鉴权 + 路径关押,随隧道透传到对端的盘。
+        .route("/api/fs/list", get(fs_list_api))
+        .route("/api/fs/read", get(fs_read_api));
     // 云机中继网关(collab-net 才有):主机挂牌 + /h/:id 反代到该主机(经 iroh 到桌面 apihub)。
     #[cfg(feature = "collab-net")]
     {

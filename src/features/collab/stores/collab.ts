@@ -41,6 +41,10 @@ export interface HostInfo {
   urls: string[];
   needsBootstrap: boolean;
   autostart: boolean;
+  /** 允许局域网/Tailscale 直连(绑 0.0.0.0);关则只绑 127.0.0.1。手机走 WiFi 连需要它开。 */
+  remoteAccess?: boolean;
+  /** 本机 iroh 主机 NodeId —— 手机据此打洞 P2P 直连(连接码里带上它)。 */
+  nodeId?: string;
 }
 
 function loadCachedUser(): CollabUser | null {
@@ -164,6 +168,14 @@ export const useCollabStore = defineStore("collab", () => {
   async function hostStop() {
     await invoke<HostInfo>("collab_host_stop");
     await hostStatus();
+  }
+
+  /** 切换局域网直连(绑 0.0.0.0):后端会重启主机重绑地址,urls 随之带上局域网 IP。 */
+  async function hostSetRemoteAccess(enabled: boolean): Promise<HostInfo> {
+    const info = await invoke<HostInfo>("collab_host_set_remote_access", { enabled });
+    hostInfo.value = info;
+    if (info?.running && info.port) applyBase(`http://127.0.0.1:${info.port}`);
+    return info;
   }
 
   // ── 登录三入口 ──
@@ -630,6 +642,7 @@ export const useCollabStore = defineStore("collab", () => {
     hostStatus,
     hostStart,
     hostStop,
+    hostSetRemoteAccess,
     login,
     signup,
     bootstrap,

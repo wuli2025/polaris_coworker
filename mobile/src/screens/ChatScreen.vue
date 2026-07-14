@@ -2,14 +2,18 @@
 import { nextTick, ref, watch } from "vue";
 import { messages, sending, sendMessage, cancel, newConversation } from "../lib/chat";
 import { renderMd } from "../lib/md";
-import { fileUrl, upload } from "../lib/net";
+import { upload } from "../lib/net";
 import { toast, toastErr } from "../lib/toast";
+import { openPreview } from "../lib/preview";
+import { hostName } from "../lib/auth";
 import TriggerSheet from "../components/TriggerSheet.vue";
+import ChatDrawer from "../components/ChatDrawer.vue";
 
-defineProps<{ wsOk: boolean }>();
+const props = defineProps<{ wsOk: boolean }>();
 
 const draft = ref("");
 const sheetOpen = ref(false);
+const drawerOpen = ref(false);
 const scroller = ref<HTMLElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const attachments = ref<string[]>([]);
@@ -67,8 +71,9 @@ const quicks = [
 <template>
   <div class="chat">
     <header class="bar">
+      <button class="icon" title="展开" @click="drawerOpen = true">☰</button>
       <div class="title">
-        对话
+        {{ hostName || "对话" }}
         <span class="dot" :class="{ live: wsOk }" :title="wsOk ? '已连接' : '连接中'"></span>
       </div>
       <button class="icon" title="新对话" @click="newConversation">＋</button>
@@ -92,14 +97,9 @@ const quicks = [
         <div v-else class="bubble asst">
           <div class="md" v-html="renderMd(m.text)"></div>
           <div v-if="m.artifacts?.length" class="arts">
-            <a
-              v-for="p in m.artifacts"
-              :key="p"
-              class="art"
-              :href="fileUrl(p)"
-              target="_blank"
-              >📎 {{ p.split(/[\\/]/).pop() }}</a
-            >
+            <button v-for="p in m.artifacts" :key="p" class="art" @click="openPreview(p)">
+              📎 {{ p.split(/[\\/]/).pop() }}
+            </button>
           </div>
         </div>
       </div>
@@ -130,6 +130,7 @@ const quicks = [
 
     <input ref="fileInput" type="file" multiple hidden @change="onFiles" />
     <TriggerSheet v-model="sheetOpen" @attach="pickFile" />
+    <ChatDrawer v-model="drawerOpen" :ws-ok="props.wsOk" />
   </div>
 </template>
 
@@ -146,6 +147,9 @@ const quicks = [
   justify-content: space-between;
   padding: calc(10px + var(--safe-top)) 16px 10px;
   border-bottom: 1px solid var(--line);
+  background: var(--bg-elev);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
 }
 .title {
   font-weight: 600;
@@ -254,7 +258,9 @@ const quicks = [
 .composer {
   border-top: 1px solid var(--line);
   padding: 10px 12px calc(10px + var(--safe-bottom));
-  background: var(--bg);
+  background: var(--bg-elev);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
 }
 .atts {
   display: flex;

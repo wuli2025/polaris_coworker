@@ -363,11 +363,8 @@ async fn dispatch_desktop(cmd: &str, a: &Args, _app: AppHandle) -> Result<Value,
         "conv_delete_conversation" => {
             ok(conv::conv_delete_conversation(req_str(a, "conversationId")?)?)
         }
-        // 账号根口令(个人设备联盟身份锚):远端设备取本机账号根以展示 / 绑定入网。owner 级。
-        "collab_account_root" => ok(crate::collab::account_root::get_or_create()?),
-        "collab_account_root_bind" => {
-            ok(crate::collab::account_root::bind(&req_str(a, "code")?)?)
-        }
+        // 设备联盟遥测:本机资源实况(远端设备经中继/隧道取用)。
+        "sys_stats" => ok(crate::sysstat::sample()),
 
         _ => Err(format!(
             "命令 {cmd} 在桌面主机模式暂不支持(手机远程仅开放文件/对话数据面;全部命令请用 Docker/NAS server 版)"
@@ -441,9 +438,8 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
         // ── KB ──
         "kb_root" => ok(kb::kb_root()),
         "kb_default_root" => ok(kb::kb_default_root()),
-        // 账号根口令(个人设备联盟身份锚):server 壳同样暴露,供云端主机的远端设备取用。
-        "collab_account_root" => ok(crate::collab::account_root::get_or_create()?),
-        "collab_account_root_bind" => ok(crate::collab::account_root::bind(&req_str(a, "code")?)?),
+        // 设备联盟遥测:云主机/server 壳自采本机资源。
+        "sys_stats" => ok(crate::sysstat::sample()),
         "kb_set_root" => ok(kb::kb_set_root(req_str(a, "newPath")?)?),
         "kb_scan" => ok(kb::kb_scan_sync()?),
         "kb_compile" => ok(wiki::kb_compile(app)?),

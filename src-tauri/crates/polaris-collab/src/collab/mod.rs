@@ -1,8 +1,6 @@
 //! 多人协作模块族（v8 方案第六节）。
 //!
 //! 铁律:主 Agent 裁决内容,永不裁决权限——权限判断全部走 db.rs 的确定性授权表。
-/// 账号根口令:个人设备联盟的身份锚(生成/展示 + 口令→账号锚 key 派生 + 新设备绑定)。
-pub mod account_root;
 pub mod account_store;
 // 应用数据面 apihub 与桌面内嵌主机 hosting 是**壳件**(分发/拼装层, 认识全部引擎),
 // 抽 crate 时归位壳仓 src/apihub.rs 与 src/hosting.rs —— 本 crate 只装协作 domain。
@@ -15,6 +13,9 @@ pub mod checks;
 pub mod commands;
 pub mod db;
 pub mod gitea;
+/// 路径关押的远程文件浏览(fsface):隧道另一端的「盘」。双壳共用,仅需 collab-host。
+#[cfg(feature = "collab-host")]
+pub mod fsface;
 /// 协作 HTTP 路由(axum,双壳共用):server 壳 merge 它;桌面 hosting 内嵌它。
 #[cfg(feature = "collab-host")]
 pub mod http;

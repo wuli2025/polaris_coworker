@@ -54,7 +54,8 @@ WORKDIR /build/src-tauri
 #   polaris-app { default-features = false, features = ["server"] }，
 #   故 -p polaris-cli 即等价于文档里的 --no-default-features --features server。
 # 注意括号:|| true 只容忍 strip 失败,绝不能吞 cargo 的失败(踩过——binary not found 才炸)
-RUN cargo build --release -p polaris-cli --bin polaris-server \
+# --features collab-net:让 polaris-server 起 iroh host_listen 暴露 NodeId(P2P 直连 + fsface 远程盘)。
+RUN cargo build --release -p polaris-cli --bin polaris-server --features collab-net \
     && (strip target/release/polaris-server || true)
 
 # ── stage 3: 运行层 ────────────────────────────────────────────

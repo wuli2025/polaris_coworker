@@ -25,6 +25,11 @@ path = "src/main.rs"
 name = "polaris-server"
 path = "src/bin/polaris-server.rs"
 
+# collab-net(iroh 打洞直连)透传:polaris-server 镜像加 `--features collab-net` 即让
+# 服务端起 iroh host_listen 暴露 NodeId,桌面/手机可 P2P 连入。polaris-forge 不带,零额外编译。
+[features]
+collab-net = ["polaris-app/collab-net"]
+
 [dependencies]
 # 复用主 lib 的全部引擎(forge 五件套 + convert)。server feature 是 Docker 侧
 # 验证过的无-tauri 已知良好组合;CLI 不起 HTTP,只是借这条特性线拿引擎。

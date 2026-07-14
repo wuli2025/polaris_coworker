@@ -215,6 +215,30 @@ export function parseShareCode(s: string): { code: string; addrs: string[] } | n
   }
 }
 
+/** 连接码 PLRK1-<base64url(json{t:token, a:[addrs]})> → {token, addrs};非该格式返回 null。
+ *  同账号自己的设备用:主机端「互联」把地址+owner令牌打包成一串,手机粘上即以 owner
+ *  完整权限直接连上,不走登录/邀请(令牌本身即凭据)。区别于 PLRS1(邀请别人,走 redeem)。 */
+export function parseConnectCode(
+  s: string
+): { token: string; addrs: string[]; nodeId?: string } | null {
+  const m = s.trim();
+  if (!m.startsWith("PLRK1-")) return null;
+  try {
+    const b64 = m.slice(6).replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const v = JSON.parse(atob(pad));
+    if (typeof v.t !== "string" || !Array.isArray(v.a)) return null;
+    return {
+      token: v.t,
+      addrs: v.a.filter((x: unknown): x is string => typeof x === "string"),
+      // n = 主机 iroh NodeId:有它 + 原生隧道可用 → probeEntry 优先 iroh 打洞 P2P 直连。
+      nodeId: typeof v.n === "string" && v.n ? v.n : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** 逐个探活分享码地址,返回第一个能通的。 */
 export async function probeHost(addrs: string[]): Promise<string | null> {
   for (const a of addrs) {

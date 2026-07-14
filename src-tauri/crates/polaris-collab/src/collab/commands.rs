@@ -7,21 +7,6 @@
 
 use super::workset;
 
-/// 账号根口令:取(或首启生成)本机账号根 —— 供前端在「明显处」常驻展示,
-/// 并作为把新设备拉进联盟的凭据(新设备输入它即自动互信)。owner 级。
-#[tauri::command]
-pub fn collab_account_root() -> Result<super::account_root::AccountRoot, String> {
-    super::account_root::get_or_create()
-}
-
-/// 用已有账号根口令把本机绑定进一个联盟(新设备加入)。幂等;绑定冲突时拒绝。
-#[tauri::command]
-pub fn collab_account_root_bind(
-    code: String,
-) -> Result<super::account_root::AccountRoot, String> {
-    super::account_root::bind(&code)
-}
-
 #[tauri::command]
 pub fn collab_clone_partial(
     remoteUrl: String,

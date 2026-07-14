@@ -44,6 +44,7 @@ pub use polaris_runtime::host;
 // ── Docker(server) 外壳：axum HTTP/WS 服务 ──
 #[cfg(feature = "server")]
 pub mod server;
+pub mod sysstat;
 
 // ── 桌面外壳入口(run + 适配器):`not(test)` 门控 ──
 // 单测二进制永远不会跑 Tauri 事件循环, 却会因编入 run() 把 tauri-plugin-dialog→rfd
@@ -193,13 +194,14 @@ pub fn run() {
             // 云机中继网关:桌面主机挂牌/断开(真·中继完整形态)
             collab::commands::collab_gateway_attach,
             collab::commands::collab_gateway_detach,
-            // 账号根口令:个人设备联盟身份锚(展示 + 新设备绑定)
-            collab::commands::collab_account_root,
-            collab::commands::collab_account_root_bind,
+            // 设备联盟遥测:本机 CPU/内存/磁盘 真实采样
+            sysstat::sys_stats,
             // 多人协作:一键把本机变成协作主机(内嵌 axum 协作路由;壳件)
             hosting::collab_host_start,
             hosting::collab_host_status,
             hosting::collab_host_stop,
+            hosting::collab_host_set_remote_access,
+            hosting::collab_host_add_device,
             // KB
             kb::kb_root,
             kb::kb_default_root,

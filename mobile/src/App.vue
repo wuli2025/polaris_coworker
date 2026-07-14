@@ -4,13 +4,14 @@ import { authed } from "./lib/auth";
 import { screen } from "./lib/nav";
 import { onWsStatus } from "./lib/net";
 import { initChat } from "./lib/chat";
-import ConnectLogin from "./screens/ConnectLogin.vue";
+import HostsScreen from "./screens/HostsScreen.vue";
 import ChatScreen from "./screens/ChatScreen.vue";
 import FilesScreen from "./screens/FilesScreen.vue";
 import ProjectsScreen from "./screens/ProjectsScreen.vue";
 import SettingsScreen from "./screens/SettingsScreen.vue";
 import PlaceholderScreen from "./screens/PlaceholderScreen.vue";
 import BottomNav from "./components/BottomNav.vue";
+import PreviewOverlay from "./components/PreviewOverlay.vue";
 import Toast from "./components/Toast.vue";
 
 const wsOk = ref(false);
@@ -22,7 +23,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <ConnectLogin v-if="!authed" />
+  <!-- 第一屏:主机选择(未登录 / 主动切换主机时) -->
+  <HostsScreen v-if="!authed || screen === 'hosts'" />
   <template v-else>
     <main class="stage">
       <ChatScreen v-show="screen === 'chat'" :ws-ok="wsOk" />
@@ -36,6 +38,7 @@ onMounted(() => {
     </main>
     <BottomNav />
   </template>
+  <PreviewOverlay />
   <Toast />
 </template>
 

@@ -15,6 +15,8 @@ dist-ssr
 src-tauri/target
 src-tauri/gen
 src-tauri/Cargo.lock
+# 手机原生隧道插件的 Rust 构建产物(源码只留 Cargo.*/src)
+mobile/native/*/target/
 
 # Runtime outputs / local logs
 .dev.log

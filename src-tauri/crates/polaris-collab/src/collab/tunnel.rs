@@ -242,9 +242,14 @@ pub async fn host_listen() -> Result<(), String> {
                 }
             };
             let remote = conn.remote_id().to_string();
-            // ⛔ 隧道层准入硬闸:不在设备白名单立即断开。
-            if !identity::is_node_allowed(&remote) {
-                eprintln!("[tunnel] 拒绝未授权设备 {remote}");
+            // 隧道层默认放开:数据面(apihub)所有命令都要求 owner 令牌/会话才放行 —— 令牌
+            // 才是真门禁,未持令牌者即便打进隧道也只会吃 401。故「粘连接码即连」零门槛,不再
+            // 要求先把设备加白名单。想要设备白名单二次防护的部署可设 POLARIS_TUNNEL_STRICT=1。
+            let strict = std::env::var("POLARIS_TUNNEL_STRICT")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if strict && !identity::is_node_allowed(&remote) {
+                eprintln!("[tunnel] 拒绝未授权设备 {remote}(strict 模式)");
                 conn.close(1u32.into(), b"device not allowed");
                 return;
             }

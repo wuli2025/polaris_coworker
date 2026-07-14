@@ -34,11 +34,18 @@ const tabs = computed(() => ALL.filter((t) => !t.cap || hasCap(t.cap)));
 </template>
 
 <style scoped>
+/* iOS 悬浮玻璃 Dock:离边、圆角药丸、毛玻璃,内容从下面滚过 */
 .nav {
   display: flex;
-  border-top: 1px solid var(--line);
+  margin: 6px 12px calc(10px + var(--safe-bottom));
+  padding: 4px;
+  border-radius: 999px;
   background: var(--bg-elev);
-  padding-bottom: var(--safe-bottom);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  box-shadow: var(--shadow);
 }
 .tab {
   flex: 1;
@@ -46,11 +53,14 @@ const tabs = computed(() => ALL.filter((t) => !t.cap || hasCap(t.cap)));
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding: 8px 0 6px;
+  padding: 7px 0 5px;
+  border-radius: 999px;
   color: var(--text-faint);
+  transition: background 0.18s, color 0.18s;
 }
 .tab.on {
   color: var(--accent);
+  background: var(--accent-soft);
 }
 .ic {
   font-size: 20px;

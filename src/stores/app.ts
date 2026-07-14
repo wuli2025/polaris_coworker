@@ -33,6 +33,7 @@ export type ViewKey =
   | "deck"
   | "web_studio"
   | "collab"
+  | "interconnect"
   | "collab_project";
 
 export const useAppStore = defineStore("app", () => {

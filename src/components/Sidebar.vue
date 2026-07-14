@@ -25,6 +25,7 @@ import {
   ChevronRight,
   Sparkles,
   Handshake,
+  Radio,
 } from "@lucide/vue";
 import SearchGlass from "./icons/SearchGlass.vue";
 import { useAppStore } from "../stores/app";
@@ -59,8 +60,10 @@ const primaryNav: NavItem[] = [
   { key: "skill_center", label: "技能中心", icon: Puzzle },
   // 「专家团」中心（原「人格」升级）：点开看全部专家 + 业务团 + 按知识库智能推荐
   { key: "claude_md", label: "专家团", icon: Users },
-  // 多人协作:任务卡看板 + 领取/提交/验收闭环(团队共用协作主机)
+  // 多人协作:任务卡看板 + 领取/提交/验收闭环(团队共用协作主机)—— 只管项目/任务
   { key: "collab", label: "协作", icon: Handshake },
+  // 互联 · 设备联盟:设备看板 + 主机连接码 + 账号根口令 —— 与协作彻底分开,只管设备与连接
+  { key: "interconnect", label: "互联", icon: Radio },
 ];
 // 收纳进「更多」的次要项（更新 / 飞书 / 环境 / MCP / 设置）
 const moreNav: NavItem[] = [

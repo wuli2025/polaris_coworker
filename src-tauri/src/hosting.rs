@@ -85,6 +85,18 @@ fn random_access_token() -> Result<String, String> {
     Ok(token)
 }
 
+/// 本机 iroh 主机 NodeId(手机据此打洞 P2P 直连);未启用 collab-net 时为空串。
+fn host_iroh_node_id() -> String {
+    #[cfg(feature = "collab-net")]
+    {
+        crate::collab::tunnel::host_node_id().unwrap_or_default()
+    }
+    #[cfg(not(feature = "collab-net"))]
+    {
+        String::new()
+    }
+}
+
 fn lan_access_enabled() -> bool {
     // 环境变量显式设置时优先(可强制关);未设置则看持久化配置。
     match std::env::var("POLARIS_HOST_ALLOW_LAN") {
@@ -177,6 +189,12 @@ pub async fn start_core(
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(tower_http::cors::CorsLayer::permissive());
 
+    // 远程文件浏览(fsface)开放根:设了 POLARIS_FS_ROOTS 才亮,提醒运维已把盘暴露给隧道对端。
+    let fs_roots = crate::collab::fsface::roots();
+    if !fs_roots.is_empty() {
+        eprintln!("[fsface] 远程浏览已开放,根: {fs_roots:?}");
+    }
+
     let (stx, srx) = tokio::sync::oneshot::channel::<()>();
     let serve_task = tokio::spawn(async move {
         let _ = axum::serve(listener, router)
@@ -226,6 +244,7 @@ fn status_json() -> serde_json::Value {
             "needsBootstrap": needs_bootstrap, "autostart": load_cfg().enabled,
             "accessToken": r.access_token,
             "remoteAccess": lan_access_enabled(),
+            "nodeId": host_iroh_node_id(),
         }),
         None => serde_json::json!({
             "running": false, "port": 0, "urls": [],
@@ -366,6 +385,15 @@ pub async fn collab_host_start(
         }
         return Ok(status_json());
     }
+    // ── iroh 主机隧道:桌面当主机时也起 host_listen,让手机经 iroh 打洞 P2P 连进来
+    //    (打洞失败自动走 n0 relay 兜底)。手机 probeEntry 拿到主机 nodeId + 原生隧道可用
+    //    → 优先起隧道直连桌面,而不是走裸地址。host_listen 有设备白名单硬闸。
+    #[cfg(feature = "collab-net")]
+    {
+        if !crate::collab::tunnel::is_running() {
+            crate::collab::tunnel::start_host_blocking_thread();
+        }
+    }
     save_cfg(HostCfg {
         enabled: true,
         port: Some(port),
@@ -377,6 +405,48 @@ pub async fn collab_host_start(
 #[tauri::command]
 pub fn collab_host_status() -> serde_json::Value {
     status_json()
+}
+
+/// 授权一台设备(把它的 iroh NodeId 加进白名单)。iroh host_listen 只放行白名单里的
+/// NodeId —— 手机首次经 iroh 连本机前,owner 在「互联」把手机显示的 NodeId 加进来即可。
+/// 幂等:已在白名单则直接返回成功。owner 级(经 tauri 命令,本机可信)。
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn collab_host_add_device(name: String, nodeId: String) -> Result<(), String> {
+    let nid = nodeId.trim();
+    if nid.is_empty() || nid.len() > 256 || nid.chars().any(char::is_control) {
+        return Err("设备 NodeId 无效".into());
+    }
+    if crate::collab::identity::is_node_allowed(nid) {
+        return Ok(());
+    }
+    let nm = if name.trim().is_empty() { "我的设备" } else { name.trim() };
+    crate::collab::identity::add_device(0, nm, nid).map(|_| ())
+}
+
+/// 切换「允许局域网 / Tailscale 直连」(绑 0.0.0.0)。持久化到 collab_host.json;主机在跑
+/// 则重启以按新地址重绑,让 status 的 urls 带上局域网 IP —— 手机据此才够得着这台桌面主机。
+/// 关掉则回绑 127.0.0.1(只本机可连,最安全)。数据面仍有口令/会话闸,不裸露 owner 接口。
+#[tauri::command]
+pub async fn collab_host_set_remote_access(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    // 环境变量显式设置时优先于持久化配置(见 lan_access_enabled)→ UI 改不动,明确告知。
+    if std::env::var("POLARIS_HOST_ALLOW_LAN").is_ok() {
+        return Err("局域网访问由环境变量 POLARIS_HOST_ALLOW_LAN 固定,无法在此切换".into());
+    }
+    let mut cfg = load_cfg();
+    cfg.allow_lan = enabled;
+    save_cfg(cfg);
+    // 主机在跑 → 停后重启,按新 bind_ip(0.0.0.0 / 127.0.0.1)重新绑定地址。
+    let was_running = RUNNING.lock().is_some();
+    if was_running {
+        collab_host_stop().await?;
+        collab_host_start(app, None).await
+    } else {
+        Ok(status_json())
+    }
 }
 
 #[tauri::command]
