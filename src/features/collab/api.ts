@@ -179,6 +179,27 @@ export interface AdminDevice {
   username?: string;
   /** 这台就是主机(node_id 命中 meta.host_node_id) */
   is_host?: boolean;
+  /** 该设备最近上报的资源实况(遥测,字段按设备能力可缺:CPU/内存/磁盘/核数) */
+  stats?: {
+    cpu_pct?: number;
+    mem_used?: number;
+    mem_total?: number;
+    disk_used?: number;
+    disk_total?: number;
+    cores?: number;
+  };
+  /** 上报时间(ms)。据此判断新鲜度,过期在 UI 上如实标灰。 */
+  stats_at?: number;
+}
+
+/** 一条审计事件(「正在发生」活动流)。 */
+export interface AuditRow {
+  actor: string;
+  action: string;
+  target: string;
+  detail: string;
+  /** Unix 秒 */
+  at: number;
 }
 
 // ── 合并闸门(冲突裁决台) ──
@@ -451,6 +472,9 @@ export const collabApi = {
   },
   adminDevices(): Promise<AdminDevice[]> {
     return get("/api/collab/admin/devices");
+  },
+  adminAudit(limit = 50): Promise<AuditRow[]> {
+    return get(`/api/collab/admin/audit?limit=${limit}`);
   },
   adminDeviceRevoke(devId: string): Promise<void> {
     return post("/api/collab/admin/device_revoke", { deviceId: devId });

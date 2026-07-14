@@ -10,7 +10,7 @@
  * 传输隐形:用户只面对「连谁 / 用它的什么」,局域网/P2P/中继由系统自动选档,
  * 界面上只作徽标展示。点「派任务」= 先建立远程连接(自动选路)再下发。
  */
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import {
   MonitorSmartphone,
   Server,
@@ -35,7 +35,7 @@ import {
 import { invoke, isTauri } from "../../tauri";
 import { useCollabStore } from "../collab/stores/collab";
 import { useAppStore } from "../../stores/app";
-import { collabApi, type AdminDevice } from "../collab/api";
+import { collabApi, type AdminDevice, type AuditRow } from "../collab/api";
 import { toast } from "../../composables/useToast";
 import {
   loadRemoteSources,
@@ -184,12 +184,12 @@ async function becomeHost() {
 // ── 设备看板 ──
 const devices = ref<AdminDevice[]>([]);
 const devicesLoading = ref(false);
-async function loadDevices() {
-  devicesLoading.value = true;
+async function loadDevices(silent = false) {
+  if (!silent) devicesLoading.value = true;
   try {
     devices.value = await collabApi.adminDevices();
   } catch {
-    devices.value = []; // 未登录/非 owner:空看板
+    if (!silent) devices.value = []; // 静默刷新失败保留旧数据,不闪空
   } finally {
     devicesLoading.value = false;
   }
@@ -258,9 +258,15 @@ async function sampleLocal() {
     /* 采样失败静默,下次再采 */
   }
 }
-/** 设备的资源数据:本机=真实采样;远端暂无(等 Phase2 遥测上报)。 */
-function statsFor(d: AdminDevice): DeviceStats | null {
-  return d.is_host ? localStats.value : null;
+/** 设备的资源数据:本机=真实采样;远端=遥测最近一帧(手机等自己上报,字段按能力可缺)。 */
+function statsFor(d: AdminDevice): Partial<DeviceStats> | null {
+  if (d.is_host) return localStats.value;
+  return d.stats ?? null;
+}
+/** 遥测新鲜度:超 90s 没上报视为过期(卡上标灰,不冒充实时)。 */
+function statsStale(d: AdminDevice): boolean {
+  if (d.is_host) return false;
+  return !d.stats_at || Date.now() - d.stats_at > 90_000;
 }
 function pctOf(used: number, total: number): number {
   return total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
@@ -275,16 +281,35 @@ function fmtSize(bytes: number): string {
 function meterCls(p: number): string {
   return p >= 85 ? "m-hot" : p >= 60 ? "m-warm" : "m-cool";
 }
-/** 设备卡三条仪表(CPU/内存/磁盘);无数据(远端未上报)返回 null。 */
+/** 部分字段的 stats → 仪表行(设备能报什么画什么,缺的不编)。 */
+function metersOf(s: Partial<DeviceStats> | null): { k: string; p: number; v: string }[] {
+  if (!s) return [];
+  const rows: { k: string; p: number; v: string }[] = [];
+  if (typeof s.cpu_pct === "number") {
+    const c = Math.round(s.cpu_pct);
+    rows.push({ k: "CPU", p: c, v: c + "%" });
+  }
+  if (s.mem_total) {
+    const used = s.mem_used ?? 0;
+    rows.push({
+      k: "内存",
+      p: s.mem_used != null ? pctOf(used, s.mem_total) : 0,
+      v: s.mem_used != null ? fmtSize(used) + "/" + fmtSize(s.mem_total) : fmtSize(s.mem_total),
+    });
+  }
+  if (s.disk_total) {
+    rows.push({
+      k: "磁盘",
+      p: pctOf(s.disk_used ?? 0, s.disk_total),
+      v: fmtSize(s.disk_used ?? 0) + "/" + fmtSize(s.disk_total),
+    });
+  }
+  return rows;
+}
+/** 设备卡三条仪表;无任何数据(远端未上报)返回 null。 */
 function metersFor(d: AdminDevice): { k: string; p: number; v: string }[] | null {
-  const s = statsFor(d);
-  if (!s) return null;
-  const c = Math.round(s.cpu_pct);
-  return [
-    { k: "CPU", p: c, v: c + "%" },
-    { k: "内存", p: pctOf(s.mem_used, s.mem_total), v: fmtSize(s.mem_used) + "/" + fmtSize(s.mem_total) },
-    { k: "磁盘", p: pctOf(s.disk_used, s.disk_total), v: fmtSize(s.disk_used) + "/" + fmtSize(s.disk_total) },
-  ];
+  const rows = metersOf(statsFor(d));
+  return rows.length ? rows : null;
 }
 function coresFor(d: AdminDevice): number | null {
   return statsFor(d)?.cores ?? null;
@@ -297,8 +322,93 @@ const DEV_FILTERS = computed(() => [
   { key: "mine" as DevFilter, label: "我的设备", n: devices.value.length },
   { key: "shared" as DevFilter, label: "我共享出去的", n: 0 },
   { key: "usable" as DevFilter, label: "我能用的", n: remotes.value.length },
-  { key: "activity" as DevFilter, label: "正在发生", n: 0 },
+  { key: "activity" as DevFilter, label: "正在发生", n: auditRows.value.length },
 ]);
+
+// ── 远程盘(我能用的)实况:经 iroh 隧道调对端 sys_stats,真数据;对端老版本无此命令→缺项 ──
+const remoteStats = ref<Record<string, Partial<DeviceStats>>>({});
+let remotePolling = false;
+async function pollRemoteStats() {
+  if (remotePolling) return; // 单飞:12s tick 与手动可能重入,别叠(codex #4)
+  remotePolling = true;
+  // 修剪已移除远程盘的残留键,防 map 无限膨胀。
+  const liveIds = new Set(remotes.value.map((s) => s.id));
+  for (const k of Object.keys(remoteStats.value)) {
+    if (!liveIds.has(k)) delete remoteStats.value[k];
+  }
+  try {
+    await Promise.all(
+      remotes.value.map(async (s) => {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 6000); // 隧道半死时别挂死(覆盖到 json() 完成)
+        try {
+          const r = await fetch(`http://127.0.0.1:${s.port}/api/invoke`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(s.token ? { Authorization: `Bearer ${s.token}` } : {}),
+            },
+            body: JSON.stringify({ cmd: "sys_stats", args: {} }),
+            signal: ctl.signal,
+          });
+          if (!r.ok) throw new Error(String(r.status));
+          const stats = await r.json();
+          remoteStats.value = { ...remoteStats.value, [s.id]: stats };
+        } catch {
+          // 断线/超时:删掉旧实况,别把过期值一直冒充「实况」(codex #4)。
+          if (remoteStats.value[s.id]) {
+            const next = { ...remoteStats.value };
+            delete next[s.id];
+            remoteStats.value = next;
+          }
+        } finally {
+          clearTimeout(t);
+        }
+      })
+    );
+  } finally {
+    remotePolling = false;
+  }
+}
+
+// ── 正在发生:audit 活动流(接入/上报/吊销/账号事件,主机留痕) ──
+const auditRows = ref<AuditRow[]>([]);
+const auditLoading = ref(false);
+async function loadAudit(silent = false) {
+  if (!silent) auditLoading.value = true;
+  try {
+    auditRows.value = await collabApi.adminAudit(50);
+  } catch {
+    if (!silent) auditRows.value = []; // 静默刷新失败保留旧数据
+  } finally {
+    auditLoading.value = false;
+  }
+}
+const AUDIT_LABEL: Record<string, string> = {
+  "auth.login": "设备登录接入",
+  "user.create": "新账号创建",
+  "user.disable": "账号停用",
+  "device.telemetry": "设备开始上报资源",
+  "device.revoke": "设备被吊销",
+  "mirror.export": "账号镜像导出",
+};
+function auditLabel(a: AuditRow): string {
+  return AUDIT_LABEL[a.action] ?? a.action;
+}
+/** Unix 秒 → 相对时间。 */
+function relTime(atSec: number): string {
+  const d = Date.now() - atSec * 1000;
+  if (d < 60_000) return "刚刚";
+  if (d < 3_600_000) return `${Math.floor(d / 60_000)} 分钟前`;
+  if (d < 86_400_000) return `${Math.floor(d / 3_600_000)} 小时前`;
+  return `${Math.floor(d / 86_400_000)} 天前`;
+}
+
+// 进对应子页即取数;设备页周期静默刷新让遥测仪表流动。
+watch(devFilter, (f) => {
+  if (f === "activity") loadAudit();
+  if (f === "usable") pollRemoteStats();
+});
 
 // ── 派任务 = 左侧新建一个「标记了目标设备」的对话 ──
 // 点派任务:主对话系统里 createConversation → 标题打上 @设备名 → 切到对话页,
@@ -454,9 +564,22 @@ async function autoReconnectRemotes() {
 
 onMounted(async () => {
   await refreshAll();
+  // 流程顺滑:已经有设备/远程盘的老用户,进来直接看设备看板,不用每次翻过教程。
+  if (tab.value === "guide" && (remoteDevices.value.length || remotes.value.length)) {
+    tab.value = "devices";
+  }
   await autoReconnectRemotes();
   await sampleLocal();
-  statTimer = setInterval(sampleLocal, 4000); // 本机仪表每 4s 跳一帧
+  // 本机仪表每 4s 跳一帧;设备页每 3 拍(12s)静默刷一次远端遥测/远程盘实况。
+  let tick = 0;
+  statTimer = setInterval(() => {
+    sampleLocal();
+    if (++tick % 3 === 0 && tab.value === "devices") {
+      if (devFilter.value === "mine") loadDevices(true);
+      else if (devFilter.value === "usable") pollRemoteStats();
+      else if (devFilter.value === "activity") loadAudit(true); // 停在活动页也持续刷新(codex #7)
+    }
+  }, 4000);
 });
 onUnmounted(() => {
   if (statTimer) clearInterval(statTimer);
@@ -614,7 +737,7 @@ onUnmounted(() => {
             <div class="fh-title">{{ collab.user?.display_name || collab.user?.username || "我" }} 的联盟</div>
             <div class="fh-sub"><span class="odot"></span> {{ onlineCount }} 台在线 · 传输自动选路,你只管用</div>
           </div>
-          <button class="icobtn sm" title="刷新" @click="loadDevices"><RefreshCw :size="14" /></button>
+          <button class="icobtn sm" title="刷新" @click="loadDevices()"><RefreshCw :size="14" /></button>
         </section>
 
         <!-- 子导航:我的设备 / 我共享出去的 / 我能用的 / 正在发生 -->
@@ -637,10 +760,23 @@ onUnmounted(() => {
             粘 NAS 的 <b>iroh NodeId</b> 与 <b>owner 令牌</b>,系统经 iroh 打洞直连(打不通走中继),
             连上后到「文件中心 · 远程源」像本机一样浏览、下载它的盘。
           </p>
-          <div v-for="s in remotes" :key="s.id" class="dev-line remote-line">
-            <span class="conn t-p2p"><Zap :size="12" :stroke-width="2" /> {{ s.name }}</span>
-            <span class="dev-node">127.0.0.1:{{ s.port }}</span>
-            <button class="b danger" title="断开并移除" @click="forgetRemote(s)"><ShieldOff :size="13" /></button>
+          <div v-for="s in remotes" :key="s.id" class="remote-block">
+            <div class="dev-line remote-line">
+              <span class="conn t-p2p"><Zap :size="12" :stroke-width="2" /> {{ s.name }}</span>
+              <span class="dev-node">127.0.0.1:{{ s.port }}</span>
+              <button class="b danger" title="断开并移除" @click="forgetRemote(s)"><ShieldOff :size="13" /></button>
+            </div>
+            <!-- 对端实况:经隧道调 sys_stats(真数据;对端老版本没有则待上报) -->
+            <div class="dev-meters" v-if="metersOf(remoteStats[s.id] ?? null).length">
+              <div class="mt" v-for="m in metersOf(remoteStats[s.id] ?? null)" :key="m.k">
+                <span class="mt-k">{{ m.k }}</span>
+                <span class="mt-bar"><i :class="meterCls(m.p)" :style="{ width: m.p + '%' }"></i></span>
+                <span class="mt-v">{{ m.v }}</span>
+              </div>
+            </div>
+            <div class="dev-meters-none" v-else>
+              <Cpu :size="12" :stroke-width="1.9" /> 实况待上报(对端需新版镜像)
+            </div>
           </div>
           <div v-if="addForm.open" class="auth-form" style="margin-top:12px; max-width:none">
             <input v-model="addForm.name" class="af-inp" placeholder="名称(如:群晖 NAS)" />
@@ -694,16 +830,17 @@ onUnmounted(() => {
                 <span class="dev-node">{{ shortNode(d.node_id) }}</span>
               </div>
 
-              <!-- 资源仪表:本机=真实采样(每 4s 跳);远端=待上报(Phase2 遥测填真) -->
-              <div class="dev-meters" v-if="metersFor(d)">
+              <!-- 资源仪表:本机=真实采样(每 4s 跳);远端=遥测上报(设备能报什么画什么) -->
+              <div class="dev-meters" :class="{ stale: statsStale(d) }" v-if="metersFor(d)">
                 <div class="mt" v-for="m in metersFor(d)!" :key="m.k">
                   <span class="mt-k">{{ m.k }}</span>
                   <span class="mt-bar"><i :class="meterCls(m.p)" :style="{ width: m.p + '%' }"></i></span>
                   <span class="mt-v">{{ m.v }}</span>
                 </div>
+                <div v-if="statsStale(d)" class="mt-stale">上次上报 {{ d.stats_at ? relTime(Math.floor(d.stats_at / 1000)) : "未知" }} · 已离线?</div>
               </div>
               <div class="dev-meters-none" v-else-if="!d.revoked">
-                <Cpu :size="12" :stroke-width="1.9" /> 资源待上报
+                <Cpu :size="12" :stroke-width="1.9" /> 资源待上报(对方 App 登录后自动上报)
               </div>
 
               <div class="dev-grant" v-if="!d.revoked">
@@ -748,10 +885,23 @@ onUnmounted(() => {
           还没有共享给别人的资源。到「协作」用定向邀请码把某个盘 / 项目开给指定的人,精确到权限与期限,这里就会留下记录。
         </div>
 
-        <!-- 正在发生:接入 / 挂盘 / 派任务的活动流(Phase 4 接活动端点) -->
-        <div v-else-if="devFilter === 'activity'" class="empty glass">
-          最近的接入、挂盘、派任务会在这里留痕。活动流正在接通(Phase 4)。
-        </div>
+        <!-- 正在发生:audit 活动流(接入/上报/吊销/账号事件,主机留痕) -->
+        <template v-else-if="devFilter === 'activity'">
+          <div v-if="auditLoading" class="empty glass"><LoaderCircle :size="14" class="spin" /> 拉取活动流…</div>
+          <div v-else-if="!auditRows.length" class="empty glass">
+            还没有活动记录。设备登录、开始上报资源、被吊销等都会在这里留痕。
+          </div>
+          <section v-else class="glass act-card">
+            <div v-for="(a, i) in auditRows" :key="i" class="act-row">
+              <span class="act-dot" :class="'act-' + a.action.split('.')[0]"></span>
+              <div class="act-main">
+                <div class="act-title"><b>{{ a.actor }}</b> · {{ auditLabel(a) }}</div>
+                <div class="act-sub">{{ a.target }}<template v-if="a.detail"> · {{ a.detail }}</template></div>
+              </div>
+              <span class="act-time">{{ relTime(a.at) }}</span>
+            </div>
+          </section>
+        </template>
       </template>
 
       <!-- ════════════ ③ 网络拓扑 ════════════ -->
@@ -1036,6 +1186,25 @@ onUnmounted(() => {
 .mt-bar i.m-hot { background: linear-gradient(90deg, #dc2626, #f2603b); }
 .mt-v { font-family: var(--mono); font-size: 10px; color: var(--text-2); min-width: 44px; text-align: right; }
 .dev-meters-none { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin: 6px 0 10px; }
+.dev-meters.stale { opacity: .45; }
+.mt-stale { font-size: 10px; color: var(--muted); }
+.remote-block { padding: 4px 0 8px; border-bottom: 1px dashed var(--glass-brd); }
+.remote-block:last-of-type { border-bottom: none; }
+.remote-block .dev-meters { max-width: 420px; margin: 8px 0 2px; }
+
+/* ── 正在发生(活动流) ── */
+.act-card { padding: 8px 16px; }
+.act-row { display: flex; align-items: center; gap: 11px; padding: 10px 2px; border-bottom: 1px solid var(--glass-brd); }
+.act-row:last-child { border-bottom: none; }
+.act-dot { width: 8px; height: 8px; border-radius: 50%; background: #8a8f98; flex: none; }
+.act-dot.act-auth { background: #16a34a; }
+.act-dot.act-device { background: #0d99ff; }
+.act-dot.act-user { background: #7c4dff; }
+.act-dot.act-mirror { background: #d97706; }
+.act-main { flex: 1; min-width: 0; }
+.act-title { font-size: 13px; }
+.act-sub { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-time { font-size: 11px; color: var(--muted); flex: none; }
 
 .dev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(238px, 1fr)); gap: 13px; }
 .dev { padding: 15px 16px; position: relative; overflow: hidden; transition: transform .18s var(--ease-out), box-shadow .18s; }

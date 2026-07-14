@@ -262,6 +262,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_devices_node ON devices(node_id);
         CREATE INDEX IF NOT EXISTS idx_rounds_task ON review_rounds(task_id, round);
+        CREATE INDEX IF NOT EXISTS idx_audit_at ON audit(at DESC, id DESC);
         "#,
     )
     .map_err(|e| format!("collab.db 迁移失败: {e}"))?;
@@ -368,6 +369,37 @@ pub fn audit(actor: &str, action: &str, target: &str, detail: &str) {
             rusqlite::params![actor, action, target, detail, now()],
         );
     }
+}
+
+/// 一条审计记录(「正在发生」活动流按新→旧读取)。
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct AuditRow {
+    pub actor: String,
+    pub action: String,
+    pub target: String,
+    pub detail: String,
+    /// Unix 秒(与 audit() 写入口径一致)。
+    pub at: i64,
+}
+
+/// 读最近 N 条审计(新→旧)。「正在发生」活动流数据源。
+pub fn audit_recent(limit: i64) -> Result<Vec<AuditRow>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT actor,action,target,detail,at FROM audit ORDER BY at DESC, rowid DESC LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([limit], |r| {
+            Ok(AuditRow {
+                actor: r.get(0)?,
+                action: r.get(1)?,
+                target: r.get(2)?,
+                detail: r.get(3)?,
+                at: r.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
 /// meta 键值读(主机标识等库级小状态)。

@@ -281,6 +281,44 @@ pub fn add_device(user_id: i64, name: &str, node_id: &str) -> Result<String, Str
     Ok(id)
 }
 
+/// 遥测/接入:确保 (user_id, node_id) 有一台设备行,并防顶替。
+///  - node_id 已属该用户 → 返回 (id, false=非新建)
+///  - node_id 属**别的**用户 → Err(拒绝,阻止成员用别台的 node_id 上报假数据)
+///  - node_id 空闲 → 自动登记一台(owner 手机 login/PLRK1 只写 sessions 不写 devices,
+///    这里补上设备行,遥测才有卡片承载),返回 (id, true=新建)
+pub fn ensure_device_for(
+    user_id: i64,
+    node_id: &str,
+    name: &str,
+) -> Result<(String, bool), String> {
+    if node_id.trim().is_empty() {
+        return Err("node_id 为空".into());
+    }
+    let conn = open_db()?;
+    match conn.query_row(
+        "SELECT id,user_id FROM devices WHERE node_id=?1",
+        params![node_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+    ) {
+        Ok((id, owner)) => {
+            if owner != user_id {
+                return Err("该设备已属其他账号,拒绝顶替".into());
+            }
+            Ok((id, false))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            let id = random_device_id()?;
+            conn.execute(
+                "INSERT INTO devices(id,user_id,name,node_id,added_at) VALUES(?1,?2,?3,?4,?5)",
+                params![id, user_id, name, node_id, now()],
+            )
+            .map_err(|e| format!("登记设备失败: {e}"))?;
+            Ok((id, true))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// 吊销设备并删除它的全部 HTTP/WS 会话。已建立的长连接会在断开/重连时失效；
 /// 真正“即时踢线”还需要连接注册表主动 close，不能在 UI 中宣称已经完成。
 pub fn revoke_device(device_id: &str) -> Result<(), String> {

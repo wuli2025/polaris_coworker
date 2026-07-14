@@ -15,6 +15,7 @@ import { reactive, ref } from "vue";
 import { invoke, listen } from "./net";
 import { activeHostId } from "./hosts";
 import { saveConv, loadConv, deleteConv, listConvs, type ConvMeta } from "./convs";
+import { startTelemetry, stopTelemetry } from "./telemetry";
 
 export interface Bubble {
   role: "user" | "assistant" | "tool" | "error";
@@ -180,9 +181,10 @@ function flush() {
   if (t && pendingCid === convId.value) appendDelta(t);
 }
 
-/** app 级初始化:注册一次流式监听 + 拉一次主机对话列表。 */
+/** app 级初始化:注册一次流式监听 + 拉一次主机对话列表 + 启动遥测上报。 */
 export function initChat(): void {
   if (!remoteConvs.value.length) refreshRemoteConvs(); // 冷启动续会话也要有主机列表
+  startTelemetry(); // 幂等;登录后手机开始把自己的资源报给主机(设备看板仪表变真)
   if (unlisten) return;
   unlisten = listen<StreamEvent>("chat:stream", (ev) => {
     if (ev.conversationId && ev.conversationId !== convId.value) return;
@@ -338,11 +340,12 @@ export function reloadForHost(): void {
   refreshRemoteConvs(); // 登录/切主机后拉主机全部对话(异步,不阻塞进屏)
 }
 
-/** 登出时的全量复位:清消息、杀在途请求、退订流式监听。 */
+/** 登出时的全量复位:清消息、杀在途请求、退订流式监听、停遥测。 */
 export function resetChat(): void {
   flushPersist();
   clearLive();
   convId.value = `m-${Date.now()}`;
+  stopTelemetry();
   if (unlisten) {
     unlisten();
     unlisten = null;
