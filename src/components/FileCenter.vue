@@ -1126,6 +1126,13 @@ const headerStats = computed<{ label: string; value: string; hint?: string }[]>(
 
 onMounted(async () => {
   remoteSources.value = loadRemoteSources(); // 互联页新接入的远程源同步进来
+  // 互联页设备卡点了「使用盘」→ 带着目标远程源直接落进远程浏览
+  const want = sessionStorage.getItem("polaris.fc.openRemote");
+  if (want) {
+    sessionStorage.removeItem("polaris.fc.openRemote");
+    const rs = remoteSources.value.find((s) => s.id === want);
+    if (rs) pickRemote(rs);
+  }
   await loadOverview();
   await loadGrid(true);
   // 后台补齐文稿自然语言(不阻塞首屏;代码/媒体的按语言归类已即时可用)

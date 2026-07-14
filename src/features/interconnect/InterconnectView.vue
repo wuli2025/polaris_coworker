@@ -382,7 +382,7 @@ const mineItems = computed<UnifiedCard[]>(() => {
       kind: "disk",
       name: s.name || "远程盘",
       sub: "远程盘 · 127.0.0.1:" + s.port,
-      transport: "disk",
+      transport: "p2p", // iroh 打洞直连,如实标 P2P(与拓扑一致)
       cores: remoteStats.value[s.id]?.cores ?? null,
       stats: remoteStats.value[s.id] ?? null,
       stale: false,
@@ -409,8 +409,10 @@ async function submitLogin() {
   await doHostAuth();
   if (!authErr.value) showLogin.value = false;
 }
+/** 使用盘:带着目标远程源直接跳文件中心的远程浏览(FileCenter onMounted 接棒)。 */
 function browseDisk(s: RemoteSource) {
-  toast.info(`「${s.name}」已在「文件中心 · 远程源」,去那里像本机盘一样浏览、下载`);
+  sessionStorage.setItem("polaris.fc.openRemote", s.id);
+  app.setView("file_center");
 }
 
 // ── 远程盘(我能用的)实况:经 iroh 隧道调对端 sys_stats,真数据;对端老版本无此命令→缺项 ──
@@ -552,13 +554,14 @@ const topoEntities = computed<TopoEntity[]>(() => {
     nodeId: d.node_id || "",
     t: devTransport(d),
   }));
+  // NAS/远程盘走的就是 iroh 打洞直连 → 链路如实标 P2P(蓝),不再单列「远程盘」色。
   const disks: TopoEntity[] = remotes.value.map((s) => ({
     kind: "disk",
     name: s.name || "远程盘",
     emoji: "🗄",
     revoked: false,
     nodeId: s.nodeId || "",
-    t: "disk",
+    t: "p2p",
   }));
   return [...devs, ...disks];
 });
@@ -1011,7 +1014,6 @@ onUnmounted(() => {
               <span class="lg t-lan"><i></i>局域网</span>
               <span class="lg t-p2p"><i></i>P2P</span>
               <span class="lg t-relay"><i></i>中继</span>
-              <span class="lg t-disk"><i></i>远程盘</span>
             </div>
           </div>
 
@@ -1156,7 +1158,7 @@ onUnmounted(() => {
 .icobtn.sm { padding: 4px; margin-left: auto; }
 .scroll { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 820px; width: 100%; margin: 0 auto; }
 /* 设备与授权是宽版双栏,别被 820 卡窄留大白边 */
-.scroll:has(.devices-tab) { max-width: 1180px; }
+.scroll:has(.devices-tab) { max-width: 1320px; }
 
 @media (max-width: 640px) {
   .tab-label { display: none; }
@@ -1286,19 +1288,19 @@ onUnmounted(() => {
 /* ── 设备联盟:左栏 + 右内容 双栏 ── */
 .devices-tab { display: flex; gap: 14px; align-items: flex-start; }
 .dev-rail {
-  flex: none; width: 186px; position: sticky; top: 0; padding: 14px 12px;
-  display: flex; flex-direction: column; gap: 6px; border-radius: 16px;
+  flex: none; width: 216px; position: sticky; top: 0; padding: 16px 14px;
+  display: flex; flex-direction: column; gap: 6px; border-radius: 18px;
 }
 .rail-fed { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 6px 6px 14px; border-bottom: 1px solid var(--glass-brd); margin-bottom: 8px; }
-.rail-av { width: 66px; height: 66px; flex: none; display: block; border-radius: 50%; overflow: hidden; box-shadow: 0 6px 18px rgba(13, 153, 255, .28); }
+.rail-av { width: 80px; height: 80px; flex: none; display: block; border-radius: 50%; overflow: hidden; box-shadow: 0 6px 20px rgba(13, 153, 255, .3); }
 .rail-av :deep(svg) { width: 100%; height: 100%; display: block; }
 .rail-fed-txt { min-width: 0; width: 100%; }
-.rail-name { font-weight: 700; font-size: 13.5px; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rail-sub { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 5px; margin-top: 2px; }
+.rail-name { font-weight: 700; font-size: 15px; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-sub { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; margin-top: 3px; justify-content: center; }
 .rail-nav { display: flex; flex-direction: column; gap: 3px; }
 .rail-item {
-  display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 11px;
-  font-size: 13px; font-weight: 600; color: var(--text-2); background: transparent;
+  display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 12px;
+  font-size: 14px; font-weight: 600; color: var(--text-2); background: transparent;
   border: none; cursor: pointer; text-align: left; transition: all .15s var(--ease-out);
 }
 .rail-item:hover { background: color-mix(in srgb, var(--text-1) 6%, transparent); color: var(--text-1); }
@@ -1318,13 +1320,13 @@ onUnmounted(() => {
 
 /* 接入卡(加号)+ 接入表单 */
 .add-card {
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
-  min-height: 168px; border: 1.5px dashed var(--glass-brd); border-radius: 16px; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  min-height: 230px; border: 1.5px dashed var(--glass-brd); border-radius: 18px; cursor: pointer;
   color: var(--text-2); background: color-mix(in srgb, var(--text-1) 3%, transparent); transition: all .16s var(--ease-out);
 }
 .add-card:hover { border-color: #0d99ff; color: #0d99ff; background: color-mix(in srgb, #0d99ff 7%, transparent); }
-.ac-t { font-size: 13.5px; font-weight: 700; }
-.ac-s { font-size: 11px; color: var(--muted); }
+.ac-t { font-size: 15px; font-weight: 700; }
+.ac-s { font-size: 12.5px; color: var(--muted); }
 .add-panel { padding: 16px 18px; }
 .ap-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 @media (max-width: 780px) { .ap-cols { grid-template-columns: 1fr; } }
@@ -1357,17 +1359,17 @@ onUnmounted(() => {
 }
 
 /* ── 设备卡:核数 + 资源仪表 ── */
-.dev-cores { font-size: 10.5px; font-weight: 700; color: var(--text-2); padding: 1px 7px; border-radius: 6px; background: color-mix(in srgb, var(--text-1) 7%, transparent); }
-.dev-meters { display: grid; gap: 7px; margin: 4px 0 10px; }
-.mt { display: grid; grid-template-columns: 30px 1fr auto; align-items: center; gap: 8px; }
-.mt-k { font-size: 10.5px; color: var(--muted); }
-.mt-bar { height: 6px; border-radius: 4px; background: color-mix(in srgb, var(--text-1) 9%, transparent); overflow: hidden; }
-.mt-bar i { display: block; height: 100%; border-radius: 4px; transition: width .5s var(--ease-out); }
+.dev-cores { font-size: 12px; font-weight: 700; color: var(--text-2); padding: 2px 9px; border-radius: 7px; background: color-mix(in srgb, var(--text-1) 7%, transparent); }
+.dev-meters { display: grid; gap: 10px; margin: 8px 0 12px; }
+.mt { display: grid; grid-template-columns: 38px 1fr auto; align-items: center; gap: 10px; }
+.mt-k { font-size: 12px; color: var(--muted); }
+.mt-bar { height: 8px; border-radius: 5px; background: color-mix(in srgb, var(--text-1) 9%, transparent); overflow: hidden; }
+.mt-bar i { display: block; height: 100%; border-radius: 5px; transition: width .5s var(--ease-out); }
 .mt-bar i.m-cool { background: linear-gradient(90deg, #0d99ff, #2ec5ff); }
 .mt-bar i.m-warm { background: linear-gradient(90deg, #d97706, #f0a53b); }
 .mt-bar i.m-hot { background: linear-gradient(90deg, #dc2626, #f2603b); }
-.mt-v { font-family: var(--mono); font-size: 10px; color: var(--text-2); min-width: 44px; text-align: right; }
-.dev-meters-none { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin: 6px 0 10px; }
+.mt-v { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); min-width: 56px; text-align: right; }
+.dev-meters-none { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); margin: 8px 0 12px; }
 .dev-meters.stale { opacity: .45; }
 .mt-stale { font-size: 10px; color: var(--muted); }
 .remote-block { padding: 4px 0 8px; border-bottom: 1px dashed var(--glass-brd); }
@@ -1388,8 +1390,9 @@ onUnmounted(() => {
 .act-sub { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .act-time { font-size: 11px; color: var(--muted); flex: none; }
 
-.dev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
-.dev { padding: 17px 18px; position: relative; overflow: hidden; transition: transform .18s var(--ease-out), box-shadow .18s; }
+.dev-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 900px) { .dev-grid { grid-template-columns: 1fr; } }
+.dev { padding: 22px 24px; position: relative; overflow: hidden; transition: transform .18s var(--ease-out), box-shadow .18s; }
 .dev:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg), inset 0 1px 0 var(--glass-hi), 0 14px 30px rgba(20, 20, 25, .08); }
 .dev::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; opacity: .85; }
 .dev.t-local::after { background: linear-gradient(90deg, #8a8f98, #b5b9c0); }
@@ -1398,16 +1401,16 @@ onUnmounted(() => {
 .dev.t-relay::after { background: linear-gradient(90deg, #d97706, #f0a53b); }
 .dev.off { opacity: .5; }
 .dev.off::after { background: var(--border); }
-.dev-top { display: flex; align-items: center; gap: 10px; }
-.dev-ico { width: 36px; height: 36px; border-radius: 10px; background: color-mix(in srgb, var(--selection-bg) 70%, transparent); display: flex; align-items: center; justify-content: center; color: var(--ink); flex: none; }
+.dev-top { display: flex; align-items: center; gap: 12px; }
+.dev-ico { width: 44px; height: 44px; border-radius: 12px; background: color-mix(in srgb, var(--selection-bg) 70%, transparent); display: flex; align-items: center; justify-content: center; color: var(--ink); flex: none; }
 .dev-id { flex: 1; min-width: 0; }
-.dev-name { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dev-owner { font-size: 11px; color: var(--muted); }
+.dev-name { font-weight: 700; font-size: 16px; display: flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-owner { font-size: 12.5px; color: var(--muted); margin-top: 1px; }
 .host-badge { font-size: 10px; font-weight: 700; color: #b8860b; background: color-mix(in srgb, #b8860b 14%, transparent); border-radius: 4px; padding: 1px 6px; flex: none; }
 .dev-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dev-dot.on { background: #16a34a; box-shadow: 0 0 0 3px color-mix(in srgb, #16a34a 20%, transparent); }
 .dev-line { display: flex; align-items: center; gap: 8px; margin: 13px 0 8px; }
-.conn { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 7px; }
+.conn { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; padding: 4px 11px; border-radius: 8px; }
 .conn.t-local { background: color-mix(in srgb, #8a8f98 16%, transparent); color: var(--text-2); }
 .conn.t-lan { background: color-mix(in srgb, #16a34a 15%, transparent); color: #16a34a; }
 .conn.t-p2p { background: color-mix(in srgb, #0d99ff 15%, transparent); color: #0d99ff; }
@@ -1415,10 +1418,10 @@ onUnmounted(() => {
 .dev-node { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
 .dev-grant { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-2); margin-bottom: 12px; }
 .dev-grant.revoked { color: var(--vermilion); }
-.dev-btns { display: flex; gap: 8px; margin-top: 12px; }
+.dev-btns { display: flex; gap: 10px; margin-top: 14px; }
 .b {
-  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-  font-size: 12.5px; font-weight: 600; padding: 10px; border-radius: 10px; cursor: pointer;
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  font-size: 13.5px; font-weight: 600; padding: 12px; border-radius: 11px; cursor: pointer;
   border: 1px solid var(--glass-brd); background: color-mix(in srgb, var(--bg) 45%, transparent); color: var(--text);
   transition: border-color .15s, background .15s;
 }
