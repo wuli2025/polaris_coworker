@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Polaris 北极星联盟头像">
+  <defs>
+    <linearGradient id="allianceAvatarBg" x1="18" y1="10" x2="103" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d99ff"/>
+      <stop offset="1" stop-color="#7c4dff"/>
+    </linearGradient>
+    <radialGradient id="allianceAvatarGlow" cx="0" cy="0" r="1" gradientTransform="translate(36 25) rotate(50) scale(74)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity=".34"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="allianceAvatarStar" x1="43" y1="22" x2="76" y2="75" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff3ad"/>
+      <stop offset="1" stop-color="#ffd76a"/>
+    </linearGradient>
+    <linearGradient id="allianceAvatarFace" x1="48" y1="30" x2="69" y2="67" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf5"/>
+      <stop offset="1" stop-color="#fff1d8"/>
+    </linearGradient>
+    <linearGradient id="allianceAvatarSuit" x1="48" y1="70" x2="72" y2="108" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf5"/>
+      <stop offset="1" stop-color="#eeeaff"/>
+    </linearGradient>
+  </defs>
+
+  <circle cx="60" cy="60" r="60" fill="url(#allianceAvatarBg)"/>
+  <circle cx="60" cy="60" r="60" fill="url(#allianceAvatarGlow)"/>
+  <circle cx="60" cy="60" r="57.5" fill="none" stroke="#ffffff" stroke-opacity=".18"/>
+
+  <path d="M13.5 69.5c8.3-17.8 26.3-29 46.1-29 21.2 0 39.7 12.9 47.1 31.4" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="2.5 5" opacity=".2"/>
+  <g fill="#fff" opacity=".8">
+    <circle cx="18" cy="55" r="1.7"/>
+    <circle cx="99" cy="61" r="1.35"/>
+    <circle cx="90" cy="20" r="1.15"/>
+  </g>
+  <g fill="#ffd76a">
+    <path d="M20.5 27.5c1.1 0 1.5-1.8 1.8-3.9.3 2.1.7 3.9 1.8 3.9-1.1 0-1.5 1.8-1.8 3.9-.3-2.1-.7-3.9-1.8-3.9Z"/>
+    <path d="M94 37c1.6 0 2.2-2.4 2.6-5.3.4 2.9 1 5.3 2.6 5.3-1.6 0-2.2 2.4-2.6 5.3-.4-2.9-1-5.3-2.6-5.3Z"/>
+  </g>
+
+  <ellipse cx="60" cy="105.5" rx="29" ry="6.5" fill="#261c5f" opacity=".2"/>
+
+  <g stroke="#37275d" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M43.4 78.8c-5.5-.5-9.1 2.3-11.1 7.8l-2.1 5.9c-.9 2.6.5 5.3 3 6.1 2.6.7 4.7-.8 5.5-3.3l1.9-5.5c.8-2.2 2-3.1 4-3.1" fill="url(#allianceAvatarSuit)"/>
+    <path d="M76.6 78.8c5.5-.5 9.1 2.3 11.1 7.8l2.1 5.9c.9 2.6-.5 5.3-3 6.1-2.6.7-4.7-.8-5.5-3.3l-1.9-5.5c-.8-2.2-2-3.1-4-3.1" fill="url(#allianceAvatarSuit)"/>
+    <path d="M44.3 72.2c3.7-3.9 9.1-5.8 15.7-5.8s12 1.9 15.7 5.8c3.1 3.3 4.3 8.8 4.3 15.3v10.8c0 5.6-4.4 9.7-10 9.7H50c-5.6 0-10-4.1-10-9.7V87.5c0-6.5 1.2-12 4.3-15.3Z" fill="url(#allianceAvatarSuit)"/>
+    <path d="M40.4 88.5h5.4" fill="none" stroke="#0d99ff"/>
+    <path d="M74.2 88.5h5.4" fill="none" stroke="#0d99ff"/>
+    <path d="M46 98h28" fill="none" stroke="#7660e8"/>
+    <path d="M52.3 98v9.7M67.7 98v9.7" fill="none"/>
+    <path d="M46.5 107.7h10v2.5c0 1.3-1 2.3-2.3 2.3H46c-1.6 0-2.7-1.6-2.1-3.1.4-1 1.4-1.7 2.6-1.7ZM73.5 107.7h-10v2.5c0 1.3 1 2.3 2.3 2.3H74c1.6 0 2.7-1.6 2.1-3.1-.4-1-1.4-1.7-2.6-1.7Z" fill="#6557db"/>
+  </g>
+
+  <rect x="48.5" y="78" width="23" height="17" rx="6" fill="#dff4ff" stroke="#37275d" stroke-width="2.1"/>
+  <path d="M60 81.3 61.7 85l4 .5-2.9 2.7.8 3.9-3.6-1.9-3.6 1.9.8-3.9-2.9-2.7 4-.5 1.7-3.7Z" fill="#ffd76a" stroke="#6750cc" stroke-width="1.1" stroke-linejoin="round"/>
+
+  <path d="M60 15.1c3 0 5.5 10.2 7.3 14.9 4.6-2.1 14.5-6.4 16.8-4.1 2.2 2.2-3.8 10.2-6.7 14.2 4.9 1.5 15.4 4.7 15.4 8 0 3.1-10.3 5.7-15.6 6.8 2.7 4.5 7.3 13.7 5 16-2.2 2.4-10.9-3.1-15.2-6.2-1.6 4.8-4.5 14.1-7.6 14.1s-5.7-9.5-7.2-13.9c-4.4 3.2-13.1 8.3-15.4 5.9-2.2-2.3 2.4-11.5 4.9-15.9-5.1-1.2-15.2-3.9-15.2-7 0-3.2 10.7-6.6 15.5-8.1-2.9-4.1-8.7-12.1-6.4-14.3 2.2-2.2 11.9 2.3 16.4 4.4 1.8-4.6 4.9-14.8 8-14.8Z" fill="url(#allianceAvatarStar)" stroke="#37275d" stroke-width="2.5" stroke-linejoin="round"/>
+
+  <circle cx="60" cy="47.5" r="23.2" fill="#6753d7"/>
+  <circle cx="60" cy="47.5" r="20.4" fill="url(#allianceAvatarFace)" stroke="#37275d" stroke-width="1.8"/>
+  <path d="M45.8 37.4c3.5-5.2 8.7-7.9 15-7.9 3.9 0 7.4 1.1 10.4 3.2" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" opacity=".75"/>
+
+  <g fill="#30234f">
+    <ellipse cx="51.5" cy="46.8" rx="4.7" ry="6.2"/>
+    <ellipse cx="68.5" cy="46.8" rx="4.7" ry="6.2"/>
+  </g>
+  <g fill="#fff">
+    <circle cx="50" cy="44.4" r="1.7"/>
+    <circle cx="67" cy="44.4" r="1.7"/>
+    <circle cx="53.1" cy="48.8" r=".75" opacity=".8"/>
+    <circle cx="70.1" cy="48.8" r=".75" opacity=".8"/>
+  </g>
+  <g fill="#ff8fa9" opacity=".68">
+    <ellipse cx="44.7" cy="56" rx="4.2" ry="2.2"/>
+    <ellipse cx="75.3" cy="56" rx="4.2" ry="2.2"/>
+  </g>
+  <path d="M54.9 56.2c1.2 2.8 3 4.1 5.1 4.1s3.9-1.3 5.1-4.1" fill="none" stroke="#6d385b" stroke-width="2.1" stroke-linecap="round"/>
+  <path d="M58.1 59.4c1.3.7 2.6.7 3.8 0" fill="none" stroke="#ff829f" stroke-width="1.1" stroke-linecap="round"/>
+
+  <path d="M99.2 78.5c1.9 0 2.6-2.9 3-6.3.4 3.4 1.1 6.3 3 6.3-1.9 0-2.6 2.9-3 6.3-.4-3.4-1.1-6.3-3-6.3Z" fill="#fff" opacity=".9"/>
+  <circle cx="20.5" cy="84" r="2.1" fill="#ffd76a" opacity=".9"/>
+</svg>

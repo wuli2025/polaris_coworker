@@ -31,6 +31,8 @@ import {
   FolderInput,
   ShieldCheck,
   Cpu,
+  Plus,
+  LogOut,
 } from "@lucide/vue";
 import { invoke, isTauri } from "../../tauri";
 import { useCollabStore } from "../collab/stores/collab";
@@ -43,6 +45,8 @@ import {
   removeRemoteSource,
   type RemoteSource,
 } from "./remoteSources";
+// 联盟账号头像(codex 生成的可爱卡通吉祥物 SVG,内联进左栏)
+import allianceAvatar from "./alliance-avatar.svg?raw";
 
 const collab = useCollabStore();
 const app = useAppStore();
@@ -319,11 +323,95 @@ function coresFor(d: AdminDevice): number | null {
 type DevFilter = "mine" | "shared" | "usable" | "activity";
 const devFilter = ref<DevFilter>("mine");
 const DEV_FILTERS = computed(() => [
-  { key: "mine" as DevFilter, label: "我的设备", n: devices.value.length },
-  { key: "shared" as DevFilter, label: "我共享出去的", n: 0 },
-  { key: "usable" as DevFilter, label: "我能用的", n: remotes.value.length },
-  { key: "activity" as DevFilter, label: "正在发生", n: auditRows.value.length },
+  // 我的设备 = 本机 + 已登记设备 + 已连接的 NAS/远程盘(用户要求 NAS 归到这里)
+  { key: "mine" as DevFilter, label: "我的设备", icon: MonitorSmartphone, n: 1 + remoteDevices.value.length + remotes.value.length },
+  { key: "shared" as DevFilter, label: "我共享出去的", icon: ShieldCheck, n: 0 },
+  { key: "usable" as DevFilter, label: "我能用的", icon: HardDrive, n: 0 },
+  { key: "activity" as DevFilter, label: "正在发生", icon: Radio, n: auditRows.value.length },
 ]);
+
+// ── 「我的设备」统一卡片:本机 + 已登记设备 + 已连接 NAS/远程盘,一套状态卡 ──
+interface UnifiedCard {
+  key: string;
+  kind: "host" | "device" | "disk";
+  name: string;
+  sub: string;
+  transport: Transport;
+  cores: number | null;
+  stats: Partial<DeviceStats> | null;
+  stale: boolean;
+  icon: unknown;
+  dev?: AdminDevice;
+  src?: RemoteSource;
+  revoked?: boolean;
+}
+const mineItems = computed<UnifiedCard[]>(() => {
+  const out: UnifiedCard[] = [];
+  // ① 本机(这台电脑),真实采样
+  out.push({
+    key: "host-self",
+    kind: "host",
+    name: hostDevice.value?.name || (collab.user?.username ? "@" + collab.user.username : "这台电脑"),
+    sub: "本机 · 全权",
+    transport: "local",
+    cores: localStats.value?.cores ?? null,
+    stats: localStats.value,
+    stale: false,
+    icon: Server,
+  });
+  // ② 已登记设备(手机等),遥测
+  for (const d of remoteDevices.value) {
+    out.push({
+      key: "dev-" + d.id,
+      kind: "device",
+      name: d.name || shortNode(d.node_id),
+      sub: d.username ? "@" + d.username : "用户 #" + d.user_id,
+      transport: devTransport(d),
+      cores: coresFor(d),
+      stats: statsFor(d),
+      stale: statsStale(d),
+      icon: devIcon(d),
+      dev: d,
+      revoked: d.revoked,
+    });
+  }
+  // ③ 已连接的 NAS/远程盘,经隧道拉的实况
+  for (const s of remotes.value) {
+    out.push({
+      key: "disk-" + s.id,
+      kind: "disk",
+      name: s.name || "远程盘",
+      sub: "远程盘 · 127.0.0.1:" + s.port,
+      transport: "disk",
+      cores: remoteStats.value[s.id]?.cores ?? null,
+      stats: remoteStats.value[s.id] ?? null,
+      stale: false,
+      icon: HardDrive,
+      src: s,
+    });
+  }
+  return out;
+});
+
+// ── 账号:登录 / 登出(桌面互联页也能切账号) ──
+const showLogin = ref(false);
+async function doLogout() {
+  if (!confirm("登出当前账号?本机主机继续运行,重新登录即可管理。")) return;
+  try {
+    await collab.logout();
+    toast.info("已登出");
+    await refreshAll();
+  } catch (e) {
+    toast.error((e as Error).message);
+  }
+}
+async function submitLogin() {
+  await doHostAuth();
+  if (!authErr.value) showLogin.value = false;
+}
+function browseDisk(s: RemoteSource) {
+  toast.info(`「${s.name}」已在「文件中心 · 远程源」,去那里像本机盘一样浏览、下载`);
+}
 
 // ── 远程盘(我能用的)实况:经 iroh 隧道调对端 sys_stats,真数据;对端老版本无此命令→缺项 ──
 const remoteStats = ref<Record<string, Partial<DeviceStats>>>({});
@@ -730,160 +818,147 @@ onUnmounted(() => {
 
       <!-- ════════════ ② 设备与授权 ════════════ -->
       <template v-else-if="tab === 'devices'">
-        <!-- 联盟概览条 -->
-        <section class="glass fed-head">
-          <span class="fh-av"></span>
-          <div class="fh-txt">
-            <div class="fh-title">{{ collab.user?.display_name || collab.user?.username || "我" }} 的联盟</div>
-            <div class="fh-sub"><span class="odot"></span> {{ onlineCount }} 台在线 · 传输自动选路,你只管用</div>
-          </div>
-          <button class="icobtn sm" title="刷新" @click="loadDevices()"><RefreshCw :size="14" /></button>
-        </section>
-
-        <!-- 子导航:我的设备 / 我共享出去的 / 我能用的 / 正在发生 -->
-        <nav class="dev-subnav">
-          <button
-            v-for="f in DEV_FILTERS"
-            :key="f.key"
-            class="dsn"
-            :class="{ on: devFilter === f.key }"
-            @click="devFilter = f.key"
-          >
-            {{ f.label }}<span v-if="f.n" class="dsn-n">{{ f.n }}</span>
-          </button>
-        </nav>
-
-        <!-- 我能用的:出站远程盘(NAS 等),这台电脑拨出去连、用它的盘 -->
-        <section v-if="devFilter === 'usable'" class="glass grant-note">
-          <div class="gn-head"><Network :size="15" :stroke-width="1.9" /> 接入远程主机 / NAS(iroh P2P)</div>
-          <p class="foot-note" style="margin-top:0">
-            粘 NAS 的 <b>iroh NodeId</b> 与 <b>owner 令牌</b>,系统经 iroh 打洞直连(打不通走中继),
-            连上后到「文件中心 · 远程源」像本机一样浏览、下载它的盘。
-          </p>
-          <div v-for="s in remotes" :key="s.id" class="remote-block">
-            <div class="dev-line remote-line">
-              <span class="conn t-p2p"><Zap :size="12" :stroke-width="2" /> {{ s.name }}</span>
-              <span class="dev-node">127.0.0.1:{{ s.port }}</span>
-              <button class="b danger" title="断开并移除" @click="forgetRemote(s)"><ShieldOff :size="13" /></button>
-            </div>
-            <!-- 对端实况:经隧道调 sys_stats(真数据;对端老版本没有则待上报) -->
-            <div class="dev-meters" v-if="metersOf(remoteStats[s.id] ?? null).length">
-              <div class="mt" v-for="m in metersOf(remoteStats[s.id] ?? null)" :key="m.k">
-                <span class="mt-k">{{ m.k }}</span>
-                <span class="mt-bar"><i :class="meterCls(m.p)" :style="{ width: m.p + '%' }"></i></span>
-                <span class="mt-v">{{ m.v }}</span>
-              </div>
-            </div>
-            <div class="dev-meters-none" v-else>
-              <Cpu :size="12" :stroke-width="1.9" /> 实况待上报(对端需新版镜像)
+        <div class="devices-tab">
+        <!-- 左栏:联盟头像 + 垂直导航(mockup 形态) -->
+        <aside class="dev-rail glass">
+          <div class="rail-fed">
+            <span class="rail-av" v-html="allianceAvatar"></span>
+            <div class="rail-fed-txt">
+              <div class="rail-name">{{ collab.user?.display_name || collab.user?.username || "未登录" }}</div>
+              <div class="rail-sub"><span class="odot" :class="{ off: !authed }"></span> {{ authed ? `${onlineCount} 台在线` : "点下方登录" }}</div>
             </div>
           </div>
-          <div v-if="addForm.open" class="auth-form" style="margin-top:12px; max-width:none">
-            <input v-model="addForm.name" class="af-inp" placeholder="名称(如:群晖 NAS)" />
-            <input v-model="addForm.nodeId" class="af-inp" placeholder="NAS iroh NodeId / 连接码" />
-            <input v-model="addForm.token" class="af-inp" placeholder="owner 令牌(浏览鉴权)" />
-            <button class="cta" :disabled="connBusy" @click="connectRemote">
-              <LoaderCircle v-if="connBusy" :size="15" class="spin" />
-              <Zap v-else :size="15" /> 发起 iroh 连接
+
+          <!-- 账号:登录 / 登出 -->
+          <div class="rail-acct">
+            <template v-if="authed">
+              <span class="ra-role">{{ owner ? "owner · 全权" : (collab.user?.role || "成员") }}</span>
+              <button class="ra-btn" @click="doLogout"><LogOut :size="13" /> 登出</button>
+            </template>
+            <button v-else class="ra-btn pri" @click="showLogin = true">登录 / 注册账号</button>
+          </div>
+
+          <nav class="rail-nav">
+            <button
+              v-for="f in DEV_FILTERS"
+              :key="f.key"
+              class="rail-item"
+              :class="{ on: devFilter === f.key }"
+              @click="devFilter = f.key"
+            >
+              <component :is="f.icon" :size="16" :stroke-width="1.9" />
+              <span class="rail-lb">{{ f.label }}</span>
+              <span v-if="f.n" class="rail-n">{{ f.n }}</span>
             </button>
-          </div>
-          <button v-else class="pill ghost" style="margin-top:12px; flex:none" @click="addForm.open = true">
-            + 接入一台 NAS / 主机
-          </button>
-        </section>
+          </nav>
+          <button class="rail-refresh" title="刷新" @click="loadDevices()"><RefreshCw :size="13" /> 刷新</button>
+        </aside>
 
-        <!-- 我的设备:入站设备(含本机),带真实/待上报资源仪表 -->
+        <!-- 右栏:当前分区内容 -->
+        <div class="dev-content">
+        <!-- 我的设备:本机 + 已登记设备 + 已连接 NAS/远程盘,统一状态卡 + 接入卡 -->
         <template v-if="devFilter === 'mine'">
-        <div v-if="devicesLoading" class="empty glass"><LoaderCircle :size="14" class="spin" /> 加载中…</div>
-        <div v-else-if="!devices.length" class="empty glass">
-          还没有已登记设备。{{ owner ? "去「教程」把手机用连接码连进来,就会出现在这里。" : "登录主机后可见。" }}
-        </div>
+          <!-- 接入 NAS/设备 表单(展开式) -->
+          <section v-if="addForm.open" class="glass add-panel">
+            <div class="gn-head"><Network :size="15" :stroke-width="1.9" /> 接入 NAS / 远程主机(iroh P2P)</div>
+            <p class="foot-note" style="margin:2px 0 10px">粘对方的 <b>iroh NodeId / 连接码</b> 与 <b>owner 令牌</b>,系统自动打洞直连(打不通走中继)。</p>
+            <div class="add-fields">
+              <input v-model="addForm.name" class="af-inp" placeholder="名称(如:群晖 NAS)" />
+              <input v-model="addForm.nodeId" class="af-inp" placeholder="NodeId / 连接码" />
+              <input v-model="addForm.token" class="af-inp" placeholder="owner 令牌" />
+            </div>
+            <div class="add-acts">
+              <button class="cta" :disabled="connBusy" @click="connectRemote">
+                <LoaderCircle v-if="connBusy" :size="15" class="spin" /><Zap v-else :size="15" /> 发起连接
+              </button>
+              <button class="pill ghost" @click="addForm.open = false">取消</button>
+            </div>
+          </section>
 
-        <template v-else>
-          <!-- 设备联盟卡片(PRD 原型②) -->
           <div class="dev-grid">
             <article
-              v-for="d in devices"
-              :key="d.id"
+              v-for="c in mineItems"
+              :key="c.key"
               class="glass dev"
-              :class="[TRANSPORT[devTransport(d)].cls, { off: d.revoked }]"
+              :class="[TRANSPORT[c.transport].cls, { off: c.revoked }]"
             >
               <div class="dev-top">
-                <span class="dev-ico"><component :is="devIcon(d)" :size="19" :stroke-width="1.7" /></span>
+                <span class="dev-ico"><component :is="c.icon" :size="19" :stroke-width="1.7" /></span>
                 <div class="dev-id">
                   <div class="dev-name">
-                    {{ d.name || d.node_id || d.id }}
-                    <span v-if="d.is_host" class="host-badge">主机</span>
+                    {{ c.name }}
+                    <span v-if="c.kind === 'host'" class="host-badge">本机</span>
                   </div>
-                  <div class="dev-owner">{{ d.username ? `@${d.username}` : `用户 #${d.user_id}` }}</div>
+                  <div class="dev-owner">{{ c.sub }}</div>
                 </div>
-                <span class="dev-dot" :class="{ on: !d.revoked }"></span>
+                <span class="dev-dot" :class="{ on: !c.revoked }"></span>
               </div>
 
-              <!-- 传输徽标 + 核数 + 连接身份(如实展示系统选了哪一档,非编造指标) -->
               <div class="dev-line">
-                <span class="conn" :class="TRANSPORT[devTransport(d)].cls">
-                  <component :is="TRANSPORT[devTransport(d)].icon" :size="12" :stroke-width="2" />
-                  {{ TRANSPORT[devTransport(d)].label }}
+                <span class="conn" :class="TRANSPORT[c.transport].cls">
+                  <component :is="TRANSPORT[c.transport].icon" :size="12" :stroke-width="2" />
+                  {{ TRANSPORT[c.transport].label }}
                 </span>
-                <span v-if="coresFor(d)" class="dev-cores">{{ coresFor(d) }} 核</span>
-                <span class="dev-node">{{ shortNode(d.node_id) }}</span>
+                <span v-if="c.cores" class="dev-cores">{{ c.cores }} 核</span>
               </div>
 
-              <!-- 资源仪表:本机=真实采样(每 4s 跳);远端=遥测上报(设备能报什么画什么) -->
-              <div class="dev-meters" :class="{ stale: statsStale(d) }" v-if="metersFor(d)">
-                <div class="mt" v-for="m in metersFor(d)!" :key="m.k">
+              <div class="dev-meters" :class="{ stale: c.stale }" v-if="metersOf(c.stats).length">
+                <div class="mt" v-for="m in metersOf(c.stats)" :key="m.k">
                   <span class="mt-k">{{ m.k }}</span>
                   <span class="mt-bar"><i :class="meterCls(m.p)" :style="{ width: m.p + '%' }"></i></span>
                   <span class="mt-v">{{ m.v }}</span>
                 </div>
-                <div v-if="statsStale(d)" class="mt-stale">上次上报 {{ d.stats_at ? relTime(Math.floor(d.stats_at / 1000)) : "未知" }} · 已离线?</div>
+                <div v-if="c.stale && c.dev" class="mt-stale">上次上报 {{ c.dev.stats_at ? relTime(Math.floor(c.dev.stats_at / 1000)) : "未知" }} · 已离线?</div>
               </div>
-              <div class="dev-meters-none" v-else-if="!d.revoked">
-                <Cpu :size="12" :stroke-width="1.9" /> 资源待上报(对方 App 登录后自动上报)
-              </div>
-
-              <div class="dev-grant" v-if="!d.revoked">
-                <ShieldCheck :size="12" :stroke-width="2" />
-                {{ d.is_host ? "本机主机 · 全权" : "已授权 · owner 完整权限" }}
-              </div>
-              <div class="dev-grant revoked" v-else>
-                <ShieldOff :size="12" :stroke-width="2" /> 已吊销 · 无法再连入
+              <div class="dev-meters-none" v-else-if="!c.revoked">
+                <Cpu :size="12" :stroke-width="1.9" /> {{ c.kind === 'disk' ? '实况待上报(对端需新版镜像)' : '资源待上报(对方 App 登录后自动上报)' }}
               </div>
 
-              <!-- 动作:本机无动作;远端可挂盘 / 派任务;owner 可吊销 -->
               <div class="dev-btns">
-                <template v-if="d.is_host">
-                  <span class="b flat">本机</span>
+                <template v-if="c.kind === 'host'"><span class="b flat">本机 · 全权</span></template>
+                <template v-else-if="c.kind === 'disk'">
+                  <button class="b" @click="browseDisk(c.src!)"><FolderInput :size="13" /> 浏览盘</button>
+                  <button class="b danger" title="断开" @click="forgetRemote(c.src!)"><ShieldOff :size="13" /></button>
                 </template>
-                <template v-else-if="!d.revoked">
-                  <button class="b" @click="mountDisk(d)"><FolderInput :size="13" /> 挂它的盘</button>
-                  <button class="b pri" @click="openDispatch(d)"><Send :size="13" /> 派任务</button>
-                  <button v-if="owner" class="b danger" title="吊销" @click="revoke(d)"><ShieldOff :size="13" /></button>
+                <template v-else-if="!c.revoked">
+                  <button class="b" @click="mountDisk(c.dev!)"><FolderInput :size="13" /> 挂它的盘</button>
+                  <button class="b pri" @click="openDispatch(c.dev!)"><Send :size="13" /> 派任务</button>
+                  <button v-if="owner" class="b danger" title="吊销" @click="revoke(c.dev!)"><ShieldOff :size="13" /></button>
                 </template>
-                <template v-else>
-                  <span class="b flat dim">已下线</span>
-                </template>
+                <template v-else><span class="b flat dim">已下线</span></template>
               </div>
             </article>
+
+            <!-- 接入卡(加号) -->
+            <button class="dev add-card" @click="addForm.open = !addForm.open">
+              <Plus :size="28" :stroke-width="1.8" />
+              <span class="ac-t">接入设备 / NAS</span>
+              <span class="ac-s">手机粘连接码,或填 NAS 的 NodeId</span>
+            </button>
           </div>
-
-          <!-- 授权说明(PRD 原型④ 精神:精确到设备/权限/可吊销) -->
-          <section class="glass grant-note">
-            <div class="gn-head"><ShieldCheck :size="15" :stroke-width="1.9" /> 授权与安全</div>
-            <ul class="gn-list">
-              <li><b>同账号自己人免授权</b>:用账号密码登录即互信,直接挂盘、派任务。</li>
-              <li><b>开给别人</b>要走「协作」定向邀请码,精确到资源、权限、期限,越权 fail-closed 拦截。</li>
-              <li><b>随时可吊销</b>:点设备卡右侧吊销,该设备立刻断流、无法再连。</li>
-            </ul>
-          </section>
-        </template>
         </template>
 
-        <!-- 我共享出去的:开给别人的资源(走协作邀请码) -->
-        <div v-else-if="devFilter === 'shared'" class="empty glass">
-          还没有共享给别人的资源。到「协作」用定向邀请码把某个盘 / 项目开给指定的人,精确到权限与期限,这里就会留下记录。
-        </div>
+        <!-- 我共享出去的:开给别人的资源(走协作邀请码)+ 加号卡 -->
+        <template v-else-if="devFilter === 'shared'">
+          <div class="dev-grid">
+            <button class="dev add-card" @click="toast.info('到「协作」用定向邀请码把盘/项目开给指定的人,精确到权限与期限')">
+              <Plus :size="28" :stroke-width="1.8" />
+              <span class="ac-t">开放资源给别人</span>
+              <span class="ac-s">走协作邀请码,精确到权限与期限</span>
+            </button>
+          </div>
+        </template>
+
+        <!-- 我能用的:别人分享给我的(凭邀请码接入)+ 加号卡 -->
+        <template v-else-if="devFilter === 'usable'">
+          <div class="dev-grid">
+            <button class="dev add-card" @click="toast.info('拿到别人的邀请码,到手机 App 或「协作」凭码入伙,即可用对方开放的盘/算力')">
+              <Plus :size="28" :stroke-width="1.8" />
+              <span class="ac-t">凭邀请码接入</span>
+              <span class="ac-s">用别人分享的资源(盘 / 算力)</span>
+            </button>
+          </div>
+        </template>
 
         <!-- 正在发生:audit 活动流(接入/上报/吊销/账号事件,主机留痕) -->
         <template v-else-if="devFilter === 'activity'">
@@ -902,6 +977,8 @@ onUnmounted(() => {
             </div>
           </section>
         </template>
+        </div><!-- /.dev-content -->
+        </div><!-- /.devices-tab -->
       </template>
 
       <!-- ════════════ ③ 网络拓扑 ════════════ -->
@@ -969,6 +1046,30 @@ onUnmounted(() => {
         </section>
       </template>
     </div>
+
+    <!-- 登录 / 注册账号弹层(桌面互联页切账号) -->
+    <Teleport to="body">
+      <div v-if="showLogin" class="login-mask" @click.self="showLogin = false">
+        <div class="glass login-box">
+          <div class="lb-head">
+            <span class="lb-av" v-html="allianceAvatar"></span>
+            <div>
+              <div class="lb-title">{{ needsBootstrap ? "创建 owner 账号" : "登录账号" }}</div>
+              <div class="lb-sub">{{ needsBootstrap ? "本机还没账号,建一个 owner" : "登录后管理设备联盟" }}</div>
+            </div>
+            <button class="icobtn" @click="showLogin = false">✕</button>
+          </div>
+          <input v-model="authForm.username" class="af-inp" placeholder="用户名" autocapitalize="off" />
+          <input v-model="authForm.password" type="password" class="af-inp" placeholder="密码" @keydown.enter="submitLogin" />
+          <input v-if="needsBootstrap" v-model="authForm.displayName" class="af-inp" placeholder="昵称(可选)" />
+          <p v-if="authErr" class="lb-err">{{ authErr }}</p>
+          <button class="cta full" :disabled="authBusy" @click="submitLogin">
+            <LoaderCircle v-if="authBusy" :size="15" class="spin" />
+            {{ needsBootstrap ? "创建并登录" : "登录" }}
+          </button>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1162,17 +1263,71 @@ onUnmounted(() => {
 
 .empty { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); padding: 22px; justify-content: center; }
 
-/* ── 设备子导航 ── */
-.dev-subnav { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 2px; }
-.dsn {
-  display: inline-flex; align-items: center; gap: 6px; padding: 6px 13px; border-radius: 999px;
-  font-size: 12.5px; font-weight: 600; color: var(--text-2); background: transparent;
-  border: 1px solid var(--glass-brd); cursor: pointer; transition: all .16s var(--ease-out);
+/* ── 设备联盟:左栏 + 右内容 双栏 ── */
+.devices-tab { display: flex; gap: 14px; align-items: flex-start; }
+.dev-rail {
+  flex: none; width: 186px; position: sticky; top: 0; padding: 14px 12px;
+  display: flex; flex-direction: column; gap: 6px; border-radius: 16px;
 }
-.dsn:hover { color: var(--text-1); background: color-mix(in srgb, var(--text-1) 5%, transparent); }
-.dsn.on { color: #fff; background: linear-gradient(135deg, #0d99ff, #7c4dff); border-color: transparent; box-shadow: 0 3px 10px rgba(13, 153, 255, .28); }
-.dsn-n { min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; font-size: 10.5px; display: inline-flex; align-items: center; justify-content: center; background: color-mix(in srgb, currentColor 18%, transparent); }
-.dsn.on .dsn-n { background: rgba(255,255,255,.28); }
+.rail-fed { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 6px 6px 14px; border-bottom: 1px solid var(--glass-brd); margin-bottom: 8px; }
+.rail-av { width: 66px; height: 66px; flex: none; display: block; border-radius: 50%; overflow: hidden; box-shadow: 0 6px 18px rgba(13, 153, 255, .28); }
+.rail-av :deep(svg) { width: 100%; height: 100%; display: block; }
+.rail-fed-txt { min-width: 0; width: 100%; }
+.rail-name { font-weight: 700; font-size: 13.5px; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-sub { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 5px; margin-top: 2px; }
+.rail-nav { display: flex; flex-direction: column; gap: 3px; }
+.rail-item {
+  display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 11px;
+  font-size: 13px; font-weight: 600; color: var(--text-2); background: transparent;
+  border: none; cursor: pointer; text-align: left; transition: all .15s var(--ease-out);
+}
+.rail-item:hover { background: color-mix(in srgb, var(--text-1) 6%, transparent); color: var(--text-1); }
+.rail-item.on { color: #fff; background: linear-gradient(135deg, #0d99ff, #7c4dff); box-shadow: 0 4px 12px rgba(13, 153, 255, .3); }
+.rail-lb { flex: 1; min-width: 0; }
+.rail-n { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; font-size: 10.5px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; background: color-mix(in srgb, currentColor 16%, transparent); }
+.rail-item.on .rail-n { background: rgba(255,255,255,.28); }
+.rail-refresh { margin-top: auto; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; border-radius: 10px; font-size: 12px; color: var(--muted); background: transparent; }
+.rail-refresh:hover { color: var(--text-1); background: color-mix(in srgb, var(--text-1) 6%, transparent); }
+.rail-acct { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 4px 10px; margin-bottom: 6px; border-bottom: 1px solid var(--glass-brd); }
+.ra-role { font-size: 11px; color: var(--muted); font-weight: 600; }
+.ra-btn { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 999px; color: var(--text-2); border: 1px solid var(--glass-brd); background: transparent; }
+.ra-btn:hover { color: var(--text-1); background: color-mix(in srgb, var(--text-1) 6%, transparent); }
+.ra-btn.pri { color: #fff; border-color: transparent; background: linear-gradient(135deg, #0d99ff, #7c4dff); box-shadow: 0 3px 10px rgba(13,153,255,.28); width: 100%; justify-content: center; }
+.odot.off { background: var(--muted); box-shadow: none; }
+.dev-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 13px; }
+
+/* 接入卡(加号)+ 接入表单 */
+.add-card {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  min-height: 168px; border: 1.5px dashed var(--glass-brd); border-radius: 16px; cursor: pointer;
+  color: var(--text-2); background: color-mix(in srgb, var(--text-1) 3%, transparent); transition: all .16s var(--ease-out);
+}
+.add-card:hover { border-color: #0d99ff; color: #0d99ff; background: color-mix(in srgb, #0d99ff 7%, transparent); }
+.ac-t { font-size: 13.5px; font-weight: 700; }
+.ac-s { font-size: 11px; color: var(--muted); }
+.add-panel { padding: 15px 16px; }
+.add-fields { display: grid; gap: 8px; }
+.add-acts { display: flex; gap: 10px; align-items: center; margin-top: 11px; }
+.af-inp { width: 100%; padding: 9px 11px; border-radius: 10px; border: 1px solid var(--glass-brd); background: color-mix(in srgb, var(--bg) 40%, transparent); color: var(--text); outline: none; font-size: 13px; }
+.af-inp:focus { border-color: #0d99ff; }
+
+/* 登录弹层 */
+.login-mask { position: fixed; inset: 0; z-index: 300; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.login-box { width: min(360px, 92vw); padding: 20px; border-radius: 18px; display: flex; flex-direction: column; gap: 10px; }
+.lb-head { display: flex; align-items: center; gap: 11px; margin-bottom: 4px; }
+.lb-av { width: 44px; height: 44px; flex: none; border-radius: 50%; overflow: hidden; box-shadow: 0 4px 12px rgba(13,153,255,.28); }
+.lb-av :deep(svg) { width: 100%; height: 100%; display: block; }
+.lb-title { font-weight: 700; font-size: 15px; }
+.lb-sub { font-size: 11.5px; color: var(--muted); }
+.lb-head .icobtn { margin-left: auto; }
+.lb-err { color: var(--vermilion); font-size: 12px; margin: 0; }
+.cta.full { width: 100%; }
+@media (max-width: 720px) {
+  .devices-tab { flex-direction: column; }
+  .dev-rail { width: 100%; position: static; }
+  .rail-nav { flex-direction: row; flex-wrap: wrap; }
+  .rail-item { flex: 1 1 auto; }
+}
 
 /* ── 设备卡:核数 + 资源仪表 ── */
 .dev-cores { font-size: 10.5px; font-weight: 700; color: var(--text-2); padding: 1px 7px; border-radius: 6px; background: color-mix(in srgb, var(--text-1) 7%, transparent); }
@@ -1206,8 +1361,8 @@ onUnmounted(() => {
 .act-sub { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .act-time { font-size: 11px; color: var(--muted); flex: none; }
 
-.dev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(238px, 1fr)); gap: 13px; }
-.dev { padding: 15px 16px; position: relative; overflow: hidden; transition: transform .18s var(--ease-out), box-shadow .18s; }
+.dev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.dev { padding: 17px 18px; position: relative; overflow: hidden; transition: transform .18s var(--ease-out), box-shadow .18s; }
 .dev:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg), inset 0 1px 0 var(--glass-hi), 0 14px 30px rgba(20, 20, 25, .08); }
 .dev::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; opacity: .85; }
 .dev.t-local::after { background: linear-gradient(90deg, #8a8f98, #b5b9c0); }
@@ -1233,13 +1388,14 @@ onUnmounted(() => {
 .dev-node { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
 .dev-grant { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-2); margin-bottom: 12px; }
 .dev-grant.revoked { color: var(--vermilion); }
-.dev-btns { display: flex; gap: 7px; }
+.dev-btns { display: flex; gap: 8px; margin-top: 12px; }
 .b {
   flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-  font-size: 12px; padding: 8px; border-radius: 9px; cursor: pointer;
+  font-size: 12.5px; font-weight: 600; padding: 10px; border-radius: 10px; cursor: pointer;
   border: 1px solid var(--glass-brd); background: color-mix(in srgb, var(--bg) 45%, transparent); color: var(--text);
   transition: border-color .15s, background .15s;
 }
+.b.flat { background: transparent; color: var(--muted); font-weight: 500; }
 .b:hover { border-color: var(--ink); }
 .b.pri { background: linear-gradient(135deg, #0d99ff, #7c4dff); color: #fff; border-color: transparent; box-shadow: 0 4px 12px rgba(13, 153, 255, .26); }
 .b.pri:hover { filter: brightness(1.05); }
