@@ -375,7 +375,7 @@ const mineItems = computed<UnifiedCard[]>(() => {
       revoked: d.revoked,
     });
   }
-  // ③ 已连接的 NAS/远程盘,经隧道拉的实况
+  // ③ 已连接的 NAS/远程盘,经隧道拉的实况(拉不到时旧值标灰,不清空)
   for (const s of remotes.value) {
     out.push({
       key: "disk-" + s.id,
@@ -385,7 +385,7 @@ const mineItems = computed<UnifiedCard[]>(() => {
       transport: "p2p", // iroh 打洞直连,如实标 P2P(与拓扑一致)
       cores: remoteStats.value[s.id]?.cores ?? null,
       stats: remoteStats.value[s.id] ?? null,
-      stale: false,
+      stale: diskStale(s.id),
       icon: HardDrive,
       src: s,
     });
@@ -417,14 +417,19 @@ function browseDisk(s: RemoteSource) {
 
 // ── 远程盘(我能用的)实况:经 iroh 隧道调对端 sys_stats,真数据;对端老版本无此命令→缺项 ──
 const remoteStats = ref<Record<string, Partial<DeviceStats>>>({});
+/** 每块盘最近一次成功拉到实况的时间:决定「新鲜/标灰」,失败不清值只变灰。 */
+const remoteStatsAt = ref<Record<string, number>>({});
 let remotePolling = false;
 async function pollRemoteStats() {
-  if (remotePolling) return; // 单飞:12s tick 与手动可能重入,别叠(codex #4)
+  if (remotePolling) return; // 单飞:tick 与手动可能重入,别叠(codex #4)
   remotePolling = true;
   // 修剪已移除远程盘的残留键,防 map 无限膨胀。
   const liveIds = new Set(remotes.value.map((s) => s.id));
   for (const k of Object.keys(remoteStats.value)) {
-    if (!liveIds.has(k)) delete remoteStats.value[k];
+    if (!liveIds.has(k)) {
+      delete remoteStats.value[k];
+      delete remoteStatsAt.value[k];
+    }
   }
   try {
     await Promise.all(
@@ -444,13 +449,10 @@ async function pollRemoteStats() {
           if (!r.ok) throw new Error(String(r.status));
           const stats = await r.json();
           remoteStats.value = { ...remoteStats.value, [s.id]: stats };
+          remoteStatsAt.value = { ...remoteStatsAt.value, [s.id]: Date.now() };
         } catch {
-          // 断线/超时:删掉旧实况,别把过期值一直冒充「实况」(codex #4)。
-          if (remoteStats.value[s.id]) {
-            const next = { ...remoteStats.value };
-            delete next[s.id];
-            remoteStats.value = next;
-          }
+          // 断线/隧道重连中:**保留旧值只标灰**(remoteStatsAt 不更新 → stale)。
+          // 之前失败即删导致卡片频繁退回「待上报」,体验像坏了 —— 灰值+时间戳更如实。
         } finally {
           clearTimeout(t);
         }
@@ -459,6 +461,10 @@ async function pollRemoteStats() {
   } finally {
     remotePolling = false;
   }
+}
+/** 盘实况是否过期(>40s 没拉到新帧,多半在隧道重连)。 */
+function diskStale(id: string): boolean {
+  return !!remoteStats.value[id] && Date.now() - (remoteStatsAt.value[id] ?? 0) > 40_000;
 }
 
 // ── 正在发生:audit 活动流(接入/上报/吊销/账号事件,主机留痕) ──
@@ -499,6 +505,13 @@ function relTime(atSec: number): string {
 watch(devFilter, (f) => {
   if (f === "activity") loadAudit();
   if (f === "mine") pollRemoteStats();
+});
+// 从教程/拓扑切回设备页:立刻补拉一轮(不等下个 tick),避免"切回来是空的"。
+watch(tab, (t) => {
+  if (t === "devices") {
+    pollRemoteStats();
+    loadDevices(true);
+  }
 });
 
 // ── 派任务 = 左侧新建一个「标记了目标设备」的对话 ──
@@ -663,13 +676,29 @@ onMounted(async () => {
   await autoReconnectRemotes();
   await sampleLocal();
   pollRemoteStats(); // 首屏就拉一次 NAS/远程盘实况(它们在「我的设备」里)
-  // 本机仪表每 4s 跳一帧;设备页每 3 拍(12s)静默刷一次远端遥测/远程盘实况。
+  // 本机仪表每 4s 跳一帧。盘实况:启动后前 ~40s 每 4s 密集试(iroh 握手要几秒,
+  // 首拉大概率没通,别让用户等 12s 才看到数字),之后回落到每 12s 一次。
   let tick = 0;
+  let warmup = 10; // 前 10 拍(40s)密集拉
   statTimer = setInterval(() => {
     sampleLocal();
-    if (++tick % 3 === 0 && tab.value === "devices") {
-      if (devFilter.value === "mine") { loadDevices(true); pollRemoteStats(); } // 含 NAS 实况
-      else if (devFilter.value === "activity") loadAudit(true); // 停在活动页也持续刷新(codex #7)
+    tick++;
+    const due = warmup > 0 ? true : tick % 3 === 0;
+    if (warmup > 0) warmup--;
+    if (due && tab.value === "devices") {
+      pollRemoteStats(); // 盘实况(任何分区都拉:mine 默认显示它们)
+      if (tick % 3 === 0) {
+        if (devFilter.value === "mine") loadDevices(true);
+        else if (devFilter.value === "activity") loadAudit(true); // 停在活动页也持续刷新(codex #7)
+      }
+    }
+    // 兜底:从没成功拉到过实况的盘(初始 collab_tunnel_connect 可能整个失败,比如
+    // 启动时断网),每 ~36s 重新发起一次隧道(端口已被占=隧道其实活着,静默吃掉)。
+    if (isTauri && tick % 9 === 0) {
+      for (const s of remotes.value) {
+        if (remoteStatsAt.value[s.id]) continue;
+        invoke("collab_tunnel_connect", { hostNodeId: s.nodeId, listenPort: s.port }).catch(() => {});
+      }
     }
   }, 4000);
 });
@@ -930,6 +959,7 @@ onUnmounted(() => {
                   <span class="mt-v">{{ m.v }}</span>
                 </div>
                 <div v-if="c.stale && c.dev" class="mt-stale">上次上报 {{ c.dev.stats_at ? relTime(Math.floor(c.dev.stats_at / 1000)) : "未知" }} · 已离线?</div>
+                <div v-else-if="c.stale && c.src" class="mt-stale">实况更新于 {{ relTime(Math.floor((remoteStatsAt[c.src.id] ?? 0) / 1000)) }} · 隧道重连中…</div>
               </div>
               <div class="dev-meters-none" v-else-if="!c.revoked">
                 <Cpu :size="12" :stroke-width="1.9" /> {{ c.kind === 'disk' ? '实况待上报(对端需新版镜像)' : '资源待上报(对方 App 登录后自动上报)' }}
