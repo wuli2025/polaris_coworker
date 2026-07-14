@@ -858,21 +858,38 @@ onUnmounted(() => {
         <div class="dev-content">
         <!-- 我的设备:本机 + 已登记设备 + 已连接 NAS/远程盘,统一状态卡 + 接入卡 -->
         <template v-if="devFilter === 'mine'">
-          <!-- 接入 NAS/设备 表单(展开式) -->
+          <!-- 接入面板(展开式):① 分享本机连接码 ② 接入对方 —— 一步到位,不用去教程 -->
           <section v-if="addForm.open" class="glass add-panel">
-            <div class="gn-head"><Network :size="15" :stroke-width="1.9" /> 接入 NAS / 远程主机(iroh P2P)</div>
-            <p class="foot-note" style="margin:2px 0 10px">粘对方的 <b>iroh NodeId / 连接码</b> 与 <b>owner 令牌</b>,系统自动打洞直连(打不通走中继)。</p>
-            <div class="add-fields">
-              <input v-model="addForm.name" class="af-inp" placeholder="名称(如:群晖 NAS)" />
-              <input v-model="addForm.nodeId" class="af-inp" placeholder="NodeId / 连接码" />
-              <input v-model="addForm.token" class="af-inp" placeholder="owner 令牌" />
+            <div class="ap-cols">
+              <!-- ① 让别的设备连上这台 -->
+              <div class="ap-block">
+                <div class="ap-h"><Radio :size="14" :stroke-width="2" /> 让别的设备连上这台电脑</div>
+                <p class="foot-note" style="margin:2px 0 8px">手机 / 另一台 Polaris 粘下面这串即以 owner 完整权限连上(iroh P2P 直连)。</p>
+                <div class="ap-code" @click="copyConnectCode">{{ connectCode || "本机主机就绪中,稍候刷新…" }}</div>
+                <div class="ap-acts">
+                  <button class="pill" :disabled="!connectCode" @click="copyConnectCode">
+                    <Copy :size="13" /> {{ codeCopied ? "已复制 ✓" : "复制连接码" }}
+                  </button>
+                  <button v-if="isTauri" class="pill ghost" :class="{ busy: lanBusy }" @click="toggleRemote">
+                    {{ remoteOn ? "关闭局域网直连" : "开局域网直连" }}
+                  </button>
+                </div>
+              </div>
+              <!-- ② 这台连别的 NAS / 主机 -->
+              <div class="ap-block">
+                <div class="ap-h"><Network :size="14" :stroke-width="2" /> 接入一台 NAS / 远程主机</div>
+                <p class="foot-note" style="margin:2px 0 8px">粘对方的 <b>NodeId / 连接码</b> 与 <b>owner 令牌</b>,自动打洞直连(打不通走中继)。</p>
+                <div class="add-fields">
+                  <input v-model="addForm.name" class="af-inp" placeholder="名称(如:群晖 NAS)" />
+                  <input v-model="addForm.nodeId" class="af-inp" placeholder="NodeId / 连接码" />
+                  <input v-model="addForm.token" class="af-inp" placeholder="owner 令牌" />
+                </div>
+                <button class="cta" style="margin-top:8px" :disabled="connBusy" @click="connectRemote">
+                  <LoaderCircle v-if="connBusy" :size="15" class="spin" /><Zap v-else :size="15" /> 发起连接
+                </button>
+              </div>
             </div>
-            <div class="add-acts">
-              <button class="cta" :disabled="connBusy" @click="connectRemote">
-                <LoaderCircle v-if="connBusy" :size="15" class="spin" /><Zap v-else :size="15" /> 发起连接
-              </button>
-              <button class="pill ghost" @click="addForm.open = false">取消</button>
-            </div>
+            <button class="ap-close pill ghost" @click="addForm.open = false">收起</button>
           </section>
 
           <div class="dev-grid">
@@ -1137,6 +1154,8 @@ onUnmounted(() => {
 .icobtn:hover { color: var(--ink); background: var(--selection-bg); }
 .icobtn.sm { padding: 4px; margin-left: auto; }
 .scroll { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 820px; width: 100%; margin: 0 auto; }
+/* 设备与授权是宽版双栏,别被 820 卡窄留大白边 */
+.scroll:has(.devices-tab) { max-width: 1180px; }
 
 @media (max-width: 640px) {
   .tab-label { display: none; }
@@ -1305,7 +1324,14 @@ onUnmounted(() => {
 .add-card:hover { border-color: #0d99ff; color: #0d99ff; background: color-mix(in srgb, #0d99ff 7%, transparent); }
 .ac-t { font-size: 13.5px; font-weight: 700; }
 .ac-s { font-size: 11px; color: var(--muted); }
-.add-panel { padding: 15px 16px; }
+.add-panel { padding: 16px 18px; }
+.ap-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 780px) { .ap-cols { grid-template-columns: 1fr; } }
+.ap-block { min-width: 0; }
+.ap-h { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700; margin-bottom: 2px; }
+.ap-code { font-family: var(--mono); font-size: 11px; line-height: 1.5; word-break: break-all; user-select: all; cursor: pointer; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--text-1) 6%, transparent); border: 1px solid var(--glass-brd); max-height: 88px; overflow: auto; }
+.ap-acts { display: flex; gap: 8px; margin-top: 9px; flex-wrap: wrap; }
+.ap-close { margin-top: 14px; }
 .add-fields { display: grid; gap: 8px; }
 .add-acts { display: flex; gap: 10px; align-items: center; margin-top: 11px; }
 .af-inp { width: 100%; padding: 9px 11px; border-radius: 10px; border: 1px solid var(--glass-brd); background: color-mix(in srgb, var(--bg) 40%, transparent); color: var(--text); outline: none; font-size: 13px; }
