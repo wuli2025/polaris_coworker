@@ -1618,7 +1618,9 @@ export const provider = {
   /** 查询某供应商套餐额度 / 实时余额(各家接口不同, 后端逐家适配 + 优雅降级) */
   balance: (id: string) => invoke<ProviderBalance>("provider_balance", { id }),
   codexStatus: () => invoke<CodexStatus>("codex_status"),
-  codexStartLogin: () => invoke<CodexDeviceLogin>("codex_start_login"),
+  // forceDevice=true → 「网站 + 效验码」(device code, 同 cc-switch);false → 桌面回环一键
+  codexStartLogin: (forceDevice = false) =>
+    invoke<CodexDeviceLogin>("codex_start_login", { forceDevice }),
   codexPollLogin: (deviceCode: string, userCode: string) =>
     invoke<CodexPollResult>("codex_poll_login", { deviceCode, userCode }),
   /** 回环一键授权(auto 模式)的进度轮询 / 取消 */

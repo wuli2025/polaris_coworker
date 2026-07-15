@@ -190,6 +190,7 @@ pub fn run() {
             collab::commands::collab_scope_status,
             collab::commands::collab_device_node_id,
             collab::commands::collab_tunnel_connect,
+            collab::commands::collab_tunnel_disconnect,
             collab::commands::collab_tunnel_status,
             // 云机中继网关:桌面主机挂牌/断开(真·中继完整形态)
             collab::commands::collab_gateway_attach,

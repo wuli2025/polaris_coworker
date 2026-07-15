@@ -130,10 +130,12 @@ export const useProvidersStore = defineStore("providers", () => {
   }
 
   /** ① 启动原生 Device Code 授权:后端会自动开浏览器,返回配对码供 UI 展示 */
-  async function codexStartLogin(): Promise<CodexDeviceLogin | null> {
+  async function codexStartLogin(
+    forceDevice = false
+  ): Promise<CodexDeviceLogin | null> {
     error.value = null;
     try {
-      return await providerApi.codexStartLogin();
+      return await providerApi.codexStartLogin(forceDevice);
     } catch (e) {
       error.value = String(e);
       return null;

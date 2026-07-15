@@ -382,7 +382,7 @@ const mineItems = computed<UnifiedCard[]>(() => {
       kind: "disk",
       name: s.name || "远程盘",
       sub: "远程盘 · 127.0.0.1:" + s.port,
-      transport: "p2p", // iroh 打洞直连,如实标 P2P(与拓扑一致)
+      transport: diskTransport(s), // 后端上报的真实链路:打洞直连标 P2P,走中继如实标 relay
       cores: remoteStats.value[s.id]?.cores ?? null,
       stats: remoteStats.value[s.id] ?? null,
       stale: diskStale(s.id),
@@ -465,6 +465,26 @@ async function pollRemoteStats() {
 /** 盘实况是否过期(>40s 没拉到新帧,多半在隧道重连)。 */
 function diskStale(id: string): boolean {
   return !!remoteStats.value[id] && Date.now() - (remoteStatsAt.value[id] ?? 0) > 40_000;
+}
+
+// ── 隧道真实链路:后端 collab_tunnel_status.tunnels 逐条给出 direct(打洞直连)/relay(中继) ──
+const tunnelByPort = ref<Record<number, { state: string; path: string }>>({});
+async function pollTunnelPaths() {
+  if (!isTauri) return;
+  try {
+    const s = await invoke<{ tunnels?: { port: number; state: string; path: string }[] }>(
+      "collab_tunnel_status"
+    );
+    const map: Record<number, { state: string; path: string }> = {};
+    for (const t of s?.tunnels ?? []) map[t.port] = { state: t.state, path: t.path };
+    tunnelByPort.value = map;
+  } catch {
+    /* 状态拉不到不影响功能,徽标保持上一帧 */
+  }
+}
+/** 远程盘链路徽标:中继兜底如实标 relay,其余(直连/建立中)标 p2p。 */
+function diskTransport(s: RemoteSource): Transport {
+  return tunnelByPort.value[s.port]?.path === "relay" ? "relay" : "p2p";
 }
 
 // ── 正在发生:audit 活动流(接入/上报/吊销/账号事件,主机留痕) ──
@@ -567,14 +587,14 @@ const topoEntities = computed<TopoEntity[]>(() => {
     nodeId: d.node_id || "",
     t: devTransport(d),
   }));
-  // NAS/远程盘走的就是 iroh 打洞直连 → 链路如实标 P2P(蓝),不再单列「远程盘」色。
+  // NAS/远程盘链路按后端上报如实标:打洞直连=P2P(蓝),走中继=relay,不再写死。
   const disks: TopoEntity[] = remotes.value.map((s) => ({
     kind: "disk",
     name: s.name || "远程盘",
     emoji: "🗄",
     revoked: false,
     nodeId: s.nodeId || "",
-    t: "p2p",
+    t: diskTransport(s),
   }));
   return [...devs, ...disks];
 });
@@ -644,8 +664,10 @@ async function connectRemote() {
 }
 function forgetRemote(s: RemoteSource) {
   if (!confirm(`断开并移除「${s.name}」?`)) return;
+  // 真断隧道:不然孤儿隧道在后台对着已移除的主机永远重连(占端口+空耗流量)。
+  if (isTauri) invoke("collab_tunnel_disconnect", { listenPort: s.port }).catch(() => {});
   remotes.value = removeRemoteSource(s.id);
-  toast.info("已移除远程源");
+  toast.info("已断开并移除远程源");
 }
 
 async function refreshAll() {
@@ -676,6 +698,7 @@ onMounted(async () => {
   await autoReconnectRemotes();
   await sampleLocal();
   pollRemoteStats(); // 首屏就拉一次 NAS/远程盘实况(它们在「我的设备」里)
+  pollTunnelPaths(); // 首屏也拉一次隧道链路,星图别先画个写死的 P2P
   // 本机仪表每 4s 跳一帧。盘实况:启动后前 ~40s 每 4s 密集试(iroh 握手要几秒,
   // 首拉大概率没通,别让用户等 12s 才看到数字),之后回落到每 12s 一次。
   let tick = 0;
@@ -685,8 +708,9 @@ onMounted(async () => {
     tick++;
     const due = warmup > 0 ? true : tick % 3 === 0;
     if (warmup > 0) warmup--;
-    if (due && tab.value === "devices") {
+    if (due && (tab.value === "devices" || tab.value === "topo")) {
       pollRemoteStats(); // 盘实况(任何分区都拉:mine 默认显示它们)
+      pollTunnelPaths(); // 隧道真实链路(直连/中继),卡片与星图共用
       if (tick % 3 === 0) {
         if (devFilter.value === "mine") loadDevices(true);
         else if (devFilter.value === "activity") loadAudit(true); // 停在活动页也持续刷新(codex #7)

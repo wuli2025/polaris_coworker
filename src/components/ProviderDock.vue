@@ -261,11 +261,12 @@ function openSite(url: string) {
 }
 
 // ── Codex 授权 ─────────────────────────
-async function startCodexAuth() {
+// forceDevice=true(默认) → 「网站 + 效验码」交互(同 cc-switch);false → 桌面回环一键
+async function startCodexAuth(forceDevice = true) {
   codexErr.value = null;
   codexCopied.value = false;
   codexBusy.value = true;
-  const dev = await store.codexStartLogin();
+  const dev = await store.codexStartLogin(forceDevice);
   codexBusy.value = false;
   if (!dev) {
     codexErr.value = store.error || "发起授权失败";
@@ -596,7 +597,7 @@ function subtitleOf(p: ProviderView): string {
                   @click="codexOpen = true"
                 >
                   <LogIn :size="14" :stroke-width="2" />
-                  ChatGPT 一键授权
+                  授权 ChatGPT
                 </button>
                 <!-- Claude 官方未登录订阅时,主操作 = 授权登录 -->
                 <button
@@ -814,14 +815,15 @@ function subtitleOf(p: ProviderView): string {
                         授权会自动送回 Polaris,无需核对配对码:
                       </p>
                     </template>
-                    <!-- 设备码兜底:1455 端口被占时的旧流程 -->
+                    <!-- 网站 + 效验码(device code · 同 cc-switch):开网址 → 填码 → 自动识别 -->
                     <template v-else>
                       <p class="codex-note">
-                        已为你打开 ChatGPT 授权页。在浏览器里确认设备码后回到这里,授权完成会自动识别:
+                        ① 打开验证网址 <code>{{ codexDevice.verificationUri }}</code>(已自动打开)
+                        → ② 登录后在网页填入下面这个效验码,授权完成会自动识别,无需回到这里操作:
                       </p>
                       <button
                         class="codex-code"
-                        :title="codexCopied ? '已复制' : '点击复制'"
+                        :title="codexCopied ? '已复制' : '点击复制效验码'"
                         @click="copyUserCode"
                       >
                         {{ codexDevice.userCode }}
@@ -855,7 +857,7 @@ function subtitleOf(p: ProviderView): string {
                       代理上次报错:{{ store.codexProxy.lastError }}
                     </p>
                     <div class="ed-actions">
-                      <button class="ed-cancel" @click="startCodexAuth" :disabled="codexBusy">
+                      <button class="ed-cancel" @click="startCodexAuth()" :disabled="codexBusy">
                         <RefreshCw :size="13" :stroke-width="2" /> 重新授权
                       </button>
                       <button
@@ -874,22 +876,29 @@ function subtitleOf(p: ProviderView): string {
                   <!-- 未授权:显著大按钮 -->
                   <template v-else>
                     <p class="codex-note">
-                      用 ChatGPT 账号授权(无需安装 codex CLI)。点击后将自动打开浏览器,
-                      登录并点「Authorize」即自动完成,凭据写入
-                      <code>~/.codex/auth.json</code>,授权后点「用 GPT 对话」即生效。
+                      用 ChatGPT 账号授权一次(无需安装 codex CLI)。点击后会打开验证网址并给出一个效验码,
+                      在网页填码即完成,凭据写入 <code>~/.codex/auth.json</code>。
+                      <b>授权后 Claude Code(经本地翻译代理)与 codex CLI 都直接用上这份 ChatGPT 订阅。</b>
                     </p>
                     <div class="ed-actions">
                       <button class="ed-cancel" @click="codexOpen = false">关闭</button>
                       <button
                         class="ed-save login big"
-                        @click="startCodexAuth"
+                        @click="startCodexAuth(true)"
                         :disabled="codexBusy"
                       >
                         <span v-if="codexBusy" class="spinner" />
                         <LogIn v-else :size="14" :stroke-width="2" />
-                        {{ codexBusy ? "正在发起…" : "ChatGPT 一键授权" }}
+                        {{ codexBusy ? "正在发起…" : "网站 + 效验码授权" }}
                       </button>
                     </div>
+                    <button
+                      class="codex-alt"
+                      @click="startCodexAuth(false)"
+                      :disabled="codexBusy"
+                    >
+                      改用浏览器一键授权(点 Authorize 即完成)
+                    </button>
                   </template>
 
                   <p v-if="codexErr" class="codex-fail">
@@ -1279,6 +1288,9 @@ function subtitleOf(p: ProviderView): string {
 .codex-code:hover { background: #10a37f22; }
 .code-copy { font-family: var(--sans); font-size: 10px; font-weight: 500; letter-spacing: 0; color: var(--muted); }
 .codex-poll { margin: 0; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); }
+.codex-alt { width: 100%; margin-top: 8px; background: none; border: none; font-size: 10.5px; color: var(--muted); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.codex-alt:hover:not(:disabled) { color: var(--text-2); }
+.codex-alt:disabled { opacity: 0.55; cursor: default; }
 
 /* ── Claude 官方订阅授权大卡 (暖橙) ───────────────────────── */
 .now-cta.claude-cta { background: #cc785c; border-color: #cc785c; color: #fff; font-weight: 600; box-shadow: 0 1px 0 #cc785c33, 0 0 0 3px #cc785c14; }

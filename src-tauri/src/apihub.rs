@@ -820,7 +820,11 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
         "usage_summary" => ok(provider::usage_summary()?),
         "provider_balance" => ok(provider::provider_balance(req_str(a, "id")?)?),
         "codex_status" => ok(provider::codex_status()?),
-        "codex_start_login" => ok(provider::codex_start_login()?),
+        "codex_start_login" => ok(provider::codex_start_login(Some(bool_def(
+            a,
+            "forceDevice",
+            false,
+        )))?),
         "codex_poll_login" => ok(provider::codex_poll_login(
             req_str(a, "deviceCode")?,
             req_str(a, "userCode")?,

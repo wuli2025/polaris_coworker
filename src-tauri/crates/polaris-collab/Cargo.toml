@@ -42,10 +42,12 @@ tower-http = { version = "0.6", features = ["fs", "cors", "trace"], optional = t
 futures-util = { version = "0.3", optional = true }
 # 组网隧道 + 云中继(collab-net):iroh 依赖树大,默认不进
 iroh = { version = "1", optional = true }
+# mDNS 局域网发现:纯内网(无外网,n0 DNS/relay 全不可达)时,同网段设备也能互相发现直连
+iroh-mdns-address-lookup = { version = "0.4", optional = true }
 tokio-tungstenite = { version = "0.24", optional = true }
 
 [features]
 default = []
 desktop = ["dep:tauri"]
 collab-host = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util"]
-collab-net = ["dep:iroh", "dep:tokio-tungstenite"]
+collab-net = ["dep:iroh", "dep:iroh-mdns-address-lookup", "dep:tokio-tungstenite"]
