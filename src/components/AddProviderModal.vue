@@ -23,6 +23,8 @@ const form = reactive({
   note: "",
   websiteUrl: "",
   tokenField: "ANTHROPIC_AUTH_TOKEN",
+  /** "" = Anthropic 兼容(直连); "openai" = OpenAI 协议(经 Polaris 本地路由翻译转发) */
+  protocol: "" as "" | "openai",
   baseUrl: "",
   apiKey: "",
   model: "",
@@ -81,6 +83,7 @@ function applyProvider(p: ProviderView) {
   form.note = p.note || "";
   form.websiteUrl = p.websiteUrl || "";
   form.tokenField = p.tokenField || "ANTHROPIC_AUTH_TOKEN";
+  form.protocol = p.protocol === "openai" ? "openai" : "";
   form.baseUrl = p.baseUrl || "";
   form.apiKey = p.authToken || "";
   form.model =
@@ -105,6 +108,7 @@ function selectCustom() {
   form.note = "";
   form.websiteUrl = "";
   form.tokenField = "ANTHROPIC_AUTH_TOKEN";
+  form.protocol = "";
   form.baseUrl = "";
   form.apiKey = "";
   form.model = "";
@@ -119,6 +123,9 @@ function pickPreset(p: ProviderView) {
 const isOauth = computed(
   () => selectedId.value === "codex" || selectedId.value === "github-copilot"
 );
+/** 自定义配置(非预设)才允许切协议;预设的协议由 kind 定死, 存了也不生效 */
+const canPickProtocol = computed(() => selectedId.value === "");
+const isOpenAiProto = computed(() => form.protocol === "openai");
 
 // ── config JSON 同步 ──
 function parseCfg(): any {
@@ -231,6 +238,10 @@ async function submit() {
     localErr.value = "配置 JSON 格式有误";
     return;
   }
+  if (isOpenAiProto.value && !form.baseUrl.trim()) {
+    localErr.value = "OpenAI 协议供应商必须填写请求地址(如 https://api.openai.com/v1)";
+    return;
+  }
   saving.value = true;
   const id = await store.save({
     id: form.id,
@@ -238,6 +249,7 @@ async function submit() {
     note: form.note,
     websiteUrl: form.websiteUrl,
     tokenField: form.tokenField,
+    protocol: form.protocol,
     settingsConfig: cfg,
   });
   saving.value = false;
@@ -355,6 +367,21 @@ function dotColor(p: ProviderView) {
             </label>
 
             <label class="field">
+              <span class="f-lab">上游协议</span>
+              <div v-if="canPickProtocol" class="field-toggle">
+                <button :class="{ sel: form.protocol === '' }" @click="form.protocol = ''">Anthropic 兼容 · 直连</button>
+                <button :class="{ sel: form.protocol === 'openai' }" @click="form.protocol = 'openai'">OpenAI 协议 · 本地路由</button>
+              </div>
+              <p v-else class="hint">
+                {{ isOpenAiProto ? "OpenAI 协议 · 请求经 Polaris 本地路由翻译转发" : "Anthropic 兼容 · Claude Code 直连该端点" }}
+              </p>
+              <p v-if="canPickProtocol && isOpenAiProto" class="hint">
+                💡 GPT 等只说 OpenAI 协议的端点选这档：Claude Code 把请求发到 Polaris 本地路由
+                (127.0.0.1)，由它实时翻译并转发到下方地址——同 cc-switch 的本地转发，改 Key/换模型即刻生效。
+              </p>
+            </label>
+
+            <label class="field">
               <span class="f-lab row">
                 请求地址
                 <span class="url-toggle" :class="{ on: form.fullUrl }" @click="form.fullUrl = !form.fullUrl">
@@ -362,15 +389,15 @@ function dotColor(p: ProviderView) {
                   <span class="sw"><span class="knob" /></span>
                 </span>
               </span>
-              <input v-model="form.baseUrl" placeholder="https://your-api-endpoint.com" @input="onBaseUrl" />
-              <p class="hint">💡 填写兼容 Claude API 的服务端点地址，不要以斜杠结尾</p>
+              <input v-model="form.baseUrl" :placeholder="isOpenAiProto ? 'https://api.openai.com/v1' : 'https://your-api-endpoint.com'" @input="onBaseUrl" />
+              <p class="hint">{{ isOpenAiProto ? "💡 填写 OpenAI 兼容端点（一般以 /v1 结尾），不要以斜杠结尾" : "💡 填写兼容 Claude API 的服务端点地址，不要以斜杠结尾" }}</p>
             </label>
 
             <label class="field">
               <span class="f-lab">模型</span>
               <input
                 v-model="form.model"
-                placeholder="例如：MiniMax-M3（留空则用 Claude 默认模型名）"
+                :placeholder="isOpenAiProto ? '例如：gpt-5.5（留空则默认 gpt-5.5）' : '例如：MiniMax-M3（留空则用 Claude 默认模型名）'"
                 @input="onModel"
               />
               <p class="hint">

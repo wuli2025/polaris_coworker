@@ -1,22 +1,29 @@
-//! Codex(ChatGPT) 翻译代理 —— 让 `claude` 用上 ChatGPT 订阅。
+//! 本地路由(翻译代理)—— 让 `claude` 用上非 Anthropic 协议的上游(cc-switch 式本地转发)。
 //!
 //! 思路同 cc-switch 的 `proxy/`, 但**不背 axum/hyper/reqwest/tokio 全家桶**: 入站用
-//! `std::net` 手写一条路由的 HTTP/1.1 + SSE 本地服务, 出站继续用现成的 `ureq`(流式读响应体)。
+//! `std::net` 手写少量路由的 HTTP/1.1 + SSE 本地服务, 出站继续用现成的 `ureq`(流式读响应体)。
 //!
-//!   claude  ──Anthropic /v1/messages(SSE)──▶  本代理  ──Responses(SSE)──▶  chatgpt.com/backend-api/codex
-//!           ◀────── Anthropic SSE ──────────         ◀──── OpenAI SSE ────────
+//!   claude ──Anthropic /p/{id}/v1/messages(SSE)──▶ 本路由 ──┬─Responses(SSE)─▶ chatgpt.com/backend-api/codex
+//!          ◀──────────── Anthropic SSE ───────────         └─chat/completions(SSE)─▶ 任意 OpenAI 兼容上游
 //!
-//! - 鉴权: 读 `~/.codex/auth.json`(坞里 Codex 授权已写好的 ChatGPT OAuth token), access_token
-//!   将过期或上游 401 时用 refresh_token 静默刷新并回写。
-//! - 翻译: system→instructions、messages→input、tools→function、tool_use/tool_result ↔
-//!   function_call/function_call_output; 流式把 Responses 的 output_text/function_call_arguments
-//!   增量翻成 Anthropic 的 content_block_delta。reasoning(思维链)在 v1 直接不透传。
-//! - 模型: 默认 gpt-5.5(最新 ChatGPT 模型); 收到 gpt-*/o* 透传, 其余(claude-*)回落默认。
+//! 路径里的 `{id}` 是供应商坞的供应商 id, **每请求实时**经 `provider::route_target(id)` 解析
+//! 上游(base_url / key / 默认模型)——改 key、换模型立即生效, 并发对话可各指不同家不串台;
+//! 裸 `/v1/messages`(无前缀, 旧版 settings.json 残留)兼容回落 ChatGPT。
 //!
-//! 注: ChatGPT 后端的请求契约(必需头/字段)可能随官方调整, 出错文案会经 `last_error()` 暴露到坞里。
+//! - ChatGPT 上游: 鉴权读 `~/.codex/auth.json`(坞里 Codex 授权写好的 OAuth token),
+//!   将过期或上游 401 时用 refresh_token 静默刷新并回写。翻译走 Responses 协议:
+//!   system→instructions、messages→input、tool_use/tool_result ↔ function_call/…。
+//! - OpenAI 兼容上游(GPT API / 各家网关): 鉴权 Bearer 该供应商存的 key, 翻译走
+//!   chat/completions: system→messages[0]、tool_use→tool_calls、tool_result→role:"tool",
+//!   流式把 delta.content / delta.tool_calls 增量翻成 Anthropic 的 content_block_delta。
+//! - 思维链(reasoning / reasoning_content)一律不透传。
+//! - 模型: claude 发来的是坞里钉的模型名, 原样透传; claude-* / 空回落该家默认。
+//!
+//! 注: 上游请求契约(必需头/字段)可能随官方调整, 出错文案会经 `last_error()` 暴露到坞里。
 
 use crate::provider::{
-    codex_auth_path, codex_b64url_decode, codex_rfc3339_now, CODEX_CLIENT_ID, CODEX_OAUTH_TOKEN_URL,
+    codex_auth_path, codex_b64url_decode, codex_rfc3339_now, route_target, RouteTarget,
+    CODEX_CLIENT_ID, CODEX_OAUTH_TOKEN_URL,
 };
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -119,9 +126,12 @@ fn handle_conn(mut stream: TcpStream) -> std::io::Result<()> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
+    // `/p/{供应商id}/...` → 按 id 路由上游; 无前缀 → 旧版兼容, 回落 ChatGPT。
+    let (route_id, path) = split_route(&path);
 
-    // 头: 只关心 Content-Length, 读到空行为止
+    // 头: 取 Content-Length + 少数需要透传给上游的 Anthropic 头, 读到空行为止
     let mut content_length = 0usize;
+    let mut fwd_headers: Vec<(String, String)> = Vec::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -132,8 +142,12 @@ fn handle_conn(mut stream: TcpStream) -> std::io::Result<()> {
             break;
         }
         if let Some((k, v)) = t.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
+            let key = k.trim().to_ascii_lowercase();
+            if key == "content-length" {
                 content_length = v.trim().parse().unwrap_or(0);
+            } else if key == "anthropic-version" || key == "anthropic-beta" {
+                // 透传目标要带上这些协议头(鉴权头不透传 —— 由路由按供应商实时注入)
+                fwd_headers.push((key, v.trim().to_string()));
             }
         }
     }
@@ -147,24 +161,70 @@ fn handle_conn(mut stream: TcpStream) -> std::io::Result<()> {
         reader.read_exact(&mut body)?;
     }
 
-    if method == "POST" && path.starts_with("/v1/messages/count_tokens") {
-        // claude 偶尔预估上下文 token; 给个粗略估算(字符数/4)即可, 别 404 把它卡住。
-        let est = (body.len() / 4).max(1) as u64;
-        let out = serde_json::to_vec(&json!({ "input_tokens": est })).unwrap_or_default();
-        write_simple(&mut stream, 200, "application/json", &out);
-    } else if method == "POST" && path.starts_with("/v1/messages") {
-        handle_messages(&mut stream, &body);
+    if method == "POST" && path.starts_with("/v1/messages") {
+        // 每请求实时解析路由目标: 改 key / 换模型 / 切供应商立即生效(热切换的根)。
+        let target = match route_target(&route_id) {
+            Ok(t) => t,
+            Err(e) => {
+                set_error(e.clone());
+                anthropic_error(&mut stream, 400, &e);
+                return Ok(());
+            }
+        };
+        let is_count = path.starts_with("/v1/messages/count_tokens");
+        match target {
+            // Anthropic 兼容上游 → 纯透传(含 count_tokens: 上游有真接口, 原样转)
+            RouteTarget::AnthropicCompat {
+                base_url,
+                api_key,
+                token_field,
+            } => passthrough_forward(
+                &mut stream,
+                &path,
+                &fwd_headers,
+                &body,
+                &base_url,
+                &api_key,
+                &token_field,
+            ),
+            t => {
+                if is_count {
+                    // 翻译目标没有可透传的 count_tokens; 粗略估算(字符数/4), 别 404 卡住 claude。
+                    let est = (body.len() / 4).max(1) as u64;
+                    let out =
+                        serde_json::to_vec(&json!({ "input_tokens": est })).unwrap_or_default();
+                    write_simple(&mut stream, 200, "application/json", &out);
+                } else {
+                    handle_messages(&mut stream, &body, t);
+                }
+            }
+        }
     } else if method == "GET" {
         write_simple(
             &mut stream,
             200,
             "application/json",
-            b"{\"ok\":true,\"service\":\"polaris-codex-proxy\"}",
+            b"{\"ok\":true,\"service\":\"polaris-local-router\"}",
         );
     } else {
         anthropic_error(&mut stream, 404, "未知路由");
     }
     Ok(())
+}
+
+/// 拆路径前缀: `/p/{id}/rest` → (id, "/rest"); 无 `/p/` 前缀 → ("", 原路径)。
+fn split_route(path: &str) -> (String, String) {
+    if let Some(rest) = path.strip_prefix("/p/") {
+        let mut it = rest.splitn(2, '/');
+        let id = it.next().unwrap_or("").to_string();
+        let sub = it
+            .next()
+            .map(|s| format!("/{s}"))
+            .unwrap_or_else(|| "/".to_string());
+        (id, sub)
+    } else {
+        (String::new(), path.to_string())
+    }
 }
 
 fn write_simple(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) {
@@ -208,13 +268,131 @@ fn write_event(stream: &mut TcpStream, event: &str, data: &Value) -> std::io::Re
 
 // ───────────────────────── /v1/messages 主流程 ─────────────────────────
 
-fn handle_messages(stream: &mut TcpStream, body: &[u8]) {
+fn handle_messages(stream: &mut TcpStream, body: &[u8], target: RouteTarget) {
     let req: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => return anthropic_error(stream, 400, &format!("请求体不是合法 JSON: {e}")),
     };
     let want_stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    match target {
+        RouteTarget::Chatgpt => handle_chatgpt(stream, &req, want_stream),
+        RouteTarget::OpenAiCompat {
+            base_url,
+            api_key,
+            model,
+        } => handle_openai_compat(stream, &req, want_stream, &base_url, &api_key, &model),
+        // AnthropicCompat 在 handle_conn 就地透传, 不会走到这里
+        RouteTarget::AnthropicCompat { .. } => {
+            anthropic_error(stream, 500, "内部路由错误: 透传目标不应进翻译分支")
+        }
+    }
+}
+
+// ───────────────────────── Anthropic 兼容上游: 纯透传 ─────────────────────────
+
+/// 把 Anthropic 请求原样转发到 Anthropic 兼容上游, 响应字节流原样回吐(SSE 逐块 flush)。
+/// 只做两件事: ①按供应商 token_field 实时注入鉴权头(ANTHROPIC_API_KEY → x-api-key,
+/// 其余 → Authorization Bearer); ②透传 anthropic-version / anthropic-beta 协议头。
+/// 上游 4xx/5xx 也原样转达 —— claude 要看到真实报错才好自愈/提示。
+fn passthrough_forward(
+    stream: &mut TcpStream,
+    path: &str,
+    fwd_headers: &[(String, String)],
+    body: &[u8],
+    base_url: &str,
+    api_key: &str,
+    token_field: &str,
+) {
+    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let mut req = upstream_agent()
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .set("Accept", "text/event-stream")
+        .set("User-Agent", USER_AGENT);
+    let mut has_version = false;
+    for (k, v) in fwd_headers {
+        if k == "anthropic-version" {
+            has_version = true;
+        }
+        req = req.set(k, v);
+    }
+    if !has_version {
+        req = req.set("anthropic-version", "2023-06-01");
+    }
+    req = if token_field == "ANTHROPIC_API_KEY" {
+        req.set("x-api-key", api_key)
+    } else {
+        req.set("Authorization", &format!("Bearer {api_key}"))
+    };
+
+    let resp = match req.send_bytes(body) {
+        Ok(r) => r,
+        // 上游错误状态: 不翻译不吞掉, 连状态码带 body 原样转达
+        Err(ureq::Error::Status(_code, r)) => r,
+        Err(ureq::Error::Transport(t)) => {
+            let m = format!("连接上游失败: {t}");
+            set_error(m.clone());
+            return anthropic_error(stream, 502, &m);
+        }
+    };
+    relay_response(stream, resp);
+}
+
+fn reason_phrase(code: u16) -> &'static str {
+    match code {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        529 => "Overloaded",
+        _ => "Status",
+    }
+}
+
+/// 上游响应(状态码 + Content-Type + body 字节流)原样中继给客户端; SSE 逐块 flush 保低延迟。
+fn relay_response(stream: &mut TcpStream, resp: ureq::Response) {
+    let code = resp.status();
+    let ct = resp
+        .header("Content-Type")
+        .unwrap_or("application/json")
+        .to_string();
+    if code >= 400 {
+        set_error(format!("上游 HTTP {code}(透传)"));
+    }
+    let head = format!(
+        "HTTP/1.1 {code} {}\r\nContent-Type: {ct}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        reason_phrase(code)
+    );
+    if stream.write_all(head.as_bytes()).is_err() {
+        return;
+    }
+    let mut reader = resp.into_reader();
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if stream.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+                let _ = stream.flush();
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = stream.flush();
+}
+
+/// ChatGPT 订阅上游(Responses 协议, OAuth 鉴权 + 401 静默刷新重试)
+fn handle_chatgpt(stream: &mut TcpStream, req: &Value, want_stream: bool) {
     let auth = match load_auth() {
         Ok(a) => a,
         Err(e) => {
@@ -223,7 +401,7 @@ fn handle_messages(stream: &mut TcpStream, body: &[u8]) {
         }
     };
 
-    let upstream = match build_responses_body(&req) {
+    let upstream = match build_responses_body(req) {
         Ok(b) => b,
         Err(e) => return anthropic_error(stream, 400, &e),
     };
@@ -253,9 +431,50 @@ fn handle_messages(stream: &mut TcpStream, body: &[u8]) {
     };
 
     if want_stream {
-        stream_translate(stream, resp);
+        stream_translate(stream, resp, Flavor::Responses, DEFAULT_MODEL);
     } else {
-        buffer_translate(stream, resp);
+        buffer_translate(stream, resp, Flavor::Responses, DEFAULT_MODEL);
+    }
+}
+
+/// OpenAI 兼容上游(chat/completions, Bearer key 鉴权; key 是死的, 401 不重试)
+fn handle_openai_compat(
+    stream: &mut TcpStream,
+    req: &Value,
+    want_stream: bool,
+    base_url: &str,
+    api_key: &str,
+    default_model: &str,
+) {
+    let upstream = match build_chat_body(req, default_model) {
+        Ok(b) => b,
+        Err(e) => return anthropic_error(stream, 400, &e),
+    };
+
+    let resp = match call_upstream_openai(base_url, api_key, &upstream) {
+        Ok(r) => r,
+        Err(UpstreamErr::Unauthorized) => {
+            let m = "上游拒绝了 API Key (401/403), 请在坞里核对该供应商的 Key".to_string();
+            set_error(m.clone());
+            return anthropic_error(stream, 401, &m);
+        }
+        Err(e) => {
+            let m = e.message();
+            set_error(m.clone());
+            return anthropic_error(stream, 502, &m);
+        }
+    };
+
+    let model = req
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(default_model)
+        .to_string();
+    if want_stream {
+        stream_translate(stream, resp, Flavor::OpenAiChat, &model);
+    } else {
+        buffer_translate(stream, resp, Flavor::OpenAiChat, &model);
     }
 }
 
@@ -268,8 +487,8 @@ impl UpstreamErr {
     fn message(&self) -> String {
         match self {
             UpstreamErr::Unauthorized => "ChatGPT 授权已失效, 请在坞里重新授权 Codex".into(),
-            UpstreamErr::Http(c, b) => format!("ChatGPT 后端 HTTP {c}: {b}"),
-            UpstreamErr::Transport(t) => format!("连接 ChatGPT 后端失败: {t}"),
+            UpstreamErr::Http(c, b) => format!("上游 HTTP {c}: {b}"),
+            UpstreamErr::Transport(t) => format!("连接上游失败: {t}"),
         }
     }
 }
@@ -293,6 +512,44 @@ fn call_upstream(auth: &Auth, body: &Value) -> Result<ureq::Response, UpstreamEr
         .set("OpenAI-Beta", "responses=experimental")
         .set("originator", "codex_cli_rs")
         .set("session_id", &session)
+        .set("Accept", "text/event-stream")
+        .set("Content-Type", "application/json")
+        .set("User-Agent", USER_AGENT)
+        .send_json(body.clone());
+    match r {
+        Ok(resp) => Ok(resp),
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            Err(UpstreamErr::Unauthorized)
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let b = resp.into_string().unwrap_or_default();
+            Err(UpstreamErr::Http(code, b.chars().take(400).collect()))
+        }
+        Err(ureq::Error::Transport(t)) => Err(UpstreamErr::Transport(t.to_string())),
+    }
+}
+
+/// base_url → chat/completions 端点。约定与 cc-switch 一致:
+/// 已带 /chat/completions 原样用; 以 /v1 结尾补 /chat/completions; 其余补 /v1/chat/completions。
+fn openai_chat_url(base: &str) -> String {
+    let b = base.trim().trim_end_matches('/');
+    if b.ends_with("/chat/completions") {
+        b.to_string()
+    } else if b.ends_with("/v1") {
+        format!("{b}/chat/completions")
+    } else {
+        format!("{b}/v1/chat/completions")
+    }
+}
+
+fn call_upstream_openai(
+    base_url: &str,
+    api_key: &str,
+    body: &Value,
+) -> Result<ureq::Response, UpstreamErr> {
+    let r = upstream_agent()
+        .post(&openai_chat_url(base_url))
+        .set("Authorization", &format!("Bearer {api_key}"))
         .set("Accept", "text/event-stream")
         .set("Content-Type", "application/json")
         .set("User-Agent", USER_AGENT)
@@ -519,6 +776,187 @@ fn build_tools(req: &Value) -> Vec<Value> {
     out
 }
 
+// ───────────────────────── Anthropic → chat/completions 请求翻译 ─────────────────────────
+
+/// 推理系模型(o1/o3/o4/gpt-5*): 只认 max_completion_tokens, 且拒绝自定义 temperature。
+fn is_reasoning_model(m: &str) -> bool {
+    let low = m.to_ascii_lowercase();
+    low.starts_with("o1") || low.starts_with("o3") || low.starts_with("o4") || low.starts_with("gpt-5")
+}
+
+/// OpenAI 侧模型映射: claude 发来的一般是坞里钉的模型名, 原样透传;
+/// 空 / claude-*(没钉时的 Claude 默认名, 上游必不认)→ 回落该家默认模型。
+fn map_model_openai(m: &str, default_model: &str) -> String {
+    let t = m.trim();
+    if t.is_empty() || t.to_ascii_lowercase().starts_with("claude") {
+        default_model.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Anthropic /v1/messages 请求 → OpenAI chat/completions 请求。
+/// system→messages[0](role:system); assistant 的 text+tool_use→content+tool_calls;
+/// user 的 tool_result→独立 role:"tool" 消息(按 block 顺序落, 天然紧跟对应 tool_calls);
+/// 图片→image_url(data URI)。思维链不透传。
+fn build_chat_body(req: &Value, default_model: &str) -> Result<Value, String> {
+    let model = map_model_openai(
+        req.get("model").and_then(|v| v.as_str()).unwrap_or(""),
+        default_model,
+    );
+    let mut messages: Vec<Value> = Vec::new();
+    let system = extract_system(req);
+    if !system.trim().is_empty() {
+        messages.push(json!({ "role": "system", "content": system }));
+    }
+
+    let Some(msgs) = req.get("messages").and_then(|m| m.as_array()) else {
+        return Err("messages 为空".into());
+    };
+    for msg in msgs {
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+        match msg.get("content") {
+            Some(Value::String(s)) => messages.push(json!({ "role": role, "content": s })),
+            Some(Value::Array(blocks)) => {
+                if role == "assistant" {
+                    let mut text = String::new();
+                    let mut tool_calls: Vec<Value> = Vec::new();
+                    for b in blocks {
+                        match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                            "text" => {
+                                text.push_str(b.get("text").and_then(|t| t.as_str()).unwrap_or(""))
+                            }
+                            "tool_use" => {
+                                let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                let args = b.get("input").cloned().unwrap_or_else(|| json!({}));
+                                let args_str =
+                                    serde_json::to_string(&args).unwrap_or_else(|_| "{}".into());
+                                tool_calls.push(json!({
+                                    "id": id,
+                                    "type": "function",
+                                    "function": { "name": name, "arguments": args_str },
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    if text.is_empty() && tool_calls.is_empty() {
+                        continue;
+                    }
+                    let mut m = serde_json::Map::new();
+                    m.insert("role".into(), json!("assistant"));
+                    m.insert(
+                        "content".into(),
+                        if text.is_empty() { Value::Null } else { json!(text) },
+                    );
+                    if !tool_calls.is_empty() {
+                        m.insert("tool_calls".into(), Value::Array(tool_calls));
+                    }
+                    messages.push(Value::Object(m));
+                } else {
+                    // user: text/image 累积成一条; tool_result 单独成 role:"tool" 消息
+                    let mut parts: Vec<Value> = Vec::new();
+                    let mut has_image = false;
+                    let flush = |messages: &mut Vec<Value>, parts: &mut Vec<Value>, has_image: &mut bool| {
+                        if parts.is_empty() {
+                            return;
+                        }
+                        // 纯单段文本降成 string(网关兼容面最大); 含图才用 parts 数组
+                        let content = if !*has_image && parts.len() == 1 {
+                            parts[0]
+                                .get("text")
+                                .cloned()
+                                .unwrap_or_else(|| json!(""))
+                        } else {
+                            Value::Array(std::mem::take(parts))
+                        };
+                        parts.clear();
+                        *has_image = false;
+                        messages.push(json!({ "role": "user", "content": content }));
+                    };
+                    for b in blocks {
+                        match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                            "text" => {
+                                let t = b.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                parts.push(json!({ "type": "text", "text": t }));
+                            }
+                            "image" => {
+                                if let Some(url) = image_data_url(b) {
+                                    has_image = true;
+                                    parts.push(
+                                        json!({ "type": "image_url", "image_url": { "url": url } }),
+                                    );
+                                }
+                            }
+                            "tool_result" => {
+                                flush(&mut messages, &mut parts, &mut has_image);
+                                let id =
+                                    b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                                messages.push(json!({
+                                    "role": "tool",
+                                    "tool_call_id": id,
+                                    "content": tool_result_text(b),
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    flush(&mut messages, &mut parts, &mut has_image);
+                }
+            }
+            _ => {}
+        }
+    }
+    if messages.iter().all(|m| m.get("role") == Some(&json!("system"))) {
+        return Err("messages 为空".into());
+    }
+
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+        // 最后一帧带 usage(标准扩展, 主流网关都认); 不认的顶多不回 usage, 不影响正文
+        "stream_options": { "include_usage": true },
+    });
+    let obj = body.as_object_mut().unwrap();
+
+    let tools = build_tools(req);
+    if !tools.is_empty() {
+        let wrapped: Vec<Value> = tools
+            .into_iter()
+            .map(|t| {
+                // build_tools 产出 Responses 扁平格式, chat/completions 要包一层 function
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name").cloned().unwrap_or_default(),
+                        "description": t.get("description").cloned().unwrap_or_default(),
+                        "parameters": t.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object" })),
+                    }
+                })
+            })
+            .collect();
+        obj.insert("tools".into(), Value::Array(wrapped));
+        obj.insert("tool_choice".into(), json!("auto"));
+    }
+    if let Some(mt) = req.get("max_tokens").and_then(|v| v.as_u64()) {
+        // 推理系模型只认 max_completion_tokens(发 max_tokens 直接 400)
+        let key = if is_reasoning_model(&model) {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        obj.insert(key.into(), json!(mt));
+    }
+    if !is_reasoning_model(&model) {
+        if let Some(t) = req.get("temperature").and_then(|v| v.as_f64()) {
+            obj.insert("temperature".into(), json!(t));
+        }
+    }
+    Ok(body)
+}
+
 // ───────────────────────── Responses SSE → Anthropic SSE 响应翻译 ─────────────────────────
 
 /// 从上游 Responses 流里解析出的规范化事件
@@ -649,8 +1087,148 @@ fn drive_upstream<R: Read>(resp_reader: R, mut emit: impl FnMut(Norm)) {
     }
 }
 
+/// 上游协议风味 → 选哪个 SSE 归一化驱动
+#[derive(Clone, Copy)]
+enum Flavor {
+    /// ChatGPT Responses 协议
+    Responses,
+    /// OpenAI chat/completions 协议
+    OpenAiChat,
+}
+
+fn drive(flavor: Flavor, reader: impl Read, emit: impl FnMut(Norm)) {
+    match flavor {
+        Flavor::Responses => drive_upstream(reader, emit),
+        Flavor::OpenAiChat => drive_openai_chat(reader, emit),
+    }
+}
+
+/// 逐行读 chat/completions SSE, 归一成 Norm 回调给 emit。
+/// 与 Responses 不同, 该协议没有显式的 completed 事件 —— 以 `[DONE]`/EOF 收口,
+/// finish_reason 与(stream_options 带回的)usage 在途中记下, 收口时统一 emit Done。
+fn drive_openai_chat<R: Read>(resp_reader: R, mut emit: impl FnMut(Norm)) {
+    let mut reader = BufReader::new(resp_reader);
+    let mut saw_tool = false;
+    let mut tool_open = false;
+    let mut cur_tool_index: i64 = -1;
+    let mut finish = String::new();
+    let mut input_tokens = 0u64;
+    let mut output_tokens = 0u64;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let line = line.trim_end();
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() {
+            continue;
+        }
+        if data == "[DONE]" {
+            break;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        // 上游把错误塞进流里(部分网关的习惯)→ 直接失败收口
+        if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("上游返回错误")
+                .to_string();
+            emit(Norm::Failed(msg));
+            return;
+        }
+        // usage 帧(include_usage 时最后单独一帧, choices 为空)
+        if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
+            input_tokens = u
+                .get("prompt_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(input_tokens);
+            output_tokens = u
+                .get("completion_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(output_tokens);
+        }
+        let Some(choice) = v
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|c| c.first())
+        else {
+            continue;
+        };
+        if let Some(delta) = choice.get("delta") {
+            // 思维链增量(reasoning_content, DeepSeek 等方言)刻意不透传, 与 Responses 同款
+            if let Some(t) = delta.get("content").and_then(|x| x.as_str()) {
+                if !t.is_empty() {
+                    emit(Norm::TextDelta(t.to_string()));
+                }
+            }
+            if let Some(tcs) = delta.get("tool_calls").and_then(|x| x.as_array()) {
+                for tc in tcs {
+                    let idx = tc.get("index").and_then(|x| x.as_i64()).unwrap_or(0);
+                    if idx != cur_tool_index {
+                        if tool_open {
+                            emit(Norm::ToolStop);
+                        }
+                        cur_tool_index = idx;
+                        tool_open = true;
+                        saw_tool = true;
+                        let id = tc
+                            .get("id")
+                            .and_then(|x| x.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(String::from)
+                            .unwrap_or_else(|| format!("call_{idx}"));
+                        let name = tc
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        emit(Norm::ToolStart { id, name });
+                    }
+                    if let Some(a) = tc
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|x| x.as_str())
+                    {
+                        if !a.is_empty() {
+                            emit(Norm::ToolArgs(a.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(f) = choice.get("finish_reason").and_then(|x| x.as_str()) {
+            finish = f.to_string();
+        }
+    }
+    if tool_open {
+        emit(Norm::ToolStop);
+    }
+    let stop = if saw_tool || finish == "tool_calls" {
+        "tool_use"
+    } else if finish == "length" {
+        "max_tokens"
+    } else {
+        "end_turn"
+    };
+    emit(Norm::Done {
+        stop: stop.into(),
+        input_tokens,
+        output_tokens,
+    });
+}
+
 /// 流式: 把 Norm 事件实时翻成 Anthropic SSE 写回 claude
-fn stream_translate(client: &mut TcpStream, resp: ureq::Response) {
+fn stream_translate(client: &mut TcpStream, resp: ureq::Response, flavor: Flavor, model: &str) {
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
     if client.write_all(head.as_bytes()).is_err() {
         return;
@@ -666,7 +1244,7 @@ fn stream_translate(client: &mut TcpStream, resp: ureq::Response) {
                 "id": msg_id,
                 "type": "message",
                 "role": "assistant",
-                "model": DEFAULT_MODEL,
+                "model": model,
                 "content": [],
                 "stop_reason": Value::Null,
                 "stop_sequence": Value::Null,
@@ -680,7 +1258,7 @@ fn stream_translate(client: &mut TcpStream, resp: ureq::Response) {
     let mut tool_open = false;
     let mut done_sent = false;
 
-    drive_upstream(resp.into_reader(), |ev| match ev {
+    drive(flavor, resp.into_reader(), |ev| match ev {
         Norm::TextDelta(t) => {
             if tool_open {
                 let _ = write_event(
@@ -830,7 +1408,7 @@ fn stream_translate(client: &mut TcpStream, resp: ureq::Response) {
 }
 
 /// 非流式(stream:false): 累积成完整 Anthropic message JSON 一次性返回
-fn buffer_translate(client: &mut TcpStream, resp: ureq::Response) {
+fn buffer_translate(client: &mut TcpStream, resp: ureq::Response, flavor: Flavor, model: &str) {
     let mut blocks: Vec<Value> = Vec::new();
     let mut cur_text = String::new();
     let mut cur_tool: Option<(String, String, String)> = None; // id, name, args
@@ -839,7 +1417,7 @@ fn buffer_translate(client: &mut TcpStream, resp: ureq::Response) {
     let mut output_tokens = 0u64;
     let mut err: Option<String> = None;
 
-    drive_upstream(resp.into_reader(), |ev| match ev {
+    drive(flavor, resp.into_reader(), |ev| match ev {
         Norm::TextDelta(t) => cur_text.push_str(&t),
         Norm::ToolStart { id, name } => {
             if !cur_text.is_empty() {
@@ -882,7 +1460,7 @@ fn buffer_translate(client: &mut TcpStream, resp: ureq::Response) {
         "id": format!("msg_{}", gen_id()),
         "type": "message",
         "role": "assistant",
-        "model": DEFAULT_MODEL,
+        "model": model,
         "content": blocks,
         "stop_reason": stop_reason,
         "stop_sequence": Value::Null,
@@ -1188,6 +1766,393 @@ mod tests {
             include.iter().any(|v| v == "reasoning.encrypted_content"),
             "store:false + reasoning 时必须带 reasoning.encrypted_content"
         );
+    }
+
+    #[test]
+    fn split_route_variants() {
+        assert_eq!(
+            split_route("/v1/messages"),
+            ("".into(), "/v1/messages".into())
+        );
+        assert_eq!(
+            split_route("/p/kimi-x/v1/messages"),
+            ("kimi-x".into(), "/v1/messages".into())
+        );
+        assert_eq!(split_route("/p/abc"), ("abc".into(), "/".into()));
+        assert_eq!(
+            split_route("/p/abc/v1/messages/count_tokens?x=1"),
+            ("abc".into(), "/v1/messages/count_tokens?x=1".into())
+        );
+    }
+
+    #[test]
+    fn openai_chat_url_join_rules() {
+        assert_eq!(
+            openai_chat_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_chat_url("https://gw.example.com"),
+            "https://gw.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_chat_url("https://gw.example.com/api/v1/chat/completions"),
+            "https://gw.example.com/api/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_chat_url("https://gw.example.com/v1/"),
+            "https://gw.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn build_chat_body_minimal_and_reasoning() {
+        let req = json!({
+            "model": "gpt-4o", "system": "be nice",
+            "messages": [{"role":"user","content":"hello"}],
+            "max_tokens": 100, "temperature": 0.5,
+        });
+        let b = build_chat_body(&req, "gpt-5.5").expect("应翻译成功");
+        assert_eq!(b["model"], "gpt-4o");
+        assert_eq!(b["messages"][0]["role"], "system");
+        assert_eq!(b["messages"][1]["content"], "hello");
+        assert_eq!(b["max_tokens"], 100);
+        assert_eq!(b["temperature"], 0.5);
+        assert_eq!(b["stream"], true);
+
+        // claude-* 回落默认; gpt-5* 是推理系 → max_completion_tokens、temperature 不透传
+        let req2 = json!({
+            "model": "claude-opus-4",
+            "messages": [{"role":"user","content":"hi"}],
+            "max_tokens": 50, "temperature": 0.9,
+        });
+        let b2 = build_chat_body(&req2, "gpt-5.5").expect("应翻译成功");
+        assert_eq!(b2["model"], "gpt-5.5");
+        assert!(b2.get("max_tokens").is_none());
+        assert_eq!(b2["max_completion_tokens"], 50);
+        assert!(b2.get("temperature").is_none());
+
+        // 空 messages → Err
+        assert!(build_chat_body(&json!({"messages": []}), "gpt-5.5").is_err());
+    }
+
+    #[test]
+    fn build_chat_body_tools_and_tool_round() {
+        let req = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role":"user","content":"weather?"},
+                {"role":"assistant","content":[
+                    {"type":"text","text":"checking"},
+                    {"type":"tool_use","id":"call_1","name":"get_weather","input":{"city":"SH"}}
+                ]},
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"call_1","content":"sunny"},
+                    {"type":"text","text":"and tomorrow?"}
+                ]}
+            ],
+            "tools": [{"name":"get_weather","description":"d","input_schema":{"type":"object"}}],
+        });
+        let b = build_chat_body(&req, "gpt-5.5").expect("应翻译成功");
+        let msgs = b["messages"].as_array().unwrap();
+        // [user, assistant(text+tool_calls), tool, user]
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "checking");
+        assert_eq!(msgs[1]["tool_calls"][0]["function"]["name"], "get_weather");
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["tool_call_id"], "call_1");
+        assert_eq!(msgs[2]["content"], "sunny");
+        assert_eq!(msgs[3]["role"], "user");
+        assert_eq!(msgs[3]["content"], "and tomorrow?");
+        // chat/completions 的 tools 要包一层 function
+        assert_eq!(b["tools"][0]["type"], "function");
+        assert_eq!(b["tools"][0]["function"]["name"], "get_weather");
+        assert_eq!(b["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn drive_openai_chat_text_tools_usage() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_9\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":1}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut evs: Vec<String> = Vec::new();
+        let mut args = String::new();
+        drive_openai_chat(std::io::Cursor::new(sse.as_bytes()), |n| match n {
+            Norm::TextDelta(t) => evs.push(format!("text:{t}")),
+            Norm::ToolStart { id, name } => evs.push(format!("start:{id}:{name}")),
+            Norm::ToolArgs(a) => args.push_str(&a),
+            Norm::ToolStop => evs.push("stop".into()),
+            Norm::Done {
+                stop,
+                input_tokens,
+                output_tokens,
+            } => evs.push(format!("done:{stop}:{input_tokens}:{output_tokens}")),
+            Norm::Failed(m) => evs.push(format!("fail:{m}")),
+        });
+        assert_eq!(evs[0], "text:Hel");
+        assert_eq!(evs[1], "text:lo");
+        assert_eq!(evs[2], "start:call_9:f");
+        assert_eq!(args, "{\"a\":1}");
+        assert_eq!(evs[3], "stop");
+        assert_eq!(evs[4], "done:tool_use:7:3");
+    }
+
+    #[test]
+    fn drive_openai_chat_error_frame_no_done() {
+        let sse = "data: {\"error\":{\"message\":\"quota exceeded\"}}\n\n";
+        let mut fail = String::new();
+        let mut done = false;
+        drive_openai_chat(std::io::Cursor::new(sse.as_bytes()), |n| match n {
+            Norm::Failed(m) => fail = m,
+            Norm::Done { .. } => done = true,
+            _ => {}
+        });
+        assert_eq!(fail, "quota exceeded");
+        assert!(!done, "错误收口后不应再 emit Done");
+    }
+
+    /// 真 TCP 端到端: 假 OpenAI 上游 ← 本地路由 ← 原生 socket 客户端。
+    /// 验证: /p/{id} 按 id 解析上游、Bearer key/端点拼接正确、SSE 全程翻成 Anthropic 事件。
+    #[test]
+    fn e2e_openai_route_over_real_tcp() {
+        use std::io::{Read as _, Write as _};
+        use std::sync::{Arc, Mutex};
+
+        // 假上游: 收一条请求(记下请求头), 回一段 chat/completions SSE
+        let upstream = TcpListener::bind("127.0.0.1:0").expect("bind 假上游");
+        let up_port = upstream.local_addr().unwrap().port();
+        let captured: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let cap2 = captured.clone();
+        // 循环 accept: 客户端侧带重试(满载并行测试下 Windows 回环偶发 RST), 每次重试都要有上游可用
+        std::thread::spawn(move || {
+            for s in upstream.incoming().flatten() {
+                let mut s = s;
+                let mut buf = [0u8; 65536];
+                let mut head: Vec<u8> = Vec::new();
+                loop {
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&head).to_string();
+                    if let Some(pos) = text.find("\r\n\r\n") {
+                        let cl = text
+                            .lines()
+                            .find_map(|l| {
+                                let low = l.to_ascii_lowercase();
+                                low.strip_prefix("content-length:")
+                                    .map(|v| v.trim().to_string())
+                            })
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if head.len() >= pos + 4 + cl {
+                            break;
+                        }
+                    }
+                }
+                *cap2.lock().unwrap() = String::from_utf8_lossy(&head).to_string();
+                let body = concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+
+        // 把假上游注册成一个 OpenAI 协议供应商(STORE_PATH 未初始化 → persist 静默跳过, 不落盘)
+        crate::provider::provider_save(crate::provider::ProviderInput {
+            id: Some("t-openai-e2e".into()),
+            name: "e2e".into(),
+            note: String::new(),
+            website_url: String::new(),
+            token_field: None,
+            protocol: Some("openai".into()),
+            settings_config: json!({"env": {
+                "ANTHROPIC_BASE_URL": format!("http://127.0.0.1:{up_port}"),
+                "ANTHROPIC_AUTH_TOKEN": "sk-e2e",
+                "ANTHROPIC_MODEL": "gpt-test",
+            }}),
+        })
+        .expect("注册供应商");
+
+        let port = ensure_running().expect("本地路由应能启动");
+        let req_body = serde_json::to_string(&json!({
+            "model": "gpt-test", "stream": true, "max_tokens": 64,
+            "messages": [{"role":"user","content":"hi"}],
+        }))
+        .unwrap();
+        let req = format!(
+            "POST /p/t-openai-e2e/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+        // 全量并行测试满载时 Windows 回环偶发 RST(与被测逻辑无关的环境抖动)→ 重试最多 3 次;
+        // 契约断言不放松: 任一次完整读到响应就按同一标准校验。
+        let mut out = String::new();
+        let mut read_err = None;
+        for attempt in 0u64..3 {
+            let mut c = TcpStream::connect(("127.0.0.1", port)).expect("连本地路由");
+            c.write_all(req.as_bytes()).unwrap();
+            out.clear();
+            read_err = c.read_to_string(&mut out).err();
+            if read_err.is_none() && out.contains("message_stop") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(120 * (attempt + 1)));
+        }
+        assert!(
+            out.contains("message_start"),
+            "响应应是 Anthropic SSE; 读到=[{out}] read_err={read_err:?} last_error={}",
+            last_error()
+        );
+        assert!(out.contains("text_delta"), "应有文本增量: {out}");
+        assert!(out.contains("你好"), "文本应透传: {out}");
+        assert!(out.contains("\"input_tokens\":5"), "usage 应带回: {out}");
+        assert!(out.contains("message_stop"), "应正常收口: {out}");
+        let head = captured.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /v1/chat/completions"),
+            "上游应收到 chat/completions: {head}"
+        );
+        assert!(
+            head.contains("Bearer sk-e2e"),
+            "上游应收到该供应商的 Bearer key: {head}"
+        );
+
+        let _ = crate::provider::provider_delete("t-openai-e2e".to_string());
+    }
+
+    /// 真 TCP 端到端(透传): 假 Anthropic 上游 ← 本地路由 ← 原生 socket 客户端。
+    /// 验证: 路由总开关下 Anthropic 兼容供应商按 /p/{id} 透传 —— 路径拼接(base 带子路径)、
+    /// Bearer key 实时注入、anthropic-version 透传、SSE 字节原样中继。
+    #[test]
+    fn e2e_anthropic_passthrough_over_real_tcp() {
+        use std::io::{Read as _, Write as _};
+        use std::sync::{Arc, Mutex};
+
+        let upstream = TcpListener::bind("127.0.0.1:0").expect("bind 假上游");
+        let up_port = upstream.local_addr().unwrap().port();
+        let captured: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let cap2 = captured.clone();
+        std::thread::spawn(move || {
+            for s in upstream.incoming().flatten() {
+                let mut s = s;
+                let mut buf = [0u8; 65536];
+                let mut head: Vec<u8> = Vec::new();
+                loop {
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&head).to_string();
+                    if let Some(pos) = text.find("\r\n\r\n") {
+                        let cl = text
+                            .lines()
+                            .find_map(|l| {
+                                let low = l.to_ascii_lowercase();
+                                low.strip_prefix("content-length:")
+                                    .map(|v| v.trim().to_string())
+                            })
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if head.len() >= pos + 4 + cl {
+                            break;
+                        }
+                    }
+                }
+                *cap2.lock().unwrap() = String::from_utf8_lossy(&head).to_string();
+                // 真 Anthropic SSE 片段 —— 透传应逐字节原样到达客户端
+                let body = concat!(
+                    "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"透传OK\"}}\n\n",
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+
+        // Anthropic 兼容供应商(base 带子路径 /anthropic, 验证透传路径拼接)
+        crate::provider::provider_save(crate::provider::ProviderInput {
+            id: Some("t-anth-e2e".into()),
+            name: "透传e2e".into(),
+            note: String::new(),
+            website_url: String::new(),
+            token_field: None,
+            protocol: None,
+            settings_config: json!({"env": {
+                "ANTHROPIC_BASE_URL": format!("http://127.0.0.1:{up_port}/anthropic"),
+                "ANTHROPIC_AUTH_TOKEN": "sk-anth-e2e",
+            }}),
+        })
+        .expect("注册供应商");
+
+        let port = ensure_running().expect("本地路由应能启动");
+        let req_body = r#"{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let req = format!(
+            "POST /p/t-anth-e2e/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nanthropic-version: 2023-06-01\r\nanthropic-beta: fine-grained-tool-streaming-2025-05-14\r\nContent-Length: {}\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+        let mut out = String::new();
+        let mut read_err = None;
+        for attempt in 0u64..3 {
+            let mut c = TcpStream::connect(("127.0.0.1", port)).expect("连本地路由");
+            c.write_all(req.as_bytes()).unwrap();
+            out.clear();
+            read_err = c.read_to_string(&mut out).err();
+            if read_err.is_none() && out.contains("message_stop") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(120 * (attempt + 1)));
+        }
+
+        assert!(
+            out.contains("event: message_start"),
+            "SSE 应原样中继; 读到=[{out}] read_err={read_err:?} last_error={}",
+            last_error()
+        );
+        assert!(out.contains("透传OK"), "正文应逐字节原样: {out}");
+        assert!(out.contains("event: message_stop"), "收口事件应在: {out}");
+        let head = captured.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /anthropic/v1/messages"),
+            "base 子路径应拼上: {head}"
+        );
+        assert!(
+            head.contains("Bearer sk-anth-e2e"),
+            "AUTH_TOKEN 档应注入 Bearer: {head}"
+        );
+        assert!(
+            head.to_ascii_lowercase().contains("anthropic-version: 2023-06-01"),
+            "协议头应透传: {head}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("anthropic-beta: fine-grained-tool-streaming-2025-05-14"),
+            "beta 头应透传: {head}"
+        );
+
+        let _ = crate::provider::provider_delete("t-anth-e2e".to_string());
     }
 
     #[test]

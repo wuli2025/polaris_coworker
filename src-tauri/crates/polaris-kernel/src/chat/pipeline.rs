@@ -1628,7 +1628,20 @@ fn spawn_on_host(
     }
 
     cmd.spawn().map_err(|e| {
-        // 错误只在 spawn 本身失败 (e.g. exe 找不到), 不再是 prompt 太长
+        // 错误只在 spawn 本身失败 (e.g. exe 找不到), 不再是 prompt 太长。
+        // Windows 上架构不符的 exe 会返回 os error 193 (ERROR_BAD_EXE_FORMAT ——
+        // 系统原文「%1 不是有效的 Win32 应用程序」)。裸透传会在界面上冒出「Win32 不匹配」这种
+        // 让人摸不着头脑的串, 这里翻成人话 + 修复指引 (多半是本机装的 claude 二进制架构与系统不符)。
+        #[cfg(windows)]
+        if e.raw_os_error() == Some(193) {
+            let arch = std::env::consts::ARCH; // x86_64 / aarch64
+            return format!(
+                "调起宿主机 claude CLI 失败: 本机安装的 claude 二进制架构与系统 ({arch}) 不符 \
+                 (Windows: 不是有效的 Win32 应用程序 / ERROR_BAD_EXE_FORMAT)。\
+                 请卸载后按本机架构重装: npm uninstall -g @anthropic-ai/claude-code 再 \
+                 npm i -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
+            );
+        }
         format!("调起宿主机 claude CLI 失败: {}", e)
     })
 }

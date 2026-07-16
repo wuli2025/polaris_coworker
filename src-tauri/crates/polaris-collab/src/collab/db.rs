@@ -258,6 +258,16 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, id);
 
+        -- 云机中继网关挂牌(账号绑定 + 重启可恢复)。node_id = 桌面主机 iroh NodeId。
+        -- 内存 REGISTRY 只是运行态(端口/监听);这张表才是「谁的主机挂了牌」的权威,
+        -- 云机重启后按需懒恢复,踢人(吊销设备/停用账号)时同步删行。
+        CREATE TABLE IF NOT EXISTS gw_hosts(
+            node_id       TEXT PRIMARY KEY,
+            user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name          TEXT NOT NULL DEFAULT '',
+            registered_at INTEGER NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, state);
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_devices_node ON devices(node_id);
@@ -328,6 +338,23 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("补 check_skill 列失败: {e}"))?;
+    }
+
+    // 增量列:tickets.used_by —— 邀请码被**哪个账号**兑换(账号绑定审计:管理面能看
+    // 「这张码是谁用的」,免鉴/匿名兑换从此无处遁形)。
+    let has_used_by: bool = conn
+        .prepare("PRAGMA table_info(tickets)")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(1))
+                .map(|rows| rows.flatten().any(|c| c == "used_by"))
+        })
+        .unwrap_or(false);
+    if !has_used_by {
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN used_by TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("补 tickets.used_by 列失败: {e}"))?;
     }
 
     // 增量列:check_runs.sha —— 今日早版建过无 sha 的表(未发版但开发库存在),探测补齐。

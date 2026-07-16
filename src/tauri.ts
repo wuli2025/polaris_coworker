@@ -1508,7 +1508,9 @@ export interface ProviderView {
   category: string; // official | cn_official | aggregator | third_party | cloud_provider | custom
   websiteUrl: string;
   color: string;
-  kind: string; // official | key | codex | copilot | custom
+  kind: string; // official | key | codex | openai | copilot | custom
+  /** 上游协议: "" = Anthropic 兼容(直连) | "openai" = OpenAI 协议(经本地路由转发) | "chatgpt" = ChatGPT 订阅(codex) */
+  protocol: string;
   isPreset: boolean;
   hasKey: boolean;
   authToken: string;
@@ -1520,6 +1522,8 @@ export interface ProviderListResult {
   currentId: string;
   /** true = 联动(切换写 ~/.claude/settings.json, 终端 CLI 跟着变); false = 隔离(仅 Polaris 内生效) */
   linkGlobal: boolean;
+  /** 本地路由总开关(cc-switch 式): true = 所有供应商统一经 127.0.0.1 本地路由转发, 改 Key 即刻生效 */
+  routeLocal: boolean;
 }
 export interface ProviderSaveInput {
   id?: string;
@@ -1527,6 +1531,8 @@ export interface ProviderSaveInput {
   note?: string;
   websiteUrl?: string;
   tokenField?: string;
+  /** ""/省略 = Anthropic 兼容(直连); "openai" = OpenAI 协议(经本地路由转发) */
+  protocol?: string;
   /** 完整 settings_config（env 含 base_url + token + 开关） */
   settingsConfig: any;
 }
@@ -1611,6 +1617,9 @@ export const provider = {
   switch: (id: string) => invoke<string>("provider_switch", { id }),
   setLinkMode: (link: boolean) =>
     invoke<boolean>("provider_set_link_mode", { link }),
+  /** 本地路由总开关(cc-switch 式代理模式); 开关立即对当前供应商重新生效 */
+  setRouteMode: (route: boolean) =>
+    invoke<boolean>("provider_set_route_mode", { route }),
   save: (input: ProviderSaveInput) =>
     invoke<string>("provider_save", { input }),
   delete: (id: string) => invoke<void>("provider_delete", { id }),
@@ -1982,7 +1991,9 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       ];
     case "provider_list": {
       const mk = (id: string, name: string, baseUrl: string, category: string, color: string, kind: string, hasKey: boolean, authToken = "") => ({
-        id, name, note: "", baseUrl, tokenField: "ANTHROPIC_AUTH_TOKEN", category, websiteUrl: baseUrl, color, kind, isPreset: true, hasKey, authToken,
+        id, name, note: "", baseUrl, tokenField: "ANTHROPIC_AUTH_TOKEN", category, websiteUrl: baseUrl, color, kind,
+        protocol: kind === "codex" ? "chatgpt" : kind === "openai" ? "openai" : "",
+        isPreset: true, hasKey, authToken,
         settingsConfig: { env: baseUrl ? { ANTHROPIC_BASE_URL: baseUrl, ...(authToken ? { ANTHROPIC_AUTH_TOKEN: authToken } : {}) } : {} },
       });
       return {
@@ -1999,12 +2010,15 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         ],
         currentId: "kimi",
         linkGlobal: false,
+        routeLocal: false,
       };
     }
     case "provider_switch":
       return String(_args?.id ?? "claude-official");
     case "provider_set_link_mode":
       return Boolean(_args?.link);
+    case "provider_set_route_mode":
+      return Boolean(_args?.route);
     case "provider_save":
       return "custom-stub";
     case "provider_delete":

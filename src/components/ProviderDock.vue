@@ -65,6 +65,11 @@ const periods: { key: Period; label: string }[] = [
   { key: "year", label: "近 1 年" },
 ];
 
+// 注:这里曾有个「Claude Code ⇄ Codex」分段器, 已删。它把 Codex 说成一个与
+// Claude Code 并列的「后端/CLI」, 而 Polaris 从不 spawn codex CLI —— 对话永远由
+// claude CLI 跑, 「Codex」只是「ChatGPT 订阅」这一家供应商(经本地翻译代理, 上游
+// 写死 chatgpt.com)。那个二元框架凭空让人以为能「在 Codex 下选 MiniMax」, 实际
+// MiniMax 等各家本就在下方供应商列表里点选即用。真相只有一层: 选哪家供应商。
 onMounted(() => {
   store.refresh();
   store.refreshUsage();
@@ -110,6 +115,13 @@ function onEsc(e: KeyboardEvent) {
 async function toggleLink() {
   await store.setLinkMode(!store.linkGlobal);
   await store.refresh();
+}
+
+/** 本地路由总开关(cc-switch 式);开关立即对当前供应商重新生效,顺带刷新路由端口展示 */
+async function toggleRoute() {
+  await store.setRouteMode(!store.routeLocal);
+  await store.refresh();
+  await store.refreshCodexProxy();
 }
 
 function fmt(n: number): string {
@@ -184,9 +196,14 @@ function balClass(b?: ProviderBalance | null): string {
   if (b.kind === "error") return "err";
   return "muted";
 }
-/** 仅 key/official 类供应商有「额度」概念(codex/copilot 走授权,无额度数字) */
+/** 仅 key/official 类供应商有「额度」概念(codex/copilot 走授权; OpenAI 协议家的
+ *  额度接口非 Anthropic 形态, 通用探测多半失败, 一并不查省噪音) */
 const showBalance = computed(
-  () => !!current.value && current.value.kind !== "codex" && current.value.kind !== "copilot"
+  () =>
+    !!current.value &&
+    current.value.kind !== "codex" &&
+    current.value.kind !== "copilot" &&
+    current.value.protocol !== "openai"
 );
 const currentModel = computed(() => {
   const c = current.value;
@@ -451,6 +468,7 @@ function subtitleOf(p: ProviderView): string {
     return store.codex?.loggedIn ? "ChatGPT · 已授权 · 点即用" : "ChatGPT · 需先授权";
   }
   if (p.kind === "copilot") return "需 OAuth · 代理";
+  if (p.protocol === "openai") return `${hostOf(p.baseUrl)} · OpenAI 协议 · 本地转发`;
   return hostOf(p.baseUrl);
 }
 </script>
@@ -537,6 +555,31 @@ function subtitleOf(p: ProviderView): string {
                 </button>
               </div>
 
+              <!-- 本地路由总开关(cc-switch 式代理模式):开 = 所有供应商统一经
+                   127.0.0.1 本地路由转发,Key 由路由实时注入,改 Key/切换即刻生效 -->
+              <div class="link-row">
+                <div class="link-info">
+                  <span class="link-title">本地路由 · 热切换</span>
+                  <span class="link-desc">{{
+                    store.routeLocal
+                      ? (store.codexProxy?.running
+                          ? `全部请求经 127.0.0.1:${store.codexProxy.port} 转发到当前供应商,改 Key 即刻生效`
+                          : "全部请求经本地路由转发到当前供应商,改 Key 即刻生效")
+                      : "直连:切换时把地址/Key 注入环境;GPT/Codex 等非 Anthropic 协议仍自动走本地路由"
+                  }}</span>
+                </div>
+                <button
+                  class="link-switch"
+                  :class="{ on: store.routeLocal }"
+                  role="switch"
+                  :aria-checked="store.routeLocal"
+                  :title="store.routeLocal ? '点击关闭(回到直连注入)' : '点击开启(cc-switch 式本地转发,热切换)'"
+                  @click="toggleRoute"
+                >
+                  <span class="knob" />
+                </button>
+              </div>
+
               <!-- ★ 上段:当前供应商状态卡 (放大) -->
               <section v-if="current" class="now-card" :class="{ codex: current.kind === 'codex' }">
                 <div class="now-row">
@@ -558,8 +601,14 @@ function subtitleOf(p: ProviderView): string {
                         <span v-if="store.claudeAuth?.loggedIn">Claude 订阅 · 已登录</span>
                         <span v-else class="need-auth">未登录订阅 · 可用 API Key 或点下方授权</span>
                       </template>
+                      <template v-else-if="current.protocol === 'openai'">
+                        {{ hostOf(current.baseUrl) }}<span v-if="currentModel"> · {{ currentModel }}</span>
+                        <span v-if="store.codexProxy?.running"> · 本地路由 127.0.0.1:{{ store.codexProxy.port }}</span>
+                        <span v-else> · OpenAI 协议 · 本地转发</span>
+                      </template>
                       <template v-else>
                         {{ hostOf(current.baseUrl) }}<span v-if="currentModel"> · {{ currentModel }}</span>
+                        <span v-if="store.routeLocal && store.codexProxy?.running"> · 本地路由 127.0.0.1:{{ store.codexProxy.port }}</span>
                       </template>
                     </div>
                   </div>
@@ -636,7 +685,7 @@ function subtitleOf(p: ProviderView): string {
                       <span class="prov-info">
                         <span class="prov-name">
                           {{ p.name }}
-                          <span v-if="p.kind === 'codex'" class="kcodex">GPT</span>
+                          <span v-if="p.kind === 'codex'" class="kcodex">GPT</span><span v-else-if="p.protocol === 'openai'" class="kcodex">OpenAI</span>
                         </span>
                         <span class="prov-host">{{ subtitleOf(p) }}</span>
                       </span>
@@ -661,7 +710,7 @@ function subtitleOf(p: ProviderView): string {
                             <Pencil :size="12" :stroke-width="1.8" />
                           </button>
                           <button
-                            v-if="(p.isPreset && p.hasKey && p.kind === 'key') || p.kind === 'custom'"
+                            v-if="(p.isPreset && p.hasKey && (p.kind === 'key' || p.kind === 'openai')) || p.kind === 'custom'"
                             class="mini-act danger"
                             :title="p.isPreset ? '清除配置' : '删除'"
                             @click.stop="removeProvider(p)"
@@ -694,7 +743,7 @@ function subtitleOf(p: ProviderView): string {
                         <span class="prov-info">
                           <span class="prov-name">
                             {{ p.name }}
-                            <span v-if="p.kind === 'codex'" class="kcodex">GPT</span>
+                            <span v-if="p.kind === 'codex'" class="kcodex">GPT</span><span v-else-if="p.protocol === 'openai'" class="kcodex">OpenAI</span>
                           </span>
                           <span class="prov-host">{{ subtitleOf(p) }}</span>
                         </span>
@@ -719,7 +768,7 @@ function subtitleOf(p: ProviderView): string {
                               <Pencil :size="12" :stroke-width="1.8" />
                             </button>
                             <button
-                              v-if="(p.isPreset && p.hasKey && p.kind === 'key') || p.kind === 'custom'"
+                              v-if="(p.isPreset && p.hasKey && (p.kind === 'key' || p.kind === 'openai')) || p.kind === 'custom'"
                               class="mini-act danger"
                               :title="p.isPreset ? '清除配置' : '删除'"
                               @click.stop="removeProvider(p)"
@@ -749,7 +798,7 @@ function subtitleOf(p: ProviderView): string {
                         <span class="prov-info">
                           <span class="prov-name">
                             {{ p.name }}
-                            <span v-if="p.kind === 'codex'" class="kcodex">GPT</span>
+                            <span v-if="p.kind === 'codex'" class="kcodex">GPT</span><span v-else-if="p.protocol === 'openai'" class="kcodex">OpenAI</span>
                           </span>
                           <span class="prov-host">{{ subtitleOf(p) }}</span>
                         </span>
@@ -774,7 +823,7 @@ function subtitleOf(p: ProviderView): string {
                               <Pencil :size="12" :stroke-width="1.8" />
                             </button>
                             <button
-                              v-if="(p.isPreset && p.hasKey && p.kind === 'key') || p.kind === 'custom'"
+                              v-if="(p.isPreset && p.hasKey && (p.kind === 'key' || p.kind === 'openai')) || p.kind === 'custom'"
                               class="mini-act danger"
                               :title="p.isPreset ? '清除配置' : '删除'"
                               @click.stop="removeProvider(p)"

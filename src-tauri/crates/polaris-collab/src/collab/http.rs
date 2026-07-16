@@ -304,9 +304,31 @@ async fn collab_me(State(state): State<CollabState>, headers: HeaderMap) -> Resp
     }
 }
 
-/// 票据兑换 → 建账号+登记设备+签会话(入伙的应用层部分;隧道层白名单在 P2 接入)。
-async fn collab_redeem(Json(v): Json<Value>) -> Response {
+/// 票据兑换(入伙的应用层部分;隧道层白名单在 P2 接入)。两条路,票据都记 used_by:
+/// - **已登录**(带有效会话 token 且真实账号):不建新号,把本设备绑到当前账号 —— 保证
+///   「同账号的人通过邀请码进来」;返回当前用户 + 原 token。
+/// - 未登录:老路径,建账号+登记设备+签会话。
+async fn collab_redeem(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Json(v): Json<Value>,
+) -> Response {
+    // 已登录路径:合成身份(user_id=0,全局口令)不算 —— 免鉴身份不允许绑设备入伙。
+    let logged_in = match auth_ctx(&state, &headers).await {
+        Some(ctx) if ctx.user_id > 0 => bearer_of(&headers),
+        _ => None,
+    };
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        if let Some(token) = logged_in {
+            let user = crate::collab::auth::check_session(&token)?;
+            crate::collab::identity::redeem_ticket_existing(
+                &s_of(&v, "code"),
+                &user,
+                &s_of(&v, "deviceName"),
+                &s_of(&v, "nodeId"),
+            )?;
+            return Ok(json!({"user": user, "token": token}));
+        }
         let (u, token) = crate::collab::identity::redeem_ticket(
             &s_of(&v, "code"),
             &s_of(&v, "username"),
@@ -379,7 +401,13 @@ async fn collab_user_disable(
             .and_then(|x| x.as_i64())
             .ok_or("缺 userId")?;
         let dis = v.get("disabled").and_then(|x| x.as_bool()).unwrap_or(true);
-        crate::collab::auth::set_user_disabled(id, dis).map(|_| json!({"ok": true}))
+        crate::collab::auth::set_user_disabled(id, dis)?;
+        // 停用即把该账号名下所有中继挂牌踢下线(关监听/断连/删挂牌行),不留「还能被反代到」的尾巴。
+        #[cfg(feature = "collab-net")]
+        if dis {
+            crate::collab::gateway::unregister_user(id);
+        }
+        Ok(json!({"ok": true}))
     })
     .await;
     unwrap_api(out)
@@ -541,7 +569,13 @@ async fn collab_device_revoke(
         return forbid();
     }
     let out = tokio::task::spawn_blocking(move || {
-        crate::collab::identity::revoke_device(&s_of(&v, "deviceId")).map(|_| json!({"ok": true}))
+        let node_id = crate::collab::identity::revoke_device(&s_of(&v, "deviceId"))?;
+        // 吊销即把这台设备在中继上的挂牌踢下线(若有);反代闸随后也会拒它。
+        #[cfg(feature = "collab-net")]
+        crate::collab::gateway::unregister_node(&node_id);
+        #[cfg(not(feature = "collab-net"))]
+        let _ = node_id;
+        Ok(json!({"ok": true}))
     })
     .await;
     unwrap_api(out)
@@ -2167,17 +2201,26 @@ async fn tunnel_relays_api(
 // ── 云机中继网关:桌面主机挂牌注册 ──
 
 /// 桌面主机挂牌到云机网关:POST 自己的 iroh NodeId,云机起本地桥接监听并返回网关 NodeId
-/// (桌面随后把它加进设备白名单,隧道才放行)。鉴权:任一有效云机账号即可(网关只做路由,
-/// 真正的准入靠主机侧设备白名单——不在白名单的注册只是造一个连不通的死监听)。
+/// (桌面随后把它加进设备白名单,隧道才放行)。
+/// 鉴权:**必须真实账号**(user_id>0)。全局口令/免鉴合成身份一律拒 —— 挂牌要绑到账号上,
+/// 账号管理面才能按账号看到「谁挂了哪台主机」并一键踢下线。NodeId 经 ensure_device_for
+/// 绑定该账号(已属别人的 NodeId 拒绝顶替),挂牌落库 gw_hosts(云机重启懒恢复)。
 #[cfg(feature = "collab-net")]
 async fn gw_register(
     State(state): State<CollabState>,
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
-    let Some(_ctx) = auth_ctx(&state, &headers).await else {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
+    if ctx.user_id <= 0 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"挂牌必须使用真实账号登录(免密口令身份不可注册主机)"})),
+        )
+            .into_response();
+    }
     let host_node_id = s_of(&v, "hostNodeId");
     if host_node_id.trim().is_empty() {
         return (
@@ -2192,7 +2235,31 @@ async fn gw_register(
     } else {
         host_name
     };
-    match crate::collab::gateway::register_host(&host_node_id, &name).await {
+    // NodeId ↔ 账号绑定(防顶替):已属其他账号直接拒。
+    {
+        let uid = ctx.user_id;
+        let node = host_node_id.clone();
+        let nm = name.clone();
+        let bound = tokio::task::spawn_blocking(move || {
+            crate::collab::identity::ensure_device_for(uid, &node, &nm)
+        })
+        .await;
+        match bound {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                return (StatusCode::FORBIDDEN, Json(json!({"error": e}))).into_response()
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("设备绑定任务失败: {e}")})),
+                )
+                    .into_response()
+            }
+        }
+    }
+    crate::collab::db::audit(&ctx.username, "gw.register", &host_node_id, &name);
+    match crate::collab::gateway::register_host(&host_node_id, &name, ctx.user_id).await {
         Ok(port) => Json(json!({
             "ok": true,
             "gatewayNodeId": crate::collab::gateway::gateway_node_id().unwrap_or_default(),
