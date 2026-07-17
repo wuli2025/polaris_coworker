@@ -100,6 +100,32 @@ Invoke-RestMethod "https://github.com/wuli2025/polaris_coworker/releases/latest/
 # 且每个 url 都带 https://gh-proxy.com/ 前缀（见第 3 步）
 ```
 
+## 附：环境医生的依赖包镜像（R2 `deps/`，与发版解耦）
+
+环境医生一键安装 PowerShell 7 / Node.js / uv 时，**第一候选源是自家 R2**，公共 GitHub 代理
+与官方直连仅作兜底（见 `polaris-kernel/src/doctor/install.rs`）。这条线**平时不用管**，
+只在改动那三个版本号时才需要动手：
+
+```powershell
+# 版本号在 install.rs 里：PWSH_VER / NODE_VER / UV_VER
+# 改任何一个 => 必须把对应架构的包传进 R2，否则 R2 那跳 404，静默退化回不稳定的公共代理
+wrangler r2 object put polaris-downloads/deps/<文件名> --file <本地包> --content-type application/x-msi --remote
+# key 前缀是 deps/，不含 downloads/（那是 functions/downloads/[[path]].js 的路由前缀）
+
+# 传完必做终验：对着生产域名核字节数 + 文件头魔数（与第 5 步同一套规矩）
+# msi 头=d0 cf 11 e0 / zip 头=50 4b 03 04 / tar.gz 头=1f 8b
+Invoke-WebRequest "https://llmwiki.cloud/downloads/deps/<文件名>" -Method Head -UseBasicParsing
+```
+
+当前在册（x64 + arm64 双架构）：`PowerShell-7.4.6-win-{x64,arm64}.msi`、
+`node-v20.18.1-{x64,arm64}.msi`、`uv-{x86_64,aarch64}-pc-windows-msvc.zip`、
+`uv-{x86_64,aarch64}-apple-darwin.tar.gz`。32 位 x86 故意没镜像——R2 那跳 404 后自动落到
+公共代理，不影响可用性。
+
+> 为什么要自建这一层：公共 GitHub 代理时好时坏（实测 gh-proxy.com 已 500，故已从候选里摘掉），
+> 而 PowerShell 的 MSI 有 107MB，慢一点就摸到超时上限 → 「有些概率装不上」。走 R2 后实测
+> 8 秒下完（5.3 MB/s），且 R2 出站免费。
+
 ## 注意
 
 - **macOS 未签名**：Tauri updater 的 minisign 签名校验与 Apple 公证是两回事。更新包能下载
