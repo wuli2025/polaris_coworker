@@ -173,7 +173,22 @@ export async function upload(
   return j.files ?? [];
 }
 
-/** 受 token 保护的文件 URL(图片/预览;导航请求带不了头,token 走 query)。 */
+/**
+ * 取文件内容,**token 走 Authorization 头、不进 URL**。
+ *
+ * 用于 HTML/SVG/文本预览:
+ *  ① 服务端对 html/svg/js 会加 `Content-Disposition: attachment`(防止带 token 的
+ *     URL 被当页面加载、页内脚本读走 owner 令牌),iframe 直接 src= 必白屏 —— fetch 不受该头影响;
+ *  ② URL 里不出现令牌,拿到文本后塞进 sandbox iframe 的 srcdoc,脚本跑在 opaque origin,
+ *     够不着主机同源接口,比原来的 `?token=` 直载更安全。
+ * 调用方自己判 res.ok(把 401/403/404 的中文原因显示出来,别静默白屏)。
+ */
+export async function fileFetch(path: string): Promise<Response> {
+  const qs = new URLSearchParams({ path });
+  return rawFetch(`/api/file?${qs.toString()}`, { headers: authHeaders() });
+}
+
+/** 受 token 保护的文件 URL(图片/音视频等元素加载;元素请求带不了头,token 只能走 query)。 */
 export function fileUrl(path: string): string {
   const qs = new URLSearchParams({ path });
   const t = getToken();
@@ -198,7 +213,9 @@ export async function probe(addr: string): Promise<boolean> {
 }
 
 /** 分享码 PLRS1-<base64url{c,a}> → {code, addrs};非分享码返回 null。 */
-export function parseShareCode(s: string): { code: string; addrs: string[] } | null {
+export function parseShareCode(
+  s: string
+): { code: string; addrs: string[]; authority?: string; kid?: string } | null {
   const m = s.trim();
   if (!m.startsWith("PLRS1-")) return null;
   try {
@@ -209,6 +226,9 @@ export function parseShareCode(s: string): { code: string; addrs: string[] } | n
     return {
       code: v.c,
       addrs: v.a.filter((x: unknown): x is string => typeof x === "string"),
+      // u/k:主机的账号由云端账号中心统管时带上,收码人据此知道去哪儿注册/登录。
+      authority: typeof v.u === "string" && v.u ? v.u : undefined,
+      kid: typeof v.k === "string" && v.k ? v.k : undefined,
     };
   } catch {
     return null;
@@ -220,7 +240,7 @@ export function parseShareCode(s: string): { code: string; addrs: string[] } | n
  *  完整权限直接连上,不走登录/邀请(令牌本身即凭据)。区别于 PLRS1(邀请别人,走 redeem)。 */
 export function parseConnectCode(
   s: string
-): { token: string; addrs: string[]; nodeId?: string } | null {
+): { token: string; addrs: string[]; nodeId?: string; authority?: string } | null {
   const m = s.trim();
   if (!m.startsWith("PLRK1-")) return null;
   try {
@@ -233,6 +253,8 @@ export function parseConnectCode(
       addrs: v.a.filter((x: unknown): x is string => typeof x === "string"),
       // n = 主机 iroh NodeId:有它 + 原生隧道可用 → probeEntry 优先 iroh 打洞 P2P 直连。
       nodeId: typeof v.n === "string" && v.n ? v.n : undefined,
+      // u = 该主机的云端账号中心(令牌进门用不着,换账号登录时要)。
+      authority: typeof v.u === "string" && v.u ? v.u : undefined,
     };
   } catch {
     return null;
@@ -376,6 +398,53 @@ export interface AuthResult {
   user: CollabUser;
   token: string;
 }
+
+/** 主机的账号体系自述:决定登录该往主机打还是往云端账号中心打。 */
+export interface AccountInfo {
+  mode: "authority" | "delegated" | "local";
+  authorityUrl?: string;
+  trusted?: boolean;
+  kid?: string;
+  emailRequired: boolean;
+}
+
+/**
+ * 打**云端账号中心**的绝对地址(不是当前主机)。
+ * 注册/改密/换身份断言都发生在云端;主机没有密码可验,也不该看见密码。
+ */
+async function authorityFetch<T>(
+  authorityUrl: string,
+  path: string,
+  body?: unknown
+): Promise<T> {
+  const base = authorityUrl.trim().replace(/\/+$/, "");
+  if (!base) throw new NetError("还没有配置云端账号中心地址");
+  let res: Response;
+  try {
+    res = await fetch(base + path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: body === undefined ? {} : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new NetError("连不上云端账号中心,请检查网络");
+  }
+  const text = await res.text();
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new NetError("云端账号中心返回了非 JSON —— 请确认地址填对了");
+  }
+  if (!res.ok) {
+    throw new NetError(
+      (data as { error?: string } | null)?.error ??
+        `账号中心请求失败(HTTP ${res.status})`,
+      res.status
+    );
+  }
+  return data as T;
+}
 export interface CollabProject {
   id: number;
   name: string;
@@ -425,6 +494,55 @@ export const collab = {
   }) => post<AuthResult>("/api/collab/redeem", a),
   logout: () => post<void>("/api/collab/logout"),
   me: () => get<{ username: string; role: string }>("/api/collab/me"),
+
+  // ── 云端账号中心(账号权威)──
+  /** 本机主机的账号体系自述(公开,免登录) */
+  accountInfo: () => get<AccountInfo>("/api/account/info"),
+  /** 拿云端断言换**当前主机**的会话:主机纯本地验签,断网也认 */
+  loginAssertion: (assertion: string) =>
+    post<AuthResult>("/api/collab/login_assertion", {
+      assertion,
+      deviceId: deviceId(),
+    }),
+  /** 云端登录:用户名**或邮箱** + 密码 → 身份断言 */
+  authorityLogin: (url: string, a: { username: string; password: string }) =>
+    authorityFetch<{ assertion: string; uid: string }>(
+      url,
+      "/api/account/login",
+      a
+    ),
+  /** 云端注册:必须带邮箱验证码 */
+  authoritySignup: (
+    url: string,
+    a: {
+      email: string;
+      code: string;
+      username: string;
+      password: string;
+      displayName: string;
+    }
+  ) =>
+    authorityFetch<{ assertion: string; uid: string }>(
+      url,
+      "/api/account/signup",
+      a
+    ),
+  /** 云端发验证码(注册/找回共用) */
+  authoritySendCode: (url: string, email: string, purpose: "signup" | "reset") =>
+    authorityFetch<void>(url, "/api/collab/email/send_code", { email, purpose }),
+  /** 云端账号 + 本机邀请码 → 成为这台主机的成员 */
+  joinWithTicket: (a: { assertion: string; code: string; deviceName: string }) =>
+    post<AuthResult>("/api/collab/join", { ...a, nodeId: deviceId() }),
+  /** 云端改密:改完所有主机同时生效 */
+  authorityReset: (
+    url: string,
+    a: { email: string; code: string; newPassword: string }
+  ) =>
+    authorityFetch<{ ok: boolean; username?: string }>(
+      url,
+      "/api/account/reset",
+      a
+    ),
   listProjects: () => get<CollabProject[]>("/api/collab/projects"),
   listTasks: (projectId: number) =>
     get<TaskCard[]>(`/api/collab/tasks?projectId=${String(projectId)}`),

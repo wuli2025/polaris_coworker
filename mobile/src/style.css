@@ -6,44 +6,92 @@
  * 面板底色一律走 --bg-elev(半透明),全局 .glass/.glass-bar/.glass-panel 补 blur。
  */
 :root {
-  --bg: #0a0a10;
-  /* 玻璃面板:半透明,叠 backdrop-filter 才有琉璃感 */
-  --bg-elev: rgba(28, 28, 38, 0.62);
-  --bg-elev2: rgba(46, 46, 62, 0.55);
-  --line: rgba(255, 255, 255, 0.09);
-  --line-hi: rgba(255, 255, 255, 0.16); /* 玻璃上缘高光 */
-  --text: #f2f2f7;
-  --text-dim: #a9a9bc;
-  --text-faint: #737388;
+  --bg: #0a0b16;
+  /* 玻璃面:**冷白半透明**而不是灰紫实色 —— 灰底 = 塑料/磨砂,透白 + brightness 才是水晶。
+     深色下靠 backdrop 的 brightness 提亮,而不是自己刷一层灰。 */
+  /* 冷蓝白而不是中性白:纯白叠深底 = 中灰(塑料),带蓝调才是「有色玻璃」 */
+  --bg-elev: rgba(170, 194, 255, 0.1);
+  --bg-elev2: rgba(170, 194, 255, 0.15);
+  /* 不做 backdrop-filter 的小件用(chips/气泡/小按钮):不能再厚,厚了就发灰 */
+  --glass-solid: rgba(168, 192, 255, 0.14);
+  --line: rgba(255, 255, 255, 0.12);
+  --line-hi: rgba(255, 255, 255, 0.38); /* 上缘镜面高光 */
+  --line-lo: rgba(0, 0, 0, 0.3); /* 下缘暗边:玻璃厚度 */
+  --text: #f7f8ff;
+  --text-dim: #c6c8dc;
+  --text-faint: #8d90a6;
   --accent: #7c9bff;
   --accent-2: #b48cff;
-  --accent-soft: rgba(108, 140, 255, 0.2);
-  --user-bubble: rgba(90, 118, 235, 0.34);
+  --accent-soft: rgba(108, 140, 255, 0.26);
+  --user-bubble: rgba(96, 126, 255, 0.36);
   --danger: #ff6b6b;
   --ok: #3ecf8e;
-  --radius: 20px;
-  --blur: saturate(170%) blur(22px);
-  --shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  --radius: 22px;
+  --radius-lg: 28px;
+  /* brightness 是「透光」的关键;去掉它玻璃就发灰 */
+  --blur-sm: saturate(180%) brightness(1.12) blur(18px);
+  --blur: saturate(185%) brightness(1.1) blur(28px);
+  /* 投影分三段:内侧高光(玻璃厚度) + 近处硬影(离地) + 远处漫射(体积) */
+  --shadow-sm:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 2px 6px rgba(0, 0, 0, 0.16),
+    0 8px 22px rgba(0, 0, 0, 0.24);
+  --shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 4px 10px rgba(0, 0, 0, 0.2),
+    0 18px 46px rgba(0, 0, 0, 0.34);
+  --shadow-lg:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 8px 20px rgba(0, 0, 0, 0.24),
+    0 32px 72px rgba(0, 0, 0, 0.44);
+  /* 玻璃上的字:复杂底色上靠极淡投影拉对比(只深色用,浅色会糊) */
+  --text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  /* 玻璃自由边(抽屉右缘等):深色是镜面白光,浅色得反过来用暗线,不然完全看不见 */
+  --edge: rgba(255, 255, 255, 0.34);
+  --scrim: rgba(6, 6, 14, 0.4);
+  /* 琉璃面语义名(--bg-elev* 是旧名,保留给尚未改造的页面) */
+  --glass: var(--bg-elev);
+  --glass2: var(--bg-elev2);
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #eef0f6;
-    --bg-elev: rgba(255, 255, 255, 0.58);
-    --bg-elev2: rgba(255, 255, 255, 0.72);
-    --line: rgba(20, 20, 40, 0.08);
-    --line-hi: rgba(255, 255, 255, 0.65);
-    --text: #17171f;
-    --text-dim: #5c5c6b;
-    --text-faint: #9999a8;
+    --bg: #eaeef8;
+    /* 浅色下别把白刷到 0.8+:那就是一张白纸,极光透不过来 = 塑料卡片 */
+    --bg-elev: rgba(255, 255, 255, 0.52);
+    --bg-elev2: rgba(255, 255, 255, 0.62);
+    --glass-solid: rgba(255, 255, 255, 0.58);
+    --edge: rgba(30, 34, 70, 0.14);
+    --scrim: rgba(20, 24, 50, 0.26);
+    --line: rgba(20, 20, 40, 0.07);
+    --line-hi: rgba(255, 255, 255, 0.9);
+    --line-lo: rgba(20, 20, 40, 0.1);
+    --text: #12121a;
+    --text-dim: #5a5a6b;
+    --text-faint: #9295a8;
     --accent: #4a6cf7;
     --accent-2: #8a5cf7;
-    --accent-soft: rgba(74, 108, 247, 0.14);
-    --user-bubble: rgba(74, 108, 247, 0.16);
+    --accent-soft: rgba(74, 108, 247, 0.16);
+    --user-bubble: rgba(74, 108, 247, 0.18);
     --danger: #e5484d;
-    --shadow: 0 8px 28px rgba(60, 70, 110, 0.16);
+    --blur-sm: saturate(180%) brightness(1.04) blur(18px);
+    --blur: saturate(185%) brightness(1.02) blur(28px);
+    --shadow-sm:
+      inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      0 2px 5px rgba(60, 70, 110, 0.08),
+      0 8px 22px rgba(60, 70, 110, 0.13);
+    --shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.98),
+      0 4px 10px rgba(60, 70, 110, 0.1),
+      0 18px 44px rgba(60, 70, 110, 0.17);
+    --shadow-lg:
+      inset 0 1px 0 rgba(255, 255, 255, 0.98),
+      0 8px 18px rgba(60, 70, 110, 0.12),
+      0 32px 70px rgba(60, 70, 110, 0.22);
+    /* 浅色底不加字投影(会发糊),靠深字自身对比 */
+    --text-shadow: none;
   }
 }
 
@@ -64,6 +112,8 @@ body {
     system-ui, sans-serif;
   font-size: 15px;
   line-height: 1.55;
+  /* 玻璃后面是流动的极光,纯字容易被亮团吃掉;深色主题下给一层极淡投影兜对比 */
+  text-shadow: var(--text-shadow);
   overscroll-behavior: none;
   -webkit-user-select: none;
   user-select: none;
@@ -74,18 +124,22 @@ body::before {
   position: fixed;
   inset: 0;
   z-index: -1;
+  /* 四团光,**要铺满整屏**:玻璃没有可折射的东西就只是一块灰片,
+     所以中部和底部(输入卡所在)必须留光,不能只在顶上好看。 */
   background:
-    radial-gradient(52% 40% at 12% 6%, rgba(96, 108, 255, 0.34), transparent 62%),
-    radial-gradient(46% 38% at 92% 22%, rgba(160, 96, 255, 0.24), transparent 64%),
-    radial-gradient(50% 44% at 55% 100%, rgba(52, 168, 200, 0.17), transparent 66%);
+    radial-gradient(64% 44% at 8% 2%, rgba(112, 132, 255, 0.55), transparent 68%),
+    radial-gradient(56% 40% at 98% 14%, rgba(190, 110, 255, 0.42), transparent 70%),
+    radial-gradient(70% 42% at 62% 56%, rgba(88, 120, 255, 0.26), transparent 72%),
+    radial-gradient(84% 40% at 44% 102%, rgba(64, 206, 236, 0.38), transparent 72%);
   pointer-events: none;
 }
 @media (prefers-color-scheme: light) {
   body::before {
     background:
-      radial-gradient(52% 40% at 12% 6%, rgba(120, 140, 255, 0.3), transparent 62%),
-      radial-gradient(46% 38% at 92% 22%, rgba(180, 130, 255, 0.22), transparent 64%),
-      radial-gradient(50% 44% at 55% 100%, rgba(80, 190, 220, 0.2), transparent 66%);
+      radial-gradient(64% 44% at 8% 2%, rgba(126, 148, 255, 0.46), transparent 68%),
+      radial-gradient(56% 40% at 98% 14%, rgba(196, 140, 255, 0.36), transparent 70%),
+      radial-gradient(70% 42% at 62% 56%, rgba(120, 150, 255, 0.22), transparent 72%),
+      radial-gradient(84% 40% at 44% 102%, rgba(80, 205, 235, 0.34), transparent 72%);
   }
 }
 #app {
@@ -110,25 +164,56 @@ a {
   color: var(--accent);
 }
 
-/* ── 琉璃工具类(全局,叠在组件 scoped 样式之上) ── */
-.glass {
+/* ── 琉璃工具类(全局,叠在组件 scoped 样式之上) ──
+ * 一片「水晶」= 四件事:
+ *  ① backdrop 透光(blur + saturate + **brightness**,少了 brightness 就是灰磨砂);
+ *  ② 边缘光:上缘镜面高光 / 下缘暗边 —— 这是玻璃「有厚度」的唯一线索;
+ *  ③ 内侧高光:左上角一团很淡的白,模拟光从斜上方打进玻璃体;
+ *  ④ 分层投影:内高光 + 近硬影 + 远漫射(见 --shadow)。
+ * 关键纪律:**只有真正悬浮的面才 blur**(顶栏三件/输入卡/抽屉/sheet/助手气泡),
+ * 面上的小件(chips、附件、小圆钮)一律不 blur —— 层数爆了整屏会掉帧且越叠越灰。
+ */
+.glass,
+.glass-bar,
+.glass-panel {
+  position: relative;
   -webkit-backdrop-filter: var(--blur);
   backdrop-filter: var(--blur);
   border: 1px solid var(--line);
-  border-top-color: var(--line-hi); /* 上缘高光:玻璃厚度感 */
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
   box-shadow: var(--shadow);
 }
-.glass-bar {
-  background: var(--bg-elev);
-  -webkit-backdrop-filter: var(--blur);
-  backdrop-filter: var(--blur);
-}
+.glass-bar,
 .glass-panel {
   background: var(--bg-elev);
-  -webkit-backdrop-filter: var(--blur);
-  backdrop-filter: var(--blur);
-  border-right: 1px solid var(--line-hi);
-  box-shadow: var(--shadow);
+}
+/* 玻璃体内侧高光(伪元素独立于内容,不吃 opacity) */
+.glass::before,
+.glass-bar::before,
+.glass-panel::before,
+.specular::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(78% 42% at 16% 0%, rgba(255, 255, 255, 0.18), transparent 58%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07), transparent 40%);
+}
+.specular {
+  position: relative;
+}
+
+/* 统一按压反馈:缩放 + 压暗,而不是只缩放(只缩放像网页,压暗才像实体按下去) */
+.press {
+  transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
+  touch-action: manipulation;
+}
+.press:active {
+  transform: scale(0.96);
+  filter: brightness(0.9);
 }
 
 .btn {
@@ -141,11 +226,16 @@ a {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: #fff;
   font-weight: 600;
-  box-shadow: 0 4px 14px rgba(108, 140, 255, 0.35);
-  transition: opacity 0.15s, transform 0.1s;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 4px 14px rgba(108, 140, 255, 0.4);
+  transition: opacity 0.15s, transform 0.13s cubic-bezier(0.32, 0.72, 0, 1),
+    filter 0.13s ease;
+  touch-action: manipulation;
 }
 .btn:active {
-  transform: scale(0.97);
+  transform: scale(0.96);
+  filter: brightness(0.92);
 }
 .btn:disabled {
   opacity: 0.5;
@@ -154,9 +244,10 @@ a {
   background: var(--bg-elev2);
   color: var(--text);
   box-shadow: none;
-  -webkit-backdrop-filter: var(--blur);
-  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur-sm);
+  backdrop-filter: var(--blur-sm);
   border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
 }
 .field {
   width: 100%;
@@ -164,10 +255,11 @@ a {
   border-radius: 14px;
   background: var(--bg-elev2);
   border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
   color: var(--text);
   outline: none;
-  -webkit-backdrop-filter: var(--blur);
-  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur-sm);
+  backdrop-filter: var(--blur-sm);
 }
 .field:focus {
   border-color: var(--accent);

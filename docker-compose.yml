@@ -48,6 +48,12 @@ services:
       - POLARIS_SMTP_PASS=${POLARIS_SMTP_PASS:-}
       - POLARIS_SMTP_FROM=${POLARIS_SMTP_FROM:-}
       - POLARIS_EMAIL_SIGNUP=${POLARIS_EMAIL_SIGNUP:-}
+      # 账号权威:云机设 POLARIS_ACCOUNT_AUTHORITY=1 即成为「账号中心」,
+      # 其余主机填 POLARIS_ACCOUNT_AUTHORITY_URL 指向它。两个都不设 = 老的本机账号行为。
+      # 签名私钥落 /home/polaris/Polaris/data/account_authority.key(在 polaris-data 卷里,
+      # 随卷备份即可;丢了所有成员主机都要重新信任)。
+      - POLARIS_ACCOUNT_AUTHORITY=${POLARIS_ACCOUNT_AUTHORITY:-}
+      - POLARIS_ACCOUNT_AUTHORITY_URL=${POLARIS_ACCOUNT_AUTHORITY_URL:-}
     volumes:
       - polaris-data:/home/polaris/Polaris   # 数据根：知识库/collab.db(data/) 等
       - polaris-claude:/home/polaris/.claude # claude 凭证与 settings.json

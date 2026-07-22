@@ -202,7 +202,14 @@ async function doSetup() {
     // ③ 身份:优先步①的账号密码(账号密码为主);受邀码走 redeem;
     //    登录报「无此账号」且是注册模式 → signup/bootstrap。
     if (share?.code) {
-      await redeem({ code: share.code, username: u, password: password.value, displayName: n });
+      // 分享码可能带着主机的账号中心地址(联邦主机):全新设备还没问过主机自述时用它兜底。
+      await redeem({
+        code: share.code,
+        username: u,
+        password: password.value,
+        displayName: n,
+        authorityHint: share.authority,
+      });
       saveCreds(activeHostId.value, remember.value ? u : "", remember.value ? password.value : ""); // codex #10
     } else if (mode.value === "signup") {
       // signup/bootstrap 已返回 token 并持久化,不再重复 login(会多造 session,二次失败反把成功当失败,codex #11)。

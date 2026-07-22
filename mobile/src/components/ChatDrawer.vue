@@ -24,6 +24,7 @@ import { hostName, base, user, displayName } from "../lib/auth";
 import { hostLabel } from "../lib/hosts";
 import { hasCap } from "../lib/capabilities";
 import { go, type Screen } from "../lib/nav";
+import Ico from "./Ico.vue";
 
 const props = defineProps<{ modelValue: boolean; wsOk: boolean }>();
 const emit = defineEmits<{ "update:modelValue": [boolean] }>();
@@ -77,9 +78,7 @@ function del(id: string, e: Event) {
   </transition>
   <transition name="drawer">
     <aside v-if="props.modelValue" class="drawer glass-panel">
-      <!-- 最顶:新对话 -->
-      <button class="btn full new" @click="fresh">＋ 新对话</button>
-
+      <!-- 顶:当前主机(状态灯 + 地址 + 切换) -->
       <div class="dhead">
         <div class="hrow">
           <span class="hdot" :class="{ live: wsOk }"></span>
@@ -87,12 +86,21 @@ function del(id: string, e: Event) {
             <div class="hname">{{ hostName || "未命名主机" }}</div>
             <div class="haddr faint">{{ hostLabel(base) }}</div>
           </div>
-          <button class="hsw" title="切换主机" @click="nav('hosts')">⇄</button>
+          <button class="hsw" title="切换主机" @click="nav('hosts')">
+            <Ico name="swap" :size="17" />
+          </button>
         </div>
       </div>
 
-      <div class="dlabel faint">
-        对话记录{{ remoteLoading ? " · 同步中…" : "" }}
+      <!-- 新对话:玻璃行,不用整块渐变按钮(太抢眼) -->
+      <button class="new" @click="fresh">
+        <span class="nico"><Ico name="compose" :size="16" /></span>
+        新对话
+      </button>
+
+      <div class="dlabel">
+        <span>对话记录</span>
+        <span v-if="remoteLoading" class="syncing">同步中</span>
       </div>
       <div class="dlist">
         <p v-if="!merged.length" class="dempty faint">
@@ -112,7 +120,9 @@ function del(id: string, e: Event) {
               <template v-if="c.localOnly"> · 仅本机缓存</template>
             </div>
           </div>
-          <button v-if="c.localOnly" class="cdel" title="清掉本机缓存" @click="del(c.id, $event)">✕</button>
+          <button v-if="c.localOnly" class="cdel" title="清掉本机缓存" @click="del(c.id, $event)">
+            <Ico name="close" :size="13" />
+          </button>
         </div>
       </div>
 
@@ -120,19 +130,19 @@ function del(id: string, e: Event) {
       <div class="dfoot">
         <div class="shortcuts">
           <button v-if="hasCap('files')" class="short" @click="nav('files')">
-            <span class="sic">📁</span>文件
+            <Ico name="folder" :size="18" />文件
           </button>
           <button v-if="hasCap('projects')" class="short" @click="nav('projects')">
-            <span class="sic">🗂️</span>项目
+            <Ico name="grid" :size="18" />项目
           </button>
           <button v-if="hasCap('kb')" class="short" @click="nav('kb')">
-            <span class="sic">📚</span>知识库
+            <Ico name="book" :size="18" />知识库
           </button>
         </div>
         <button class="urow" @click="nav('settings')">
           <span class="avatar">{{ displayName(user).slice(0, 1) }}</span>
           <span class="uname">{{ displayName(user) }}</span>
-          <span class="uset faint">⚙️ 设置</span>
+          <span class="uset"><Ico name="settings" :size="17" /></span>
         </button>
       </div>
     </aside>
@@ -143,7 +153,11 @@ function del(id: string, e: Event) {
 .scrim {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--scrim);
+  /* 只虚化不压暗:scrim 一旦 brightness 变暗,上面的抽屉会去采样这层暗画面 → 整片发灰
+     (实测过,别加回来)。景深靠虚化 + 半透明黑给,不靠降亮度。 */
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
   z-index: 200;
 }
 .drawer {
@@ -151,18 +165,76 @@ function del(id: string, e: Event) {
   top: 0;
   left: 0;
   bottom: 0;
-  width: min(82vw, 320px);
+  width: min(84vw, 328px);
   z-index: 210;
   display: flex;
   flex-direction: column;
-  padding: calc(14px + var(--safe-top)) 14px calc(10px + var(--safe-bottom));
+  padding: calc(12px + var(--safe-top)) 12px calc(10px + var(--safe-bottom));
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
 }
-.new {
-  flex-shrink: 0;
+/* 右缘一道竖向镜面光:玻璃板的「厚度」,两端渐隐免得在圆角处露直角 */
+.drawer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1.5px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    var(--edge) 16%,
+    var(--edge) 74%,
+    transparent
+  );
+  pointer-events: none;
+  z-index: 1;
+}
+/* 抽屉内部所有行都不再单独 blur:面板已经是一片玻璃,里面再 blur 只会越叠越灰 */
+.drawer > * {
+  position: relative;
+  z-index: 1;
 }
 .dhead {
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
+  padding: 4px 4px 12px;
+}
+/* 新对话:玻璃行 */
+.new {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  flex-shrink: 0;
+  padding: 11px 12px;
+  border-radius: 16px;
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
+  font-size: 14.5px;
+  font-weight: 500;
+  text-align: left;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
+  touch-action: manipulation;
+}
+.new:active,
+.hsw:active,
+.short:active {
+  transform: scale(0.96);
+  filter: brightness(0.9);
+}
+.nico {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+  color: #fff;
+  flex-shrink: 0;
 }
 .hrow {
   display: flex;
@@ -197,39 +269,82 @@ function del(id: string, e: Event) {
 .hsw {
   width: 34px;
   height: 34px;
-  border-radius: 10px;
-  background: var(--bg-elev2);
+  border-radius: 11px;
+  background: var(--glass2);
   border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
   color: var(--text-dim);
-  font-size: 15px;
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
+  transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
+  touch-action: manipulation;
 }
 .dlabel {
-  margin: 12px 2px 6px;
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 6px 4px;
+  font-size: 11.5px;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+}
+.syncing {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--glass2);
+  color: var(--text-faint);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.45 }
+  50% { opacity: 1 }
 }
 .dlist {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  margin: 0 -2px;
+  padding: 0 2px;
 }
 .dempty {
   text-align: center;
   padding: 30px 0;
 }
 .conv {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 11px 10px;
-  border-radius: 12px;
+  padding: 10px 10px;
+  border-radius: 13px;
   cursor: pointer;
+  border: 1px solid transparent;
 }
+/* 选中态:淡玻璃 + 左侧一道竖条,不用整块高饱和色块 */
 .conv.on {
-  background: var(--accent-soft);
+  background: var(--glass2);
+  border-color: var(--line);
+  border-top-color: var(--line-hi);
+}
+.conv.on::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+}
+.conv.on .ctitle {
+  font-weight: 600;
 }
 .conv:active {
-  background: var(--bg-elev2);
+  background: var(--glass2);
 }
 .cmeta {
   flex: 1;
@@ -246,16 +361,26 @@ function del(id: string, e: Event) {
 }
 .cdel {
   color: var(--text-faint);
-  font-size: 12px;
   padding: 6px;
   flex-shrink: 0;
+  display: flex;
 }
 /* ── 底部:快捷入口 + 用户/设置 ── */
 .dfoot {
   flex-shrink: 0;
-  border-top: 1px solid var(--line);
-  padding-top: 10px;
+  padding-top: 12px;
   margin-top: 8px;
+  position: relative;
+}
+/* 发丝分隔线:两端渐隐,比整条实线轻 */
+.dfoot::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 6px;
+  right: 6px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--line-hi), transparent);
 }
 .shortcuts {
   display: flex;
@@ -267,37 +392,37 @@ function del(id: string, e: Event) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 9px 0 7px;
-  border-radius: 12px;
-  background: var(--bg-elev2);
+  gap: 6px;
+  padding: 10px 0 8px;
+  border-radius: 14px;
+  background: var(--glass2);
   border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
   color: var(--text-dim);
-  font-size: 12px;
-}
-.short:active {
-  background: var(--accent-soft);
-}
-.sic {
-  font-size: 19px;
+  font-size: 11.5px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
+  touch-action: manipulation;
 }
 .urow {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 8px;
-  border-radius: 12px;
+  padding: 8px;
+  border-radius: 14px;
   text-align: left;
 }
 .urow:active {
-  background: var(--bg-elev2);
+  background: var(--glass2);
 }
 .avatar {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: var(--accent);
+  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+  box-shadow: inset 0 -5px 10px rgba(30, 20, 90, 0.3), 0 3px 10px rgba(108, 140, 255, 0.3);
   color: #fff;
   display: flex;
   align-items: center;
@@ -305,6 +430,7 @@ function del(id: string, e: Event) {
   font-weight: 600;
   font-size: 15px;
   flex-shrink: 0;
+  text-transform: uppercase;
 }
 .uname {
   flex: 1;
@@ -315,16 +441,17 @@ function del(id: string, e: Event) {
 }
 .uset {
   flex-shrink: 0;
-}
-.full {
-  width: 100%;
+  color: var(--text-faint);
+  display: flex;
+  padding: 6px;
 }
 .drawer-enter-active,
 .drawer-leave-active {
-  transition: transform 0.22s ease;
+  transition: transform 0.26s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.2s;
 }
 .drawer-enter-from,
 .drawer-leave-to {
   transform: translateX(-100%);
+  opacity: 0.7;
 }
 </style>

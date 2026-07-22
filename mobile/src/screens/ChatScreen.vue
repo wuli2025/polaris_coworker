@@ -5,7 +5,7 @@ import { renderMd } from "../lib/md";
 import { upload } from "../lib/net";
 import { toast, toastErr } from "../lib/toast";
 import { openPreview } from "../lib/preview";
-import { hostName } from "../lib/auth";
+import { hostName, user, displayName } from "../lib/auth";
 import {
   chosenProviderId,
   chosenSkillIds,
@@ -20,6 +20,7 @@ import TriggerSheet from "../components/TriggerSheet.vue";
 import ChatDrawer from "../components/ChatDrawer.vue";
 import SkillSheet from "../components/SkillSheet.vue";
 import ModelSheet from "../components/ModelSheet.vue";
+import Ico from "../components/Ico.vue";
 
 const props = defineProps<{ wsOk: boolean }>();
 
@@ -120,50 +121,20 @@ async function onFiles(e: Event) {
   }
 }
 
-// 空状态功能卡(豆包式):点一下把模板填进输入框,补上细节就能发
+// 建议:Kimi/豆包式**浮在输入框上方**的一条横滑胶囊(不再是空状态里的两列大卡片,
+// 因为大卡片只在空对话时有用,而横滑条聊到一半也能随手点)。点一下把模板填进输入框。
 interface Feature {
   icon: string;
   label: string;
-  hint: string;
   template: string;
 }
 const FEATURES: Feature[] = [
-  {
-    icon: "📊",
-    label: "做 PPT",
-    hint: "一句话生成整份演示",
-    template: "帮我做一份 PPT,主题是:",
-  },
-  {
-    icon: "🌐",
-    label: "做网页",
-    hint: "HTML 页面直接产出",
-    template: "帮我做一个 HTML 网页,要求:",
-  },
-  {
-    icon: "✍️",
-    label: "写文档",
-    hint: "报告/方案/文案",
-    template: "帮我写一份文档,主题是:",
-  },
-  {
-    icon: "📈",
-    label: "数据分析",
-    hint: "表格丢过来就行",
-    template: "帮我分析这份数据,重点看:",
-  },
-  {
-    icon: "🗂️",
-    label: "总结文件",
-    hint: "长文秒变要点",
-    template: "帮我总结这份文件的要点",
-  },
-  {
-    icon: "📅",
-    label: "生成周报",
-    hint: "口述内容变周报",
-    template: "帮我生成一份周报,本周做了:",
-  },
+  { icon: "deck", label: "做 PPT", template: "帮我做一份 PPT,主题是:" },
+  { icon: "globe", label: "做网页", template: "帮我做一个 HTML 网页,要求:" },
+  { icon: "doc", label: "写文档", template: "帮我写一份文档,主题是:" },
+  { icon: "chart", label: "数据分析", template: "帮我分析这份数据,重点看:" },
+  { icon: "stack", label: "总结文件", template: "帮我总结这份文件的要点" },
+  { icon: "calendar", label: "写周报", template: "帮我生成一份周报,本周做了:" },
 ];
 function useFeature(f: Feature) {
   draft.value = f.template;
@@ -174,41 +145,44 @@ function useFeature(f: Feature) {
   });
 }
 
-const modelLabel = computed(() => chosenProviderName() || "模型");
+const modelLabel = computed(() => chosenProviderName() || "Auto");
 const skillLabel = computed(() =>
-  chosenSkillIds.value.length ? `技能·${chosenSkillIds.value.length}` : "技能"
+  chosenSkillIds.value.length ? `技能 ${chosenSkillIds.value.length}` : "技能"
 );
+// 建议条:没在生成、且还没开始打字时才占位(打字时让位给输入,避免抢空间)
+const showSuggest = computed(() => !sending.value && !draft.value.trim());
 </script>
 
 <template>
   <div class="chat">
+    <!-- 顶栏:三块悬浮琉璃(左抽屉 / 中主机·模型 / 右新对话),不压横线,背景透出极光 -->
     <header class="bar">
-      <button class="icon" title="展开" @click="drawerOpen = true">☰</button>
-      <div class="title">
-        {{ hostName || "对话" }}
-        <span class="dot" :class="{ live: wsOk }" :title="wsOk ? '已连接' : '连接中'"></span>
-      </div>
-      <button class="icon" title="新对话" @click="newConversation">＋</button>
+      <button class="orb-btn" title="展开" @click="drawerOpen = true">
+        <Ico name="menu" :size="19" />
+      </button>
+      <button class="hpill" @click="modelOpen = true">
+        <span class="hp-host">{{ hostName || "对话" }}</span>
+        <span class="hp-model">{{ modelLabel }}</span>
+        <span class="hp-dot" :class="{ live: wsOk }" :title="wsOk ? '已连接' : '连接中'"></span>
+      </button>
+      <button class="orb-btn" title="新对话" @click="newConversation">
+        <Ico name="compose" :size="18" />
+      </button>
     </header>
 
     <div ref="scroller" class="stream">
       <div v-if="!messages.length" class="empty">
-        <div class="hi">嗨,今天做点什么?</div>
-        <p class="muted sub">把任务丢给中控平台 —— PPT、网页、文档、数据都能直接产出。</p>
-        <div class="feats">
-          <button v-for="f in FEATURES" :key="f.label" class="feat" @click="useFeature(f)">
-            <span class="fic">{{ f.icon }}</span>
-            <span class="fmeta">
-              <span class="flabel">{{ f.label }}</span>
-              <span class="fhint">{{ f.hint }}</span>
-            </span>
-          </button>
+        <div class="orb"><i></i></div>
+        <div class="hi">
+          嗨 {{ displayName(user) }},<br />今天想做点什么
         </div>
       </div>
 
       <div v-for="(m, i) in messages" :key="i" class="row" :class="m.role">
         <div v-if="m.role === 'user'" class="bubble user">{{ m.text }}</div>
-        <div v-else-if="m.role === 'tool'" class="tool-chip">🔧 {{ m.text }}</div>
+        <div v-else-if="m.role === 'tool'" class="tool-chip">
+          <Ico name="tool" :size="13" /> {{ m.text }}
+        </div>
         <div v-else-if="m.role === 'error'" class="bubble err">{{ m.text }}</div>
         <div v-else class="bubble asst">
           <div class="md" v-html="renderMd(m.text)"></div>
@@ -219,7 +193,7 @@ const skillLabel = computed(() =>
               class="art-preview"
               @click="openPreview(artView(m.artifacts).preview!)"
             >
-              <span class="ap-ico">👁</span>
+              <Ico name="eye" :size="16" />
               <span class="ap-name">{{ baseName(artView(m.artifacts).preview!) }}</span>
               <span class="ap-tag">预览</span>
             </button>
@@ -227,7 +201,7 @@ const skillLabel = computed(() =>
             <template v-if="artView(m.artifacts).rest.length">
               <button class="art-more" @click="toggleArts(i)">
                 {{ artsExpanded.has(i) ? "收起" : `本轮共 ${m.artifacts.length} 个文件` }}
-                <span class="am-chev">{{ artsExpanded.has(i) ? "▲" : "▼" }}</span>
+                <Ico name="chevron" :size="12" :class="{ up: artsExpanded.has(i) }" />
               </button>
               <template v-if="artsExpanded.has(i)">
                 <button
@@ -236,23 +210,33 @@ const skillLabel = computed(() =>
                   class="art"
                   @click="openPreview(p)"
                 >
-                  📎 {{ baseName(p) }}
+                  <Ico name="clip" :size="13" /> {{ baseName(p) }}
                 </button>
               </template>
             </template>
           </div>
         </div>
       </div>
-      <div v-if="sending" class="typing">正在思考…</div>
+      <div v-if="sending" class="typing"><i></i><i></i><i></i></div>
     </div>
 
-    <!-- 豆包式输入卡片:上排输入,下排 ＋/技能/模型/深度工作 chips + 发送 -->
-    <div class="composer">
+    <!-- 底部:建议横滑条 + 输入卡片(都贴着屏底浮起来) -->
+    <div class="dock">
+      <transition name="lift">
+        <div v-if="showSuggest" class="suggest">
+          <button v-for="f in FEATURES" :key="f.label" class="sg" @click="useFeature(f)">
+            <Ico :name="f.icon" :size="16" />
+            {{ f.label }}
+          </button>
+        </div>
+      </transition>
+
       <div class="card">
         <div v-if="attachments.length" class="atts">
           <span v-for="(a, i) in attachments" :key="i" class="att-chip">
-            📎 {{ a.split(/[\\/]/).pop() }}
-            <button @click="attachments.splice(i, 1)">✕</button>
+            <Ico name="clip" :size="12" />
+            {{ a.split(/[\\/]/).pop() }}
+            <button @click="attachments.splice(i, 1)"><Ico name="close" :size="12" /></button>
           </span>
         </div>
         <textarea
@@ -260,12 +244,14 @@ const skillLabel = computed(() =>
           v-model="draft"
           class="ta"
           rows="1"
-          placeholder="有什么想聊的?"
+          placeholder="尽管问,带图也行"
           @input="autoGrow"
           @keydown.enter.exact.prevent="send"
         ></textarea>
         <div class="tools">
-          <button class="round" title="更多" @click="sheetOpen = true">＋</button>
+          <button class="round" title="更多" @click="sheetOpen = true">
+            <Ico name="plus" :size="19" />
+          </button>
           <div class="chips">
             <button
               v-if="skillState !== 'unsupported'"
@@ -273,7 +259,7 @@ const skillLabel = computed(() =>
               :class="{ on: chosenSkillIds.length }"
               @click="skillOpen = true"
             >
-              ⚡ {{ skillLabel }}
+              <Ico name="spark" :size="14" /> {{ skillLabel }}
             </button>
             <button
               v-if="providerState !== 'unsupported'"
@@ -281,16 +267,21 @@ const skillLabel = computed(() =>
               :class="{ on: chosenProviderId !== 'auto' }"
               @click="modelOpen = true"
             >
-              ✦ {{ modelLabel }}
+              <Ico name="stack" :size="14" /> {{ modelLabel }}
             </button>
             <button class="chip" :class="{ on: deepWork }" @click="deepWork = !deepWork">
-              🧠 深度工作
+              <Ico name="brain" :size="14" /> 深度工作
             </button>
           </div>
-          <button v-if="sending" class="stop" @click="cancel">■</button>
-          <button v-else class="go" :disabled="!draft.trim()" @click="send">↑</button>
+          <button v-if="sending" class="go stop" @click="cancel">
+            <Ico name="stop" :size="18" :stroke-width="2" />
+          </button>
+          <button v-else class="go" :disabled="!draft.trim()" @click="send">
+            <Ico name="send" :size="18" :stroke-width="2" />
+          </button>
         </div>
       </div>
+      <div class="foot">内容由 AI 生成</div>
     </div>
 
     <input ref="fileInput" type="file" multiple hidden @change="onFiles" />
@@ -308,97 +299,156 @@ const skillLabel = computed(() =>
   flex-direction: column;
   min-height: 0;
 }
+
+/* ── 顶栏:悬浮琉璃三件套 ── */
 .bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: calc(10px + var(--safe-top)) 16px 10px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-elev);
-  -webkit-backdrop-filter: var(--blur);
-  backdrop-filter: var(--blur);
+  gap: 10px;
+  padding: calc(8px + var(--safe-top)) 12px 6px;
+  background: transparent;
 }
-.title {
-  font-weight: 600;
+/* 顶栏三件是真·悬浮层,允许 blur;它们的内侧高光走 .specular::before */
+.orb-btn,
+.hpill {
+  position: relative;
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm);
+  backdrop-filter: var(--blur-sm);
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
+  box-shadow: var(--shadow-sm);
+  color: var(--text-dim);
+  overflow: hidden;
+  transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
+  touch-action: manipulation;
+}
+.orb-btn:active,
+.hpill:active {
+  transform: scale(0.94);
+  filter: brightness(0.9);
+}
+.orb-btn::before,
+.hpill::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(80% 46% at 20% 0%, rgba(255, 255, 255, 0.22), transparent 60%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 45%);
+}
+.orb-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.hpill {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  border-radius: 999px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 16px;
 }
-.dot {
-  width: 7px;
-  height: 7px;
+.hpill:active {
+  transform: scale(0.98);
+}
+.hp-host {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text);
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hp-model {
+  font-size: 13.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hp-dot {
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--text-faint);
+  flex-shrink: 0;
 }
-.dot.live {
+.hp-dot.live {
   background: var(--ok);
+  box-shadow: 0 0 7px var(--ok);
 }
-.icon {
-  font-size: 22px;
-  color: var(--text-dim);
-  width: 34px;
-  height: 34px;
-}
+
+/* ── 消息流 ── */
 .stream {
   flex: 1;
   overflow-y: auto;
-  padding: 16px 14px;
+  padding: 10px 14px 4px;
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 .empty {
   margin: auto 0;
-  padding: 20px 4px;
-}
-.hi {
-  font-size: 24px;
-  font-weight: 700;
-  margin-bottom: 6px;
-}
-.sub {
-  margin: 0 0 18px;
-  font-size: 14px;
-}
-.feats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-.feat {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 13px 12px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-top-color: var(--line-hi);
-  border-radius: 16px;
-  text-align: left;
-  transition: transform 0.1s;
-}
-.feat:active {
-  transform: scale(0.96);
-}
-.fic {
-  font-size: 24px;
-}
-.fmeta {
+  padding: 0 4px 12vh;
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  align-items: center;
+  text-align: center;
 }
-.flabel {
-  font-size: 14.5px;
-  font-weight: 600;
+/* 水晶球:不是「蓝色吉祥物」,是一颗真玻璃珠 ——
+   本体半透明只做 backdrop 折射(blur+饱和+提亮),再叠镜面高光 / 边缘环光 / 底部焦散。 */
+.orb {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background:
+    radial-gradient(58% 52% at 32% 26%, rgba(255, 255, 255, 0.5), transparent 62%),
+    linear-gradient(150deg, rgba(124, 155, 255, 0.5), rgba(180, 140, 255, 0.34));
+  -webkit-backdrop-filter: saturate(220%) brightness(1.25) blur(6px);
+  backdrop-filter: saturate(220%) brightness(1.25) blur(6px);
+  box-shadow:
+    inset 0 2px 2px rgba(255, 255, 255, 0.75),
+    inset 0 -14px 26px rgba(60, 40, 140, 0.36),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.28),
+    0 18px 40px rgba(96, 116, 255, 0.32);
+  animation: float 6.5s ease-in-out infinite;
+}
+/* 底部焦散:光穿过玻璃球在下缘聚出来的那道亮弧 */
+.orb i {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(38% 22% at 66% 82%, rgba(255, 255, 255, 0.55), transparent 70%),
+    radial-gradient(18% 12% at 30% 22%, rgba(255, 255, 255, 0.95), transparent 72%);
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0) }
+  50% { transform: translateY(-9px) }
+}
+@media (prefers-reduced-motion: reduce) {
+  .orb { animation: none }
+}
+.hi {
+  margin-top: 24px;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  line-height: 1.5;
   color: var(--text);
-}
-.fhint {
-  font-size: 11.5px;
-  color: var(--text-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .row {
   display: flex;
@@ -407,19 +457,42 @@ const skillLabel = computed(() =>
   justify-content: flex-end;
 }
 .bubble {
+  position: relative;
   max-width: 84%;
   padding: 10px 14px;
-  border-radius: 16px;
+  border-radius: 18px;
   word-break: break-word;
 }
+/* 气泡上沿的内高光:同一套光学(光从斜上方进玻璃),比单纯提高底色不透明度便宜也更透 */
+.bubble.asst::before,
+.bubble.user::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 42%);
+}
+.bubble > * {
+  position: relative;
+}
+/* 气泡**不做 backdrop-filter**:一屏几十条 = 几十个合成层,Android WebView 直接掉帧,
+   而且玻璃叠玻璃越叠越灰。改用稍厚的半透明 + 上缘高光/下缘暗边,一样有厚度。 */
 .bubble.user {
   background: var(--user-bubble);
-  border-bottom-right-radius: 5px;
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
+  border-bottom-right-radius: 6px;
+  box-shadow: var(--shadow-sm);
 }
 .bubble.asst {
-  background: var(--bg-elev);
+  background: var(--glass-solid);
   border: 1px solid var(--line);
-  border-bottom-left-radius: 5px;
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
+  border-bottom-left-radius: 6px;
+  box-shadow: var(--shadow-sm);
 }
 .bubble.err {
   background: transparent;
@@ -427,9 +500,14 @@ const skillLabel = computed(() =>
   color: var(--danger);
 }
 .tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   color: var(--text-dim);
-  background: var(--bg-elev2);
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
   padding: 6px 12px;
   border-radius: 20px;
 }
@@ -446,15 +524,11 @@ const skillLabel = computed(() =>
   gap: 8px;
   width: 100%;
   padding: 9px 12px;
-  border: none;
-  border-radius: 10px;
-  background: var(--accent-soft, var(--bg-elev2));
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--accent-soft);
   color: var(--text);
   text-align: left;
-}
-.art-preview .ap-ico {
-  font-size: 16px;
-  flex-shrink: 0;
 }
 .art-preview .ap-name {
   flex: 1;
@@ -470,50 +544,121 @@ const skillLabel = computed(() =>
   font-size: 11px;
   font-weight: 600;
   padding: 2px 8px;
-  border-radius: 6px;
-  background: var(--accent, #3b82f6);
+  border-radius: 7px;
+  background: var(--accent);
   color: #fff;
 }
 /* 「共 N 个」折叠条 */
-.art-more {
+.art-more,
+.art {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 12.5px;
-  padding: 4px 10px;
-  border: none;
-  border-radius: 8px;
-  background: var(--bg-elev2);
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  border-radius: 999px;
+  background: var(--glass2);
   color: var(--text-dim);
 }
-.art-more .am-chev {
-  font-size: 9px;
+.art-more .ico.up {
+  transform: rotate(180deg);
 }
-.art {
-  font-size: 13px;
-  padding: 4px 10px;
-  background: var(--bg-elev2);
-  border-radius: 8px;
-  text-decoration: none;
-}
+/* 三点呼吸:比「正在思考…」安静 */
 .typing {
+  display: flex;
+  gap: 5px;
+  padding: 6px 4px;
+}
+.typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  animation: blink 1.3s ease-in-out infinite;
+}
+.typing i:nth-child(2) { animation-delay: 0.18s }
+.typing i:nth-child(3) { animation-delay: 0.36s }
+@keyframes blink {
+  0%, 100% { opacity: 0.25; transform: translateY(0) }
+  40% { opacity: 1; transform: translateY(-3px) }
+}
+
+/* ── 底坞:建议条 + 输入卡片 ── */
+.dock {
+  padding: 0 10px calc(4px + var(--safe-bottom));
+}
+.suggest {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 6px 2px 9px;
+  -webkit-mask-image: linear-gradient(90deg, #000 94%, transparent);
+  mask-image: linear-gradient(90deg, #000 94%, transparent);
+}
+.suggest::-webkit-scrollbar {
+  display: none;
+}
+/* 建议胶囊:6 个一排,**不给 blur**(6 个合成层不值),用厚一档的半透明压底 */
+.sg {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 13.5px;
   color: var(--text-dim);
-  font-size: 13px;
-  padding-left: 4px;
+  background: var(--glass-solid);
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
+  box-shadow: var(--shadow-sm);
+  white-space: nowrap;
+  transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
+  touch-action: manipulation;
 }
-/* ── 豆包式输入卡片 ── */
-.composer {
-  padding: 8px 10px calc(10px + var(--safe-bottom));
+.sg:active {
+  transform: scale(0.94);
+  filter: brightness(0.9);
+  color: var(--accent);
 }
+.lift-enter-active,
+.lift-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.lift-enter-from,
+.lift-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+/* 输入卡:整个 App 最厚的一片玻璃,该有的都给足 */
 .card {
-  background: var(--bg-elev);
+  position: relative;
+  background: var(--glass);
   -webkit-backdrop-filter: var(--blur);
   backdrop-filter: var(--blur);
   border: 1px solid var(--line);
   border-top-color: var(--line-hi);
-  border-radius: 22px;
-  box-shadow: var(--shadow);
-  padding: 10px 12px 8px;
+  border-bottom-color: var(--line-lo);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 10px 12px 9px;
+}
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(70% 40% at 14% 0%, rgba(255, 255, 255, 0.2), transparent 58%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07), transparent 34%);
+}
+.card > * {
+  position: relative;
 }
 .atts {
   display: flex;
@@ -522,26 +667,32 @@ const skillLabel = computed(() =>
   margin-bottom: 6px;
 }
 .att-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
-  background: var(--bg-elev2);
-  border-radius: 8px;
+  background: var(--glass2);
+  border-radius: 9px;
   padding: 4px 8px;
 }
 .att-chip button {
   color: var(--text-faint);
-  margin-left: 4px;
+  display: flex;
 }
 .ta {
   display: block;
   width: 100%;
   resize: none;
   max-height: 140px;
-  padding: 4px 4px 8px;
+  padding: 5px 6px 9px;
   background: transparent;
   border: none;
   outline: none;
   line-height: 1.45;
   font-size: 15.5px;
+}
+.ta::placeholder {
+  color: var(--text-faint);
 }
 .tools {
   display: flex;
@@ -552,12 +703,20 @@ const skillLabel = computed(() =>
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: var(--bg-elev2);
+  background: var(--glass2);
   border: 1px solid var(--line);
-  font-size: 20px;
-  line-height: 1;
+  border-top-color: var(--line-hi);
   color: var(--text-dim);
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
+  transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
+}
+.round:active,
+.chip:active,
+.go:active {
+  transform: scale(0.92);
+  filter: brightness(0.9);
 }
 .chips {
   flex: 1;
@@ -572,36 +731,54 @@ const skillLabel = computed(() =>
 }
 .chip {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12.5px;
   padding: 6px 11px;
   border-radius: 999px;
-  background: var(--bg-elev2);
+  background: var(--glass2);
   border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
   color: var(--text-dim);
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s,
+    transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
   white-space: nowrap;
+  touch-action: manipulation;
 }
 .chip.on {
   background: var(--accent-soft);
   border-color: var(--accent);
   color: var(--accent);
 }
-.go,
-.stop {
+.go {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    0 4px 12px rgba(108, 140, 255, 0.42);
   color: #fff;
-  font-size: 17px;
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
+  transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
 }
 .go:disabled {
-  background: var(--bg-elev2);
+  background: var(--glass2);
   color: var(--text-faint);
+  box-shadow: none;
 }
-.stop {
+.go.stop {
   background: var(--danger);
-  font-size: 13px;
+  box-shadow: none;
+}
+.foot {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-faint);
+  opacity: 0.7;
+  padding: 7px 0 2px;
 }
 </style>
