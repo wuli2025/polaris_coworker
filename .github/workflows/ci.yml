@@ -36,8 +36,14 @@ jobs:
       # --exclude polaris-cli: 它依赖主 lib 的 server feature, 若与本 job 的桌面(默认)feature
       # 一起选中会被 cargo 统一 feature → 主 lib 同时开 tauri+server 两套 AppHandle 而 E0308。
       # polaris-cli 的编译守护放 forge-matrix(server feature 同侧, cache 共享, 见下)。
+      # --exclude polaris-kernel: v2.4.0 开了 `tauri/tray-icon` 后, workspace feature 统一
+      # 会让 kernel 的 lib 测试 exe 在 Windows 加载期就崩(0xc0000139
+      # STATUS_ENTRYPOINT_NOT_FOUND, 与测试内容无关)。单独按自身默认 feature 跑它一切正常
+      # (92 passed), 所以拆成两步, 覆盖面不减。
       - name: Test
-        run: cargo test --workspace --exclude polaris-cli
+        run: cargo test --workspace --exclude polaris-cli --exclude polaris-kernel
+      - name: Test (polaris-kernel 单跑)
+        run: cargo test -p polaris-kernel
       # 建议性: 先不 -D warnings, 等存量 lint 清干净再收紧成硬门槛
       - name: Format check
         run: cargo fmt --all --check
