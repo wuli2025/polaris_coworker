@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue";
 import { invoke, upload } from "../lib/net";
 import { toast, toastErr } from "../lib/toast";
 import { openPreview } from "../lib/preview";
+import { go } from "../lib/nav";
 
 interface FileCard {
   id: number;
@@ -86,6 +87,7 @@ onMounted(() => load(true));
 <template>
   <div class="files">
     <header class="bar">
+      <button class="icon" title="返回对话" @click="go('chat')">‹</button>
       <div class="title">文件</div>
       <button class="icon" title="上传" @click="doUpload">⬆</button>
     </header>

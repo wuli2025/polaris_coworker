@@ -40,6 +40,12 @@ const MODEL_KEYS = [
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 ] as const;
 
+// OpenAI 协议(codex / 本地路由)默认钉选的模型名 —— 与后端 DEFAULT_MODEL /
+// DEFAULT_OPENAI_MODEL 保持一致, 防止手输拼错。
+const DEFAULT_OPENAI_MODEL = "gpt5.6-sol";
+// 模型输入框的下拉候选(datalist): 用户可直接选, 也保留手输能力。
+const MODEL_PRESETS = ["gpt5.6-sol"] as const;
+
 // 预设列表（排除自定义占位，自定义单独首位渲染）
 const presets = computed(() => store.providers.filter((p) => p.isPreset));
 const filteredPresets = computed(() => {
@@ -126,6 +132,15 @@ const isOauth = computed(
 /** 自定义配置(非预设)才允许切协议;预设的协议由 kind 定死, 存了也不生效 */
 const canPickProtocol = computed(() => selectedId.value === "");
 const isOpenAiProto = computed(() => form.protocol === "openai");
+
+// OpenAI 协议(本地路由)供应商: 模型字段留空时自动预填默认 gpt5.6-sol 并钉四档,
+// 用户无需手输即得正确模型名; 已有钉选值则尊重, 不覆盖。
+watch(isOpenAiProto, (on) => {
+  if (on && !form.model.trim()) {
+    form.model = DEFAULT_OPENAI_MODEL;
+    onModel();
+  }
+});
 
 // ── config JSON 同步 ──
 function parseCfg(): any {
@@ -397,12 +412,17 @@ function dotColor(p: ProviderView) {
               <span class="f-lab">模型</span>
               <input
                 v-model="form.model"
-                :placeholder="isOpenAiProto ? '例如：gpt-5.5（留空则默认 gpt-5.5）' : '例如：MiniMax-M3（留空则用 Claude 默认模型名）'"
+                list="model-presets"
+                :placeholder="isOpenAiProto ? '默认 gpt5.6-sol（可下拉选择，或手输其他模型名）' : '例如：MiniMax-M3（留空则用 Claude 默认模型名）'"
                 @input="onModel"
               />
+              <datalist id="model-presets">
+                <option v-for="m in MODEL_PRESETS" :key="m" :value="m" />
+              </datalist>
               <p class="hint">
                 💡 第三方供应商通常需指定自家模型名。填一个值会同时钉主模型与 Opus/Sonnet/Haiku
-                三档默认，连后台小任务也走它，避免回落到最低档。
+                三档默认，连后台小任务也走它，避免回落到最低档。OpenAI 协议默认已预填
+                <code>gpt5.6-sol</code>，无需手输。
               </p>
             </label>
 

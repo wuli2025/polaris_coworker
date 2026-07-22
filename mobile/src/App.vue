@@ -10,7 +10,6 @@ import FilesScreen from "./screens/FilesScreen.vue";
 import ProjectsScreen from "./screens/ProjectsScreen.vue";
 import SettingsScreen from "./screens/SettingsScreen.vue";
 import PlaceholderScreen from "./screens/PlaceholderScreen.vue";
-import BottomNav from "./components/BottomNav.vue";
 import PreviewOverlay from "./components/PreviewOverlay.vue";
 import Toast from "./components/Toast.vue";
 
@@ -36,7 +35,6 @@ onMounted(() => {
         :which="screen"
       />
     </main>
-    <BottomNav />
   </template>
   <PreviewOverlay />
   <Toast />

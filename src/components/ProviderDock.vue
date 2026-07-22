@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
+// 懒加载:绘图供应商面板只在 Dock 展开到对应页时才渲染,静态 import 会把它
+// (连同其依赖)吸进首屏 chunk。ProviderDock 本体保持静态 —— 首屏可能立刻用。
+const ImageProviderPanel = defineAsyncComponent(() => import("./ImageProviderPanel.vue"));
 import {
   Zap,
   ChevronUp,
@@ -839,6 +842,10 @@ function subtitleOf(p: ProviderView): string {
                   <button class="add-row" @click="addCustom">
                     <Plus :size="13" :stroke-width="2.2" /> 添加自定义供应商
                   </button>
+
+                  <!-- 生图模型: 后端是**独立的一张表**(见 provider/image_store.rs 文件头),
+                       故前端也用独立组件, 与上面的聊天供应商状态物理隔离。 -->
+                  <ImageProviderPanel />
                 </template>
               </div>
 
@@ -894,13 +901,13 @@ function subtitleOf(p: ProviderView): string {
                       <ShieldCheck :size="14" :stroke-width="2" /> 已授权 ChatGPT
                     </p>
                     <p v-if="store.currentId === 'codex'" class="codex-note">
-                      Claude Code 正经本地翻译代理使用你的 ChatGPT 订阅(<code>gpt-5.5</code>)<template
+                      Claude Code 正经本地翻译代理使用你的 ChatGPT 订阅(<code>gpt5.6-sol</code>)<template
                         v-if="store.codexProxy?.running"
                       > · 127.0.0.1:{{ store.codexProxy.port }}</template
                       >。
                     </p>
                     <p v-else class="codex-note">
-                      凭据已写入 <code>~/.codex/auth.json</code>。点「用 GPT 对话」即让 Claude Code 经本地翻译代理用上 ChatGPT 订阅(<code>gpt-5.5</code>)。
+                      凭据已写入 <code>~/.codex/auth.json</code>。点「用 GPT 对话」即让 Claude Code 经本地翻译代理用上 ChatGPT 订阅(<code>gpt5.6-sol</code>)。
                     </p>
                     <p v-if="store.codexProxy?.lastError" class="codex-fail">
                       代理上次报错:{{ store.codexProxy.lastError }}

@@ -16,6 +16,7 @@ import { invoke, listen } from "./net";
 import { activeHostId } from "./hosts";
 import { saveConv, loadConv, deleteConv, listConvs, type ConvMeta } from "./convs";
 import { startTelemetry, stopTelemetry } from "./telemetry";
+import { resetPickers } from "./pickers";
 
 export interface Bubble {
   role: "user" | "assistant" | "tool" | "error";
@@ -230,10 +231,17 @@ export function initChat(): void {
   });
 }
 
-export async function sendMessage(
-  prompt: string,
-  opts?: { attachments?: string[] }
-): Promise<void> {
+export interface SendOpts {
+  attachments?: string[];
+  /** "fast"(默认·省略) | "work" —— 输入条「深度工作」开关。 */
+  workMode?: string;
+  /** 供应商 id;空/"auto" = 跟随主机全局,不下发字段。 */
+  providerId?: string;
+  /** 输入条勾选的技能 id 列表。 */
+  skillIds?: string[];
+}
+
+export async function sendMessage(prompt: string, opts?: SendOpts): Promise<void> {
   const text = prompt.trim();
   if (!text || sending.value) return;
   initChat();
@@ -253,13 +261,16 @@ export async function sendMessage(
     // chat_send 是服务端唯一「具名参数」命令:实参要再包一层 args(server.rs 取
     // args.args 反序列化 ChatSendArgs);permissionMode 无 serde default 必填,
     // 手机端没有权限确认 UI,固定 auto_current(=acceptEdits,与桌面自动化路径一致)。
-    const rid = await invoke<string>("chat_send", {
-      args: {
-        prompt: text,
-        conversationId: convId.value,
-        permissionMode: "auto_current",
-      },
-    });
+    // workMode/providerId/skillIds 有 serde default,老主机没有的字段会被忽略,兼容。
+    const sendArgs: Record<string, unknown> = {
+      prompt: text,
+      conversationId: convId.value,
+      permissionMode: "auto_current",
+    };
+    if (opts?.workMode && opts.workMode !== "fast") sendArgs.workMode = opts.workMode;
+    if (opts?.providerId && opts.providerId !== "auto") sendArgs.providerId = opts.providerId;
+    if (opts?.skillIds?.length) sendArgs.skillIds = opts.skillIds;
+    const rid = await invoke<string>("chat_send", { args: sendArgs });
     if (myGen !== gen) {
       // 用户已在 send resolve 前取消/切会话 → 这个请求是孤儿,立即补杀。
       if (typeof rid === "string") invoke("chat_cancel", { reqId: rid }).catch(() => {});
@@ -337,6 +348,7 @@ export function reloadForHost(): void {
   convId.value = `m-${Date.now()}`;
   convList.value = listConvs(liveHost);
   remoteConvs.value = []; // 旧主机的列表不跨主机残留
+  resetPickers(); // 供应商/技能选中态不跨主机残留(上家的 id 在下家无意义)
   refreshRemoteConvs(); // 登录/切主机后拉主机全部对话(异步,不阻塞进屏)
 }
 

@@ -141,9 +141,10 @@ docker exec -it polaris-web bash    # 进容器排查（claude --version 等）
 容器内偶发：个别极简 prompt 会让 claude 触发子代理（`claude --print`，其 cwd 落在 `/`）
 对文件系统做无界扫描而长时间不返回，既拖死本轮、又占住 OAuth 订阅的并发槽拖垮后续消息。
 
-对策：`POLARIS_CHAT_TIMEOUT_SECS`（默认 180s）。超时仍未结束则杀掉整个 claude 进程组，
-stdout 关闭 → 正常 emit error+done，系统自愈、释放并发槽。设 0 关闭。
-桌面版默认关闭（保持原行为），仅容器启用。
+对策：`POLARIS_CHAT_TIMEOUT_SECS`（容器默认 900s，桌面 1800s）。连续空闲超阈且进程树
+深检确认静止（0 子孙 + CPU 无推进）才杀整个 claude 进程组，stdout 关闭 → 正常 emit
+error+done，系统自愈、释放并发槽。设 0 关闭。静默但在干活（构建/ffmpeg/长脚本）不会被杀。
+另有总时长硬顶 `POLARIS_CHAT_HARD_CAP_SECS`（默认 86400s=24h），只兜真失控任务。
 
 > 实测：实质性问题（联网检索、生成 PPT/网页、写文件、KB 取证）均正常；
 > 仅「只回复两个字」这类极简多轮 prompt 偶发触发上述扫描，看门狗保证不会无限挂死。

@@ -896,9 +896,12 @@ export const files = {
   searchAi: (query: string, topK = 24, scope?: string) =>
     invoke<FableSearchResult>("fable_search_ai", { query, topK, scope }),
   /** 取消当前盘点/索引任务(协作式:循环轮询 CANCEL,几百毫秒内优雅停;索引可再点继续续建) */
-  fableCancel: () => invoke<void>("fable_cancel"),
+  /** 协作式取消。task:"inventory"=只停盘点、"index"=只停索引、"cluster"=停归类(连带其 T2 向量化);缺省=全停(旧行为)。 */
+  fableCancel: (task?: "inventory" | "index" | "cluster") => invoke<void>("fable_cancel", { task: task ?? null }),
 };
 
+// 注意:后端 FableHit/FableSearchResult **没有** serde camelCase 改名(库里少数派),
+// 载荷就是 snake_case —— 类型必须照实写,否则读 grepHits 之类恒 undefined。
 export interface FableHit {
   path: string;
   abspath: string;
@@ -906,15 +909,17 @@ export interface FableHit {
   snippet: string;
   score: number;
   lanes: string[];
+  /** 被同目录同名新版本压制时给出新版本相对路径(前端标「有新版本」);无则缺省。 */
+  superseded_by_path?: string;
 }
 export interface FableSearchResult {
   query: string;
   mode: string;
   hits: FableHit[];
-  grepHits: number;
-  vectorHits: number;
+  grep_hits: number;
+  vector_hits: number;
   reranked: boolean;
-  grepTruncated: boolean;
+  grep_truncated: boolean;
   ms: number;
 }
 
@@ -1002,6 +1007,24 @@ export const chat = {
   send: (args: ChatSendArgs) =>
     invoke<string>("chat_send", { args: args as unknown as Record<string, unknown> }),
   cancel: (reqId: string) => invoke<void>("chat_cancel", { reqId }),
+  /**
+   * 预热常驻 claude 进程(fire-and-forget): 用户打开对话/开始打字时提前 spawn,
+   * 把 CLI ~6.4s 自举挪进打字期间, 首条消息首响 ~10s → ~3s。
+   * 仅 Tauri 桌面(常驻池在本机内核里, web/Docker 壳未登记此命令); 任何失败吞掉 ——
+   * 预热失败不影响真发送(后端有完整重建路径), 不值得打扰用户。
+   */
+  prewarm: (args: {
+    conversationId: string;
+    permissionMode?: PermissionMode;
+    workMode?: string;
+    providerId?: string;
+    dynamicWorkflow?: boolean;
+  }) => {
+    if (!isTauri) return;
+    void invoke<void>("chat_prewarm", {
+      args: args as unknown as Record<string, unknown>,
+    }).catch(() => {});
+  },
   /** 读取分批构建清单 polaris.build.json（分批长任务的断点/进度凭据）。不存在返回 null。 */
   buildManifest: (conversationId: string | undefined) =>
     invoke<BuildManifest | null>("chat_build_manifest", {
@@ -1224,6 +1247,8 @@ export interface Project {
   collabProjectId?: number | null;
   /** 绑定时的协作主机 base(空=未绑) */
   collabHost?: string;
+  /** 本项目绑定的工作目录(用户选的真实仓库绝对路径)；该项目下所有对话以它为 claude cwd。null/空=默认 */
+  workDir?: string | null;
 }
 
 export interface Conversation {
@@ -1252,6 +1277,7 @@ type RawProject = {
   kb_scope?: string | null;
   collab_project_id?: number | null;
   collab_host?: string;
+  work_dir?: string | null;
 };
 type RawConv = {
   id: string;
@@ -1277,6 +1303,7 @@ const p = (r: RawProject): Project => ({
   kbScope: r.kb_scope ?? null,
   collabProjectId: r.collab_project_id ?? null,
   collabHost: r.collab_host ?? "",
+  workDir: r.work_dir ?? null,
 });
 const c = (r: RawConv): Conversation => ({
   id: r.id,
@@ -1337,6 +1364,10 @@ export const convApi = {
   /** 板块⑫: 设置项目的知识库 scope（人格工坊下拉） */
   setKbScope: (projectId: string, kbScope: string | null) =>
     invoke<void>("conv_set_project_kb_scope", { projectId, kbScope }),
+  /** 设置(或清除)项目的工作目录：本项目下所有对话以此为 claude cwd（终端 cd 进 repo 同款）。
+   *  传 null/空 = 解绑回落默认。传入不存在的目录后端会报错(可直接展示)。 */
+  setWorkDir: (projectId: string, workDir: string | null) =>
+    invoke<void>("conv_set_project_work_dir", { projectId, workDir }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -1573,6 +1604,60 @@ export interface ProviderBalance {
   /** 控制台 / 官网链接(可空) */
   consoleUrl: string;
 }
+
+// ── 生图供应商坞(独立表, 与上面的聊天供应商无关) ──
+/** 请求/响应形状: minimax 吃 aspect_ratio→data.image_urls[0]; openai 系吃 size→data[0].url|b64_json */
+export type ImageFlavor = "minimax" | "openai";
+export interface ImageProviderView {
+  id: string;
+  name: string;
+  flavor: ImageFlavor;
+  endpoint: string;
+  model: string;
+  note: string;
+  /** 只回「配没配 key」, 后端绝不回明文 */
+  hasKey: boolean;
+  isCurrent: boolean;
+}
+export interface ImagePresetView {
+  id: string;
+  name: string;
+  flavor: ImageFlavor;
+  endpoint: string;
+  model: string;
+  note: string;
+}
+export interface ImageProviderListResult {
+  items: ImageProviderView[];
+  currentId: string;
+  /** 预设模板, 只为免手输; 用户仍需自己填 Key */
+  presets: ImagePresetView[];
+  /** 可借用的聊天坞 MiniMax(Coding Plan)key 档; active=true 即当前生效(坞里没配可用条目) */
+  borrowed?: { name: string; model: string; active: boolean } | null;
+}
+export interface ImageProviderSaveInput {
+  /** 空 = 新建 */
+  id?: string;
+  name: string;
+  flavor: ImageFlavor;
+  endpoint: string;
+  model: string;
+  /** 空 = 保持原 key 不变(编辑时不必重填) */
+  apiKey?: string;
+  note?: string;
+}
+export interface ImageGenResult {
+  ok: boolean;
+  out: string;
+  bytes: number;
+  /** 按魔数认出的真实格式(png/jpeg), 可能与 out 的后缀不同 */
+  format: string;
+  ratio: string;
+  model: string;
+  attempts: number;
+  provider: string;
+}
+
 export interface CodexStatus {
   installed: boolean;
   loggedIn: boolean;
@@ -1645,6 +1730,25 @@ export const provider = {
     invoke<ClaudeAuthStatus>("claude_finish_login", { pasted, verifier, state }),
   claudeLoginPoll: () => invoke<LoginPollResult>("claude_login_poll"),
   claudeLoginCancel: () => invoke<void>("claude_login_cancel"),
+};
+
+/**
+ * 生图供应商坞 —— **独立于上面那张聊天表**。
+ * 后端是另一张表(provider/image_store.rs), 理由见其文件头: 聊天表的 switch/detect 会把
+ * 任何带 base_url 的条目当聊天家、把地址套进 ANTHROPIC_BASE_URL, 生图 endpoint 混进去
+ * 会把聊天整条链路搞挂。前端也照此分开, 别把两者的方法混到一个对象里。
+ */
+export const imageProvider = {
+  list: () => invoke<ImageProviderListResult>("image_provider_list"),
+  save: (input: ImageProviderSaveInput) =>
+    invoke<ImageProviderListResult>("image_provider_save", { input }),
+  delete: (id: string) =>
+    invoke<ImageProviderListResult>("image_provider_delete", { id }),
+  switch: (id: string) =>
+    invoke<ImageProviderListResult>("image_provider_switch", { id }),
+  /** 文生图。生图常 20–60s, 后端已 spawn_blocking, 前端记得给 loading 态。 */
+  generate: (prompt: string, out: string, ratio?: string) =>
+    invoke<ImageGenResult>("forge_image", { prompt, out, ratio }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -2023,6 +2127,23 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return "custom-stub";
     case "provider_delete":
       return undefined;
+    // 生图坞 stub: 浏览器预览下回「一家没配」——与真机首次打开同一形态,
+    // 让空态 UI 也能在浏览器里走查。presets 照抄后端 IMAGE_PRESETS。
+    case "image_provider_list":
+    case "image_provider_save":
+    case "image_provider_delete":
+    case "image_provider_switch":
+      return {
+        items: [],
+        currentId: "",
+        presets: [
+          { id: "minimax-image", name: "MiniMax 图像", flavor: "minimax", endpoint: "https://api.minimaxi.com/v1/image_generation", model: "image-01", note: "国内可直连;画幅走 aspect_ratio(16:9 等)" },
+          { id: "openai-image", name: "OpenAI 图像", flavor: "openai", endpoint: "https://api.openai.com/v1/images/generations", model: "gpt-image-1", note: "官方或任何兼容网关;画幅走 size(1024x1024 等)" },
+          { id: "doubao-image", name: "豆包 Seedream(方舟)", flavor: "openai", endpoint: "https://ark.cn-beijing.volces.com/api/v3/images/generations", model: "doubao-seedream-4-0-250828", note: "火山方舟;说 OpenAI 形状,模型名需在方舟控制台确认" },
+        ],
+      };
+    case "forge_image":
+      throw new Error("浏览器预览不支持真实生图（需要本机 forge 引擎）");
     case "codex_status":
       return { installed: false, loggedIn: false, authPath: "(browser-only)" };
     case "codex_start_login":

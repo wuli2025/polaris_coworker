@@ -413,6 +413,33 @@ async fn collab_user_disable(
     unwrap_api(out)
 }
 
+/// owner 直接重置任意用户密码(邮箱没绑/邮件服务没配时的兜底通道)。
+/// 改密即踢掉该用户全部旧会话。
+async fn collab_admin_user_reset_password(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Json(v): Json<Value>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let actor = ctx.username.clone();
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let id = v
+            .get("userId")
+            .and_then(|x| x.as_i64())
+            .ok_or("缺 userId")?;
+        crate::collab::auth::set_password(id, &s_of(&v, "newPassword"))?;
+        crate::collab::db::audit(&actor, "user.reset_password", &id.to_string(), "owner 重置");
+        Ok(json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
 // ── 设备遥测(设备联盟 Phase 2):成员设备定时上报资源实况,内存态聚合 ──
 // 键 = 上报方 deviceId(登录时登记为 devices.node_id)。只留最新一帧,不落库;
 // 设备看板(collab_devices)按 node_id 合并出 stats/stats_at,前端如实渲染 —— 不插值不造假。
@@ -609,6 +636,181 @@ async fn collab_signup(Json(v): Json<Value>) -> Response {
         let (_, token) =
             crate::collab::auth::login(&u.username, &s_of(&v, "password"), &s_of(&v, "deviceId"))?;
         Ok(json!({"user": u, "token": token}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+// ── 邮箱注册 / 找回密码(验证码 = 邮箱所有权证明) ──
+
+/// 邮箱服务状态(公开,无鉴权):前端据此决定「注册」入口亮不亮、「忘记密码」走不走邮箱。
+async fn collab_email_status() -> Response {
+    // configured/signup_open 都要读 collab.db(meta 表),放阻塞池。
+    let out = tokio::task::spawn_blocking(|| -> Result<Value, String> {
+        Ok(json!({
+            "configured": crate::collab::mail::configured(),
+            "signupOpen": crate::collab::mail::signup_open(),
+        }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 发验证码。purpose=signup:邮箱须未被绑定;purpose=reset:邮箱须已绑定账号。
+/// 频控在 mail::issue_code(60s 重发间隔 + 每小时 5 封)。
+async fn collab_email_send_code(Json(v): Json<Value>) -> Response {
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let email = s_of(&v, "email");
+        let purpose = s_of(&v, "purpose");
+        match purpose.as_str() {
+            "signup" => {
+                if !crate::collab::mail::signup_open() {
+                    return Err("本主机未开放邮箱注册,请联系管理员或用邀请票据入伙".into());
+                }
+                if crate::collab::auth::find_user_by_email(&email)?.is_some() {
+                    return Err("该邮箱已注册过账号,请直接登录或走「忘记密码」".into());
+                }
+            }
+            "reset" => {
+                if !crate::collab::mail::configured() {
+                    return Err("邮箱服务未配置,无法自助找回,请联系管理员重置密码".into());
+                }
+                if crate::collab::auth::find_user_by_email(&email)?.is_none() {
+                    return Err("该邮箱没有绑定任何账号".into());
+                }
+            }
+            _ => return Err("purpose 须为 signup 或 reset".into()),
+        }
+        crate::collab::mail::issue_code(&email, &purpose)?;
+        Ok(json!({"ok": true}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 邮箱验证码注册:验证通过即建号(collaborator)+ 绑邮箱 + 签会话,一步登录。
+async fn collab_email_signup(Json(v): Json<Value>) -> Response {
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        if !crate::collab::mail::signup_open() {
+            return Err("本主机未开放邮箱注册,请联系管理员或用邀请票据入伙".into());
+        }
+        let email = s_of(&v, "email");
+        crate::collab::mail::verify_code(&email, "signup", &s_of(&v, "code"))?;
+        let username = s_of(&v, "username");
+        let display = {
+            let d = s_of(&v, "displayName");
+            if d.trim().is_empty() {
+                username.clone()
+            } else {
+                d
+            }
+        };
+        let u = crate::collab::auth::create_user_with_email(
+            &username,
+            &s_of(&v, "password"),
+            "collaborator",
+            &display,
+            &email,
+        )?;
+        let (_, token) =
+            crate::collab::auth::login(&u.username, &s_of(&v, "password"), &s_of(&v, "deviceId"))?;
+        Ok(json!({"user": u, "token": token}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 邮箱找回密码:验证码通过即换口令,该账号旧会话全部作废。回 username 提示用哪个名登录。
+async fn collab_email_reset(Json(v): Json<Value>) -> Response {
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let email = s_of(&v, "email");
+        crate::collab::mail::verify_code(&email, "reset", &s_of(&v, "code"))?;
+        let u = crate::collab::auth::find_user_by_email(&email)?
+            .ok_or("该邮箱没有绑定任何账号")?;
+        crate::collab::auth::set_password(u.id, &s_of(&v, "newPassword"))?;
+        Ok(json!({"ok": true, "username": u.username}))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// owner 读邮箱服务配置。SMTP 授权码永不回显,只回 passSet(是否已配置)。
+async fn collab_admin_email_config_get(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let out = tokio::task::spawn_blocking(|| -> Result<Value, String> {
+        let cfg = crate::collab::mail::config();
+        let (host, port, user, from) = match &cfg {
+            Some(c) => (c.host.clone(), c.port, c.user.clone(), c.from.clone()),
+            None => (
+                crate::collab::db::meta_get("smtp_host").unwrap_or_else(|| "smtp.qq.com".into()),
+                crate::collab::db::meta_get("smtp_port")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(465),
+                crate::collab::db::meta_get("smtp_user").unwrap_or_default(),
+                crate::collab::db::meta_get("smtp_from").unwrap_or_default(),
+            ),
+        };
+        Ok(json!({
+            "configured": cfg.is_some(),
+            "host": host,
+            "port": port,
+            "user": user,
+            "from": from,
+            "passSet": cfg.is_some(),
+            "signupOpen": crate::collab::mail::signup_open(),
+        }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// owner 写邮箱服务配置(pass 留空 = 保留旧授权码);testTo 非空则顺手发一封测试信验通。
+async fn collab_admin_email_config_set(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Json(v): Json<Value>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let actor = ctx.username.clone();
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let user = s_of(&v, "user");
+        if user.trim().is_empty() {
+            return Err("请填发信邮箱(如 1799820934@qq.com)".into());
+        }
+        let host = {
+            let h = s_of(&v, "host");
+            if h.trim().is_empty() { "smtp.qq.com".into() } else { h }
+        };
+        let port = i_of(&v, "port").unwrap_or(465).clamp(1, 65535) as u16;
+        let from = {
+            let f = s_of(&v, "from");
+            if f.trim().is_empty() { user.clone() } else { f }
+        };
+        let signup = v.get("signupOpen").and_then(|x| x.as_bool()).unwrap_or(true);
+        crate::collab::mail::save_config(&host, port, &user, &s_of(&v, "pass"), &from, signup)?;
+        crate::collab::db::audit(&actor, "email.config", &user, "SMTP 配置更新");
+        let test_to = s_of(&v, "testTo");
+        if !test_to.trim().is_empty() {
+            crate::collab::mail::send_mail(
+                test_to.trim(),
+                "【Polaris】邮箱服务测试",
+                "看到这封信,说明 Polaris 的 SMTP 邮箱服务已配置成功。",
+            )?;
+        }
+        Ok(json!({"ok": true, "configured": crate::collab::mail::configured()}))
     })
     .await;
     unwrap_api(out)
@@ -2572,6 +2774,15 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/collab/redeem", post(collab_redeem))
         // GitHub 式:开放注册 + 用户名搜索 + 团队(一人多团队,团队下挂项目)
         .route("/api/collab/signup", post(collab_signup))
+        // 邮箱验证码:注册 / 找回密码(验证码 = 邮箱所有权证明;频控在 mail 模块)
+        .route("/api/collab/email/status", get(collab_email_status))
+        .route("/api/collab/email/send_code", post(collab_email_send_code))
+        .route("/api/collab/email/signup", post(collab_email_signup))
+        .route("/api/collab/email/reset", post(collab_email_reset))
+        .route(
+            "/api/collab/admin/email_config",
+            get(collab_admin_email_config_get).post(collab_admin_email_config_set),
+        )
         .route("/api/collab/users/search", get(collab_user_search))
         .route("/api/collab/teams", get(team_list).post(team_create))
         .route(
@@ -2582,6 +2793,10 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/collab/admin/ticket", post(collab_ticket))
         .route("/api/collab/admin/users", get(collab_users))
         .route("/api/collab/admin/user_disable", post(collab_user_disable))
+        .route(
+            "/api/collab/admin/user_reset_password",
+            post(collab_admin_user_reset_password),
+        )
         .route("/api/collab/admin/devices", get(collab_devices))
         .route("/api/collab/admin/audit", get(collab_audit_recent))
         // 遥测帧本就该 <2KB:单独收紧到 4KB body 上限,低权限成员无法用大包耗解析(codex #3)。

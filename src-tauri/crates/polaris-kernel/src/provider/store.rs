@@ -212,6 +212,90 @@ static STORE_PATH: Lazy<RwLock<PathBuf>> = Lazy::new(|| RwLock::new(PathBuf::new
 /// settings.json → 撕裂成半截。此锁保证整条 RMW 原子, 与 atomic_write 一起根治配置损坏。
 static IO_LOCK: Lazy<parking_lot::Mutex<()>> = Lazy::new(|| parking_lot::Mutex::new(()));
 
+// ─────────────────── 故障转移(polaris-failover 滑窗) ───────────────────
+// 5 分钟窗口内同一供应商第 3 次网络/鉴权/欠费类失败 → 自动切到列表里下一个可用
+// 供应商, 并 emit 事件让前端 toast。不自动切回(防抖动), 切回由用户在坞里确认。
+static FAILOVER: Lazy<polaris_failover::FailoverTracker> =
+    Lazy::new(polaris_failover::FailoverTracker::new);
+/// init() 时存一份 AppHandle 供故障转移线程 emit 事件用 —— 失败上报点(本地路由
+/// codex_proxy 的 TCP 线程)手里没有 app 句柄, 只能走全局。
+static FAILOVER_APP: Lazy<RwLock<Option<AppHandle>>> = Lazy::new(|| RwLock::new(None));
+
+/// 当前激活供应商 id(本地路由无 `/p/{id}` 前缀的旧版路径需要它做故障归因)。
+pub fn current_provider_id() -> String {
+    STORE.read().current_id.clone()
+}
+
+/// 请求成功: 清零该供应商的失败计数(偶发抖动不积累)。
+pub fn note_provider_success(id: &str) {
+    FAILOVER.record_success(id);
+}
+
+/// 记一次网络/鉴权/欠费类失败; 达到滑窗阈值时自动切换到下一个可用供应商。
+/// 取舍说明: 最理想的上报点是「claude 子进程每次上游请求的结果」, 但直连模式下
+/// 请求发生在 claude CLI 内部, kernel 看不见 —— 所以接在**本地路由**(codex_proxy,
+/// cc-switch 式代理, 每请求过手)的错误分类点上: 透传 4xx/5xx、OpenAI 兼容 401、
+/// ChatGPT 刷新失败、连接超时等都会走到这里。直连供应商享受不到自动转移, 属已知边界。
+pub fn note_provider_failure(id: &str) {
+    if !FAILOVER.record_failure(id) {
+        return; // 未达阈值: 只计数
+    }
+    // 达阈: 挑「当前供应商列表里失败者之后的下一个可用项」(环形), 沿用 provider_switch
+    // 完成真正切换(env/settings 写入逻辑零重复)。仅当失败者就是当前供应商才切 ——
+    // 用户手动在用别家时, 后台某路由请求失败不该抢方向盘。
+    let (views, current_id) = {
+        let store = STORE.read().clone();
+        (build_views(&store), store.current_id.clone())
+    };
+    if current_id != id {
+        return;
+    }
+    let Some(pos) = views.iter().position(|v| v.id == id) else {
+        return;
+    };
+    let failed_name = views[pos].name.clone();
+    // 环形找下一个「有 key 且不是失败者」的供应商; 找不到备用就只广播失败, 不切。
+    let next = (1..views.len())
+        .map(|off| &views[(pos + off) % views.len()])
+        .find(|v| v.has_key && v.id != id)
+        .cloned();
+    let Some(next) = next else {
+        eprintln!("[provider-failover] {failed_name} 连续失败, 但没有其他可用供应商, 不切换");
+        return;
+    };
+    match provider_switch(next.id.clone()) {
+        Ok(_) => {
+            let msg = format!("供应商「{failed_name}」连续失败, 已自动切换到「{}」", next.name);
+            eprintln!("[provider-failover] {msg}");
+            emit_failover(&json!({
+                "kind": "switched",
+                "from": id,
+                "fromName": failed_name,
+                "to": next.id,
+                "toName": next.name,
+                "message": msg,
+            }));
+        }
+        Err(e) => eprintln!("[provider-failover] 自动切换失败: {e}"),
+    }
+}
+
+fn emit_failover(payload: &Value) {
+    #[cfg(feature = "desktop")]
+    {
+        use tauri::Emitter;
+        if let Some(app) = FAILOVER_APP.read().as_ref() {
+            let _ = app.emit("provider://failover", payload.clone());
+        }
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        if let Some(app) = FAILOVER_APP.read().as_ref() {
+            let _ = app.emit("provider://failover", payload.clone());
+        }
+    }
+}
+
 /// 还原构建期注入的「粉丝福利」MiniMax key。
 /// 二进制内为 XOR 混淆字节, 此处解出明文; 未注入(本地 dev 构建)时返回空串。
 /// 提醒: 客户端解密逻辑随包一起分发, 混淆只是延缓提取, 不构成真正保护。
@@ -245,6 +329,43 @@ pub fn minimax_borrow_key() -> String {
         }
     }
     gift_minimax_key()
+}
+
+/// **生图**专用借 key:只借用户自己在坞里存的 minimax / minimax-en(Coding Plan)key,
+/// **不**回落粉丝福利 key —— 生图按张烧额度, 共享福利 key 扛不住, 只留给语音整形这类小调用。
+/// 实测(2026-07-21): `sk-cp-` 前缀的 Coding Plan key 可直接调 `/v1/image_generation`。
+/// 回 (key, 是否国际站) —— 国际站 key 须打 api.minimax.io, 国内站打 api.minimaxi.com,
+/// 打错主站会 401, 由调用方按此选 endpoint。
+pub fn minimax_borrow_key_for_image() -> Option<(String, bool)> {
+    fn pick(st: &Store) -> Option<(String, bool)> {
+        for id in ["minimax", "minimax-en"] {
+            if let Some(it) = st.items.iter().find(|i| i.id == id) {
+                for field in [DEFAULT_TOKEN_FIELD, API_KEY_FIELD] {
+                    let tok = cfg_env_str(&it.settings_config, field);
+                    if !tok.trim().is_empty() {
+                        return Some((tok.trim().to_string(), id == "minimax-en"));
+                    }
+                }
+            }
+        }
+        None
+    }
+    // 壳内(Tauri/server)STORE 由 init() 装载, 直接读内存。但对话里的生图跑在
+    // `polaris-forge image` **子进程**里 —— 没有 AppHandle 不走 init, STORE 恒空;
+    // 以 STORE_PATH 是否已设判「未初始化」, 是则从磁盘只读解析 providers.json,
+    // 否则聊天出图的借用链路在子进程里永远断(实测就是这么断的)。
+    if !STORE_PATH.read().as_os_str().is_empty() {
+        return pick(&STORE.read());
+    }
+    let user = UserDirs::new()?;
+    let path = user
+        .home_dir()
+        .join("Polaris")
+        .join("data")
+        .join("providers.json");
+    let txt = fs::read_to_string(path).ok()?;
+    let st: Store = serde_json::from_str(&txt).ok()?;
+    pick(&st)
 }
 
 /// 还原构建期注入的「免费额度赠送」Kimi For Coding token(XOR 混淆, 见 build.rs)。
@@ -363,7 +484,7 @@ fn config_with_model(mut cfg: Value, model: &str) -> Value {
 }
 
 /// OpenAI 协议供应商未钉模型时的默认模型名。
-const DEFAULT_OPENAI_MODEL: &str = "gpt-5.5";
+const DEFAULT_OPENAI_MODEL: &str = "gpt5.6-sol";
 
 /// 本地路由配置: 把 base_url 指到本地路由的 `/p/{id}` 前缀(路由按 id 实时解析该家上游,
 /// 每对话可并发指向不同家而不串台), 钉四档模型(含小任务档), AUTH_TOKEN 给个占位串
@@ -474,6 +595,8 @@ pub fn route_target(id: &str) -> Result<RouteTarget, String> {
 }
 
 pub fn init(_app: &AppHandle) -> Result<()> {
+    // 故障转移事件通道: 失败上报点在无 app 句柄的 TCP 线程里, 这里存一份全局。
+    *FAILOVER_APP.write() = Some(_app.clone());
     let user = UserDirs::new().ok_or_else(|| anyhow::anyhow!("no user dir"))?;
     let dir = user.home_dir().join("Polaris").join("data");
     fs::create_dir_all(&dir)?;
@@ -1024,32 +1147,20 @@ fn apply_settings_config(cfg: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// 给「生图」用的当前供应商画像：返回 (当前供应商展示名, 是否疑似具备真实生图能力)。
+/// 给「生图」用的画像：返回 (可用的生图家展示名, 是否真能生图)。
 ///
-/// 真相：供应商坞里 55 家全部是 Anthropic 协议的文本 / 代码大模型，**没有一个能生图**；
-/// 真要生图得另配一份独立的图像 API（如 OpenAI gpt-image）。所以默认「不支持」，
-/// 仅当 settings.json 的 env 或进程环境里检测到 `OPENAI_API_KEY` 时才认为可尝试真实生图。
+/// 本表(聊天供应商坞)里 55 家全是文本/代码大模型,**没有一个能生图** —— 生图配置住在
+/// 独立的生图坞(`image_store.rs`,理由见其文件头)。这里只是把它转出来。
+///
+/// 旧实现是「settings.json 或进程 env 里有非空 `OPENAI_API_KEY` 就算支持」—— 那是张**空头
+/// 支票**:环境变量里有个 key 不代表我们真会去调它(当时压根没有生图调用路径),而
+/// `prompt.rs` 却照着它跟用户承诺「可以在 API 供应商里配置图像 API」。现在按**真配了生图家
+/// 且填了 Key** 判定,承诺才对得上实现。
 pub fn image_gen_capability() -> (String, bool) {
-    let store = STORE.read().clone();
-    let views = build_views(&store);
-    let cur = detect_current(&views, &store);
-    let name = views
-        .iter()
-        .find(|v| v.id == cur)
-        .map(|v| v.name.clone())
-        .unwrap_or_else(|| "Claude 官方".to_string());
-
-    let live = read_live_env();
-    let has_image_key = live
-        .get("OPENAI_API_KEY")
-        .and_then(|v| v.as_str())
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
-        || std::env::var("OPENAI_API_KEY")
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
-
-    (name, has_image_key)
+    match image_store::current_image_config() {
+        Some(c) => (format!("{}({})", c.name, c.model), true),
+        None => (String::new(), false),
+    }
 }
 
 // ───────────────────────── Commands: 供应商 ─────────────────────────
@@ -1084,7 +1195,7 @@ fn cfg_for_view(v: &ProviderView, route_all: bool) -> Result<Value, String> {
             return Err("请先授权 ChatGPT (Codex), 再切换到它".to_string());
         }
         let port = crate::integrations::codex_proxy::ensure_running()?;
-        return Ok(local_route_config(port, "codex", "gpt-5.5"));
+        return Ok(local_route_config(port, "codex", "gpt5.6-sol"));
     }
     if v.protocol == "openai" {
         // OpenAI 协议(GPT API / 各家 OpenAI 兼容网关)→ 同样走本地路由转发:

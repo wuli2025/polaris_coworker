@@ -88,8 +88,9 @@ Container Manager → 项目 → 新增：
 - `mem_limit: 6g` —— 防单容器泄漏拖垮整机；超限 OOM kill 本容器，DSM 与其它容器存活。
   （群晖内核缺 CFS 模块，CPU 硬限速 `cpus=` **不生效**，故不设，只能在 UI 设 CPU 优先级。）
 - 日志 `json-file` `max-size 10m` / `max-file 5` —— 防 stdout 膨胀写满系统分区。
-- 看门狗 `POLARIS_CHAT_TIMEOUT_SECS=180` —— 单轮对话**连续空闲**超时才杀进程组，
-  活跃流式的长任务不会被误杀。
+- 看门狗 `POLARIS_CHAT_TIMEOUT_SECS`（默认 900s）—— 单轮对话**连续空闲**且进程树静止
+  才杀进程组，活跃流式/静默干活的长任务不会被误杀；总时长硬顶默认 86400s（24h），
+  7 小时级长任务全程不中断。
 - 镜像自带 `tini` 作 PID1 —— 回收 claude 扇出的子进程僵尸。
 
 水位监控：`GET http://<nas>:8080/api/status` 返回容器内存（贴近 mem_limit）、数据盘用量、

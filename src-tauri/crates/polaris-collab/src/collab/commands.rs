@@ -4,6 +4,9 @@
 //! 但 git 工作集操作发生在**成员本机**——这里把 workset 六件套暴露给前端 invoke。
 //! 隧道客户端(空壳/完整端连主机)也在此启停。
 #![cfg(feature = "desktop")]
+// 参数名必须与前端 invoke 的 camelCase key 逐字对齐(tauri 按名字反序列化),
+// 改成 snake_case 会让前端调用当场丢参,故此文件整体豁免命名 lint。
+#![allow(non_snake_case)]
 
 use super::workset;
 

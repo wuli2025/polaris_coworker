@@ -22,8 +22,9 @@
 //! 注: 上游请求契约(必需头/字段)可能随官方调整, 出错文案会经 `last_error()` 暴露到坞里。
 
 use crate::provider::{
-    codex_auth_path, codex_b64url_decode, codex_rfc3339_now, route_target, RouteTarget,
-    CODEX_CLIENT_ID, CODEX_OAUTH_TOKEN_URL,
+    codex_auth_path, codex_b64url_decode, codex_rfc3339_now, current_provider_id,
+    note_provider_failure, note_provider_success, route_target, RouteTarget, CODEX_CLIENT_ID,
+    CODEX_OAUTH_TOKEN_URL,
 };
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -34,7 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BACKEND_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const DEFAULT_MODEL: &str = "gpt-5.5";
+const DEFAULT_MODEL: &str = "gpt5.6-sol";
 const USER_AGENT: &str = "polaris-codex-proxy";
 const BASE_PORT: u16 = 8765;
 const PORT_TRIES: u16 = 25;
@@ -172,6 +173,14 @@ fn handle_conn(mut stream: TcpStream) -> std::io::Result<()> {
             }
         };
         let is_count = path.starts_with("/v1/messages/count_tokens");
+        // 故障转移归因 id: `/p/{id}` 前缀直接可信; 旧版无前缀路径按「当前供应商」归因。
+        // 本地路由是唯一每请求过手的地方 —— 直连模式的失败发生在 claude CLI 内部,
+        // kernel 看不见, 故滑窗只接在这条路径上(取舍见 store::note_provider_failure)。
+        let fo_id = if route_id.is_empty() {
+            current_provider_id()
+        } else {
+            route_id.clone()
+        };
         match target {
             // Anthropic 兼容上游 → 纯透传(含 count_tokens: 上游有真接口, 原样转)
             RouteTarget::AnthropicCompat {
@@ -186,6 +195,7 @@ fn handle_conn(mut stream: TcpStream) -> std::io::Result<()> {
                 &base_url,
                 &api_key,
                 &token_field,
+                &fo_id,
             ),
             t => {
                 if is_count {
@@ -195,7 +205,7 @@ fn handle_conn(mut stream: TcpStream) -> std::io::Result<()> {
                         serde_json::to_vec(&json!({ "input_tokens": est })).unwrap_or_default();
                     write_simple(&mut stream, 200, "application/json", &out);
                 } else {
-                    handle_messages(&mut stream, &body, t);
+                    handle_messages(&mut stream, &body, t, &fo_id);
                 }
             }
         }
@@ -268,7 +278,7 @@ fn write_event(stream: &mut TcpStream, event: &str, data: &Value) -> std::io::Re
 
 // ───────────────────────── /v1/messages 主流程 ─────────────────────────
 
-fn handle_messages(stream: &mut TcpStream, body: &[u8], target: RouteTarget) {
+fn handle_messages(stream: &mut TcpStream, body: &[u8], target: RouteTarget, fo_id: &str) {
     let req: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => return anthropic_error(stream, 400, &format!("请求体不是合法 JSON: {e}")),
@@ -276,12 +286,12 @@ fn handle_messages(stream: &mut TcpStream, body: &[u8], target: RouteTarget) {
     let want_stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     match target {
-        RouteTarget::Chatgpt => handle_chatgpt(stream, &req, want_stream),
+        RouteTarget::Chatgpt => handle_chatgpt(stream, &req, want_stream, fo_id),
         RouteTarget::OpenAiCompat {
             base_url,
             api_key,
             model,
-        } => handle_openai_compat(stream, &req, want_stream, &base_url, &api_key, &model),
+        } => handle_openai_compat(stream, &req, want_stream, &base_url, &api_key, &model, fo_id),
         // AnthropicCompat 在 handle_conn 就地透传, 不会走到这里
         RouteTarget::AnthropicCompat { .. } => {
             anthropic_error(stream, 500, "内部路由错误: 透传目标不应进翻译分支")
@@ -303,6 +313,7 @@ fn passthrough_forward(
     base_url: &str,
     api_key: &str,
     token_field: &str,
+    fo_id: &str,
 ) {
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
     let mut req = upstream_agent()
@@ -327,10 +338,20 @@ fn passthrough_forward(
     };
 
     let resp = match req.send_bytes(body) {
-        Ok(r) => r,
-        // 上游错误状态: 不翻译不吞掉, 连状态码带 body 原样转达
-        Err(ureq::Error::Status(_code, r)) => r,
+        Ok(r) => {
+            note_provider_success(fo_id); // 2xx: 清故障滑窗计数
+            r
+        }
+        // 上游错误状态: 不翻译不吞掉, 连状态码带 body 原样转达;
+        // 鉴权/欠费/服务端故障类顺手计入故障滑窗(达阈自动切备用供应商)。
+        Err(ureq::Error::Status(code, r)) => {
+            if status_counts_as_failure(code) {
+                note_provider_failure(fo_id);
+            }
+            r
+        }
         Err(ureq::Error::Transport(t)) => {
+            note_provider_failure(fo_id); // 网络类失败: 连不上/超时
             let m = format!("连接上游失败: {t}");
             set_error(m.clone());
             return anthropic_error(stream, 502, &m);
@@ -392,7 +413,7 @@ fn relay_response(stream: &mut TcpStream, resp: ureq::Response) {
 }
 
 /// ChatGPT 订阅上游(Responses 协议, OAuth 鉴权 + 401 静默刷新重试)
-fn handle_chatgpt(stream: &mut TcpStream, req: &Value, want_stream: bool) {
+fn handle_chatgpt(stream: &mut TcpStream, req: &Value, want_stream: bool, fo_id: &str) {
     let auth = match load_auth() {
         Ok(a) => a,
         Err(e) => {
@@ -406,24 +427,38 @@ fn handle_chatgpt(stream: &mut TcpStream, req: &Value, want_stream: bool) {
         Err(e) => return anthropic_error(stream, 400, &e),
     };
 
-    // 调上游: 401/403 先刷新 token 重试一次
+    // 调上游: 401/403 先刷新 token 重试一次。注意故障滑窗只记「重试后仍失败」——
+    // 静默刷新本身是设计内的自愈, 刷新成功不算供应商坏。
     let resp = match call_upstream(&auth, &upstream) {
-        Ok(r) => r,
+        Ok(r) => {
+            note_provider_success(fo_id);
+            r
+        }
         Err(UpstreamErr::Unauthorized) => match refresh_auth(&auth) {
             Ok(a2) => match call_upstream(&a2, &upstream) {
-                Ok(r) => r,
+                Ok(r) => {
+                    note_provider_success(fo_id);
+                    r
+                }
                 Err(e) => {
+                    if upstream_err_counts(&e) {
+                        note_provider_failure(fo_id);
+                    }
                     let m = e.message();
                     set_error(m.clone());
                     return anthropic_error(stream, 502, &m);
                 }
             },
             Err(e) => {
+                note_provider_failure(fo_id); // 刷新 token 也失败 = 鉴权类故障
                 set_error(e.clone());
                 return anthropic_error(stream, 401, &e);
             }
         },
         Err(e) => {
+            if upstream_err_counts(&e) {
+                note_provider_failure(fo_id);
+            }
             let m = e.message();
             set_error(m.clone());
             return anthropic_error(stream, 502, &m);
@@ -445,6 +480,7 @@ fn handle_openai_compat(
     base_url: &str,
     api_key: &str,
     default_model: &str,
+    fo_id: &str,
 ) {
     let upstream = match build_chat_body(req, default_model) {
         Ok(b) => b,
@@ -452,13 +488,20 @@ fn handle_openai_compat(
     };
 
     let resp = match call_upstream_openai(base_url, api_key, &upstream) {
-        Ok(r) => r,
+        Ok(r) => {
+            note_provider_success(fo_id);
+            r
+        }
         Err(UpstreamErr::Unauthorized) => {
+            note_provider_failure(fo_id); // key 是死的, 401 无从自愈 → 直接计入
             let m = "上游拒绝了 API Key (401/403), 请在坞里核对该供应商的 Key".to_string();
             set_error(m.clone());
             return anthropic_error(stream, 401, &m);
         }
         Err(e) => {
+            if upstream_err_counts(&e) {
+                note_provider_failure(fo_id);
+            }
             let m = e.message();
             set_error(m.clone());
             return anthropic_error(stream, 502, &m);
@@ -475,6 +518,21 @@ fn handle_openai_compat(
         stream_translate(stream, resp, Flavor::OpenAiChat, &model);
     } else {
         buffer_translate(stream, resp, Flavor::OpenAiChat, &model);
+    }
+}
+
+/// 故障滑窗的失败分类: 只有「供应商坏了」的信号才计入 —— 鉴权失效(401/403)、
+/// 欠费(402)、服务端故障(5xx)。400 参数错是我们/claude 的问题, 429 是临时限流,
+/// 都不该触发切换供应商。
+fn status_counts_as_failure(code: u16) -> bool {
+    matches!(code, 401 | 402 | 403) || code >= 500
+}
+
+/// UpstreamErr 版分类(翻译分支用): Unauthorized/Transport 必计, Http 按状态码。
+fn upstream_err_counts(e: &UpstreamErr) -> bool {
+    match e {
+        UpstreamErr::Unauthorized | UpstreamErr::Transport(_) => true,
+        UpstreamErr::Http(c, _) => status_counts_as_failure(*c),
     }
 }
 
@@ -495,12 +553,19 @@ impl UpstreamErr {
 
 /// 带超时的上游 agent: connect/read/write 都设上限。read 用 per-read 超时 (见 UPSTREAM_READ_TIMEOUT
 /// 注释), 不设整条 call 的全局 deadline, 以免误杀正在持续吐 token 的长 SSE 回复。
+/// 进程级共享(OnceLock): Agent 持有连接池, 每次现建 = 每个请求都重做 TCP+TLS 握手
+/// 且上一条连接直接丢弃。共享后同上游(chatgpt.com)的连续请求走 keep-alive 复用。
 fn upstream_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(UPSTREAM_CONNECT_TIMEOUT)
-        .timeout_read(UPSTREAM_READ_TIMEOUT)
-        .timeout_write(IO_TIMEOUT)
-        .build()
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            ureq::AgentBuilder::new()
+                .timeout_connect(UPSTREAM_CONNECT_TIMEOUT)
+                .timeout_read(UPSTREAM_READ_TIMEOUT)
+                .timeout_write(IO_TIMEOUT)
+                .build()
+        })
+        .clone()
 }
 
 fn call_upstream(auth: &Auth, body: &Value) -> Result<ureq::Response, UpstreamErr> {
@@ -587,7 +652,7 @@ fn build_responses_body(req: &Value) -> Result<Value, String> {
         "input": input,
         "store": false,
         "stream": true,
-        // gpt-5.5 是最新 ChatGPT 模型; 推理模型(o1/o3)用 reasoning 字段
+        // gpt5.6-sol 是最新 ChatGPT 模型; 推理模型(o1/o3)用 reasoning 字段
         "reasoning": { "effort": "medium" },
         // 关键: ChatGPT 后端在 `store:false` 下带 `reasoning` 时, **必须**同时声明
         // `include: ["reasoning.encrypted_content"]`, 否则整条 /responses 请求被 400 拒
@@ -610,7 +675,18 @@ fn build_responses_body(req: &Value) -> Result<Value, String> {
     Ok(body)
 }
 
-/// 模型映射: 空→默认; gpt-*/o*/codex 透传; 其余(claude-* 等)→默认 codex 模型
+/// 防输错归一化：`gpt5.x` 系列少横杠是最常见笔误（上游真实 id 为 `gpt-5.x`），
+/// 在路由层自动补上——用户配 `gpt5.6-sol` 与 `gpt-5.6-sol` 等效，杜绝 404。
+fn normalize_gpt(m: &str) -> String {
+    let low = m.to_ascii_lowercase();
+    if low.starts_with("gpt") && !low.starts_with("gpt-") && low.len() > 3 {
+        format!("gpt-{}", &m[3..])
+    } else {
+        m.to_string()
+    }
+}
+
+/// 模型映射: 空→默认; gpt-*/o*/codex 透传(归一化); 其余(claude-* 等)→默认 codex 模型
 fn map_model(m: &str) -> String {
     let low = m.to_ascii_lowercase();
     if low.is_empty() {
@@ -622,7 +698,7 @@ fn map_model(m: &str) -> String {
         || low.starts_with("o3")
         || low.starts_with("o4")
     {
-        return m.to_string();
+        return normalize_gpt(m);
     }
     DEFAULT_MODEL.into()
 }
@@ -778,10 +854,15 @@ fn build_tools(req: &Value) -> Vec<Value> {
 
 // ───────────────────────── Anthropic → chat/completions 请求翻译 ─────────────────────────
 
-/// 推理系模型(o1/o3/o4/gpt-5*): 只认 max_completion_tokens, 且拒绝自定义 temperature。
+/// 推理系模型(o1/o3/o4/gpt-5*, 含新命名 gpt5.6-sol 等无连字符写法): 只认
+/// max_completion_tokens, 且拒绝自定义 temperature。
 fn is_reasoning_model(m: &str) -> bool {
     let low = m.to_ascii_lowercase();
-    low.starts_with("o1") || low.starts_with("o3") || low.starts_with("o4") || low.starts_with("gpt-5")
+    low.starts_with("o1")
+        || low.starts_with("o3")
+        || low.starts_with("o4")
+        || low.starts_with("gpt-5")
+        || low.starts_with("gpt5")
 }
 
 /// OpenAI 侧模型映射: claude 发来的一般是坞里钉的模型名, 原样透传;
@@ -789,9 +870,9 @@ fn is_reasoning_model(m: &str) -> bool {
 fn map_model_openai(m: &str, default_model: &str) -> String {
     let t = m.trim();
     if t.is_empty() || t.to_ascii_lowercase().starts_with("claude") {
-        default_model.to_string()
+        normalize_gpt(default_model)
     } else {
-        t.to_string()
+        normalize_gpt(t)
     }
 }
 
@@ -1755,7 +1836,7 @@ mod tests {
         // 回归护栏: 只要带 reasoning + store:false, 就必须同时声明
         // include=["reasoning.encrypted_content"], 否则 ChatGPT 后端 400 拒, 授权后每条对话都失败。
         let req = json!({
-            "model": "gpt-5.5",
+            "model": "gpt5.6-sol",
             "messages": [{"role":"user","content":"hi"}],
         });
         let body = build_responses_body(&req).expect("应翻译成功");
@@ -1766,6 +1847,17 @@ mod tests {
             include.iter().any(|v| v == "reasoning.encrypted_content"),
             "store:false + reasoning 时必须带 reasoning.encrypted_content"
         );
+    }
+
+    #[test]
+    fn normalize_gpt_fixes_missing_dash() {
+        // 防输错：gpt5.x 少横杠自动补成上游真实 id 形态 gpt-5.x
+        assert_eq!(normalize_gpt("gpt5.6-sol"), "gpt-5.6-sol");
+        assert_eq!(map_model("gpt5.6-sol"), "gpt-5.6-sol");
+        assert_eq!(map_model_openai("gpt5.6-terra", "x"), "gpt-5.6-terra");
+        // 本就带横杠 / 非 gpt 前缀不受影响
+        assert_eq!(normalize_gpt("gpt-5.6-sol"), "gpt-5.6-sol");
+        assert_eq!(normalize_gpt("o3-mini"), "o3-mini");
     }
 
     #[test]
@@ -1812,7 +1904,7 @@ mod tests {
             "messages": [{"role":"user","content":"hello"}],
             "max_tokens": 100, "temperature": 0.5,
         });
-        let b = build_chat_body(&req, "gpt-5.5").expect("应翻译成功");
+        let b = build_chat_body(&req, "gpt5.6-sol").expect("应翻译成功");
         assert_eq!(b["model"], "gpt-4o");
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "hello");
@@ -1826,14 +1918,15 @@ mod tests {
             "messages": [{"role":"user","content":"hi"}],
             "max_tokens": 50, "temperature": 0.9,
         });
-        let b2 = build_chat_body(&req2, "gpt-5.5").expect("应翻译成功");
-        assert_eq!(b2["model"], "gpt-5.5");
+        let b2 = build_chat_body(&req2, "gpt5.6-sol").expect("应翻译成功");
+        // 默认模型回落时经 normalize_gpt 归一化为上游真实 id 形态（补横杠）
+        assert_eq!(b2["model"], "gpt-5.6-sol");
         assert!(b2.get("max_tokens").is_none());
         assert_eq!(b2["max_completion_tokens"], 50);
         assert!(b2.get("temperature").is_none());
 
         // 空 messages → Err
-        assert!(build_chat_body(&json!({"messages": []}), "gpt-5.5").is_err());
+        assert!(build_chat_body(&json!({"messages": []}), "gpt5.6-sol").is_err());
     }
 
     #[test]
@@ -1853,7 +1946,7 @@ mod tests {
             ],
             "tools": [{"name":"get_weather","description":"d","input_schema":{"type":"object"}}],
         });
-        let b = build_chat_body(&req, "gpt-5.5").expect("应翻译成功");
+        let b = build_chat_body(&req, "gpt5.6-sol").expect("应翻译成功");
         let msgs = b["messages"].as_array().unwrap();
         // [user, assistant(text+tool_calls), tool, user]
         assert_eq!(msgs[1]["role"], "assistant");

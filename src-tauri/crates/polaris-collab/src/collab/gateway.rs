@@ -46,7 +46,6 @@ static NEXT_PORT: AtomicU16 = AtomicU16::new(19000);
 struct HostEntry {
     node_id: String,
     local_port: u16,
-    name: String,
     /// 挂牌账号(gw_register 鉴权后的 user_id)——踢人按它索引。
     user_id: i64,
     /// 踢下线信号:发 true 后该主机的本地桥接监听循环立即退出、端口释放。
@@ -217,7 +216,6 @@ pub async fn register_host(host_node_id: &str, name: &str, user_id: i64) -> Resu
         HostEntry {
             node_id: host_node_id.clone(),
             local_port: port,
-            name: name.to_string(),
             user_id,
             cancel: cancel_tx,
         },

@@ -2,6 +2,7 @@
 import { onMounted, ref } from "vue";
 import { collab, type CollabProject, type TaskCard } from "../lib/net";
 import { toastErr, toast } from "../lib/toast";
+import { go } from "../lib/nav";
 
 const projects = ref<CollabProject[]>([]);
 const active = ref<CollabProject | null>(null);
@@ -60,7 +61,7 @@ onMounted(loadProjects);
 <template>
   <div class="proj">
     <header class="bar">
-      <button v-if="active" class="icon" @click="active = null">‹</button>
+      <button class="icon" @click="active ? (active = null) : go('chat')">‹</button>
       <div class="title">{{ active ? active.name : "项目" }}</div>
       <span style="width: 34px"></span>
     </header>

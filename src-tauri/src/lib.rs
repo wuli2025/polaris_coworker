@@ -31,6 +31,8 @@ pub use forge::figma_bridge;
 pub use polaris_runtime as runtime;
 // 外壳拼装点: 把引擎实现注入内核桥(chat::bridges), 桌面 setup 与 server serve 共用。
 pub mod wiring;
+// 生图壳桥接: 唯一同时认识 kernel 生图坞与 forge 生图引擎的地方(forge 不认识 kernel, 见其 Cargo.toml)。
+pub mod imagegen;
 // 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。
 #[cfg(feature = "desktop")]
 pub mod updater;
@@ -71,10 +73,25 @@ impl KbLocator for HostKbLocator {
     }
 }
 
+/// 把主窗口从托盘/最小化里拉回前台（托盘点击、二次启动唤起共用）。
+#[cfg(all(feature = "desktop", not(test)))]
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
 #[cfg(all(feature = "desktop", not(test)))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例守卫（须第一个注册）：应用藏在托盘时用户再点桌面图标, 不起第二个进程
+        // (两实例会互抢协作主机 8484/网关端口、双份 claude 常驻池), 而是唤起已有窗口。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -166,6 +183,42 @@ pub fn run() {
             // 云机网关自启重挂:上次挂过牌就重新向云机注册(云机重启后注册表清空需重挂)。
             #[cfg(feature = "collab-net")]
             collab::commands::gateway_auto_reattach();
+            // ── 系统托盘（Tailscale 式静默驻留）──
+            // 关窗只是藏进托盘, 协作主机/隧道/网关/常驻 claude 池全部继续跑;
+            // 左键单击托盘图标唤回主窗口, 右键菜单里才有真正的「退出」。
+            {
+                use tauri::menu::{Menu, MenuItem};
+                use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+                let show = MenuItem::with_id(app, "tray-show", "显示主界面", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "tray-quit", "退出 Polaris", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show, &quit])?;
+                let mut tray = TrayIconBuilder::with_id("main")
+                    .tooltip("北极星 · Polaris（后台运行中,点击打开）")
+                    .menu(&menu)
+                    // 左键=直接唤醒窗口(Tailscale 手感), 只有右键才弹菜单
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "tray-show" => show_main_window(app),
+                        // 唯一的真退出入口:走 app.exit → RunEvent::ExitRequested,
+                        // 下方 run 回调里的子进程收割/落盘清理照常执行。
+                        "tray-quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            show_main_window(tray.app_handle());
+                        }
+                    });
+                if let Some(icon) = app.default_window_icon() {
+                    tray = tray.icon(icon.clone());
+                }
+                tray.build(app)?;
+            }
             // 开发实例窗口标题带 (Dev+版本): 与已安装正式版(同为 polaris-app.exe,
             // 还可能是改牌分发)一眼区分, 测试时不点混窗口。仅 debug 构建, 发版不受影响。
             #[cfg(debug_assertions)]
@@ -176,6 +229,17 @@ pub fn run() {
                 ));
             }
             Ok(())
+        })
+        // 关窗 ≠ 退出:主窗口的 X 只是隐藏(托盘继续驻留), 所有后台链路不断。
+        // 真退出唯一入口 = 托盘菜单「退出 Polaris」(app.exit)。系统关机/注销时
+        // Windows 会绕过 CloseRequested 直接终止进程, 不会被这里卡住。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             // 多人协作:完整端工作集(本机 git)+ 隧道客户端
@@ -253,6 +317,7 @@ pub fn run() {
             conv::conv_rename_conversation,
             conv::conv_get_messages,
             conv::conv_set_project_kb_scope,
+            conv::conv_set_project_work_dir,
             // 人格模块 (板块⑫)
             persona::persona_list,
             persona::persona_apply,
@@ -300,6 +365,7 @@ pub fn run() {
             integrations::nas::nas_disconnect,
             // Chat
             chat::chat_send,
+            chat::chat_prewarm, // 打字期预热常驻 claude 进程(best-effort)
             chat::chat_cancel,
             chat::chat_attach_files,
             chat::chat_attach_image,
@@ -337,6 +403,12 @@ pub fn run() {
             provider::provider_delete,
             provider::usage_summary,
             provider::provider_balance,
+            // 生图供应商坞(独立于上面那张聊天表 —— 理由见 provider/image_store.rs 文件头)
+            provider::image_provider_list,
+            provider::image_provider_save,
+            provider::image_provider_delete,
+            provider::image_provider_switch,
+            imagegen::forge_image,
             provider::codex_status,
             provider::codex_start_login,
             provider::codex_poll_login,
@@ -467,6 +539,9 @@ pub fn run() {
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 runtime::procs::CHILDREN.kill_all();
+                // 常驻 claude agent 进程池(session_pool)不在 CHILDREN 里(按 conv 而非
+                // req 管理), 单独收割 —— 否则退出后每个会话遗留一个 ~数百 MB 的孤儿 claude。
+                chat::session_pool::kill_all();
                 // 对话状态强制落盘:append_message 走「脏标记 + 500ms 合并落盘」,
                 // 退出瞬间可能还有最近半秒的消息只在内存里 —— 这里补一刀(不脏则零开销)。
                 conv::flush();

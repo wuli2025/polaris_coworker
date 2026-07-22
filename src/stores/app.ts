@@ -363,6 +363,18 @@ export const useAppStore = defineStore("app", () => {
     await convApi.openProjectDir(projectId);
   }
 
+  /** 设置(或清除)项目的工作目录：本项目下所有对话以此为 claude cwd（终端 cd 进 repo 同款）。
+   *  workDir 传 null/空 = 解绑回落默认。成功后就地更新本地项目的 workDir。 */
+  async function setProjectWorkDir(projectId: string, workDir: string | null) {
+    await convApi.setWorkDir(projectId, workDir);
+    const i = projects.value.findIndex((x) => x.id === projectId);
+    if (i >= 0) {
+      const next = [...projects.value];
+      next[i] = { ...next[i], workDir: workDir && workDir.trim() ? workDir : null };
+      projects.value = next;
+    }
+  }
+
   /**
    * @param navigate 是否切到 chat 视图。默认 true(侧栏/对话面板新建即跳进对话)。
    *   工坊类组件(Deck/Web 等)自己管理视图、就地展示预览, 必须传 false ——
@@ -383,6 +395,9 @@ export const useAppStore = defineStore("app", () => {
     useChatStore().markFresh(c.id);
     currentProjectId.value = projectId;
     if (navigate) setView("chat");
+    // 新建对话即预热: 新对话必然还没有常驻进程, 正是预热收益最大的时刻
+    // (用户接下来要打的就是首条消息)。
+    useChatStore().prewarm(c.id);
     return c;
   }
 
@@ -429,6 +444,9 @@ export const useAppStore = defineStore("app", () => {
     currentProjectId.value = conv.projectId;
     clearUnread(conv.id);
     setView("chat");
+    // 打开对话即预热常驻 claude 进程(fire-and-forget): 用户看历史/打字的几秒里
+    // 把 CLI ~6.4s 自举跑完, 首条消息首响 ~10s → ~3s。失败静默, 不影响任何流程。
+    useChatStore().prewarm(conv.id);
   }
 
   /** 按 id 找对话标题(任务中心给后台 AI 任务起可读名用);找不到返回空串。 */
@@ -492,6 +510,7 @@ export const useAppStore = defineStore("app", () => {
     projectByCollabId,
     archiveProject,
     openProjectDir,
+    setProjectWorkDir,
     createConversation,
     deleteConversation,
     archiveConversation,

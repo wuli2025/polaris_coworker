@@ -5,6 +5,13 @@ import { toggleableCaps, hasCap, setCap, type CapKey } from "../lib/capabilities
 import { go } from "../lib/nav";
 import { invoke } from "../lib/net";
 import { deviceNodeId } from "../lib/tunnel";
+import {
+  APP_VERSION,
+  fetchLatest,
+  hasUpdate,
+  downloadUrls,
+  type MobileLatest,
+} from "../lib/update";
 
 // hasCap/toggleableCaps 内部读响应式 user+capOverride,computed 自动联动
 const caps = computed(() => toggleableCaps());
@@ -51,6 +58,25 @@ onMounted(async () => {
   }
 });
 
+// ── 远程更新检查(CF/GitHub 三端点,见 lib/update.ts) ──
+const checking = ref(false);
+const checked = ref(false);
+const latest = ref<MobileLatest | null>(null);
+const updateAvail = computed(() => !!latest.value && hasUpdate(latest.value));
+const dlUrls = computed(() => (latest.value ? downloadUrls(latest.value) : []));
+
+async function checkUpdate() {
+  if (checking.value) return;
+  checking.value = true;
+  checked.value = false;
+  try {
+    latest.value = await fetchLatest();
+  } finally {
+    checking.value = false;
+    checked.value = true;
+  }
+}
+
 const maskedCode = computed(() => {
   const c = accountRoot.value?.code ?? "";
   // 保留 PLRA1- 前缀,其余字符掩成圆点,格式不变(便于识别但不泄露)。
@@ -74,7 +100,11 @@ async function copyRoot() {
 
 <template>
   <div class="settings">
-    <header class="bar"><div class="title">我的</div></header>
+    <header class="bar">
+      <button class="back" title="返回对话" @click="go('chat')">‹</button>
+      <div class="title">我的</div>
+      <span style="width: 34px"></span>
+    </header>
     <div class="scroll">
       <div class="profile">
         <div class="avatar">{{ displayName(user).slice(0, 1) }}</div>
@@ -120,7 +150,7 @@ async function copyRoot() {
 
       <div class="group">
         <div class="glabel">能力管控</div>
-        <p class="faint gp">关闭的能力会从底部导航与「更多」面板隐藏。核心对话不可关闭。</p>
+        <p class="faint gp">关闭的能力会从侧边栏与输入框「＋」面板隐藏。核心对话不可关闭。</p>
         <div v-for="c in caps" :key="c.key" class="caprow" @click="toggle(c.key)">
           <span class="cic">{{ c.icon }}</span>
           <span class="cmeta">
@@ -131,8 +161,35 @@ async function copyRoot() {
         </div>
       </div>
 
+      <div class="group">
+        <div class="glabel">关于与更新</div>
+        <div class="krow">
+          <span class="muted">当前版本</span>
+          <span class="kval">v{{ APP_VERSION }}</span>
+        </div>
+        <button class="btn ghost full mt" :disabled="checking" @click="checkUpdate">
+          {{ checking ? "检查中…" : "🔄 检查更新" }}
+        </button>
+        <div v-if="updateAvail && latest" class="upcard">
+          <div class="upver">🎉 发现新版 v{{ latest.version }}</div>
+          <p v-if="latest.notes" class="faint upnotes">{{ latest.notes }}</p>
+          <!-- 顶层导航到外部域 → Capacitor 交给系统浏览器下载,浏览器里点开即装 -->
+          <a class="btn full dl" :href="dlUrls[0]" target="_blank">⬇ 下载新版 APK</a>
+          <a v-if="dlUrls[1]" class="mirror faint" :href="dlUrls[1]" target="_blank">
+            下载慢?试试备用地址
+          </a>
+          <p class="faint uphint">
+            将用系统浏览器下载,完成后点开安装(首次需允许「安装未知来源应用」)。
+          </p>
+        </div>
+        <p v-else-if="checked && latest" class="faint upres">已是最新版本 ✓</p>
+        <p v-else-if="checked && !latest" class="faint upres">
+          暂时获取不到更新信息,请检查外网连接后再试。
+        </p>
+      </div>
+
       <button class="btn ghost logout" @click="logout">退出登录</button>
-      <p class="faint ver">北极星 · 安卓远程壳 v1.1</p>
+      <p class="faint ver">北极星 · 安卓远程壳 v{{ APP_VERSION }}</p>
     </div>
   </div>
 </template>
@@ -145,8 +202,16 @@ async function copyRoot() {
   min-height: 0;
 }
 .bar {
-  padding: calc(10px + var(--safe-top)) 16px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(10px + var(--safe-top)) 12px 10px;
   border-bottom: 1px solid var(--line);
+}
+.back {
+  font-size: 26px;
+  color: var(--text-dim);
+  width: 34px;
 }
 .title {
   font-weight: 600;
@@ -335,6 +400,41 @@ async function copyRoot() {
 .switch.on i {
   transform: translateX(18px);
   background: #fff;
+}
+/* 更新卡片 */
+.upcard {
+  margin-top: 12px;
+  padding: 13px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+}
+.upver {
+  font-weight: 600;
+  font-size: 15px;
+}
+.upnotes {
+  margin: 6px 0 0;
+  white-space: pre-line;
+}
+.dl {
+  margin-top: 10px;
+  text-decoration: none;
+}
+.mirror {
+  display: block;
+  text-align: center;
+  margin-top: 8px;
+  text-decoration: none;
+}
+.uphint {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.upres {
+  margin: 8px 0 0;
+  text-align: center;
 }
 .logout {
   width: 100%;
