@@ -101,10 +101,25 @@ jobs:
         if: matrix.platform == 'macos-latest'
         run: brew install autoconf automake libtool
 
+      # ★ 坑(v2.4.0 实证,连挂两轮):sherpa-rs-sys 的 build script 把预编译 SDK 下到
+      #   %LOCALAPPDATA%\sherpa-rs\<target>\<hash>\...(**不在 target/ 下**),而它的
+      #   build script 产物(记着那条 LIBPATH)会被 rust-cache 缓存。缓存一命中 →
+      #   build script 判定"已构建"不再下载 → 链接期 `LNK1181: cannot open input
+      #   file 'cargs.lib'`。即:第一轮空缓存能过,之后每轮必挂。
+      #   解法 = 把 SDK 目录与 cargo 缓存**同生共死**地一起缓存。
+      - name: Cache sherpa-onnx prebuilt SDK (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\sherpa-rs
+          key: sherpa-rs-sdk-${{ runner.os }}-v1
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # 换 key 命名空间:作废掉「build script 说已下载、SDK 实则不存在」的旧毒缓存。
+          prefix-key: v2-rust
 
       - name: Install frontend deps
         run: npm install
