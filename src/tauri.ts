@@ -1786,8 +1786,13 @@ export interface ProviderView {
   protocol: string;
   isPreset: boolean;
   hasKey: boolean;
+  /**
+   * **掩码值**(`••••••••尾4`)——后端 provider_list 出口不再下发明文 key。
+   * 原样回传给 provider_save 即表示「保持原 key 不变」；换 key 直接填新值覆盖；
+   * 清空该 env 字段才是真的删掉 key。
+   */
   authToken: string;
-  /** 完整 settings_config（env + includeCoAuthoredBy/attribution 等） */
+  /** 完整 settings_config（env + includeCoAuthoredBy/attribution 等）；env 里的密钥字段同样是掩码 */
   settingsConfig: any;
 }
 export interface ProviderListResult {
