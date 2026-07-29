@@ -1,8 +1,12 @@
 # ═══════════════════════════════════════════════════════════════
 # Polaris 服务器镜像（多阶段构建）
 #
-# ⚠ 未在开发机实测构建（本机 WSL 无 docker）。首次构建若报错，见
+# ⚠ 完整三段构建未在开发机跑过（stage2 的 Rust release 编译很慢）。首次构建若报错，见
 #   DEPLOY-CLOUD.md「构建排错」一节。
+#   已实测（2026-07-24，Docker 29.4.3）：**stage3 运行层的 Claude Code 安装段**在真
+#   debian:bookworm-slim 里单独构建通过 —— 四源回落生效（R2 未传→被 gzip 魔数拦下→
+#   落 npmmirror）、容器内 `claude --version` 正常、**非 root(uid 1000) 下同样正常**、
+#   `ldd` 确认只依赖基础 glibc（librt/libc/libpthread/libdl/libm），无 libstdc++/libgcc 依赖。
 #
 # stage1  node:20        → 前端 dist/
 # stage2  rust:1.95      → polaris-server 二进制（bin 住在 crates/polaris-cli，
@@ -48,6 +52,11 @@ WORKDIR /build
 # 以及 include_dir!/include_str! 内嵌的 src/templates、assets/、voice-libs 等，
 # 都在 src-tauri/ 之内，整目录 COPY 一次到位。
 COPY src-tauri ./src-tauri
+# ★ src-tauri 之外的内嵌资源:beam.rs 用 include_str!("../../docs/beam-guide.html")
+#   把这份说明编进二进制。只 COPY src-tauri 会在 stage2 直接编译失败
+#   (`couldn't read src/../../docs/beam-guide.html`)—— 2026-07-28 实测踩到。
+#   新增跨出 src-tauri 的 include_* 时,这里要跟着加。
+COPY docs/beam-guide.html ./docs/beam-guide.html
 WORKDIR /build/src-tauri
 # ★ 关键：polaris-server 的 [[bin]] 不在主包（tauri bundler 连坐问题，47d1e0c），
 #   而在 workspace 成员 crates/polaris-cli；它依赖
@@ -66,16 +75,65 @@ RUN if [ -n "$APT_MIRROR" ]; then sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/a
 RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         git git-lfs ca-certificates curl openssl tini \
     && rm -rf /var/lib/apt/lists/*
-# Node 20（claude CLI 运行时）：官方 dist 直下 tar.gz（不走 nodesource 脚本，
-# 免 gnupg/apt 源注入，且 NODE_DIST_BASE 可切 npmmirror 国内加速）→ 全局装 claude
+# Node 20：给 Claude 写的 JS/TS 脚本当运行时。
+# ⚠ 它**已不是 claude CLI 的运行时** —— claude 自 2.1.198 起是原生二进制，不调 Node
+#   （官方原话：the installed claude binary does not itself invoke Node）。
+# 官方 dist 直下 tar.gz（不走 nodesource 脚本，免 gnupg/apt 源注入，
+# NODE_DIST_BASE 可切 npmmirror 国内加速）。按 uname 选架构 → x64/arm64 都能构建。
 ARG NODE_VERSION=20.18.1
 ARG NODE_DIST_BASE=https://nodejs.org/dist
 ARG NPM_REGISTRY=
-RUN curl -fsSL "$NODE_DIST_BASE/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.gz" \
-        | tar -xz -C /usr/local --strip-components=1 \
-    && if [ -n "$NPM_REGISTRY" ]; then npm config set -g registry "$NPM_REGISTRY"; fi \
-    && npm i -g @anthropic-ai/claude-code \
-    && npm cache clean --force
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64|amd64)  NARCH=x64 ;; \
+      aarch64|arm64) NARCH=arm64 ;; \
+      *) echo "不支持的架构: $(uname -m)"; exit 1 ;; \
+    esac; \
+    curl -fsSL "$NODE_DIST_BASE/v$NODE_VERSION/node-v$NODE_VERSION-linux-$NARCH.tar.gz" \
+      | tar -xz -C /usr/local --strip-components=1; \
+    if [ -n "$NPM_REGISTRY" ]; then npm config set -g registry "$NPM_REGISTRY"; fi; \
+    node -v; npm -v
+
+# ── Claude Code：直抓 npm 平台包 tgz，**不走 `npm i -g`** ──────────────────────
+# 为什么换掉 `npm i -g @anthropic-ai/claude-code`（三个实打实的毛病）：
+#   ① 它要拉 ~80MB 的 optionalDependency 原生包，构建期常卡死/半途而废 → 整个镜像构建挂掉；
+#   ② 不锁版本（隐式 latest）→ 每次重建拿到的 claude 都不一样，镜像不可复现；
+#   ③ 只有一个源，npm 那边一抖就没得救。
+# 现在：锁版本 + 四源逐个自证（下载 → gzip 魔数 → 解压 → 真跑一次 --version），
+# 任一步不过就换下一个源；四源失败域各不相同，任一家活着就装得上：
+#   R2(自托管/CF) → npmmirror(阿里) → yarn(CF 镜像) → npmjs(官方)
+# 与桌面端 doctor::install 完全同一套规矩 —— **升级 claude 版本要两边一起改**
+#   (src-tauri/crates/polaris-kernel/src/doctor/install.rs 的 CLAUDE_VER)。
+# 注：debian:bookworm-slim 是 glibc，故取 linux-<arch>（非 -musl 包）。
+ARG CLAUDE_VERSION=2.1.218
+ARG DEPS_BASE=https://llmwiki.cloud/downloads/deps
+RUN set -eu; \
+    case "$(uname -m)" in \
+      x86_64|amd64)  CARCH=x64 ;; \
+      aarch64|arm64) CARCH=arm64 ;; \
+      *) echo "不支持的架构: $(uname -m)"; exit 1 ;; \
+    esac; \
+    PKG="claude-code-linux-${CARCH}"; TGZ="${PKG}-${CLAUDE_VERSION}.tgz"; OK=0; \
+    for U in "$DEPS_BASE/$TGZ" \
+             "https://registry.npmmirror.com/@anthropic-ai/${PKG}/-/${TGZ}" \
+             "https://registry.yarnpkg.com/@anthropic-ai/${PKG}/-/${TGZ}" \
+             "https://registry.npmjs.org/@anthropic-ai/${PKG}/-/${TGZ}"; do \
+      echo "下载 Claude Code: $U"; \
+      curl -fsSL --retry 2 --retry-delay 2 "$U" -o /tmp/cc.tgz || { echo "  下载失败，换下一个源"; continue; }; \
+      [ -s /tmp/cc.tgz ] || { echo "  空文件，换下一个源"; continue; }; \
+      [ "$(head -c 2 /tmp/cc.tgz | od -An -tx1 | tr -d ' \n')" = "1f8b" ] \
+        || { echo "  非 gzip（多半是代理/CDN 回的错误页），换下一个源"; continue; }; \
+      rm -rf /tmp/ccx; mkdir -p /tmp/ccx; \
+      tar -xzf /tmp/cc.tgz -C /tmp/ccx --strip-components=1 \
+        || { echo "  解压失败，换下一个源"; continue; }; \
+      [ -f /tmp/ccx/claude ] || { echo "  解压后没有 claude（包结构变了），换下一个源"; continue; }; \
+      chmod +x /tmp/ccx/claude; \
+      /tmp/ccx/claude --version || { echo "  跑不起来（下坏/架构不符），换下一个源"; continue; }; \
+      install -m 0755 /tmp/ccx/claude /usr/local/bin/claude; OK=1; break; \
+    done; \
+    rm -rf /tmp/cc.tgz /tmp/ccx; \
+    [ "$OK" = "1" ] || { echo "Claude Code 所有源都失败，构建中止"; exit 1; }; \
+    claude --version
 
 # 非 root 运行；数据根 = $HOME/Polaris（server 用 ~/Polaris 当工作目录，
 # collab.db 落 ~/Polaris/data/；claude 凭证落 ~/.claude）

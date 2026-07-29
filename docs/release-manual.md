@@ -126,6 +126,22 @@ Invoke-WebRequest "https://llmwiki.cloud/downloads/deps/<文件名>" -Method Hea
 > 而 PowerShell 的 MSI 有 107MB，慢一点就摸到超时上限 → 「有些概率装不上」。走 R2 后实测
 > 8 秒下完（5.3 MB/s），且 R2 出站免费。
 
+### 随安装包内置的运行时（构建期抓取，不入库）
+
+自 2026-07-23 起，**uv / Python / Git Bash 直接打进安装包**——用户不必再装 uv，
+Windows 上也不必再装 PowerShell 7（Claude 的 shell 由内置 Git Bash 提供）。
+`tauri build` 前由 `beforeBuildCommand` 自动跑 `scripts/fetch-runtimes.mjs` 抓到
+`src-tauri/runtime/`（已 gitignore，约 225MB 未压缩 / 3.6k 文件，NSIS lzma 后安装包约 +90MB）。
+
+- 版本锁在 `scripts/fetch-runtimes.mjs` 顶部：`UV_VER`（**与 install.rs 的 UV_VER 保持一致**，
+  共用 R2 里同一份包）、`PY_VER`/`PY_TAG`、`GIT_VER`/`GIT_TAG`。
+- 下载源顺序同上：R2 → ghfast.top → ghproxy.net → GitHub 直连。**MinGit 与 Python 目前
+  还没传 R2**，故走的是公共代理；要提速就按上面的 `wrangler r2 object put` 把
+  `MinGit-<ver>-64-bit.zip` 与 `cpython-<ver>+<tag>-<triple>-install_only_stripped.tar.gz`
+  传进 `deps/`。
+- 抓完可跑真机探针自证：`cargo run -p polaris-kernel --example bundled_runtime_probe`
+  （会验证内置 bash 裸跑可用、13 个 unix 工具不落到 System32、bash 里能跑 uv/python）。
+
 ## 注意
 
 - **macOS 未签名**：Tauri updater 的 minisign 签名校验与 Apple 公证是两回事。更新包能下载

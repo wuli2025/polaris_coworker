@@ -14,9 +14,14 @@ dist-ssr
 .DS_Store
 src-tauri/target
 src-tauri/gen
+# 随安装包分发的运行时(uv / Python / Git Bash),约 227MB,由 scripts/fetch-runtimes.mjs
+# 在 `tauri build` 前自动抓取,不入库。
+src-tauri/runtime/
 src-tauri/Cargo.lock
 # 手机原生隧道插件的 Rust 构建产物(源码只留 Cargo.*/src)
 mobile/native/*/target/
+# e2e 跑 --shots 时落的截图,只用来人眼看一下,不入库
+mobile/e2e/shots/
 
 # Runtime outputs / local logs
 .dev.log

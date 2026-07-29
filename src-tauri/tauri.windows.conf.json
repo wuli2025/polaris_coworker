@@ -3,6 +3,9 @@
   "bundle": {
     "resources": {
       "resources/seed-kb": "resources/seed-kb",
+      "runtime/uv": "runtime/uv",
+      "runtime/python": "runtime/python",
+      "runtime/git": "runtime/git",
       "voice-libs/onnxruntime.dll": "onnxruntime.dll",
       "voice-libs/onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
       "voice-libs/sherpa-onnx-c-api.dll": "sherpa-onnx-c-api.dll",

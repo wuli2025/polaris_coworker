@@ -23,7 +23,14 @@ services:
     # 仅在可信内网且明确接受明文风险时，才在 .env 设置 POLARIS_BIND_IP=0.0.0.0。
     ports:
       - "${POLARIS_BIND_IP:-127.0.0.1}:8080:8080"
+      # iroh 打洞用的 UDP 口。**必须发布**,而且必须是固定口:iroh 默认随机绑,
+      # 容器里随机口等于外面永远打不进来 → 打洞必失败 → 全部流量绕公共中继,
+      # 实测往返从 12ms 变 370ms、盘慢 30 倍,而且不报任何错(只是"能用但很慢")。
+      # 与 .env 的 POLARIS_IROH_PORT 必须同值;云防火墙/安全组也要放行这个 UDP 口。
+      - "${POLARIS_IROH_PORT:-41641}:${POLARIS_IROH_PORT:-41641}/udp"
     environment:
+      # 留空（默认）= 免口令，谁连上谁能用：家用 NAS 在 NAT 后面公网连不上，
+      # 而口令忘了没有找回入口。只有真做了公网映射/反代域名才在 .env 里填上它。
       - POLARIS_AUTH_TOKEN=${POLARIS_AUTH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
@@ -54,6 +61,20 @@ services:
       # 随卷备份即可;丢了所有成员主机都要重新信任)。
       - POLARIS_ACCOUNT_AUTHORITY=${POLARIS_ACCOUNT_AUTHORITY:-}
       - POLARIS_ACCOUNT_AUTHORITY_URL=${POLARIS_ACCOUNT_AUTHORITY_URL:-}
+      # ── 互联(iroh 隧道 / 远程盘)──
+      # 固定 UDP 口:要与上面 ports 里发布的那个一致(理由见 ports 处注释)。
+      - POLARIS_IROH_PORT=${POLARIS_IROH_PORT:-41641}
+      # 自建/指定中继,逗号分隔。打洞成功时用不上它,但打洞失败时它是唯一的兜底 ——
+      # 不设就会落到 n0 的公共中继(可能在欧洲,每跳往返几百毫秒)。
+      - POLARIS_RELAYS=${POLARIS_RELAYS:-}
+      # 主机隧道开机自启。不设的话每次容器重建都得手动 POST 一次 /api/collab/tunnel/start,
+      # 否则对端只会一直等不到应答(现象是"盘挂不上",完全看不出是少了一条启动指令)。
+      - POLARIS_TUNNEL_AUTOSTART=${POLARIS_TUNNEL_AUTOSTART:-1}
+      # 隧道性能旋钮(留空=按机器自适应):worker 数默认取 CPU 核数,
+      # 转发缓冲默认 256KB,远程盘传输压缩级别默认 3(设 0 关闭压缩)。
+      - POLARIS_TUNNEL_WORKERS=${POLARIS_TUNNEL_WORKERS:-}
+      - POLARIS_TUNNEL_BUF_KB=${POLARIS_TUNNEL_BUF_KB:-}
+      - POLARIS_FS_ZSTD_LEVEL=${POLARIS_FS_ZSTD_LEVEL:-}
     volumes:
       - polaris-data:/home/polaris/Polaris   # 数据根：知识库/collab.db(data/) 等
       - polaris-claude:/home/polaris/.claude # claude 凭证与 settings.json

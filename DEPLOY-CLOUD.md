@@ -45,6 +45,8 @@ nano .env
 
 - `POLARIS_AUTH_TOKEN`：机器级 owner 访问口令，必须使用独立强随机值。
   生成一个：`openssl rand -hex 32`
+  （容器**默认是免口令**的——那是给 NAT 后面的家用 NAS 设的。云机对公网可达，
+  这一项必须显式设上，否则等于把 owner 接口敞开。）
 - `POLARIS_BIND_IP`：保持默认 `127.0.0.1`。这让 8080 只供宿主机上的 HTTPS
   反向代理访问，避免 owner 口令、聊天和文件走公网明文。
 - LLM 接入（三选一）：`ANTHROPIC_API_KEY`，或第三方端点的

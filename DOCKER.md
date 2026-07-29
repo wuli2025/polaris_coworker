@@ -14,13 +14,14 @@ cp .env.example .env
 #   编辑 .env，至少填一种鉴权：
 #   - ANTHROPIC_API_KEY=sk-ant-...           （Claude 官方）
 #   - 或 ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN（智谱/Kimi/DeepSeek/聚合站）
-#   - 公网部署务必设 POLARIS_AUTH_TOKEN=<一串口令>
+#   访问口令默认不要（家用 NAS 直接用）；只有真把 8080 暴露到公网时才设
+#   POLARIS_AUTH_TOKEN=<一串口令>
 
 # 2) 一键构建 + 拉起
 docker compose up -d --build
 
 # 3) 浏览器打开
-#   http://localhost:8080
+#   http://localhost:8080          ← 默认免口令，直接进
 #   若设了口令：http://localhost:8080/?token=<你的口令>
 ```
 
@@ -103,8 +104,31 @@ docker compose up -d --build
 - **供应商坞切换**：进入 App 内「供应商」面板切换/新增，会写入 `/root/.claude/settings.json`（持久化）。
 - **OAuth 订阅（Claude Pro / Codex）**：无头容器难走设备码流程。变通：把已登录的
   `~/.claude` 内容拷进 `polaris-claude` 卷复用。本期主推 API Key。
-- **访问口令**：设 `POLARIS_AUTH_TOKEN` 后，`/api/*` 需 `Authorization: Bearer <口令>`，
-  WS 需 `?token=<口令>`。前端用 `http://host:8080/?token=<口令>` 访问会自动记住口令。
+- **访问口令：默认没有**（2026-07-25 起）。容器起来谁连上谁能用，不弹口令框、不看来源。
+
+  | 配置 | 效果 |
+  |---|---|
+  | **什么都不设（默认）** | **免口令**：任何能连上 8080 的来源直接进 |
+  | `POLARIS_AUTH_TOKEN=<口令>` | 所有来源一律校验这把口令 |
+  | `POLARIS_REQUIRE_LOGIN=1` | 不用口令，改为一律要团队账号登录 |
+  | `POLARIS_LAN_ONLY=1` | 免口令，但只放行内网来源（私网/回环/Tailscale `100.64/10`），公网来源拒 |
+
+  设了口令时 `/api/*` 需 `Authorization: Bearer <口令>`、WS 需 `?token=<口令>`；
+  前端用 `http://host:8080/?token=<口令>` 打开会自动记住。
+
+  为什么默认不要口令：家用 NAS 挂在路由 NAT 后面，地址由运营商动态分配、还常带 CGNAT，
+  没做端口映射时公网压根连不上（真要远程用走的是 P2P/Tailscale，那条自带身份）；而口令
+  最容易忘、忘了又没有找回入口——历史上两次把用户锁在自己软件外面，一次是启动时随机
+  生成只打在日志里，一次是网页向导让人随手设的。**网页里那个「设置访问口令」向导已经
+  撤掉，历史落盘的口令也不再生效**（升级上来即自动解锁）。上锁只剩上表那几个环境变量
+  一条明路。`POLARIS_ALLOW_OPEN` 现在就是默认行为，留着不报错、也不必再设。
+
+  `POLARIS_LAN_ONLY=1` 那档的判定按 **TCP 对端地址**，保守优先：拿不到对端地址、或带了
+  `X-Forwarded-For`/`X-Real-IP` 但没设 `POLARIS_TRUST_PROXY=1`，一律当公网处理（反代后面
+  对端恒是反代自己，按它判会把全世界当内网）。
+
+  **`/api/exec`（远程 shell）不吃免口令这条豁免**：没设 `POLARIS_AUTH_TOKEN`／没开
+  `POLARIS_REQUIRE_LOGIN` 时它直接 403，要用必须先给出真凭据。
 
 ---
 

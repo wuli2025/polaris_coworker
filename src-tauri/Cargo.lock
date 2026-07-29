@@ -5815,7 +5815,7 @@ dependencies = [
 
 [[package]]
 name = "polaris-app"
-version = "2.5.1"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5828,6 +5828,8 @@ dependencies = [
  "enigo",
  "futures-util",
  "getrandom 0.2.17",
+ "hyper",
+ "hyper-util",
  "include_dir",
  "libc",
  "once_cell",
@@ -5865,11 +5867,12 @@ dependencies = [
  "ureq 2.12.1",
  "walkdir",
  "windows-sys 0.59.0",
+ "zstd",
 ]
 
 [[package]]
 name = "polaris-cli"
-version = "2.5.1"
+version = "2.7.0"
 dependencies = [
  "polaris-app",
  "serde_json",
@@ -5909,6 +5912,7 @@ dependencies = [
  "tower-http",
  "ureq 2.12.1",
  "walkdir",
+ "zstd",
 ]
 
 [[package]]
