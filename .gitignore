@@ -16,6 +16,12 @@ src-tauri/target
 src-tauri/gen
 # 随安装包分发的运行时(uv / Python / Git Bash),约 227MB,由 scripts/fetch-runtimes.mjs
 # 在 `tauri build` 前自动抓取,不入库。
+# scripts/fetch-runtimes.mjs 抓的随包运行时(uv/python/git,约 225MB)。
+# ⚠ 既然它不进仓库,**就不许出现在 tauri.windows.conf.json 的 bundle.resources 里** ——
+#   tauri 的 build script 会逐条校验资源路径,少一个就整个 cargo 编译失败
+#   (`resource path runtime\python doesn't exist`)。本机有这个目录时完全看不出来,
+#   一到 CI 的干净检出必挂(v2.7.0 实测踩过)。要真启用随包运行时,得先让 CI 在 build 前
+#   跑 fetch-runtimes.mjs;在那之前 doctor/bundled.rs 找不到它会回落到系统 uv/python/git。
 src-tauri/runtime/
 src-tauri/Cargo.lock
 # 手机原生隧道插件的 Rust 构建产物(源码只留 Cargo.*/src)
