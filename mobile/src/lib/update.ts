@@ -13,9 +13,9 @@
  * (ACTION_VIEW),浏览器下载 APK 后用户点开即装,无需任何原生插件。
  */
 
-export const APP_VERSION = "1.4";
+export const APP_VERSION = "1.5";
 /** 与 android/app/build.gradle 的 versionCode 保持同步(出包时一起 +1)。 */
-export const APP_VERSION_CODE = 5;
+export const APP_VERSION_CODE = 6;
 
 export interface MobileLatest {
   version: string;

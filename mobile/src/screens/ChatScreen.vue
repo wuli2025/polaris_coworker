@@ -1,10 +1,36 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { messages, sending, sendMessage, cancel, newConversation } from "../lib/chat";
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from "vue";
+import {
+  messages,
+  sending,
+  sendMessage,
+  cancel,
+  newConversation,
+  switchProject,
+} from "../lib/chat";
+import {
+  projects,
+  activeProject,
+  loadProjects,
+  matchProject,
+  parseProjectIntent,
+  dirName,
+} from "../lib/projects";
 import { renderMd } from "../lib/md";
-import { upload } from "../lib/net";
+import { invoke, upload } from "../lib/net";
+import { VoiceRecorder, MAX_SECONDS } from "../lib/recorder";
+import { hasCap } from "../lib/capabilities";
 import { toast, toastErr } from "../lib/toast";
 import { openPreview } from "../lib/preview";
+import { go } from "../lib/nav";
+import {
+  list as listApps,
+  matchApp,
+  parseOpenIntent,
+  requestOpen,
+  type PubApp,
+} from "../lib/apps";
+import { onKeyboard } from "../lib/viewport";
 import { hostName, user, displayName } from "../lib/auth";
 import {
   chosenProviderId,
@@ -56,6 +82,16 @@ function baseName(p: string): string {
   return p.split(/[\\/]/).pop() || p;
 }
 
+/** 正文里被 md.ts 标成 data-path 的文件名 → 点一下就远程预览(事件代理,不给每个链接挂监听)。 */
+function onMdClick(e: MouseEvent) {
+  const hit = (e.target as HTMLElement | null)?.closest?.("[data-path]") as HTMLElement | null;
+  if (!hit) return;
+  const p = hit.getAttribute("data-path");
+  if (!p) return;
+  e.preventDefault();
+  openPreview(p);
+}
+
 const draft = ref("");
 const sheetOpen = ref(false);
 const skillOpen = ref(false);
@@ -67,9 +103,34 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const attachments = ref<string[]>([]);
 
 // 静默预取模型/技能列表:chips 才知道该不该显示(老主机 unsupported 时隐藏)
+let offKeyboard: (() => void) | null = null;
 onMounted(() => {
   loadProviders();
   loadSkills();
+  if (hasCap("voice")) probeVoice();
+  // 键盘弹起时输入坞上抬 → 消息流同时变矮,不补一次滚动的话刚发的消息会被顶出视野。
+  offKeyboard = onKeyboard(() => scrollDown());
+  // 按住说话时被切后台/来电 → 松手事件收不到了,得主动收手,
+  // 否则麦克风一直开着(状态栏挂录音图标),回来还会把这段没打算说的话发去识别。
+  document.addEventListener("visibilitychange", onHidden);
+});
+function onHidden() {
+  if (document.visibilityState !== "hidden") return;
+  pressing = false; // 切后台时 pointerup 多半不会来了
+  if (recState.value === "rec") {
+    stopLevelTimer();
+    recorder.cancel();
+    recState.value = "idle";
+    recLevel.value = 0;
+    willCancel.value = false;
+  }
+}
+onBeforeUnmount(() => {
+  offKeyboard?.();
+  document.removeEventListener("visibilitychange", onHidden);
+  // 离开页面时别把麦克风占着不放(安卓状态栏会一直挂着录音图标)
+  stopLevelTimer();
+  if (recState.value === "rec") recorder.cancel();
 });
 
 async function scrollDown() {
@@ -83,9 +144,81 @@ watch(
   scrollDown
 );
 
+/**
+ * 「打开××项目」先在本地截:切项目是选一个工作目录,不必劳驾大模型 —— 秒进,零轮次。
+ * 切完之后这条对话里说的话,主机都在该项目绑定的文件夹里执行。
+ * 返回 true = 已处理,别再发给模型。判定顺序在 tryOpenApp 之前(说了「项目」二字的归这里)。
+ */
+async function tryOpenProject(t: string): Promise<boolean> {
+  const intent = parseProjectIntent(t);
+  if (!intent) return false;
+  if (intent.kind === "list") {
+    go("work");
+    return true;
+  }
+  let list = projects.value;
+  try {
+    // 清单可能是冷的(电脑上刚建的项目);拉一次再匹配,失败就用手上这份。
+    list = (await loadProjects()) ?? list;
+  } catch {
+    /* 老主机/断网:用缓存的清单匹配,匹配不上照常发给模型 */
+  }
+  const hit = matchProject(list, intent.name);
+  if (hit) {
+    await switchProject(hit);
+    toast(hit.work_dir ? `已进入「${hit.name}」· ${dirName(hit.work_dir)}` : `已进入「${hit.name}」`, "ok");
+    return true;
+  }
+  if (intent.explicit) {
+    // 明说了要开「××项目」却没这个项目 → 带去项目页自己挑/新建,比让模型编一段强
+    toast(list.length ? `电脑上没有叫「${intent.name}」的项目` : "电脑上还没有项目");
+    go("work");
+    return true;
+  }
+  return false; // 只是「切到××」而对不上项目 → 当普通消息发,绝不吞用户的话
+}
+
+/**
+ * 「打开××」先在本地截:开电脑上的应用不需要劳驾大模型 —— 秒进,零轮次。
+ * 语音说的也走这里(转写完同样从 send 出去)。返回 true = 已处理,别再发给模型。
+ */
+async function tryOpenApp(t: string): Promise<boolean> {
+  const intent = parseOpenIntent(t);
+  if (!intent) return false;
+  if (intent.kind === "list") {
+    go("apps");
+    return true;
+  }
+  let apps: PubApp[] = [];
+  try {
+    apps = (await listApps()) ?? [];
+  } catch {
+    return false; // 主机不支持/临时抖动 → 当普通消息发,别拦
+  }
+  const hit = matchApp(apps, intent.name);
+  if (hit) {
+    toast(`正在打开「${hit.name}」`, "ok");
+    requestOpen(hit.slug);
+    return true;
+  }
+  if (intent.explicit) {
+    // 明说了要开「××应用」却没这个应用 → 带去应用页自己挑,比让模型编一段强
+    toast(apps.length ? `没有叫「${intent.name}」的应用,看看已发布的` : "电脑还没发布任何应用");
+    go("apps");
+    return true;
+  }
+  return false;
+}
+
 async function send() {
   const t = draft.value.trim();
   if (!t) return;
+  // 先项目后应用:「打开××项目」明确点了项目,不能被「打开××(应用)」抢走。
+  if ((await tryOpenProject(t)) || (await tryOpenApp(t))) {
+    draft.value = "";
+    if (ta.value) ta.value.style.height = "auto";
+    return;
+  }
   draft.value = "";
   if (ta.value) ta.value.style.height = "auto";
   const atts = attachments.value.slice();
@@ -98,10 +231,146 @@ async function send() {
   });
 }
 
-function autoGrow(e: Event) {
-  const el = e.target as HTMLTextAreaElement;
+function growTa(el: HTMLTextAreaElement | null) {
+  if (!el) return;
   el.style.height = "auto";
   el.style.height = Math.min(el.scrollHeight, 140) + "px";
+}
+function autoGrow(e: Event) {
+  growTa(e.target as HTMLTextAreaElement);
+}
+
+// ── 语音输入:按住说话 → 录 16k WAV → 主机侧火山识别 → 文字填进输入框 ──
+// 上滑取消是国内 App 的肌肉记忆(微信/豆包都这样),不做的话手滑了只能把错字删掉。
+const recorder = new VoiceRecorder();
+const recState = ref<"idle" | "rec" | "asr">("idle");
+const recLevel = ref(0);
+/** 距离硬顶还剩几秒(只在最后 10 秒提示,免得平时数字乱跳分心)。 */
+const recLeft = ref(MAX_SECONDS);
+const willCancel = ref(false);
+// 主机支不支持云端转写。手机 APK 与主机各自发版,连到没升级的老主机时,
+// 不探一下就会「按住说完 45 秒才被告知命令不支持」。探法很轻:发一个空音频,
+// 新主机回「没有收到音频数据」(说明命令在),老主机回「…暂不支持」→ 直接把钮藏掉。
+const voiceSupported = ref(true);
+const voiceOn = computed(() => hasCap("voice") && voiceSupported.value);
+
+async function probeVoice() {
+  try {
+    await invoke("voice_transcribe_audio", { audio: "", format: "wav" });
+  } catch (e) {
+    const msg = (e as Error)?.message ?? "";
+    if (msg.includes("不支持") || msg.includes("未知命令")) voiceSupported.value = false;
+  }
+}
+const CANCEL_DIST = 80; // 上滑超过这个距离(px)即取消
+let pressY = 0;
+let levelTimer: ReturnType<typeof setInterval> | null = null;
+/** recorder.start() 在途(含系统权限框那几百毫秒)。 */
+let starting = false;
+/** 手指还按在麦克风上吗 —— 启动窗口里松手的唯一判据。 */
+let pressing = false;
+
+function stopLevelTimer() {
+  if (levelTimer) {
+    clearInterval(levelTimer);
+    levelTimer = null;
+  }
+}
+
+async function micDown(e: PointerEvent) {
+  if (recState.value !== "idle" || starting || sending.value) return;
+  pressY = e.clientY;
+  willCancel.value = false;
+  // 捕获指针:手指滑出按钮范围后仍能收到 up/move,否则松手事件会丢、录音停不下来。
+  (e.currentTarget as HTMLElement)?.setPointerCapture?.(e.pointerId);
+  // starting/pressing:recorder.start() 是异步的,**首次使用还要等系统权限框**,
+  // 这期间用户手指早抬起来了 —— 那一发 pointerup 会因为 recState 还是 idle 被守卫吞掉,
+  // 结果授权一过就自己开始录音、浮层盖屏,人却没在按。所以要记「手指还按着吗」。
+  starting = true;
+  pressing = true;
+  try {
+    await recorder.start();
+    if (!pressing) {
+      // 手指在授权/启动期间已经松开(或被 pointercancel 打断)→ 立刻收手,别自己录起来。
+      recorder.cancel();
+      return;
+    }
+    recState.value = "rec";
+    levelTimer = setInterval(() => {
+      recLevel.value = recorder.level;
+      recLeft.value = Math.max(0, Math.ceil(MAX_SECONDS - recorder.elapsed));
+      // 到顶自动收尾:再录下去 base64 会顶破 /api/invoke 的 2MB body 上限,
+      // 与其让用户说满一分钟吃个 413,不如替他把话收住并直接送去识别。
+      if (recorder.elapsed >= MAX_SECONDS) {
+        willCancel.value = false;
+        void micUp();
+      }
+    }, 80);
+    navigator.vibrate?.(12);
+  } catch (err) {
+    toastErr(err);
+    recState.value = "idle";
+  } finally {
+    starting = false;
+  }
+}
+
+function micMove(e: PointerEvent) {
+  if (recState.value !== "rec") return;
+  willCancel.value = pressY - e.clientY > CANCEL_DIST;
+}
+
+/** 松手 = 发送。 */
+function micRelease() {
+  pressing = false;
+  void micUp();
+}
+/** 被系统打断(来电 / 系统手势接管 / 按钮被移除)= **取消**,不是发送 ——
+ *  照微信/豆包的习惯,意外中断绝不能把半句话替用户发出去。 */
+function micAbort() {
+  pressing = false;
+  if (recState.value !== "rec") return;
+  willCancel.value = true;
+  void micUp();
+}
+
+async function micUp() {
+  if (recState.value !== "rec") return;
+  stopLevelTimer();
+  recLevel.value = 0;
+  recLeft.value = MAX_SECONDS;
+  if (willCancel.value) {
+    recorder.cancel();
+    recState.value = "idle";
+    toast("已取消");
+    return;
+  }
+  recState.value = "asr";
+  try {
+    const out = await recorder.stop();
+    if (!out) {
+      toast("说得太短啦,按住多说两句");
+      return;
+    }
+    const r = await invoke<{ text?: string; raw?: string }>("voice_transcribe_audio", {
+      audio: out.base64,
+      format: "wav",
+    });
+    const t = (r?.text || r?.raw || "").trim();
+    if (!t) {
+      toast("没听清,再说一次试试");
+      return;
+    }
+    // 追加而不是覆盖:用户可能先打了一半字再补一句话。
+    draft.value = draft.value.trim() ? `${draft.value.trimEnd()} ${t}` : t;
+    await nextTick();
+    growTa(ta.value);
+    ta.value?.focus();
+  } catch (err) {
+    toastErr(err);
+  } finally {
+    recState.value = "idle";
+  }
 }
 
 async function pickFile() {
@@ -170,11 +439,26 @@ const showSuggest = computed(() => !sending.value && !draft.value.trim());
       </button>
     </header>
 
+    <!-- 在哪个项目里干活:选了才显示,点一下换。不选时行为同旧版(主机默认目录) -->
+    <button v-if="activeProject" class="projbar" @click="go('work')">
+      <Ico name="folder" :size="13" />
+      <span class="pb-name">{{ activeProject.name }}</span>
+      <span v-if="activeProject.work_dir" class="pb-dir">{{ dirName(activeProject.work_dir) }}</span>
+      <Ico name="swap" :size="12" class="pb-sw" />
+    </button>
+
     <div ref="scroller" class="stream">
       <div v-if="!messages.length" class="empty">
         <div class="orb"><i></i></div>
         <div class="hi">
           嗨 {{ displayName(user) }},<br />今天想做点什么
+        </div>
+        <div class="hint faint">
+          {{
+            activeProject
+              ? `现在在「${activeProject.name}」里，说的活都在电脑的这个文件夹里做`
+              : "说一句「打开 ×× 项目」，就能进电脑上的项目干活"
+          }}
         </div>
       </div>
 
@@ -185,7 +469,7 @@ const showSuggest = computed(() => !sending.value && !draft.value.trim());
         </div>
         <div v-else-if="m.role === 'error'" class="bubble err">{{ m.text }}</div>
         <div v-else class="bubble asst">
-          <div class="md" v-html="renderMd(m.text)"></div>
+          <div class="md" @click="onMdClick" v-html="renderMd(m.text)"></div>
           <div v-if="m.artifacts?.length" class="arts">
             <!-- 主预览大按钮:本轮最该「打开看」的那个件 -->
             <button
@@ -246,6 +530,7 @@ const showSuggest = computed(() => !sending.value && !draft.value.trim());
           rows="1"
           placeholder="尽管问,带图也行"
           @input="autoGrow"
+          @focus="scrollDown"
           @keydown.enter.exact.prevent="send"
         ></textarea>
         <div class="tools">
@@ -273,6 +558,23 @@ const showSuggest = computed(() => !sending.value && !draft.value.trim());
               <Ico name="brain" :size="14" /> 深度工作
             </button>
           </div>
+          <!-- 按住说话:pointer 事件 + setPointerCapture,手指滑出按钮也收得到松手。
+               **发送中只 disable、不 v-if 移除** —— 元素一旦从 DOM 拿掉,pointer capture
+               跟着销毁,松手事件永远到不了,录音和浮层就会一直挂到 45 秒硬顶才自愈。 -->
+          <button
+            v-if="voiceOn"
+            class="round mic"
+            :class="{ rec: recState === 'rec', busy: recState === 'asr' }"
+            :disabled="recState === 'asr' || (sending && recState === 'idle')"
+            title="按住说话"
+            @pointerdown.prevent="micDown"
+            @pointermove="micMove"
+            @pointerup="micRelease"
+            @pointercancel="micAbort"
+            @contextmenu.prevent
+          >
+            <Ico name="mic" :size="18" />
+          </button>
           <button v-if="sending" class="go stop" @click="cancel">
             <Ico name="stop" :size="18" :stroke-width="2" />
           </button>
@@ -283,6 +585,34 @@ const showSuggest = computed(() => !sending.value && !draft.value.trim());
       </div>
       <div class="foot">内容由 AI 生成</div>
     </div>
+
+    <!-- 录音浮层:说话时盖住半屏给足反馈(声波 + 上滑取消提示),识别时转成「识别中」 -->
+    <transition name="fade">
+      <div v-if="recState !== 'idle'" class="rec-veil">
+        <div class="rec-card" :class="{ cancel: willCancel, busy: recState === 'asr' }">
+          <div class="wave">
+            <i
+              v-for="n in 5"
+              :key="n"
+              :style="{
+                transform: `scaleY(${(0.22 + recLevel * (n % 2 ? 1.7 : 1.15)).toFixed(2)})`,
+              }"
+            ></i>
+          </div>
+          <p class="rec-tip">
+            {{
+              recState === "asr"
+                ? "识别中…"
+                : willCancel
+                  ? "松手取消"
+                  : recLeft <= 10
+                    ? `还能说 ${recLeft} 秒`
+                    : "松开发送 · 上滑取消"
+            }}
+          </p>
+        </div>
+      </div>
+    </transition>
 
     <input ref="fileInput" type="file" multiple hidden @change="onFiles" />
     <TriggerSheet v-model="sheetOpen" @attach="pickFile" />
@@ -300,12 +630,15 @@ const showSuggest = computed(() => !sending.value && !draft.value.trim());
   min-height: 0;
 }
 
-/* ── 顶栏:悬浮琉璃三件套 ── */
+/* ── 顶栏:悬浮琉璃三件套 ──
+   上内边距 = 真实安全区 + 10px 呼吸位:安卓 15 起 WebView 铺到状态栏/挖孔底下,
+   safe-top 由原生 MainActivity 注入(见 lib/viewport.ts),再压一档间距,
+   顶栏就整体落在刘海下方一点点,而不是贴着甚至压住摄像头。 */
 .bar {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: calc(8px + var(--safe-top)) 12px 6px;
+  padding: calc(10px + var(--safe-top)) 12px 6px;
   background: transparent;
 }
 /* 顶栏三件是真·悬浮层,允许 blur;它们的内侧高光走 .specular::before */
@@ -450,6 +783,55 @@ const showSuggest = computed(() => !sending.value && !draft.value.trim());
   line-height: 1.5;
   color: var(--text);
 }
+.hint {
+  margin-top: 10px;
+  max-width: 17em;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+/* 项目条:顶栏与消息流之间的一道细提示,只在选了项目时出现 */
+.projbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: center;
+  max-width: calc(100% - 28px);
+  margin: 2px auto 0;
+  padding: 4px 11px;
+  border-radius: 999px;
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--blur-sm);
+  backdrop-filter: var(--blur-sm);
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  flex-shrink: 0;
+  touch-action: manipulation;
+}
+.projbar:active {
+  filter: brightness(0.9);
+}
+.pb-name {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pb-dir {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pb-dir::before {
+  content: "· ";
+}
+.pb-sw {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
 .row {
   display: flex;
 }
@@ -585,9 +967,13 @@ const showSuggest = computed(() => !sending.value && !draft.value.trim());
   40% { opacity: 1; transform: translateY(-3px) }
 }
 
-/* ── 底坞:建议条 + 输入卡片 ── */
+/* ── 底坞:建议条 + 输入卡片 ──
+   底内边距把键盘高度 --kb 也算进去:输入坞被顶起、消息流(flex:1)相应缩短,
+   于是点开输入框时输入卡浮在输入法**上方**而不是被盖住。
+   --safe-bottom 是导航栏,--kb 是键盘净高(原生已减掉导航栏,两者相加正好等于遮挡总高)。 */
 .dock {
-  padding: 0 10px calc(4px + var(--safe-bottom));
+  padding: 0 10px calc(4px + var(--safe-bottom) + var(--kb));
+  transition: padding-bottom 0.18s cubic-bezier(0.32, 0.72, 0, 1);
 }
 .suggest {
   display: flex;
@@ -773,6 +1159,79 @@ const showSuggest = computed(() => !sending.value && !draft.value.trim());
 .go.stop {
   background: var(--danger);
   box-shadow: none;
+}
+/* 麦克风:平时和「更多」同款小圆钮,按住变红并轻微放大 —— 手指盖住按钮时,
+   放大后露出的一圈是「确实在录」的唯一视觉证据。 */
+.mic.rec {
+  background: var(--danger);
+  border-color: transparent;
+  color: #fff;
+  transform: scale(1.12);
+  box-shadow: 0 0 0 6px rgba(255, 107, 107, 0.18);
+}
+.mic.busy {
+  opacity: 0.6;
+}
+
+/* ── 录音浮层 ── */
+.rec-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 220;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* scrim 不做 brightness/blur:抽屉那次踩过,盖一层滤镜整屏必发灰 */
+  background: var(--scrim);
+  pointer-events: none;
+}
+.rec-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 26px 34px;
+  border-radius: var(--radius-lg);
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
+  box-shadow: var(--shadow-lg);
+}
+.wave {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 46px;
+}
+/* 五根柱子按实时音量伸缩:transform 走合成层,不触发布局,录音时也不掉帧 */
+.wave i {
+  width: 5px;
+  height: 46px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  transform: scaleY(0.22);
+  transition: transform 0.08s linear;
+}
+.rec-card.cancel .wave i {
+  background: var(--danger);
+}
+.rec-card.busy .wave i {
+  animation: blink 1.1s ease-in-out infinite;
+}
+.rec-card.busy .wave i:nth-child(2) { animation-delay: 0.12s }
+.rec-card.busy .wave i:nth-child(3) { animation-delay: 0.24s }
+.rec-card.busy .wave i:nth-child(4) { animation-delay: 0.36s }
+.rec-card.busy .wave i:nth-child(5) { animation-delay: 0.48s }
+.rec-tip {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--text-dim);
+}
+.rec-card.cancel .rec-tip {
+  color: var(--danger);
 }
 .foot {
   text-align: center;

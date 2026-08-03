@@ -17,6 +17,15 @@ import { activeHostId } from "./hosts";
 import { saveConv, loadConv, deleteConv, listConvs, type ConvMeta } from "./convs";
 import { startTelemetry, stopTelemetry } from "./telemetry";
 import { resetPickers } from "./pickers";
+import {
+  projects,
+  activeProject,
+  setActiveProject,
+  loadProjects,
+  resetForHost as resetProjectsForHost,
+  type WorkProject,
+} from "./projects";
+import { go } from "./nav";
 
 export interface Bubble {
   role: "user" | "assistant" | "tool" | "error";
@@ -47,6 +56,9 @@ export interface RemoteConv {
   title: string;
   at: number;
   project: string;
+  /** 所属项目 id:点开一条历史对话时据此把「当前项目」对齐(不然界面显示的项目
+   *  与主机实际用的工作目录会对不上 —— cwd 是按 conversation→project 解析的)。 */
+  projectId: string;
 }
 export const remoteConvs = ref<RemoteConv[]>([]);
 export const remoteLoading = ref(false);
@@ -86,6 +98,7 @@ export async function refreshRemoteConvs(): Promise<void> {
               title: c.title || "未命名对话",
               at: c.updated_at,
               project: p.name,
+              projectId: p.id,
             }))
           )
           .catch(() => [] as RemoteConv[])
@@ -110,6 +123,15 @@ export async function openHostConversation(id: string): Promise<void> {
   flushPersist();
   clearLive();
   convId.value = id;
+  // 续的是哪个项目的对话,「当前项目」就跟到哪 —— 主机按 conversation 反查项目定 cwd,
+  // 界面上的项目名必须与之一致,否则用户以为在 A 项目里,活其实干在 B 项目的文件夹。
+  const owner = remoteConvs.value.find((c) => c.id === id);
+  if (owner?.projectId && owner.projectId !== activeProject.value?.id) {
+    // 优先用项目清单里的完整记录(带 work_dir,顶栏能显示在哪个文件夹里干活);
+    // 清单还没拉到时先用对话自带的 id+名字顶上。
+    const full = projects.value.find((p) => p.id === owner.projectId);
+    setActiveProject(full ?? { id: owner.projectId, name: owner.project });
+  }
   const forHost = liveHost; // 捕获发起时的主机
   const cached = loadConv(liveHost, id);
   for (const m of cached) messages.push(m);
@@ -185,6 +207,7 @@ function flush() {
 /** app 级初始化:注册一次流式监听 + 拉一次主机对话列表 + 启动遥测上报。 */
 export function initChat(): void {
   if (!remoteConvs.value.length) refreshRemoteConvs(); // 冷启动续会话也要有主机列表
+  if (!projects.value.length) loadProjects().catch(() => {}); // 电脑上的项目清单(顶栏/口令切项目要用)
   startTelemetry(); // 幂等;登录后手机开始把自己的资源报给主机(设备看板仪表变真)
   if (unlisten) return;
   unlisten = listen<StreamEvent>("chat:stream", (ev) => {
@@ -241,6 +264,52 @@ export interface SendOpts {
   skillIds?: string[];
 }
 
+/**
+ * 把当前**尚未在主机登记**的本地会话(`m-<ts>`)换成「建在选中项目下」的真会话。
+ *
+ * 不这么做的话:主机收到不认识的 conversationId 会自动挂到「第一个未归档项目」下,
+ * claude 的 cwd 就成了那个项目的工作目录 —— 用户在手机上明明选了 A 项目,活却干在 B。
+ * 没选项目 / 会话已在主机上 / 主机是老版本 → 原样不动(行为与旧版完全一致)。
+ */
+async function bindConvToProject(): Promise<void> {
+  const pid = activeProject.value?.id;
+  if (!pid) return;
+  if (!convId.value.startsWith("m-")) return; // 已是主机发的会话 id
+  const before = convId.value;
+  const forHost = liveHost;
+  try {
+    const c = await invoke<{ id: string }>("conv_create_conversation", { projectId: pid });
+    if (!c?.id) return;
+    // 等待期间用户又开了新会话 / 切了主机 → 这个新建的会话已无人认领,别硬套上去。
+    if (convId.value !== before || liveHost !== forHost) return;
+    // 本地缓存跟着换键:此刻至多是刚输入的那一条消息,搬过去别丢。
+    const cached = loadConv(liveHost, before);
+    convId.value = c.id;
+    if (cached.length) {
+      saveConv(liveHost, c.id, cached.find((m) => m.role === "user")?.text.slice(0, 40) ?? "新对话", cached);
+      deleteConv(liveHost, before);
+      convList.value = listConvs(liveHost);
+    }
+  } catch {
+    /* 老主机没有 conv_create_conversation / 网络抖动 → 沿用本地 id,同旧版行为 */
+  }
+}
+
+/**
+ * 切到电脑上的某个项目:记住选择 + 开一条建在该项目下的新对话 + 回到对话页。
+ * 之后这条对话里说的每句话,主机都在该项目绑定的文件夹里执行。
+ */
+export async function switchProject(p: WorkProject | null): Promise<void> {
+  setActiveProject(p);
+  flushPersist();
+  clearLive();
+  convId.value = `m-${Date.now()}`;
+  convList.value = listConvs(liveHost);
+  go("chat");
+  await bindConvToProject();
+  refreshRemoteConvs();
+}
+
 export async function sendMessage(prompt: string, opts?: SendOpts): Promise<void> {
   const text = prompt.trim();
   if (!text || sending.value) return;
@@ -250,6 +319,9 @@ export async function sendMessage(prompt: string, opts?: SendOpts): Promise<void
   sending.value = true;
   const myGen = ++gen;
   try {
+    // 发之前先把会话钉进选中的项目(已钉过就是空操作),cwd 才落在用户要的文件夹。
+    await bindConvToProject();
+    if (myGen !== gen) return; // 期间被取消/切走
     // 附件不进 chat_send(ChatSendArgs 没有 attachments 字段,传了会被静默丢弃)——
     // 与桌面一致:先 chat_attach_files 挂到会话,chat_send 时服务端自取。
     if (opts?.attachments?.length) {
@@ -318,6 +390,8 @@ export function newConversation(): void {
   flushPersist(); // 旧会话先收尾落盘
   clearLive();
   convId.value = `m-${Date.now()}`;
+  // 选了项目就顺手在主机上把会话建出来(不阻塞进屏;发消息前还有一道兜底)。
+  void bindConvToProject();
 }
 
 /** 打开一条历史会话(从本地恢复消息;继续聊会沿用该 conversationId)。 */
@@ -349,7 +423,9 @@ export function reloadForHost(): void {
   convList.value = listConvs(liveHost);
   remoteConvs.value = []; // 旧主机的列表不跨主机残留
   resetPickers(); // 供应商/技能选中态不跨主机残留(上家的 id 在下家无意义)
+  resetProjectsForHost(); // 项目也是每台主机各一套:换成新主机上次选的那个
   refreshRemoteConvs(); // 登录/切主机后拉主机全部对话(异步,不阻塞进屏)
+  loadProjects().catch(() => {}); // 项目清单(顶栏项目名/说「打开××项目」都要用)
 }
 
 /** 登出时的全量复位:清消息、杀在途请求、退订流式监听、停遥测。 */

@@ -9,6 +9,8 @@ import ChatScreen from "./screens/ChatScreen.vue";
 import FilesScreen from "./screens/FilesScreen.vue";
 import ProjectsScreen from "./screens/ProjectsScreen.vue";
 import SettingsScreen from "./screens/SettingsScreen.vue";
+import AppsScreen from "./screens/AppsScreen.vue";
+import WorkScreen from "./screens/WorkScreen.vue";
 import PlaceholderScreen from "./screens/PlaceholderScreen.vue";
 import PreviewOverlay from "./components/PreviewOverlay.vue";
 import Toast from "./components/Toast.vue";
@@ -30,6 +32,8 @@ onMounted(() => {
       <FilesScreen v-if="screen === 'files'" />
       <ProjectsScreen v-if="screen === 'projects'" />
       <SettingsScreen v-if="screen === 'settings'" />
+      <AppsScreen v-if="screen === 'apps'" />
+      <WorkScreen v-if="screen === 'work'" />
       <PlaceholderScreen
         v-if="screen === 'skills' || screen === 'kb' || screen === 'voice' || screen === 'admin'"
         :which="screen"

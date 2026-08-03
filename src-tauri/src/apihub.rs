@@ -1689,6 +1689,9 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
 
         // ── 环境医生（容器内只读检测；安装类降级为提示）──
         "env_check" => ok(doctor::env_check()),
+        // 深度校验:纯只读探测(起子进程跑 --version / 扫冲突),容器内直通。
+        // deep=true 会真发一次请求做端到端冒烟,默认 false —— 前端不传就不花额度。
+        "env_verify" => ok(doctor::env_verify(bool_def(a, "deep", false))),
         // 静默托管状态: 容器版从不自己装东西(组件随镜像预装), 如实回一个「没跑过」的空状态
         "env_autopilot_status" => ok(doctor::env_autopilot_status()),
         "env_fix_path" => ok(doctor::env_fix_path()?),

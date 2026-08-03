@@ -52,8 +52,14 @@
   /* 琉璃面语义名(--bg-elev* 是旧名,保留给尚未改造的页面) */
   --glass: var(--bg-elev);
   --glass2: var(--bg-elev2);
-  --safe-top: env(safe-area-inset-top, 0px);
+  /* 安全区:安卓壳里由原生 MainActivity 把真实 insets 内联写到 <html> 上覆盖这三个值
+     (env() 在 Android WebView 只反映挖孔、不含状态栏高度,一律为 0 = 顶栏被刘海吃掉)。
+     这里留的是**兜底**:24px 约等于一条状态栏,原生注入失败/浏览器里跑也不至于顶到边。 */
+  --safe-top: max(env(safe-area-inset-top, 0px), 24px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* 键盘净高:原生 ime inset(或 viewport.ts 的 visualViewport 兜底)注入,
+     输入坞据此整体上抬 —— 输入框永远浮在输入法之上,而不是被盖住。 */
+  --kb: 0px;
 }
 
 @media (prefers-color-scheme: light) {
@@ -303,6 +309,22 @@ a {
 .md ol {
   padding-left: 1.2em;
   margin: 0.4em 0;
+}
+/* 正文里被认出来的文件路径:一枚可点的浅色药丸(md.ts 贴 data-path,聊天页代理点击)。
+   不用普通链接样式 —— 长路径整条变蓝加下划线在小屏上非常吵。 */
+.md .fpath {
+  display: inline;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 6px;
+  padding: 1px 5px;
+  margin: 0 1px;
+  text-decoration: none;
+  word-break: break-all;
+  -webkit-tap-highlight-color: transparent;
+}
+.md .fpath:active {
+  filter: brightness(0.88);
 }
 
 .fade-enter-active,

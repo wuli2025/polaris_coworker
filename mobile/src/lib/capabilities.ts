@@ -35,7 +35,7 @@ export const CAP_CATALOG: CapMeta[] = [
   { key: "projects", label: "项目", icon: "🗂️", desc: "协作项目与任务卡" },
   { key: "skills", label: "技能", icon: "⚡", desc: "触发技能与工作流" },
   { key: "kb", label: "知识库", icon: "📚", desc: "检索团队知识库" },
-  { key: "voice", label: "语音", icon: "🎙️", desc: "语音输入" },
+  { key: "voice", label: "语音", icon: "🎙️", desc: "按住说话,主机侧走火山识别转文字" },
   { key: "admin", label: "管理", icon: "🛡️", desc: "成员 / 设备 / 权限", ownerOnly: true },
 ];
 
@@ -45,7 +45,9 @@ const DEFAULT_ON: Record<CapKey, boolean> = {
   projects: true,
   skills: true,
   kb: true,
-  voice: false,
+  // 语音输入原先默认关(那时手机端根本没有能落地的转写后端)。现在录音在手机、
+  // 识别在主机(火山),整条链路通了 → 默认开。用户仍可在设置里关掉。
+  voice: true,
   admin: true,
 };
 

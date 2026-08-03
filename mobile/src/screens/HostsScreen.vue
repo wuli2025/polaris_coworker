@@ -454,7 +454,9 @@ function stateLabel(h: HostEntry): string {
 .body {
   flex: 1;
   overflow-y: auto;
-  padding: 18px 16px calc(24px + var(--safe-bottom));
+  /* 加 --kb:键盘弹起时窗口不会 resize(安卓 15 edge-to-edge),
+     不给滚动区补出这段高度,最底下的字段就永远滚不上来。 */
+  padding: 18px 16px calc(24px + var(--safe-bottom) + var(--kb));
 }
 .boot {
   display: flex;

@@ -23,6 +23,7 @@ import { relTime } from "../lib/convs";
 import { hostName, base, user, displayName } from "../lib/auth";
 import { hostLabel } from "../lib/hosts";
 import { hasCap } from "../lib/capabilities";
+import { activeProject } from "../lib/projects";
 import { go, type Screen } from "../lib/nav";
 import Ico from "./Ico.vue";
 
@@ -98,6 +99,18 @@ function del(id: string, e: Event) {
         新对话
       </button>
 
+      <!-- 当前项目:主机就在这个文件夹里干活。点一下换项目。 -->
+      <button class="proj" @click="nav('work')">
+        <Ico name="folder" :size="15" />
+        <span class="pj-meta">
+          <span class="pj-name">{{ activeProject?.name ?? "未选项目" }}</span>
+          <span class="pj-dir faint">
+            {{ activeProject?.work_dir || (activeProject ? "未绑定文件夹" : "主机默认目录") }}
+          </span>
+        </span>
+        <Ico name="swap" :size="14" />
+      </button>
+
       <div class="dlabel">
         <span>对话记录</span>
         <span v-if="remoteLoading" class="syncing">同步中</span>
@@ -132,11 +145,19 @@ function del(id: string, e: Event) {
           <button v-if="hasCap('files')" class="short" @click="nav('files')">
             <Ico name="folder" :size="18" />文件
           </button>
+          <!-- 电脑项目:选中谁,主机就在谁的文件夹里干活(区别于下面的协作项目/任务卡) -->
+          <button class="short" @click="nav('work')">
+            <Ico name="folder" :size="18" />项目
+          </button>
           <button v-if="hasCap('projects')" class="short" @click="nav('projects')">
-            <Ico name="grid" :size="18" />项目
+            <Ico name="grid" :size="18" />协作
           </button>
           <button v-if="hasCap('kb')" class="short" @click="nav('kb')">
             <Ico name="book" :size="18" />知识库
+          </button>
+          <!-- 应用直投:电脑当服务器,手机跑它的网页端 -->
+          <button class="short" @click="nav('apps')">
+            <Ico name="cast" :size="18" />应用
           </button>
         </div>
         <button class="urow" @click="nav('settings')">
@@ -219,6 +240,52 @@ function del(id: string, e: Event) {
   box-shadow: var(--shadow-sm);
   transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
   touch-action: manipulation;
+}
+/* 当前项目行:比「新对话」轻一档,只是状态显示 + 换项目入口 */
+.proj {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  flex-shrink: 0;
+  margin-top: 8px;
+  padding: 9px 12px;
+  border-radius: 14px;
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  border-top-color: var(--line-hi);
+  border-bottom-color: var(--line-lo);
+  color: var(--text-dim);
+  text-align: left;
+  transition: transform 0.13s cubic-bezier(0.32, 0.72, 0, 1), filter 0.13s ease;
+  touch-action: manipulation;
+}
+.proj:active {
+  transform: scale(0.96);
+  filter: brightness(0.9);
+}
+.pj-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.pj-name {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pj-dir {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 长路径截头留尾,末段目录名才是用户认得的 */
+  text-align: left;
 }
 .new:active,
 .hsw:active,
@@ -384,11 +451,12 @@ function del(id: string, e: Event) {
 }
 .shortcuts {
   display: flex;
+  flex-wrap: wrap; /* 五个入口一行挤不下,自动折成 3+2 */
   gap: 8px;
   margin-bottom: 10px;
 }
 .short {
-  flex: 1;
+  flex: 1 0 calc(33.333% - 6px);
   display: flex;
   flex-direction: column;
   align-items: center;
