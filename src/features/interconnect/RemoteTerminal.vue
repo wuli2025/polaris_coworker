@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 /**
  * 远程终端：对某台经 iroh 隧道互联的设备发受控执行请求（/api/exec）。
  *
@@ -148,7 +149,7 @@ async function run() {
       cwd: cwd.value.trim(),
       ok: false,
       out: "",
-      err: `请求失败:${(e as Error).message}(隧道可能已断)`,
+      err: `请求失败:${errMsg(e)}(隧道可能已断)`,
       code: null,
       ms: Math.round(performance.now() - started),
       truncated: false,

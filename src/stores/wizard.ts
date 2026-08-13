@@ -56,11 +56,19 @@ export const useWizardStore = defineStore("wizard", () => {
     }
   }
 
-  function openWizard() {
+  /**
+   * scanOnly = 「只盘点」轻模式:搭子卡第 2 张(「让我认认你的东西」)调起向导时置位。
+   * 扫完就停在一屏「盘点完成」,把要不要继续(配模型 / 归类 / 图谱 / 索引)交还给用户,
+   * 而不是像默认流程那样自动把人拽进后面五步 —— 那正是新手不敢点「智能向导」的原因。
+   */
+  const scanOnly = ref(false);
+
+  function openWizard(opts?: { scanOnly?: boolean }) {
+    scanOnly.value = !!opts?.scanOnly;
     open.value = true;
   }
   function closeWizard() {
     open.value = false;
   }
-  return { open, profile, schemaId, method, setProfile, setSchema, openWizard, closeWizard };
+  return { open, scanOnly, profile, schemaId, method, setProfile, setSchema, openWizard, closeWizard };
 });

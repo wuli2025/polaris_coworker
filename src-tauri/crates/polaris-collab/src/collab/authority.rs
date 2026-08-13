@@ -348,6 +348,49 @@ pub fn verify_assertion(assertion: &str) -> Result<Claims, String> {
     verify_assertion_with(assertion, &pk)
 }
 
+/// 成员主机把一个请求**原样转给**它信任的账号中心,回体也原样带回来。
+///
+/// 为什么需要它:手机常常只连得上家里那台桌面/NAS(同一 WiFi、没走公网),连不上云机。
+/// 没有这条转发,它就发不出验证码、也换不到断言 —— 「用邮箱登录」在那种网络下直接不可用,
+/// 只能退回粘连接码。有了它,手机把请求打给身边这台主机,主机替它跑一趟公网。
+///
+/// 安全上这是**纯转发**:主机不看内容、不改内容、不留内容。凭据(验证码)始终在
+/// 客户端与账号中心之间,主机只是根管子 —— 和它替客户端登录(`upstream_login`)同一口径。
+pub fn upstream_forward(path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    // 地址优先取**已钉住的**那个(meta),而不是 `ensure_pinned` 依赖的环境变量 ——
+    // 桌面是双击启动的,`POLARIS_ACCOUNT_AUTHORITY_URL` 在那儿根本不存在;它信任的
+    // 账号中心是用户登录时由 `pin_explicit` 写进 meta 的。只看环境变量的话,
+    // 这条转发在**桌面主机上永远不可用**,而桌面正是手机最常连的那一台。
+    let url = match pinned() {
+        Some((u, _, _)) => u,
+        None => ensure_pinned()
+            .map_err(|e| {
+                format!("这台主机还没登录过任何账号中心,替你转发不了({e})—— 请先在它上面用邮箱登录一次")
+            })?
+            .0,
+    };
+    let ep = format!("{url}{path}");
+    match ureq::post(&ep)
+        .timeout(std::time::Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
+        .send_json(body.clone())
+    {
+        Ok(r) => r
+            .into_json()
+            .map_err(|e| format!("账号中心返回的不是 JSON: {e}")),
+        // 业务错误原样透传(「验证码不对」「发送太频繁」这些必须让用户看见原文,
+        // 糊成「网络错误」会让人对着正确的码反复试)。
+        Err(ureq::Error::Status(_, r)) => {
+            let v: serde_json::Value = r.into_json().unwrap_or_default();
+            Err(v
+                .get("error")
+                .and_then(|x| x.as_str())
+                .unwrap_or("账号中心拒绝了这次请求")
+                .to_string())
+        }
+        Err(e) => Err(format!("这台主机也连不上账号中心: {e}")),
+    }
+}
+
 /// 成员主机代客户端向权威登录(客户端只连得上主机、连不上云机时的兜底路径)。
 /// 返回权威签的断言。
 pub fn upstream_login(username: &str, password: &str) -> Result<String, String> {
@@ -397,6 +440,17 @@ pub enum Admission {
     ExistingOnly,
     /// 拿着 owner 签发的一次性邀请票据来入伙,角色由票据决定。
     Invited(String),
+    /// **自己名下的设备**:断言里的 uid 与本机记着的 `owner_uid` 一致 → 直接给 owner。
+    ///
+    /// 为什么开这个口:上面那条铁律(「云端证明你是谁,进不进得去由每台机器说了算」)对
+    /// **别人**成立,对**你自己名下的第二台机器**却是纯摩擦 —— 两台机器的主人是同一个 uid,
+    /// 却要自己给自己发一张邀请码。用户看到的就是「怎么还要登第二个账号」。
+    ///
+    /// 代价与对冲说清楚:云机若被完全拿下,它能签任意断言,于是能直接成为你每台机器的 owner
+    /// (此前还隔着一道邀请码)。对冲在 [`super::grants`] 的冷静期 —— 从没见过的新设备首次
+    /// 进来的 24 小时内一律按只读对待,期间用户可一键撤销。另有 `owner_uid` 只写一次的闸
+    /// (见 [`super::db::meta_set_once`]),否则「谁最后登录谁是主人」会把远程夺权做成一条 API。
+    SelfOwned,
 }
 
 /// 把一张已验过的断言落成本机的成员资格,返回本机 `users` 行。
@@ -451,6 +505,9 @@ pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, Stri
             }
         })?;
         tx.commit().map_err(|e| format!("提交成员资格失败: {e}"))?;
+        // 老库升级路径:这台机器早就有 owner 了,但 owner_uid 这个键是这次才引入的。
+        // 由本人登录时补写一次(只写一次,后来者改不动)。
+        stamp_owner_uid(&role, &claims.uid);
         return Ok(User {
             id,
             username: claims.username.clone(),
@@ -490,6 +547,7 @@ pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, Stri
     } else {
         match admission {
             Admission::Invited(r) => r,
+            Admission::SelfOwned => "owner".to_string(),
             Admission::ExistingOnly => {
                 return Err(
                     "本主机还没有邀请你 —— 请向这台主机的管理者要一张邀请码,再用它入伙".into(),
@@ -513,6 +571,7 @@ pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, Stri
     .map_err(|e| format!("建成员资格失败: {e}"))?;
     let id = tx.last_insert_rowid();
     tx.commit().map_err(|e| format!("提交成员资格失败: {e}"))?;
+    stamp_owner_uid(&role, &claims.uid);
     db::audit(&claims.username, "member.join", &claims.uid, &role);
     Ok(User {
         id,
@@ -523,13 +582,86 @@ pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, Stri
     })
 }
 
+/// 本机记着的主人 uid。空 = 这台机器还没有主人(全新装机)。
+pub fn owner_uid() -> String {
+    db::meta_get(OWNER_UID_KEY).unwrap_or_default()
+}
+
+const OWNER_UID_KEY: &str = "owner_uid";
+
+/// 某个账号成为本机 owner 时,把它的 uid 钉成「这台机器的主人」。
+///
+/// **只写一次**(见 [`db::meta_set_once`])。这是 [`Admission::SelfOwned`] 整条路的地基:
+/// 若这个键能被后来的写入覆盖,那就是「谁最后一个登录谁就是主人」—— 等于把远程夺权做成
+/// 一条 API。写不进去(已有主人)不是错误,是正常的日常路径,静默即可。
+fn stamp_owner_uid(role: &str, uid: &str) {
+    if role != "owner" || uid.trim().is_empty() {
+        return;
+    }
+    if let Ok((cur, fresh)) = db::meta_set_once(OWNER_UID_KEY, uid) {
+        if fresh {
+            db::audit("system", "host.owner_uid.set", uid, "本机主人已确定");
+        } else if cur != uid {
+            // 同一台机器上有两个 owner 角色的联邦账号:后来的那个不会成为「主人」,
+            // 它照样是 owner(能管本机),但同账号设备网的自动准入只认第一个。如实留痕。
+            db::audit("system", "host.owner_uid.keep", &cur, uid);
+        }
+    }
+}
+
 /// 断言 → 本机会话(成员主机的登录出口)。验签 → 认成员资格 → 签本机会话 token。
-/// 只放已经是本机成员的人(空库首登除外);陌生账号要走 `join_with_ticket`。
+///
+/// 准入分三档,按「这张断言是谁的」决定:
+///  · uid == 本机主人 → [`Admission::SelfOwned`],直接进(**这就是「不再登两次」**)。
+///  · 否则 → [`Admission::ExistingOnly`],已是成员才放行,陌生人走 `join_with_ticket`。
+///  · 设备被本机撤销过(peer_grants.revoked)→ 一律拒,连主人本人的设备也拒 ——
+///    「丢了电脑」的应急撤销必须比「我是主人」优先,否则捡到电脑的人照样能进。
 pub fn login_with_assertion(assertion: &str, device_id: &str) -> Result<(User, String), String> {
     let claims = verify_assertion(assertion)?;
-    let user = upsert_member(&claims, Admission::ExistingOnly)?;
-    let token = super::auth::issue_session(user.id, device_id)?;
-    db::audit(&user.username, "auth.login.federated", device_id, &claims.uid);
+    let dev = device_id.trim();
+    if !dev.is_empty() && super::grants::is_revoked(dev) {
+        db::audit(&claims.username, "auth.login.denied", dev, "设备已被本机撤销");
+        return Err("这台设备已被移出本机的信任列表 —— 请在另一台设备的「设备台账」里恢复它".into());
+    }
+    let owner = owner_uid();
+    let is_mine = !owner.is_empty() && owner == claims.uid;
+    let admission = if is_mine {
+        Admission::SelfOwned
+    } else {
+        Admission::ExistingOnly
+    };
+    let user = upsert_member(&claims, admission)?;
+
+    // 主人身份要**重读**:空库首登时 owner_uid 是 upsert_member 刚刚才落下的,
+    // 上面那个 is_mine 当时还是 false。少了这次重读,第一台设备就不会登记契约,
+    // 于是第二台设备会被 `any_granted()` 误判成「本机的第一台」而跳过冷静期 ——
+    // 那道对冲 SelfOwned 的闸就永远不会生效(探针 email_login_probe 抓到过这个)。
+    let mine_now = {
+        let o = owner_uid();
+        !o.is_empty() && o == claims.uid
+    };
+
+    // 自己名下的设备:首次见面即登记信任契约(带冷静期)。之后的档位调整以用户手动设置为准 ——
+    // auto_grant_self 对已有契约是 no-op,不会把用户调过的档冲回默认值。
+    if mine_now && !dev.is_empty() {
+        let first = !super::grants::any_granted().unwrap_or(false);
+        match super::grants::auto_grant_self(dev, &claims.uid, &user.display_name, first) {
+            Ok((g, true)) if g.in_cooldown() => {
+                db::audit(
+                    &user.username,
+                    "auth.login.newdevice",
+                    dev,
+                    "同账号新设备已接入,冷静期内只读",
+                );
+            }
+            Ok(_) => {}
+            // 登记失败不该把人挡在门外(登录已经成了),但要留痕以便排查。
+            Err(e) => db::audit(&user.username, "peer.grant.fail", dev, &e),
+        }
+    }
+
+    let token = super::auth::issue_session(user.id, dev)?;
+    db::audit(&user.username, "auth.login.federated", dev, &claims.uid);
     Ok((user, token))
 }
 
@@ -545,8 +677,15 @@ pub fn join_with_ticket(
     node_id: &str,
 ) -> Result<(User, String), String> {
     let claims = verify_assertion(assertion)?;
-    // 已经是成员就不必再烧票据,直接当登录处理(重复点「入伙」不该白白作废一张票)。
-    if let Ok(u) = upsert_member(&claims, Admission::ExistingOnly) {
+    // 已经是成员(或本机主人自己)就不必再烧票据,直接当登录处理 ——
+    // 重复点「入伙」不该白白作废一张票,主人对自己的机器更不该被要求出示邀请码。
+    let owner = owner_uid();
+    let quick = if !owner.is_empty() && owner == claims.uid {
+        Admission::SelfOwned
+    } else {
+        Admission::ExistingOnly
+    };
+    if let Ok(u) = upsert_member(&claims, quick) {
         let token = super::auth::issue_session(u.id, node_id)?;
         return Ok((u, token));
     }
@@ -751,6 +890,81 @@ mod tests {
             upsert_member(&stranger, Admission::ExistingOnly).unwrap().role,
             "visitor"
         );
+    }
+
+    /// 本次改动的**主线**:同一个账号的第二台设备,**零邀请码**就该进得去。
+    /// 这正是用户说的「不要还得登两个账号」——它在代码里就是这一个断言。
+    #[test]
+    fn my_own_second_device_needs_no_invite_code() {
+        let _g = tmp_env();
+        // 第一台设备上首登 → 成 owner,同时把 owner_uid 钉死。
+        let me = claims_of("acct_me", "wuli", "wuli@qq.com");
+        let u1 = upsert_member(&me, Admission::ExistingOnly).unwrap();
+        assert_eq!(u1.role, "owner");
+        assert_eq!(owner_uid(), "acct_me", "首个 owner 必须落成本机主人");
+
+        // 模拟「另一台机器」:同一个 uid 拿断言来 —— 走 SelfOwned,不要票据。
+        let (u2, token) = login_with_assertion(&fresh_assertion_for(&me), "node-second").unwrap();
+        assert_eq!(u2.role, "owner");
+        assert!(!token.is_empty());
+        // 且它已被登记进信任契约(冷静期由 grants 管)。
+        assert!(super::super::grants::get("node-second").unwrap().is_some());
+    }
+
+    /// 安全线一:`owner_uid` 只写一次。否则「谁最后登录谁是主人」= 远程夺权。
+    #[test]
+    fn owner_uid_cannot_be_hijacked_by_a_later_owner() {
+        let _g = tmp_env();
+        upsert_member(&claims_of("acct_me", "wuli", "w@q.com"), Admission::ExistingOnly).unwrap();
+        assert_eq!(owner_uid(), "acct_me");
+
+        // 攻击者拿到一张 owner 票据(或本机 owner 手滑给了他 owner 角色)。
+        let attacker = claims_of("acct_evil", "mallory", "m@q.com");
+        let u = upsert_member(&attacker, Admission::Invited("owner".into())).unwrap();
+        assert_eq!(u.role, "owner", "他确实成了本机 owner(票据给的)");
+        // 但「本机主人」这个身份没被他抢走 —— 他的设备走不了 SelfOwned 那条免票据的路。
+        assert_eq!(owner_uid(), "acct_me", "主人 uid 不该被后来的 owner 覆盖");
+    }
+
+    /// 安全线二:**撤销优先于「我是主人」**。丢了电脑在别处点了「移出」之后,
+    /// 捡到电脑的人拿着同一个账号也进不来。
+    #[test]
+    fn revoked_device_is_refused_even_for_the_owner() {
+        let _g = tmp_env();
+        let me = claims_of("acct_me", "wuli", "w@q.com");
+        upsert_member(&me, Admission::ExistingOnly).unwrap();
+        // 先正常进一次,拿到契约。
+        login_with_assertion(&fresh_assertion_for(&me), "node-lost").unwrap();
+        // 丢了 → 在另一台设备上撤销它。
+        super::super::grants::revoke("node-lost", "wuli").unwrap();
+
+        let e = login_with_assertion(&fresh_assertion_for(&me), "node-lost").unwrap_err();
+        assert!(e.contains("移出"), "err={e}");
+        // 别的设备不受影响。
+        assert!(login_with_assertion(&fresh_assertion_for(&me), "node-other").is_ok());
+    }
+
+    /// 安全线三:SelfOwned **只**放自己账号。别人的账号照旧要邀请码 —— 这条铁律没松。
+    #[test]
+    fn selfowned_does_not_leak_to_other_accounts() {
+        let _g = tmp_env();
+        upsert_member(&claims_of("acct_me", "wuli", "w@q.com"), Admission::ExistingOnly).unwrap();
+        let stranger = claims_of("acct_other", "mallory", "m@q.com");
+        let e = login_with_assertion(&fresh_assertion_for(&stranger), "node-x").unwrap_err();
+        assert!(e.contains("邀请"), "陌生账号必须仍被邀请码闸挡住,err={e}");
+    }
+
+    /// 用 tmp_env 里的临时签名密钥给一组 claims 现签一张真断言,
+    /// 并把本机钉在这把钥匙上 —— 让 login_with_assertion 的验签走真路径,不绕过。
+    fn fresh_assertion_for(c: &Claims) -> String {
+        let pk = public_key_b64().unwrap();
+        // 首次调用时钉住自己(测试里权威与成员是同一进程、同一把钥匙)。
+        if pinned().is_none() {
+            db::meta_set("authority_url", "http://test-authority").unwrap();
+            db::meta_set("authority_pub", &pk).unwrap();
+            db::meta_set("authority_kid", &kid_of(&pk)).unwrap();
+        }
+        sign_assertion(&c.uid, &c.username, &c.email, &c.display_name).unwrap()
     }
 
     /// 一张票据只能用一次:并发/重复入伙不能各拿一个成员资格。

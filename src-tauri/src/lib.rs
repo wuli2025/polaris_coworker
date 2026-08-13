@@ -364,12 +364,23 @@ pub fn run() {
             fsshare::fs_share_set,
             fsshare::fs_share_list,
             fsshare::fs_share_save,
-            // 同账号设备网(入网一次 → 自己的设备自动互连自动挂盘,不再粘连接码)
+            // 统一账号:邮箱验证码是**唯一**登录方式。send_code 发码,login_code 一步办完
+            // (换断言 → 钉账号中心 → 入网换设备密钥 → 进本机门),此后开机自动互连。
+            mesh::account_send_code,
+            mesh::account_login_code,
+            // 同账号设备网(登录一次 → 自己的设备自动互连自动挂盘,不再粘连接码)
             mesh::mesh_join,
             mesh::mesh_leave,
             mesh::mesh_kick,
             mesh::mesh_sync,
             mesh::mesh_status,
+            // 设备台账(云端目录 + 本机契约 + 实时链路一次给全)与逐设备的权限档位。
+            // 档位落 peer_grants,跨重启有效 —— 「记住权限状态」。
+            mesh::mesh_devices,
+            mesh::mesh_rename,
+            mesh::peer_grant_set,
+            mesh::peer_trust,
+            mesh::peer_revoke,
             // 远程盘挂载(成员侧:对端共享目录 → 本机系统盘符,自动挑 Z:/Y:…)
             fsmount::fs_mount,
             fsmount::fs_unmount,

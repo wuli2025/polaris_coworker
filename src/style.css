@@ -533,6 +533,38 @@ html[data-lowspec] .aurora span {
   mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
 }
 
+/* ═══════════ 引导高亮(搭子卡的「带我去」) ═══════════ */
+/* 目标按钮只写 data-spot="xxx";引导指着它时挂上 data-spot-on。
+   规则必须放全局:属性是从组件外部加的,而各组件的 scoped 样式只覆盖自己模板里的选择器。
+   一圈静态描边(指着期间一直在)+ 开头三次呼吸(把视线拽过去);
+   全程只画描边,不改布局、不挪位置 —— 界面纹丝不动。 */
+[data-spot-on] {
+  position: relative;
+  outline: 2px solid color-mix(in srgb, var(--gold, #d8a24a) 62%, transparent);
+  outline-offset: 2px;
+  animation: spot-pulse 1.5s cubic-bezier(0.3, 0.9, 0.4, 1) 3;
+  border-radius: 10px;
+  z-index: 5;
+}
+@keyframes spot-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--gold, #d8a24a) 70%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 9px color-mix(in srgb, var(--gold, #d8a24a) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--gold, #d8a24a) 0%, transparent);
+  }
+}
+/* 已开「减少动效」的机器:不闪,改成一圈静态描边,同样看得见 */
+@media (prefers-reduced-motion: reduce) {
+  [data-spot-on] {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--gold, #d8a24a) 55%, transparent);
+  }
+}
+
 /* ═══════════ KaTeX 数学块 ═══════════ */
 .math-block {
   margin: 0.7em 0;

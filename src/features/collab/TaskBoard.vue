@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 import { computed, ref, watch } from "vue";
 import {
   ChevronDown,
@@ -78,7 +79,7 @@ async function refreshMorning() {
     await collab.refreshMorning();
     morningOpen.value = true;
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     morningBusy.value = false;
   }
@@ -124,7 +125,7 @@ async function submitCreate() {
     showCreate.value = false;
     toast.info("任务卡已创建");
   } catch (e) {
-    formErr.value = (e as Error).message;
+    formErr.value = errMsg(e);
   } finally {
     creating.value = false;
   }
@@ -197,7 +198,7 @@ async function act(fn: () => Promise<void>, okMsg: string) {
     await fn();
     toast.info(okMsg);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     acting.value = false;
   }
@@ -294,7 +295,7 @@ async function runDecompose() {
       if (!aiDrafts.value.length) showAi.value = false;
     }
   } catch (e) {
-    aiErr.value = (e as Error).message;
+    aiErr.value = errMsg(e);
   } finally {
     aiBusy.value = false;
   }
@@ -311,7 +312,7 @@ async function createDraft(d: CardDraft, idx: number) {
     toast.info(`已建卡「${d.title}」`);
     if (!aiDrafts.value.length) showAi.value = false;
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 
@@ -329,7 +330,7 @@ async function doNudge() {
         : "没有超期无动静的卡,无需催办"
     );
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     nudgeBusy.value = false;
   }
@@ -344,7 +345,7 @@ async function runAiReview(t: TaskCard) {
   try {
     aiDraft.value = await collabApi.aiReview(t.id);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     aiReviewBusy.value = false;
   }
@@ -418,7 +419,7 @@ async function doRerunChecks(t: TaskCard) {
     toast.info("已重新排队检查,结果会实时刷新");
     await collab.refreshChecks(t.id);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     rerunBusy.value = false;
   }
@@ -438,7 +439,7 @@ async function doForceSquash(t: TaskCard) {
     toast.info(`已强推合并进 main(${r.commit.slice(0, 8)})`);
     await collab.refreshTasks();
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     forceMerging.value = false;
   }

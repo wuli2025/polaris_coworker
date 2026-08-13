@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../lib/err";
 /**
  * 隔空同屏 · 舞台（桌面侧）
  *
@@ -116,7 +117,7 @@ async function load(path: string) {
     zoom.value = 1;
   } catch (e) {
     if (gen !== loadGen) return;
-    err.value = (e as Error).message || "打包失败";
+    err.value = errMsg(e) || "打包失败";
     doc.value = null;
   } finally {
     if (gen === loadGen) loading.value = false;
@@ -174,7 +175,7 @@ async function exportPage() {
     const out = await beam.export(doc.value.path);
     toast.info(`已导出网页：${out}`);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 
@@ -184,7 +185,7 @@ async function openExternal() {
     const out = await beam.export(doc.value.path);
     await artifacts.openExternal(out);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 
@@ -209,7 +210,7 @@ defineExpose({ beamOut });
 
 // 本机其它入口（互联页「投到手机」等）发起的同屏。
 watch(beamOpenRequest, (r) => {
-  if (r?.path) void beamOut(r.path).catch((e) => toast.error((e as Error).message));
+  if (r?.path) void beamOut(r.path).catch((e) => toast.error(errMsg(e)));
 });
 
 onMounted(async () => {

@@ -123,6 +123,8 @@ async fn main() {
         node.clone(),
         PORT,
         token.clone(),
+        None, // readOnly:探针随对端能力,不钉死只读
+        None, // driveHint:探针不复原盘符
     )
     .await
     .expect("fs_mount 不该报错");

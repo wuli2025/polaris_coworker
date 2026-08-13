@@ -1250,7 +1250,7 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
 
 
     <!-- 输入卡片 -->
-    <div class="input-card" :class="{ 'goal-on': goalMode }">
+    <div class="input-card" data-spot="ask" :class="{ 'goal-on': goalMode }">
       <!-- Skill 标签 -->
       <div v-if="skillsStore.enabledSkills.size > 0" class="skill-tags">
         <div
@@ -1337,6 +1337,7 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
           </button>
           <button
             class="toolbar-btn"
+            data-coach="deep_search"
             :class="{ active: skillsStore.has('deep-research') }"
             @click="toggleSkill('deep-research')"
           >
@@ -1353,6 +1354,7 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
           </button>
           <button
             class="toolbar-btn"
+            data-coach="modes"
             :class="{ active: activeModeCount > 0 || showModePanel }"
             @click="showModePanel = !showModePanel"
           >

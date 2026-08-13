@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 /**
  * 冲突裁决台:合并前试算(无副作用) → 干净则 owner 可 squash 放行;
  * 有冲突则逐文件逐块并排展示 main 侧/分支侧(diff3 base 可展开),
@@ -70,7 +71,7 @@ async function runTrial() {
     picks.value = next;
   } catch (e) {
     trial.value = null;
-    trialErr.value = (e as Error).message;
+    trialErr.value = errMsg(e);
   } finally {
     loading.value = false;
   }
@@ -119,7 +120,7 @@ async function fuseBlock(file: string, i: number) {
     p.text = r.text;
     p.choice = "manual";
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     p.fusing = false;
   }
@@ -143,7 +144,7 @@ async function applyResolutions() {
     toast.info(`裁决已落到分支(${r.commit.slice(0, 8)}),重新试算…`);
     await runTrial();
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     resolving.value = false;
   }
@@ -158,7 +159,7 @@ async function doSquash() {
     await collab.refreshTasks();
   } catch (e) {
     // 400 = 三级闸门拒绝理由,原样示人
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     merging.value = false;
   }
@@ -179,7 +180,7 @@ async function doRevert() {
     const r = await collabApi.mergeRevert(props.task.project_id, oid);
     toast.info(`已回滚(新提交 ${r.commit.slice(0, 8)})`);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     revertBusy.value = false;
   }

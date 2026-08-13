@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 import { computed, onMounted, ref } from "vue";
 import {
   TicketPlus,
@@ -38,7 +39,7 @@ async function issueTicket() {
       note: ticketNote.value.trim(),
     });
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     issuing.value = false;
   }
@@ -61,7 +62,7 @@ async function stopHost() {
     await collab.hostStop();
     toast.info("主机已停止");
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 
@@ -84,7 +85,7 @@ async function loadUsers() {
   try {
     users.value = await collabApi.adminUsers();
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     usersLoading.value = false;
   }
@@ -113,7 +114,7 @@ async function createAccount() {
     nu.value = { username: "", password: "", displayName: "", email: "", role: "collaborator" };
     await loadUsers();
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     creating.value = false;
   }
@@ -150,7 +151,7 @@ async function saveEdit(u: AdminUser) {
     toast.info("已保存");
     await loadUsers();
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     saving.value = false;
   }
@@ -165,7 +166,7 @@ async function removeAccount(u: AdminUser) {
     toast.info(isDelegated.value ? "已移出本机" : "账号已删除");
     await loadUsers();
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 /** 老账号(v2.5.0 之前建的)没有全局 uid,登不了别的主机,给它补签一个 */
@@ -175,7 +176,7 @@ async function backfillUid(u: AdminUser) {
     u.uid = r.uid;
     toast.info(`已给「${u.username}」补签全局身份,现在他能在所有主机上登录了`);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 async function toggleUser(u: AdminUser) {
@@ -184,7 +185,7 @@ async function toggleUser(u: AdminUser) {
     u.disabled = !u.disabled;
     toast.info(`已${u.disabled ? "停用" : "启用"}「${u.username}」`);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 /** owner 兜底改密:成员没绑邮箱/邮件服务没配时,当面给一把新密码 */
@@ -199,7 +200,7 @@ async function resetPassword(u: AdminUser) {
     await collabApi.adminUserResetPassword(u.id, pw);
     toast.info(`「${u.username}」的密码已重置,把新密码告诉对方吧`);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 
@@ -211,7 +212,7 @@ async function loadDevices() {
   try {
     devices.value = await collabApi.adminDevices();
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     devicesLoading.value = false;
   }
@@ -224,7 +225,7 @@ async function revoke(d: AdminDevice) {
     toast.info("已吊销");
     await loadDevices();
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 

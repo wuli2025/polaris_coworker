@@ -424,10 +424,7 @@ async fn account_signup(Json(v): Json<Value>) -> Response {
     if !crate::collab::authority::is_authority() {
         return not_authority();
     }
-    let open = std::env::var("POLARIS_ACCOUNT_OPEN_SIGNUP")
-        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if !open {
+    if !open_signup() {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error":"本账号中心未开放自助注册,请联系管理员开通账号"})),
@@ -491,6 +488,53 @@ async fn account_login(Json(v): Json<Value>) -> Response {
             "uid": uid,
             "assertion": assertion,
         }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 请求来源 IP。没有反代头就返回空串 —— 调用方(频控)对空 key 一律放行,
+/// 不误伤直连场景;那时按邮箱的那道闸还在。
+///
+/// 只认 `X-Real-IP` 与 `X-Forwarded-For` 的**第一段**。XFF 是客户端可伪造的头,
+/// 所以这个值只配用来做频控(伪造它只能让攻击者绕过自己的限速,伤不到别人的账号),
+/// **绝不能**拿去做鉴权或白名单。
+fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_default()
+}
+
+/// 发一枚**登录**验证码。整套账号体系唯一的公开发码口。
+///
+/// 刻意不回答「这个邮箱有没有注册过」——不管有没有,响应都一样。否则这个端点就成了
+/// 一台免费的「查某人是不是 Polaris 用户」的机器。首登自动建号也让这个区分本就没意义了。
+///
+/// 频控见 [`crate::collab::mail`]:按邮箱 + 按来源 IP 两道,都**落库**(重启不清零)。
+async fn account_send_code(headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    let ip = client_ip(&headers);
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        // 成员主机:替客户端跑一趟公网。手机常常只连得上家里这台机器、连不上云机 ——
+        // 没有这条转发,「用邮箱登录」在那种网络下直接不可用,只能退回粘连接码。
+        if !crate::collab::authority::is_authority() {
+            return crate::collab::authority::upstream_forward("/api/account/send_code", &v);
+        }
+        if !crate::collab::mail::configured() {
+            return Err("本账号中心还没配邮件服务,发不出验证码 —— 请联系管理员".into());
+        }
+        crate::collab::mail::issue_code_from(&s_of(&v, "email"), "login", &ip)?;
+        Ok(json!({ "sent": true, "ttl": 600 }))
     })
     .await;
     unwrap_api(out)
@@ -1276,14 +1320,42 @@ async fn collab_email_login(Json(v): Json<Value>) -> Response {
 
 /// 全局验证码登录(账号权威):邮箱 + 验证码 → 身份断言,拿着它能进任意一台成员主机。
 /// 与 `/api/account/login` 的区别只在于「凭什么证明是你」——那个用密码,这个用邮箱验证码。
+///
+/// **首登即注册**:这个邮箱还没有账号时当场建一个(受 `POLARIS_ACCOUNT_OPEN_SIGNUP` 闸控)。
+/// 注册页因此可以整个消失 —— 用户从没填过用户名、没设过密码,只证明了「这个邮箱是我的」。
+/// 建出来的账号密码位是哨兵串,永远不可能凭密码进来。
 async fn account_login_code(Json(v): Json<Value>) -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        // 与 send_code 同一口径:成员主机当管子,把验证码原样递给账号中心、把断言原样带回来。
+        // 主机自己不看、不改、不留 —— 它本来就没有能力验这枚码。
+        if !crate::collab::authority::is_authority() {
+            return crate::collab::authority::upstream_forward("/api/account/login_code", &v);
+        }
         let email = s_of(&v, "email");
+        // 验证码必须**先**过:否则「首登自动建号」就成了任何人往任意邮箱建号的口子。
         crate::collab::mail::verify_code(&email, "login", &s_of(&v, "code"))?;
-        let (u, uid, email) = crate::collab::auth::authority_identity_by_email(&email)?;
+        let (u, uid, email) = match crate::collab::auth::authority_identity_by_email(&email) {
+            Ok(v) => v,
+            Err(e) => {
+                // 只有「没这个账号」才走自动建号;停用、缺 uid 这些要原样报出去,
+                // 否则会绕过管理员的停用决定,凭空再造一个能用的号。
+                if !e.contains("没有绑定任何账号") {
+                    return Err(e);
+                }
+                if !open_signup() {
+                    return Err("本账号中心未开放自助注册,请联系管理员开通账号".into());
+                }
+                match crate::collab::auth::create_account_by_verified_email(&email) {
+                    Ok((u, uid)) => {
+                        let e2 = crate::collab::auth::validate_email(&email)?;
+                        (u, uid, e2)
+                    }
+                    // 并发首登:两台设备同时拿着同一枚码进来,一个建成、一个撞唯一索引。
+                    // 撞了的那个直接读既有账号即可 —— 用户看到的是两台都登进去了。
+                    Err(_) => crate::collab::auth::authority_identity_by_email(&email)?,
+                }
+            }
+        };
         let assertion =
             crate::collab::authority::sign_assertion(&uid, &u.username, &email, &u.display_name)?;
         Ok(json!({
@@ -1294,6 +1366,15 @@ async fn account_login_code(Json(v): Json<Value>) -> Response {
     })
     .await;
     unwrap_api(out)
+}
+
+/// 自助注册是否开放。默认**关**:账号中心的 users 表同时是这台机器自己的成员表,
+/// 放开等于把本机的 collaborator 会话发给任何人(成员能触发构建脚本 = 主机 RCE)。
+/// 官方云机要开它,须同时开 `POLARIS_AUTHORITY_ONLY=1` 把「能跑东西」的那一面关掉。
+fn open_signup() -> bool {
+    std::env::var("POLARIS_ACCOUNT_OPEN_SIGNUP")
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// owner 读邮箱服务配置。SMTP 授权码永不回显,只回 passSet(是否已配置)。
@@ -1607,12 +1688,40 @@ fn ensure_member(ctx: &AuthCtx, project_id: i64) -> Result<(), Response> {
         .into_response())
 }
 
+/// 「纯账号中心」模式:本进程**只**当身份权威,不当协作主机。
+///
+/// 为什么需要它:账号中心的 `users` 表同时就是这台机器自己的成员表 —— 开放自助注册,
+/// 等于任何人都能拿到本机的 collaborator 会话,而成员能建项目、触发 checks 跑构建脚本,
+/// 本质是主机 RCE。「填个邮箱就能用」要求官方云机必须开放注册,于是这道闸必须同时上:
+/// 把云机上「能跑东西」的那一面整个关掉,成员再多也没东西可碰。
+///
+/// 桌面/NAS 主机不设这个变量,一切照旧。
+pub fn authority_only() -> bool {
+    std::env::var("POLARIS_AUTHORITY_ONLY")
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// 纯账号中心上被关掉的能力,统一这一句话。
+fn authority_only_denied() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error":"这台服务器只做账号中心,不承载项目与任务 —— 请在你自己的电脑/NAS 上操作"
+        })),
+    )
+        .into_response()
+}
+
 /// 建项目会授予后续 git/check/merge 能力，因此只允许主机管理员绑定本地仓库。
 async fn project_create(
     State(state): State<CollabState>,
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
+    if authority_only() {
+        return authority_only_denied();
+    }
     let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
@@ -1917,6 +2026,9 @@ async fn task_create(
     headers: HeaderMap,
     Json(v): Json<Value>,
 ) -> Response {
+    if authority_only() {
+        return authority_only_denied();
+    }
     let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
@@ -3617,6 +3729,164 @@ async fn mesh_assert(headers: HeaderMap) -> Response {
     unwrap_api(out)
 }
 
+/// 设备**台账**:这个账号名下的全部设备(含自己那台、含已移出的)。
+///
+/// 与 announce 回的名册的分工:那个是给后台对账循环用的「我该连谁」,这个是给人看的。
+/// 台账少一台都是缺陷 —— 用户要认出「哪台是我正用的」,也要看见「上周被我踢掉的那台」。
+async fn mesh_devices(headers: HeaderMap) -> Response {
+    if !crate::collab::authority::is_authority() {
+        return not_authority();
+    }
+    let key = match mesh_key_of(&headers) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let (uid, me) = crate::collab::mesh::resolve_key(&key)?;
+        let list: Vec<Value> = crate::collab::mesh::devices(&uid)?
+            .into_iter()
+            .map(|(p, revoked)| {
+                json!({
+                    "nodeId": p.node_id, "name": p.name, "os": p.os, "ver": p.ver,
+                    "lastSeen": p.last_seen, "online": p.online, "firstSeen": p.first_seen,
+                    "revoked": revoked,
+                    // 「这台就是你现在坐着的这台」——台账上要标出来,不然一屋子机器名认不出谁是谁。
+                    "self": p.node_id == me,
+                })
+            })
+            .collect();
+        Ok(json!({ "uid": uid, "nodeId": me, "devices": list }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 给自己账号名下的设备改个人话名字。改过之后心跳不再用机器名覆盖它。
+async fn mesh_rename(headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    if !crate::collab::authority::is_authority() {
+        return not_authority();
+    }
+    let key = match mesh_key_of(&headers) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let (uid, _) = crate::collab::mesh::resolve_key(&key)?;
+        crate::collab::mesh::rename(&uid, &s_of(&v, "nodeId"), &s_of(&v, "name"))?;
+        Ok(json!({ "ok": true }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+// ───────────────────────── 设备信任契约 /api/peer/*(每台主机本地)─────────────────────────
+//
+// 与上面 /api/mesh/* 的分工要分清,这是整套设计的关键一刀:
+//  · /api/mesh/*  在**云端**,回答「我有哪些设备」——目录,不含任何权限。
+//  · /api/peer/*  在**本机**,回答「这台设备在我这儿能干什么」——权限,云端永远碰不到。
+// 云机被完全拿下也改不动任何一台机器的 peer_grants:它根本没有这张表。
+
+/// 本机的设备信任契约清单(owner 才看得到:这是权限面)。
+async fn peer_grants_list(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let list: Vec<Value> = crate::collab::grants::list()?
+            .into_iter()
+            .map(|g| {
+                json!({
+                    "nodeId": g.node_id, "uid": g.uid, "name": g.name, "role": g.role,
+                    "fsAccess": g.fs_access, "execAccess": g.exec_access,
+                    // 实际生效的档(冷静期内会低于用户批的档)—— UI 要显示这个,
+                    // 只显示库里那个会让用户以为「明明给了可写怎么写不进去」。
+                    "effectiveFs": g.effective_fs(), "effectiveExec": g.effective_exec(),
+                    "autoMount": g.auto_mount, "driveHint": g.drive_hint,
+                    "cooldownUntil": g.cooldown_until, "inCooldown": g.in_cooldown(),
+                    "grantedAt": g.granted_at, "grantedBy": g.granted_by, "revoked": g.revoked,
+                })
+            })
+            .collect();
+        Ok(json!({ "grants": list, "ownerUid": crate::collab::authority::owner_uid() }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 改一台设备的档位(盘 none/ro/rw、执行 none/ask/allow、自动挂载)。owner 才行。
+async fn peer_grant_set(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Json(v): Json<Value>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let opt = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
+        let g = crate::collab::grants::update(
+            &s_of(&v, "nodeId"),
+            opt("name").as_deref(),
+            opt("fsAccess").as_deref(),
+            opt("execAccess").as_deref(),
+            v.get("autoMount").and_then(|x| x.as_bool()),
+            &ctx.username,
+        )?;
+        Ok(json!({ "ok": true, "effectiveFs": g.effective_fs(), "autoMount": g.auto_mount }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 「信任这台设备」:冷静期立即清零(同时也把误撤销的恢复回来)。
+async fn peer_grant_trust(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Json(v): Json<Value>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let g = crate::collab::grants::trust_now(&s_of(&v, "nodeId"), &ctx.username)?;
+        Ok(json!({ "ok": true, "effectiveFs": g.effective_fs() }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 撤销一台设备在**本机**的准入(丢了电脑 / 冷静期内反悔)。
+///
+/// 与云端的 `/api/mesh/revoke` 是两道独立的闸,应该都点:云端那道让它拿不到新断言,
+/// 本机这道让它连断言都递不进来。云机被绕过、名册被伪造,本机这一行仍然说了算。
+async fn peer_grant_revoke(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Json(v): Json<Value>,
+) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        crate::collab::grants::revoke(&s_of(&v, "nodeId"), &ctx.username)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
 /// 把自己账号名下的一台设备移出设备网(丢了电脑的应急操作)。
 async fn mesh_revoke(headers: HeaderMap, Json(v): Json<Value>) -> Response {
     if !crate::collab::authority::is_authority() {
@@ -3843,7 +4113,9 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/account/pubkey", get(account_pubkey))
         .route("/api/account/signup", post(account_signup))
         .route("/api/account/login", post(account_login))
-        // 全局验证码登录:邮箱 + 验证码 → 身份断言(免密码,凭邮箱所有权)
+        // 全局验证码登录:邮箱 + 验证码 → 身份断言(免密码,凭邮箱所有权)。
+        // send_code 是整套账号体系**唯一**的公开发码口;login_code 首登即自动建号。
+        .route("/api/account/send_code", post(account_send_code))
         .route("/api/account/login_code", post(account_login_code))
         .route("/api/account/reset", post(account_reset))
         // 成员侧进门:拿权威签的断言换本机会话。
@@ -3853,6 +4125,13 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/mesh/announce", post(mesh_announce))
         .route("/api/mesh/assert", post(mesh_assert))
         .route("/api/mesh/revoke", post(mesh_revoke))
+        .route("/api/mesh/devices", get(mesh_devices))
+        .route("/api/mesh/rename", post(mesh_rename))
+        // ── 设备信任契约(**本机**的权限面,云端碰不到)──
+        .route("/api/peer/grants", get(peer_grants_list))
+        .route("/api/peer/grant", post(peer_grant_set))
+        .route("/api/peer/trust", post(peer_grant_trust))
+        .route("/api/peer/revoke", post(peer_grant_revoke))
         .route("/api/collab/join", post(collab_join))
         .route("/api/collab/authority/repin", post(collab_authority_repin))
         // GitHub 式:开放注册 + 用户名搜索 + 团队(一人多团队,团队下挂项目)

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 /**
  * 主 Agent 设置卡(owner 专属):指定项目主 Agent 专家 + 授权表。
  * 铁律:主 Agent 只裁决内容,权限永远由授权表判定 —— UI 显著标注。
@@ -66,7 +67,7 @@ async function save() {
     toast.info("主 Agent 设置已保存");
     await collab.refreshProjects();
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     saving.value = false;
   }

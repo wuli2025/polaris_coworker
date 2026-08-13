@@ -481,6 +481,8 @@ function subtitleOf(p: ProviderView): string {
     <!-- resting 药丸 -->
     <button
       class="pill"
+      data-spot="provider"
+      data-coach="provider"
       :class="{ rail: props.collapsed, active: open }"
       :title="current ? `当前: ${current.name}` : 'API 供应商'"
       @click="open = !open"

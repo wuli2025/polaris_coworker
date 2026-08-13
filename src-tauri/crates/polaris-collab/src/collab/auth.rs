@@ -592,6 +592,94 @@ pub fn create_account_full(
     Ok((user, uid))
 }
 
+/// 「只能用邮箱验证码登录」的账号在 `pass_hash` 位上的哨兵。
+///
+/// 不是合法 PHC 串,`verify_password` 见到它必定返回 false —— 即这类账号**没有密码**,
+/// 也永远不可能凭密码进来。首次用验证码登录自动建号走的就是这条路:用户从没设过密码,
+/// 就不该在库里替他生造一个(生造出来的那个既没人知道,又是一条实打实的攻击面)。
+pub const CODE_ONLY_SENTINEL: &str = "!codeonly";
+
+/// 邮箱 → 一个合法的用户名。
+///
+/// 用户名在这套体系里已经退化成内部展示字段(登录只认邮箱),但它仍是 users 表的唯一键、
+/// 仍会出现在审计和成员列表里,所以得生成一个像样的。取邮箱 @ 前那一截,滤掉不合规字符,
+/// 补齐首尾与长度;撞名就挂数字后缀。
+fn username_from_email(conn: &rusqlite::Connection, email: &str) -> Result<String, String> {
+    let local = email.split('@').next().unwrap_or("").to_ascii_lowercase();
+    let mut base: String = local
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .collect();
+    // 首尾必须是字母或数字(validate_new_account_credentials 的规矩)。
+    while base.chars().next().is_some_and(|c| !c.is_ascii_alphanumeric()) {
+        base.remove(0);
+    }
+    while base.chars().last().is_some_and(|c| !c.is_ascii_alphanumeric()) {
+        base.pop();
+    }
+    if base.chars().count() > USERNAME_MAX_CHARS - 4 {
+        // 留 4 个字符给去重后缀,免得截断后再加后缀反而超长。
+        base = base.chars().take(USERNAME_MAX_CHARS - 4).collect();
+        while base.chars().last().is_some_and(|c| !c.is_ascii_alphanumeric()) {
+            base.pop();
+        }
+    }
+    if base.chars().count() < USERNAME_MIN_CHARS {
+        base = format!("{base}user");
+    }
+    for n in 0..1000 {
+        let cand = if n == 0 { base.clone() } else { format!("{base}{n}") };
+        let taken: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM users WHERE username=?1 COLLATE NOCASE LIMIT 1",
+                params![cand],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("查用户名失败: {e}"))?;
+        if taken.is_none() {
+            return Ok(cand);
+        }
+    }
+    Err("生成用户名失败(同前缀账号过多),请换一个邮箱".into())
+}
+
+/// 账号权威侧:**首次用邮箱验证码登录时自动建号**,回 (用户, uid, 邮箱)。
+///
+/// 这就是「注册页消失了」的实现 —— 用户从没填过用户名、没设过密码,只证明了「这个邮箱是我的」。
+/// 调用方**必须已经核验过验证码**(见 `mail::verify_code`),这里不重复验:这个函数只要被调到,
+/// 就等于「邮箱所有权已证明」。
+///
+/// 建出来的账号:密码位是 [`CODE_ONLY_SENTINEL`](永不可登)、角色 collaborator(在权威机上
+/// 不给任何特权)、uid 现签。它在**别人的**主机上依然什么都不是 —— 要进那台机器仍须邀请码。
+pub fn create_account_by_verified_email(email: &str) -> Result<(User, String), String> {
+    let e = validate_email(email)?;
+    let uid = super::authority::new_uid();
+    let mut conn = open_db()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|err| format!("建账号事务失败: {err}"))?;
+    // 并发两个设备同时首登同一个邮箱:两边都查到「没有」,都来建 —— 靠 email 唯一索引兜底,
+    // 后到的那个拿到 UNIQUE 冲突,调用方据此改走「读既有账号」。
+    let username = username_from_email(&tx, &e)?;
+    let display = username.clone();
+    let user = insert_user_tx(&tx, &username, CODE_ONLY_SENTINEL, "collaborator", &display)?;
+    tx.execute(
+        "UPDATE users SET email=?1, uid=?2 WHERE id=?3",
+        params![e, uid, user.id],
+    )
+    .map_err(|err| {
+        if err.to_string().contains("UNIQUE") {
+            "该邮箱已被其他账号绑定".to_string()
+        } else {
+            format!("绑定邮箱失败: {err}")
+        }
+    })?;
+    tx.commit().map_err(|err| format!("提交账号失败: {err}"))?;
+    db::audit(&username, "account.create", &uid, "邮箱验证码首登自动建号");
+    Ok((user, uid))
+}
+
 /// 账号权威侧登录:用户名**或邮箱**都收,校验密码,回 (用户, uid, 邮箱)。
 /// 权威只做这一件事——确认「你是谁」,至于你在某台主机上有什么权限,那是主机自己的事。
 pub fn authority_login(

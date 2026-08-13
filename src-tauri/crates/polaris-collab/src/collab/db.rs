@@ -5,7 +5,7 @@
 //!
 //! 连接策略沿用 fable::open_db（WAL + busy_timeout + 每线程一连接）。
 use once_cell::sync::Lazy;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -298,6 +298,46 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_mesh_uid ON mesh_nodes(uid, revoked);
 
+        -- 设备信任契约(**每台主机本地**,与云端的 mesh_nodes 目录是两回事)。
+        -- 记的是「用户批准了什么」而不是「现在连没连上」——所以它跨重启、跨换网、跨换 IP
+        -- 都有效,这正是「记住权限状态」要的东西:批过一次,以后开机自己连、自己挂,不再问第二次。
+        --
+        -- 两个方向共用这一行(它描述的是「我和这台设备之间的信任」,不是单向配置):
+        --  · 出方向:后台对账循环据此决定连不连它、挂不挂盘、挂成只读还是可读写。
+        --  · 入方向:它拿断言进本机门时,revoked=1 直接拒(云端目录被绕过也进不来的第二道闸)。
+        --
+        -- cooldown_until:同账号新设备的冷静期。云机若被拿下能伪造断言,SelfOwned 会让它
+        -- 直接成 owner;冷静期内该设备一律按只读对待,且期间用户能一键撤销 —— 把「静默全权」
+        -- 压成「24 小时内可反悔的只读」。用户在设备台账上点「信任」即当场清零。
+        CREATE TABLE IF NOT EXISTS peer_grants(
+            node_id        TEXT PRIMARY KEY,       -- 对端 iroh NodeId
+            uid            TEXT NOT NULL DEFAULT '', -- 对端账号;与本机 owner_uid 相同 = 自己的设备
+            name           TEXT NOT NULL DEFAULT '',
+            role           TEXT NOT NULL DEFAULT 'collaborator',
+            fs_access      TEXT NOT NULL DEFAULT 'none',  -- none|ro|rw
+            exec_access    TEXT NOT NULL DEFAULT 'none',  -- none|ask|allow
+            auto_mount     INTEGER NOT NULL DEFAULT 0,    -- 1 = 上线即挂盘
+            drive_hint     TEXT NOT NULL DEFAULT '',      -- 上次挂成的盘符,尽量复原
+            cooldown_until INTEGER NOT NULL DEFAULT 0,    -- >now = 冷静期内,一律降为只读
+            granted_at     INTEGER NOT NULL,
+            granted_by     TEXT NOT NULL DEFAULT '',
+            revoked        INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_peer_grants_uid ON peer_grants(uid, revoked);
+
+        -- 登录/发码失败计数(**落库**,不是内存态)。
+        -- 原先的频控表在进程内存里,重启即清零 —— 攻击者只要撑到一次重启就绕过去了;
+        -- 而且只按邮箱计数,换个邮箱地址就能接着打,SMTP 成了免费邮件炮台。这张表按
+        -- (scope, key) 两个维度记:scope='email' 防单账号穷举,scope='ip' 防换邮箱轰炸。
+        CREATE TABLE IF NOT EXISTS login_attempts(
+            scope    TEXT NOT NULL,               -- email|ip
+            key      TEXT NOT NULL,
+            window_start INTEGER NOT NULL,        -- 当前计数窗口起点(unix 秒)
+            count    INTEGER NOT NULL DEFAULT 0,
+            last_at  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(scope, key)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, state);
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_devices_node ON devices(node_id);
@@ -451,6 +491,26 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         [],
     )
     .ok();
+
+    // 增量列:mesh_nodes.first_seen —— 设备台账要显示「这台机器是什么时候第一次入网的」。
+    // created_at 会被重新入网的 upsert 覆盖(同 NodeId 重登换密钥),留不住真正的首见时刻。
+    let has_first_seen: bool = conn
+        .prepare("PRAGMA table_info(mesh_nodes)")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(1))
+                .map(|rows| rows.flatten().any(|c| c == "first_seen"))
+        })
+        .unwrap_or(false);
+    if !has_first_seen {
+        conn.execute(
+            "ALTER TABLE mesh_nodes ADD COLUMN first_seen INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("补 mesh_nodes.first_seen 列失败: {e}"))?;
+        // 老行没有首见时刻,拿 created_at 兜底(那时它还没被重登覆盖过)。
+        conn.execute("UPDATE mesh_nodes SET first_seen=created_at WHERE first_seen=0", [])
+            .ok();
+    }
     Ok(())
 }
 
@@ -528,9 +588,123 @@ pub fn meta_set(k: &str, v: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 滑动窗口频控(**落库**)。返回 Ok 即放行并记一次;超限回 Err(人话)。
+///
+/// 为什么不能留在内存里:原先的发码频控是进程内的 HashMap,重启即清零 —— 攻击者只要撑到
+/// 一次重启就绕过去了。而且它只按邮箱计数,换个邮箱地址就能接着打,我们的 SMTP 就成了
+/// 免费邮件炮台。这里按 (scope,key) 记账:`scope="email"` 防单账号穷举,`scope="ip"` 防
+/// 换邮箱轰炸,两道闸都要过。
+///
+/// 窗口是「跳跃窗口」而非严格滑动:超过 window 秒就整个重开一轮。对抗滥用足够,
+/// 且一行一个计数器,不会随请求量增长。
+pub fn rate_gate(scope: &str, key: &str, cap: i64, window: i64, msg: &str) -> Result<(), String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Ok(()); // 拿不到 key(比如取不到 IP)时不误伤,另一道闸还在
+    }
+    let t = now();
+    let conn = open_db()?;
+    let cur: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT window_start,count FROM login_attempts WHERE scope=?1 AND key=?2",
+            [scope, key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("查频控失败: {e}"))?;
+    let (start, count) = match cur {
+        Some((s, c)) if t - s < window => (s, c),
+        _ => (t, 0), // 没记过 / 窗口已过 → 开新一轮
+    };
+    if count >= cap {
+        return Err(msg.to_string());
+    }
+    conn.execute(
+        "INSERT INTO login_attempts(scope,key,window_start,count,last_at) VALUES(?1,?2,?3,1,?4) \
+         ON CONFLICT(scope,key) DO UPDATE SET window_start=?3, count=?5, last_at=?4",
+        rusqlite::params![scope, key, start, t, count + 1],
+    )
+    .map_err(|e| format!("记频控失败: {e}"))?;
+    Ok(())
+}
+
+/// 距上次同一 (scope,key) 动作过去了多少秒。没记过返回 None。发码的「60 秒内不重发」用它。
+pub fn rate_since(scope: &str, key: &str) -> Option<i64> {
+    let conn = open_db().ok()?;
+    conn.query_row(
+        "SELECT last_at FROM login_attempts WHERE scope=?1 AND key=?2",
+        [scope, key.trim()],
+        |r| r.get::<_, i64>(0),
+    )
+    .ok()
+    .map(|last| now() - last)
+}
+
+/// 成功之后清账(别让「登录成功了但今天已经试过 4 次」拖累下一次)。
+pub fn rate_clear(scope: &str, key: &str) {
+    if let Ok(conn) = open_db() {
+        let _ = conn.execute(
+            "DELETE FROM login_attempts WHERE scope=?1 AND key=?2",
+            [scope, key.trim()],
+        );
+    }
+}
+
+/// meta 键值**只写一次**:已有值(且非空)时不覆盖,返回当前值与「这次是不是我写的」。
+///
+/// 存在的理由只有一个 —— `owner_uid`。它是「这台机器是谁的」的唯一凭据,SelfOwned 准入
+/// 全靠它判断。若能被后来的写入覆盖,那就是**谁最后一个登录谁就是主人**,等于把远程夺权
+/// 做成了一条 API。所以这个键只在机器第一次有主人时落一次,之后要改只能本机物理操作
+/// (删库/出厂重置)。
+pub fn meta_set_once(k: &str, v: &str) -> Result<(String, bool), String> {
+    let v = v.trim();
+    if v.is_empty() {
+        return Err("meta_set_once 不接受空值".into());
+    }
+    let conn = open_db()?;
+    // INSERT OR IGNORE 是原子的:并发两个人同时首登,只有一个能落进去,另一个读到既有值。
+    let n = conn
+        .execute("INSERT OR IGNORE INTO meta(k,v) VALUES(?1,?2)", [k, v])
+        .map_err(|e| e.to_string())?;
+    if n == 1 {
+        return Ok((v.to_string(), true));
+    }
+    let cur: String = conn
+        .query_row("SELECT v FROM meta WHERE k=?1", [k], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    // 历史上写过空串(老库的 meta_set)——那不算「已有主人」,补写真值。
+    if cur.trim().is_empty() {
+        conn.execute("UPDATE meta SET v=?2 WHERE k=?1", [k, v])
+            .map_err(|e| e.to_string())?;
+        return Ok((v.to_string(), true));
+    }
+    Ok((cur, false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// owner_uid 那道闸:第一次写进去的值是终值,后来者改不动 —— 否则「谁最后登录谁是主人」。
+    #[test]
+    fn meta_set_once_never_overwrites() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("collab-once-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        std::env::set_var("POLARIS_COLLAB_DB", &tmp);
+
+        let (v, fresh) = meta_set_once("owner_uid", "acct_first").unwrap();
+        assert_eq!((v.as_str(), fresh), ("acct_first", true));
+        // 后来者:拿到的是既有值,且被告知「不是你写的」。
+        let (v, fresh) = meta_set_once("owner_uid", "acct_attacker").unwrap();
+        assert_eq!((v.as_str(), fresh), ("acct_first", false));
+        assert_eq!(meta_get("owner_uid").as_deref(), Some("acct_first"));
+        // 空值不接受(否则会把「没有主人」写成一条看起来有主人的行)。
+        assert!(meta_set_once("owner_uid", "  ").is_err());
+
+        std::env::remove_var("POLARIS_COLLAB_DB");
+        let _ = std::fs::remove_file(&tmp);
+    }
 
     #[test]
     fn meta_roundtrip() {

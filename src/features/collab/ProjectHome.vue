@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 /**
  * 团队项目主页(GitHub repo 首页式):概览 / 任务 / 讨论 / 成员 四 tab。
  * - 概览:六态统计 + 动态时间线(activity)+ 成员条
@@ -74,7 +75,7 @@ async function changeProfile(e: Event) {
     await collab.setCheckProfile(v);
     toast.info(`检查档位已改为「${PROFILE_OPTS.find((o) => o.value === v)?.label ?? v}」`);
   } catch (err) {
-    toast.error((err as Error).message);
+    toast.error(errMsg(err));
     el.value = collab.checkProfile || ""; // 失败回弹到原值
   } finally {
     profileBusy.value = false;
@@ -102,7 +103,7 @@ async function changeCheckSkill(e: Event) {
     await collab.setCheckProfile("", v);
     toast.info("检查技能已更新");
   } catch (err) {
-    toast.error((err as Error).message);
+    toast.error(errMsg(err));
     el.value = collab.checkSkill || defaultSkill.value;
   } finally {
     skillBusy.value = false;
@@ -127,7 +128,7 @@ async function saveSharedScope() {
     toast.info("共享可见路径已保存,协作者下次开工生效");
     await collab.refreshProjects();
   } catch (err) {
-    toast.error((err as Error).message);
+    toast.error(errMsg(err));
   } finally {
     sharedBusy.value = false;
   }
@@ -169,7 +170,7 @@ async function newTalk() {
     if (!pid) return;
     await app.createConversation(pid); // 内部 setView("chat")
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     talkBusy.value = false;
   }

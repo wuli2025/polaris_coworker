@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 /**
  * 团队成员页(GitHub 组织成员风格):
  * - 成员列表 + 角色徽标(owner/member)
@@ -67,7 +68,7 @@ async function pick(u: UserSearchHit) {
     query.value = "";
     hits.value = [];
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     adding.value = false;
   }
@@ -83,7 +84,7 @@ async function remove(userId: number, username: string) {
     await collab.removeTeamMember(userId);
     toast.info(isSelf ? "已退出团队" : "已移出");
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   }
 }
 

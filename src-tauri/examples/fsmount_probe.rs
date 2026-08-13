@@ -158,6 +158,8 @@ async fn mount(src: &str, up_port: u16, expect_writable: bool) -> String {
         "not-a-real-node-id".into(), // 看门狗重连会解析失败,无副作用
         up_port,
         TOKEN.into(),
+        None, // readOnly:探针随对端能力,不钉死只读
+        None, // driveHint:探针不复原盘符
     )
     .await
     .expect("fs_mount 不应报错");

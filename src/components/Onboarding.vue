@@ -1,15 +1,42 @@
 <script setup lang="ts">
+/**
+ * L0 首开 60 秒(见桌面《北极星 · 搭子式引导方案》)。
+ *
+ * 这一屏以前问的是「工作文件夹放哪」,还顺带解释了 raw/ output/ wiki/ 三层结构 ——
+ * 而用户此刻**连这软件是干嘛的都不知道**,先被要求做一个技术决定。改成只问一句人话:
+ * 你主要想让我帮你干哪类活?工作文件夹取推荐位置直接落库,想改的人点右下角小字。
+ *
+ * 选的这一项存进 starter store,右下角的搭子卡据此改招呼语 —— 让他一眼看出不是通用模板。
+ */
 import { onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { kb, isTauri } from "../tauri";
+import { useStarterStore, type StarterIntent } from "../stores/starter";
 
 const emit = defineEmits<{ (e: "done"): void }>();
+const starter = useStarterStore();
 
 const step = ref<1 | 2>(1);
 const defaultRoot = ref("");
 const draft = ref("");
 const busy = ref(false);
 const error = ref("");
+const picked = ref<StarterIntent | null>(null);
+
+const INTENTS: { key: StarterIntent; label: string; desc: string }[] = [
+  { key: "files", label: "整理文件", desc: "电脑里堆了太多东西,想找得到、理得清" },
+  { key: "write", label: "写东西", desc: "写稿、做方案、出材料,想有人搭把手" },
+  { key: "code", label: "写代码", desc: "有项目在手,想让它读得懂、改得动" },
+  { key: "all", label: "都试试", desc: "先随便看看,用着再说" },
+];
+
+/** 选完即进 —— 不再多问一屏。工作文件夹用推荐位置,想改的人走右下角小字。 */
+async function choose(k: StarterIntent) {
+  if (busy.value) return;
+  picked.value = k;
+  starter.setIntent(k);
+  await finish();
+}
 
 onMounted(async () => {
   try {
@@ -43,9 +70,11 @@ function useDefault() {
 }
 
 async function finish() {
-  const v = draft.value.trim();
+  // 没填过就用推荐位置:首屏不该因为一个路径把人卡住(设置里随时能改)
+  const v = draft.value.trim() || defaultRoot.value.trim();
   if (!v) {
-    error.value = "请先选择一个工作文件夹。";
+    error.value = "还没能确定工作文件夹位置,请手动选一个。";
+    step.value = 2;
     return;
   }
   busy.value = true;
@@ -70,22 +99,38 @@ async function finish() {
         <span class="star"></span>
       </div>
 
-      <!-- 第一步：欢迎 -->
+      <!-- 第一步：一句人话 + 只问一个问题 -->
       <template v-if="step === 1">
-        <h1 class="title">欢迎来到北极星</h1>
+        <h1 class="title">我是北极星</h1>
         <p class="lead">
-          Polaris 是一个本地优先的 AI 工作台。你的对话、知识库与生成的成品，
-          都会安放在<strong>你自己的电脑</strong>上一个叫「工作文件夹」的地方。
+          你电脑里堆着的那些文件，我可以帮你<strong>认一遍、找出来</strong>，
+          再顺手<strong>替你办点事</strong>。资料全程留在你自己的机器上。
         </p>
-        <p class="lead dim">
-          在开始之前，先帮你把这个文件夹安顿好——它是你与北极星一切协作的落脚点。
-        </p>
-        <div class="actions">
-          <button class="btn primary" @click="step = 2">下一步 · 选择工作文件夹</button>
+        <p class="ask">先说一句：你主要想让我帮你干哪类活？</p>
+        <div class="picks">
+          <button
+            v-for="it in INTENTS"
+            :key="it.key"
+            class="pick"
+            :class="{ on: picked === it.key }"
+            :disabled="busy"
+            @click="choose(it.key)"
+          >
+            <span class="pick-t">{{ it.label }}</span>
+            <span class="pick-d">{{ it.desc }}</span>
+          </button>
         </div>
+        <p v-if="error" class="err">{{ error }}</p>
+        <p class="fine">
+          <span v-if="busy">正在安顿工作文件夹…</span>
+          <template v-else>
+            选哪个都不影响你用别的功能，随时能改。
+            <button class="link" @click="step = 2">换个工作文件夹</button>
+          </template>
+        </p>
       </template>
 
-      <!-- 第二步：选工作文件夹 -->
+      <!-- 第二步（可选）：想自己指定工作文件夹的人才会来 -->
       <template v-else>
         <h1 class="title">把工作文件夹放在哪里？</h1>
         <p class="lead">
@@ -321,6 +366,60 @@ code {
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+/* ── L0 首屏：一句人话 + 四选一 ── */
+.ask {
+  margin: 22px 0 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: 0.5px;
+}
+.picks {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.pick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 13px 14px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  cursor: pointer;
+  transition: border-color 0.16s, transform 0.16s, box-shadow 0.16s;
+}
+.pick:hover:not(:disabled) {
+  border-color: var(--primary);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+.pick.on {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+.pick:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.pick-t {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.pick-d {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+.fine {
+  margin: 18px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: center;
 }
 .link {
   background: transparent;

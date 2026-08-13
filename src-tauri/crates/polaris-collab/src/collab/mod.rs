@@ -22,6 +22,10 @@ pub mod fsface;
 /// 协作 HTTP 路由(axum,双壳共用):server 壳 merge 它;桌面 hosting 内嵌它。
 #[cfg(feature = "collab-host")]
 pub mod http;
+/// 设备信任契约(peer_grants):「这台设备我批过、批到什么档、要不要自动挂盘」。
+/// 每台主机本地一张,跨重启有效 —— 「记住权限状态」落在这儿。不挂 feature:
+/// 入方向(authority 的准入闸)与出方向(设备网对账循环)都要读它。
+pub mod grants;
 pub mod identity;
 /// 同账号设备网的设备目录(「登录即成网」)。权威侧的表与判定;不挂 feature ——
 /// 云机要发号,桌面/NAS 侧的客户端循环也要复用这里的类型。

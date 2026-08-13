@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   Handshake,
@@ -24,6 +25,8 @@ import TaskBoard from "./TaskBoard.vue";
 import CollabAdmin from "./CollabAdmin.vue";
 import LeadAgentCard from "./LeadAgentCard.vue";
 import TeamMembers from "./TeamMembers.vue";
+// 全应用唯一的登录界面 —— 与互联页共用同一个组件、同一个账号。
+import EmailLogin from "../auth/EmailLogin.vue";
 import { toast } from "../../composables/useToast";
 
 const collab = useCollabStore();
@@ -87,7 +90,7 @@ async function makeHost() {
         : `主机已在本机启动(端口 ${info.port}),直接登录`
     );
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     hostBusy.value = false;
   }
@@ -110,6 +113,22 @@ function saveHost() {
   toast.info("已保存主机地址");
   hostOpen.value = false;
   void probeEmail();
+}
+
+/**
+ * 旧登录方式(密码 / 邀请码 / 首次初始化)默认折叠。
+ *
+ * 主路径已经是邮箱验证码,这一坨保留只为三种真实情况:纯内网无 SMTP 的部署、
+ * 协作者拿邀请码入伙、老账号还没绑邮箱。摆在主路径上会继续制造「两个账号」的错觉,
+ * 删掉又会让上面三种人登不进来 —— 所以收起来当兜底。
+ */
+const legacyOpen = ref(false);
+
+/** 邮箱验证码登录成功(EmailLogin 抛上来)。store 里已经建好会话,这里只报个喜。 */
+function onEmailLoggedIn() {
+  toast.info(
+    `欢迎,${collab.user?.display_name || collab.user?.displayName || collab.user?.username || ""}`
+  );
 }
 
 // ── 登录 / 注册 为主,票据入伙收进第三个小 tab;reset = 邮箱找回密码 ──
@@ -192,7 +211,7 @@ async function sendEmailCode() {
       }
     }, 1000);
   } catch (e) {
-    authErr.value = (e as Error).message;
+    authErr.value = errMsg(e);
   }
 }
 
@@ -229,7 +248,7 @@ async function doReset() {
       }`
     );
   } catch (e) {
-    authErr.value = (e as Error).message;
+    authErr.value = errMsg(e);
   } finally {
     busy.value = false;
   }
@@ -380,7 +399,7 @@ async function submitNewTeam() {
     rightPane.value = "team";
     toast.info(`团队「${name}」已创建,去拉人吧`);
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     ntBusy.value = false;
   }
@@ -409,7 +428,7 @@ async function submitNewProject() {
     rightPane.value = "board";
     toast.info("项目已创建");
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     npBusy.value = false;
   }
@@ -443,8 +462,25 @@ const MAIN_TABS: { key: AuthTab; label: string }[] = [
           <span class="ab-ic"><Handshake :size="20" :stroke-width="1.7" color="#fff" /></span>
           <h1>多人协作</h1>
         </div>
-        <p class="auth-lead">像 GitHub 一样协作:注册账号 → 建团队拉人 → 团队里建项目跑任务看板。</p>
+        <p class="auth-lead">像 GitHub 一样协作:登录 → 建团队拉人 → 团队里建项目跑任务看板。</p>
 
+        <!-- ── 主路径:邮箱验证码。与互联页是同一个组件、同一个账号 ── -->
+        <EmailLogin
+          lead="和「互联」页同一个账号 —— 那边登录过,这边就已经进来了。"
+          :join-mesh="false"
+          @done="onEmailLoggedIn"
+        />
+
+        <!-- 旧登录方式:密码 / 票据 / 初始化。
+             为什么不删干净:①纯内网、无 SMTP 的部署收不到验证码,得有条活路;
+             ②协作者拿邀请码入伙那条路必须保留;③老账号还没绑邮箱。
+             所以收进折叠里当兜底,而不是摆在主路径上继续制造「两个账号」的错觉。 -->
+        <button class="legacy-toggle" @click="legacyOpen = !legacyOpen">
+          <ChevronDown :size="13" class="chev" :class="{ open: legacyOpen }" />
+          登不上?用旧方式(密码 / 邀请码 / 首次初始化)
+        </button>
+
+        <template v-if="legacyOpen">
         <!-- 桌面版:一键把本机变成协作主机(零配置;同事凭配对码加入) -->
         <div v-if="isTauri" class="host-cta">
           <template v-if="!collab.hostInfo?.running">
@@ -612,6 +648,7 @@ const MAIN_TABS: { key: AuthTab; label: string }[] = [
             </p>
           </div>
         </div>
+        </template>
       </div>
     </div>
 
@@ -1045,4 +1082,12 @@ const MAIN_TABS: { key: AuthTab; label: string }[] = [
 .dlg-act { display: flex; justify-content: flex-end; gap: 8px; }
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* 旧登录方式的折叠开关。主路径是邮箱验证码,这一坨只是兜底,视觉上要明显更轻。 */
+.legacy-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 14px;
+  background: none; border: none; cursor: pointer;
+  font-size: 12.5px; color: var(--muted); padding: 6px 0;
+}
+.legacy-toggle .chev { transition: transform .18s; }
+.legacy-toggle .chev.open { transform: rotate(180deg); }
 </style>

@@ -36,6 +36,10 @@ pub struct Peer {
     pub ver: String,
     pub last_seen: i64,
     pub online: bool,
+    /// 这台机器**第一次**入网的时刻。created_at 会被重登覆盖(同 NodeId 换密钥即 upsert),
+    /// 留不住真正的首见时间,而设备台账要显示它 —— 「这台是三天前才冒出来的」是个安全信号。
+    #[serde(default)]
+    pub first_seen: i64,
 }
 
 fn hash_key(k: &str) -> String {
@@ -61,8 +65,11 @@ fn row_to_peer(
         ver: r.get(3)?,
         last_seen,
         online: t - last_seen <= ONLINE_WINDOW,
+        first_seen: r.get(5).unwrap_or(0),
     })
 }
+
+const PEER_COLS: &str = "node_id,name,os,ver,last_seen,first_seen";
 
 /// 设备入网:登记 NodeId 并颁一把新的设备密钥(返回明文,只此一次)。
 ///
@@ -79,12 +86,15 @@ pub fn enroll(uid: &str, node_id: &str, name: &str, os: &str, ver: &str) -> Resu
     }
     let key = new_key()?;
     let conn = open_db()?;
+    // first_seen 用 excluded 会被重登覆盖 —— 这里刻意保留旧值(COALESCE 兜住老行的 0),
+    // 因为台账要回答的是「这台机器什么时候第一次出现在我账号里」,不是「上次重登是几点」。
     conn.execute(
-        "INSERT INTO mesh_nodes(node_id,uid,name,os,ver,key_hash,created_at,last_seen,revoked) \
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?7,0) \
+        "INSERT INTO mesh_nodes(node_id,uid,name,os,ver,key_hash,created_at,last_seen,revoked,first_seen) \
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?7,0,?7) \
          ON CONFLICT(node_id) DO UPDATE SET \
            uid=excluded.uid, name=excluded.name, os=excluded.os, ver=excluded.ver, \
-           key_hash=excluded.key_hash, last_seen=excluded.last_seen, revoked=0",
+           key_hash=excluded.key_hash, last_seen=excluded.last_seen, revoked=0, \
+           first_seen=CASE WHEN mesh_nodes.first_seen>0 THEN mesh_nodes.first_seen ELSE excluded.first_seen END",
         params![node_id, uid.trim(), name.trim(), os.trim(), ver.trim(), hash_key(&key), now()],
     )
     .map_err(|e| format!("设备入网失败: {e}"))?;
@@ -117,10 +127,10 @@ pub fn peers(uid: &str, exclude_node: &str) -> Result<Vec<Peer>, String> {
     let t = now();
     let conn = open_db()?;
     let mut st = conn
-        .prepare(
-            "SELECT node_id,name,os,ver,last_seen FROM mesh_nodes \
-             WHERE uid=?1 AND revoked=0 AND node_id<>?2 ORDER BY last_seen DESC",
-        )
+        .prepare(&format!(
+            "SELECT {PEER_COLS} FROM mesh_nodes \
+             WHERE uid=?1 AND revoked=0 AND node_id<>?2 ORDER BY last_seen DESC"
+        ))
         .map_err(|e| format!("查设备清单失败: {e}"))?;
     let rows = st
         .query_map(params![uid, exclude_node], |r| row_to_peer(r, t))
@@ -128,10 +138,70 @@ pub fn peers(uid: &str, exclude_node: &str) -> Result<Vec<Peer>, String> {
     Ok(rows.flatten().collect())
 }
 
+/// 设备**台账**:同一账号名下的全部设备,**含自己那台**,也含已被移出的。
+///
+/// 与 [`peers`] 的分工:那个是给对账循环用的「我该连谁」,所以排掉自己、排掉已吊销的;
+/// 这个是给人看的,少一台都是缺陷 —— 用户要在台账上认出「哪台是我正在用的这台」,
+/// 也要看见「上周被我踢掉的那台还在不在」。
+pub fn devices(uid: &str) -> Result<Vec<(Peer, bool)>, String> {
+    let t = now();
+    let conn = open_db()?;
+    let mut st = conn
+        .prepare(&format!(
+            "SELECT {PEER_COLS},revoked FROM mesh_nodes WHERE uid=?1 \
+             ORDER BY revoked ASC, last_seen DESC"
+        ))
+        .map_err(|e| format!("查设备台账失败: {e}"))?;
+    let rows = st
+        .query_map(params![uid], |r| {
+            Ok((row_to_peer(r, t)?, r.get::<_, i64>(6)? != 0))
+        })
+        .map_err(|e| format!("查设备台账失败: {e}"))?;
+    Ok(rows.flatten().collect())
+}
+
+/// 给设备改个人话名字(台账上的「改名」)。
+///
+/// 为什么需要它:名字本来跟着 announce 走 = 机器名,一屋子 `DESKTOP-1D01IJR` 认不出谁是谁。
+/// 改过名的设备打上 named 标记,此后 announce 不再用机器名覆盖它 —— 否则用户改完,
+/// 下一拍心跳就给改回去了。
+pub fn rename(uid: &str, node_id: &str, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 40 {
+        return Err("设备名长度须为 1–40 个字符".into());
+    }
+    let conn = open_db()?;
+    let n = conn
+        .execute(
+            "UPDATE mesh_nodes SET name=?3 WHERE node_id=?1 AND uid=?2",
+            params![node_id.trim(), uid, name],
+        )
+        .map_err(|e| format!("改设备名失败: {e}"))?;
+    if n == 0 {
+        return Err("这台设备不在你账号的设备网里".into());
+    }
+    // 记住「这个名字是人取的」,announce 从此不覆盖它。
+    let _ = conn.execute(
+        "INSERT INTO meta(k,v) VALUES(?1,'1') ON CONFLICT(k) DO UPDATE SET v='1'",
+        params![named_key(node_id)],
+    );
+    db::audit(uid, "mesh.rename", node_id.trim(), name);
+    Ok(())
+}
+
+/// 「这台设备的名字是人手取的」标记键。
+fn named_key(node_id: &str) -> String {
+    format!("mesh_named_{}", node_id.trim())
+}
+
 /// 心跳 + 取清单(一次往返办两件事:设备网的轮询频率不低,能省一趟就省一趟)。
 pub fn announce(key: &str, name: &str, os: &str, ver: &str) -> Result<(String, Vec<Peer>), String> {
     let (uid, node_id) = resolve_key(key)?;
     let conn = open_db()?;
+    // 用户在台账上手工改过名的设备,心跳不许再拿机器名覆盖回去 ——
+    // 否则「改名」这个动作最多活 60 秒,下一拍就被打回原形。
+    let human_named = db::meta_get(&named_key(&node_id)).as_deref() == Some("1");
+    let name = if human_named { "" } else { name };
     // 名字/版本每次报到都跟着更新:改了机器名、升了版本,清单里立刻是新的。
     conn.execute(
         "UPDATE mesh_nodes SET last_seen=?1, \
@@ -257,6 +327,44 @@ mod tests {
         enroll("acct_1", "node-b", "另一台", "linux", "1").unwrap();
         let (_, list) = announce(&k, "", "", "").unwrap();
         assert_eq!(list.len(), 1, "同 node_id 重复入网不该多出一台:{list:?}");
+    }
+
+    /// 台账:含自己、含已移出的;改过名之后心跳不许把名字打回原形。
+    #[test]
+    fn ledger_lists_all_and_keeps_human_names() {
+        let _g = tmp_db("ledger");
+        let k1 = enroll("acct_1", "node-a", "DESKTOP-1D01IJR", "windows", "2.9.0").unwrap();
+        enroll("acct_1", "node-b", "NAS", "linux", "2.9.0").unwrap();
+        enroll("acct_1", "node-c", "旧笔记本", "windows", "2.7.0").unwrap();
+        revoke("acct_1", "node-c").unwrap();
+
+        let list = devices("acct_1").unwrap();
+        assert_eq!(list.len(), 3, "台账要含自己那台和已移出的那台:{list:?}");
+        assert!(list.iter().any(|(p, rev)| p.node_id == "node-c" && *rev));
+        assert!(list.iter().all(|(p, _)| p.first_seen > 0), "首见时刻要落下来");
+
+        // 改名 → 心跳带着机器名再来一次 → 名字必须还是人取的那个。
+        rename("acct_1", "node-a", "书房台式机").unwrap();
+        announce(&k1, "DESKTOP-1D01IJR", "windows", "2.9.0").unwrap();
+        let list = devices("acct_1").unwrap();
+        let a = list.iter().find(|(p, _)| p.node_id == "node-a").unwrap();
+        assert_eq!(a.0.name, "书房台式机", "手工改的名被心跳覆盖了");
+
+        // 改不了别人账号的设备名。
+        assert!(rename("acct_other", "node-a", "偷改").is_err());
+        assert!(rename("acct_1", "node-a", "").is_err());
+    }
+
+    /// 重复入网不该把「第一次见到这台机器」的时刻冲掉(安全信号要留得住)。
+    #[test]
+    fn first_seen_survives_reenroll() {
+        let _g = tmp_db("firstseen");
+        enroll("acct_1", "node-a", "机器", "windows", "1").unwrap();
+        let first = devices("acct_1").unwrap()[0].0.first_seen;
+        assert!(first > 0);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        enroll("acct_1", "node-a", "机器", "windows", "2").unwrap();
+        assert_eq!(devices("acct_1").unwrap()[0].0.first_seen, first);
     }
 
     #[test]

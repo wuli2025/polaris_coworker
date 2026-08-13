@@ -3,8 +3,21 @@ import { onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { kb, isTauri } from "../tauri";
 import { useAppStore } from "../stores/app";
+import { useStarterStore } from "../stores/starter";
+import { resetCoachmarks } from "../lib/coachmarks";
 
 const app = useAppStore();
+const starter = useStarterStore();
+
+// 重看引导:清掉「上手五件事」的进度 + 所有「点哪讲哪」气泡的已读位。
+// 二次上手、给别人演示、录屏都要用 —— 引导一旦看不了第二遍,就没人敢点掉第一遍。
+const guideReset = ref(false);
+function replayGuides() {
+  starter.resetAll();
+  resetCoachmarks();
+  guideReset.value = true;
+  window.setTimeout(() => (guideReset.value = false), 2600);
+}
 
 const currentRoot = ref("");
 const defaultRoot = ref("");
@@ -200,6 +213,18 @@ function useDefault() {
       </div>
     </section>
 
+    <section class="block">
+      <div class="b-title">新手引导</div>
+      <div class="b-desc">
+        右下角的「上手五件事」搭子卡,以及第一次点开某个功能时弹的那一次解释气泡。
+        点下面这个按钮会把它们全部复位,从第一件重新来一遍。
+      </div>
+      <div class="row">
+        <button class="btn primary" @click="replayGuides">重看所有引导</button>
+        <span v-if="guideReset" class="hint-ok">已复位 · 回主界面就能看到</span>
+      </div>
+    </section>
+
     <section class="block muted">
       <div class="b-title sm">即将开放</div>
       <ul class="todo">
@@ -211,6 +236,10 @@ function useDefault() {
 </template>
 
 <style scoped>
+.hint-ok {
+  font-size: 12px;
+  color: var(--primary);
+}
 .settings {
   flex: 1;
   overflow-y: auto;

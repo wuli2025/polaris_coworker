@@ -661,7 +661,10 @@ onMounted(async () => {
   await nextTick();
   // 进入文件中心且库还是空的 → 立刻拉起「让 AI 更懂你」引导,用户一点进来就被带着走完
   // 盘点 → 语义归类 → 图谱 → 建索引。库一旦有内容(说明引导过/手动盘过)就不再打扰。
-  if ((overview.value?.totalFiles ?? 0) === 0) openWizard();
+  // !wiz.open 这一条不能省:搭子卡是「先切到文件中心、再以只盘点轻模式开向导」,而新机器的
+  // 库正好是空的 —— 少了这道判断,本组件挂载后会用无参 openWizard() 再开一次,把 scanOnly
+  // 冲成 false,用户当场被拽回六步全流程(首次使用必现)。
+  if (!wiz.open && (overview.value?.totalFiles ?? 0) === 0) openWizard();
   // 空闲预热盘点选择器(扫根+第一层+低并发预算大小),点「盘点」秒开(scanPrewarm)。
   const idle = (window as any).requestIdleCallback ?? ((f: () => void) => setTimeout(f, 300));
   idle(() => prewarmScan());

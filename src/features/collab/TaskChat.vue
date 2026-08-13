@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 /**
  * 任务级对话面板(挂在任务详情抽屉里)。
  *
@@ -87,10 +88,10 @@ async function send() {
         draft.value = "";
         toast.info("主机暂不可达,消息已存入待发送队列,连上后自动补传");
       } catch {
-        toast.error((e as Error).message);
+        toast.error(errMsg(e));
       }
     } else {
-      toast.error((e as Error).message);
+      toast.error(errMsg(e));
     }
   } finally {
     sending.value = false;
@@ -107,7 +108,7 @@ async function aiReply() {
       scrollToBottom();
     }
   } catch (e) {
-    toast.error((e as Error).message);
+    toast.error(errMsg(e));
   } finally {
     aiBusy.value = false;
   }

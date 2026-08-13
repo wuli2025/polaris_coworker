@@ -24,6 +24,40 @@ use super::prompt::*;
 use super::session_pool;
 use super::types::*;
 
+/// 本源模式 (`POLARIS_RAW_MODE=1`) —— 「跟在终端裸调 `claude` 一模一样」。
+///
+/// 缘由: 常规路径每轮要先拼 19 段 system 注入(KB-First 铁律 / 回答风格 / 输出约定 /
+/// 脚本公约 / 检索公约 / 长任务铁律 / KB 召回 / 产物地图 / 历史块 …)再问用户的问题, 还叠一层
+/// `--allowedTools` 白名单 + `--disallowedTools` 黑名单。这些约束单看每条都有实证来由,
+/// 叠在一起却会把模型压成「事事有回应、事事无着落」—— 尤其非 Claude 系的弱模型会严格照字面
+/// 执行到荒谬(见 prompt.rs `kb_first_directive` 的 A/B 实证)。本模式给出一个干净逃生舱:
+///
+/// - **零注入**: 丢弃全部指令段与召回块, 只把用户原话经 stdin 交给 CLI(连 `## 用户问题`
+///   这个包装标题都不加);
+/// - **不限工具**: 不传 `--allowedTools` / `--disallowedTools`, 工具面由 CLI 自己按
+///   `--permission-mode` 与用户 `~/.claude` 配置决定;
+/// - **不额外放行目录**: 不传 `--add-dir`, 只信任 cwd 子树 —— 与裸 CLI 行为一致。
+///
+/// 剩下的 argv 与 MicaBase(youxi)那套裸调完全对齐:
+/// `--print --output-format stream-json --verbose --include-partial-messages`。
+///
+/// **代价(有意为之)**: 知识库不再自动召回、成品不再自动落产物目录(侧边栏预览也就看不到)、
+/// 脚本/长任务/下载那几条实证公约一并失效。要这些能力就别开本模式。
+///
+/// **为什么用进程级 env 而不是对话内开关**: 常驻会话池按 [`session_pool::Fingerprint`]
+/// 判是否复用进程, 而工具白名单不在指纹字段里。做成可随时翻转的 UI 开关, 会让翻转后
+/// 旧进程(带着老 argv)被继续复用 → 行为对不上。env 在进程存活期恒定, 天然没有这个坑;
+/// 要接 UI 开关得给 Fingerprint 加一个字段(那在 session_pool.rs, 不在本文件)。
+/// 改这个变量后**重启应用**生效。
+pub(super) fn raw_mode() -> bool {
+    std::env::var("POLARIS_RAW_MODE")
+        .map(|v| {
+            let t = v.trim();
+            !t.is_empty() && t != "0"
+        })
+        .unwrap_or(false)
+}
+
 /// 默认预授权的联网工具 (逗号分隔, 传给 `--allowedTools`)。
 /// 把内置 WebSearch / WebFetch 设为「联网搜索默认打开」: 任何权限模式都不再拦截,
 /// 深度搜索 / 联网搜索因此能真正联网检索, 而不是退回内置知识。
@@ -247,8 +281,15 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     let project_work_dir = current_project_id
         .as_deref()
         .and_then(conv::project_work_dir);
-    let cm_ctx =
-        claude_md::render_for_project(current_project_id.as_deref(), &args.prompt, args.use_kb);
+    // 本源模式: 整轮零注入(见 raw_mode 文档)。这里就把最贵的两处源头掐掉 ——
+    // CLAUDE.md 渲染(读盘 + wiki 地图)与下面的 KB 召回(SQLite 检索, 可能还带 AI 扩写),
+    // 否则算完再在末尾丢弃, 白付一次延迟。
+    let raw = raw_mode();
+    let cm_ctx = if raw {
+        String::new()
+    } else {
+        claude_md::render_for_project(current_project_id.as_deref(), &args.prompt, args.use_kb)
+    };
 
     // prompt 改为「分段计划」而非单个大字符串: 旧路径照旧取 full_text()(逐段拼接,
     // 顺序与此前完全一致); 常驻 agent 路径按分段类别做首条/续轮拆分(见 session_pool):
@@ -291,22 +332,27 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     // ①禁用哪些冗余工具 ②注入哪些约定(可运行项目/长任务仅工作模式)③KB 召回快档 vs 全质量
     // ④上下文预算 ⑤权限/模型默认(前端)。
     let work_full = args.work_mode.as_deref() == Some("work");
-    // 快速模式强制调用知识库(这是该模式的本职「快速调用知识库」)——即便前端没开 KB 开关;
-    // 工作模式(纯 Claude Code)则尊重用户的 use_kb 开关, 默认不注入 KB。
-    let kb_recall = (args.use_kb || !work_full) && !creative;
+    // 知识库召回**只跟着 use_kb 开关走**(2026-08-13 改)。原先快速模式恒真(即便前端没开 KB),
+    // 于是每一轮日常对话都要先查一遍库、把命中片段塞进上下文 —— 库里没有相关内容时, 这些
+    // 片段纯属噪声, 还配合 KB-First 铁律把模型引向「翻库→没找到→收工」。现在: 点了知识库
+    // 才召回, 没点就当它不存在。创作模式照旧跳过(素材已在 prompt 里)。
+    let kb_recall = !raw && args.use_kb && !creative;
 
-    // 0. KB 顶层指令 (写死, 优先级最高)
-    // 普通对话 = KB-First 全量: 知识库是真相源, 必须先 4 步取证再作答、脚注溯源。
-    // 创作模式 = 精简版: 只保留「数据/指令隔离」安全条款(提示词注入防线, 不随模式豁免),
-    // 知识库按需自取 —— 做 PPT/网页/视频时素材已在 prompt 里, 强制取证只会稀释创作注意力。
-    // 这条指令在 prompt 最前面, 离用户问题最远——但因 Claude 的"system 指令优先"特性,
-    // 它仍然约束着整轮回复。配合 `claude_md::render_for_project` 注入的结构化 wiki,
-    // 模型就能沿 Read/Glob/Grep + [[双链]] 自主取证。
+    // 0. KB 顶层指令 (优先级最高)
+    // **门控(2026-08-13 改): 只有用户点了知识库(use_kb)才上 KB-First 全量。**
+    // 原先是「非创作模式一律强制」—— 这条要求先 4 步取证(Glob/Grep/Read/双链)再作答, 且配了
+    // 「查不到就明确说缺什么」的反幻想护栏。对没开知识库的日常对话, 它约束的是一个根本不存在的
+    // 库: 必然查不到 → 按护栏收工在「找不到」, 这正是「事事有回应、事事无着落」的源头
+    // (A/B 实证见 prompt.rs `kb_first_directive` 的注释)。知识库是可选能力, 它的强制取证
+    // 铁律就该跟着开关走, 而不是常驻。
+    // 未开 KB / 创作模式 → 只留精简版的「资料与指令隔离」安全条款: 这是提示词注入防线,
+    // 只要模型还会 Read 素材文件就必须在, **不随任何模式豁免**, 且它本身不要求先取证、
+    // 不构成不动手的理由。
     // (会话级: creative 已入常驻指纹, 翻转即重建, 会话内该段稳定不变)
-    if creative {
-        plan.session(format!("{}\n\n---\n\n", kb_isolation_directive_light()));
-    } else {
+    if !creative && args.use_kb {
         plan.session(format!("{}\n\n---\n\n", kb_first_directive()));
+    } else {
+        plan.session(format!("{}\n\n---\n\n", kb_isolation_directive_light()));
     }
 
     // skill 逐个成为门控段(key=skill id): 第 5 轮才点选/意图激活的 skill 也能在
@@ -329,22 +375,16 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     // 产物意图只算一次, 输出约定与脚本公约两个门共用。
     let artifact_intent = detect_artifact_intent(&args.prompt);
 
-    // 2. 输出文件约定 (Polaris) — 让成品文件落到产物目录, 侧边栏即可预览。
-    //    门控: work 模式 / 创作模式 / 消息含「生成文件·成品产物」意图 → 全量(~700 tokens);
-    //    否则精简版(只告知产物目录 + 末尾报绝对路径, 2 句)。
-    //    门控段: 首轮只发精简版、后某轮命中产物意图时, 常驻续轮能补发全量版
-    //    (两个 key 各自去重; 全量版语义覆盖精简版, 重复无害)。
-    if prompt_full || work_full || creative || artifact_intent {
-        plan.keyed(
-            "conv:output-full",
-            format!("{}\n\n---\n\n", output_convention(&art_dir)),
-        );
-    } else {
-        plan.keyed(
-            "conv:output-lite",
-            format!("{}\n\n---\n\n", output_convention_lite(&art_dir)),
-        );
-    }
+    // 2. 输出文件约定 —— **已移除 (2026-08-13)**。
+    //    原先每轮都注入(全量 ~700 tokens / 精简版 2 句): 要求成品必须落到会话产物目录、
+    //    末尾用绝对路径罗列、网页要单文件自包含、过程产物不许列出并跑完清理。目的是让右侧
+    //    边栏能预览成品。代价是模型每轮都被一套「文件该写到哪、该怎么汇报」的格式要求箍着,
+    //    与终端里裸调 claude 的行为背离(那里文件就落在 cwd, 想写哪写哪)。
+    //    按用户决定直接删掉: 成品此后落在 claude 的 cwd(= 项目绑定的工作目录), 与裸 CLI 一致。
+    //    **连带影响(有意接受)**: 右侧产物边栏靠 art_dir 的前后快照(dir_snapshot)发现新文件,
+    //    模型不再被告知该目录 → 边栏基本不会再自动冒出成品。art_dir 本身与 --add-dir 放行
+    //    保持原样, 不影响别处; `output_convention`/`output_convention_lite` 两个函数暂留在
+    //    prompt.rs(无调用点), 想恢复把上面这段门控加回来即可。
 
     // 2.1 可运行项目约定 (板块⑮) — 要跑起来的应用(尤其前后端)打包成带运行清单的项目文件夹,
     //     用户在右侧点「运行」即一键启动前后端并内嵌预览。创作模式跳过(成品是单文件);
@@ -357,9 +397,20 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     }
 
     // 2.2 长任务铁律: 回合结束 = claude 退出 = 其整棵子进程树被回收(防孤儿)。模型若把出片/上传/
-    //     下载等耗时任务放后台再结束回复, 任务必死且无人知晓。**工作模式 + 创作模式注入**(那里
-    //     才有长产出); 快速模式只做秒级问答、无长任务, 跳过这段 → 提示词更短、首 token 更快。
-    if work_full || creative {
+    //     下载等耗时任务放后台再结束回复, 任务必死且无人知晓。
+    //     门控(2026-08-13 放宽): 原为「仅 work + 创作模式」, 理由是快速模式只做秒级问答。但
+    //     快速模式是默认档, 用户在这里照样会说「帮我装个即梦 CLI」「下载这个模型」—— 那时模型
+    //     拿不到本铁律, 就会把 npm i / 下载丢后台并回一句「安装中, 好了通知你」, 回合一结束
+    //     进程树被回收、任务真死 → 这正是「事事有回应、事事无着落」的另一半成因(前一半是
+    //     KB-First 缺执行豁免)。故改为与脚本公约同闸: 凡是要动手干活的轮次, 两段成对注入。
+    if work_full
+        || creative
+        || prompt_full
+        || artifact_intent
+        || skills::detect_dev_intent(&args.prompt)
+        || detect_script_intent(&args.prompt)
+        || skills::detect_download_intent(&args.prompt)
+    {
         plan.keyed(
             "conv:longtask",
             format!("{}\n\n---\n\n", longtask_convention()),
@@ -506,22 +557,29 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
         plan.session(format!("{cm_ctx}\n\n---\n\n"));
     }
 
-    // fable 状态只查一次(打开 SQLite + COUNT): 此前家底概览与强制召回各自调一次
-    // fable::status(), 现在共用同一份结果。
-    let fable_st = super::bridges::kb_bridge().and_then(|b| b.fable_status());
+    // fable 状态只查一次(打开 SQLite + COUNT): 家底概览与强制召回共用同一份结果。
+    // 两者现在都只在开了 KB 时才要 → 没开就整个跳过这次查询, 省一次开库。
+    let fable_st = if kb_recall {
+        super::bridges::kb_bridge().and_then(|b| b.fable_status())
+    } else {
+        None
+    };
 
-    // 3.15 知识库家底概览(始终注入, 便宜): 让模型一开口就答得清「你的库在哪 / 有什么」,
-    //      报全四层(妈妈库 wiki / raw / output / memory)家底, 不再只会复述 wiki 结构。
-    {
+    // 3.15 知识库家底概览: 让模型一开口就答得清「你的库在哪 / 有什么」, 报全四层
+    //      (妈妈库 wiki / raw / output / memory)家底。
+    //      门控(2026-08-13 改, 原为「始终注入」): 跟着 use_kb 走 —— 没开知识库的对话里,
+    //      报一遍家底只会诱导模型往库里钻。
+    if kb_recall {
         let ov = kb_overview_block(fable_st.as_ref());
         if !ov.is_empty() {
             plan.session(format!("{ov}\n\n---\n\n")); // 会话级: 家底轮间基本不变
         }
     }
 
-    // 3.2 双库强制召回: 后端先替模型查两个库(妈妈库 wiki 权威 + 外库 raw/output 混检), 命中
-    //     片段直接喂进上下文。快速模式 kb_recall 恒真(本职就是「快速调用知识库」); 工作模式仅
-    //     用户开了 KB 才查。创作模式跳过(素材已在 prompt 里)。
+    // 3.2 双库召回: 后端先替模型查两个库(妈妈库 wiki 权威 + 外库 raw/output 混检), 命中
+    //     片段直接喂进上下文。**两种模式现在都只在用户点了知识库时才查**(2026-08-13 改;
+    //     此前快速模式恒真)。创作模式跳过(素材已在 prompt 里)。
+    //     下面的快档/全质量之分仍按 work_full 走 —— 那是「怎么查」, 与「查不查」无关。
     if kb_recall {
         // 快速模式提速核心: 召回走「快档」—— 双车道(grep + 向量)融合但**跳过重排 API**, 把这步
         // 从网络主导的 ~1.8s 砍到 ~250ms(重排是 hybrid 唯一的慢源, 见 retrieve::search 的
@@ -600,7 +658,17 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     }
 
     // 4. 用户原始问题
-    plan.turn(format!("## 用户问题\n\n{}", args.prompt));
+    if raw {
+        // 本源模式: 把上面所有可能已入计划的段整个丢掉, 只留用户原话 —— 连 `## 用户问题`
+        // 这个包装标题都不加, 让 CLI 收到的字节与你在终端 `claude` 里敲进去的完全一致。
+        // 这里做「整盘重置」而不是逐段加 `if !raw` 判断, 是因为注入点有 19 处且后续还会加,
+        // 逐点加判断迟早漏一处; 重置是收敛的 —— 无论上面新增多少段, 本源模式恒为空。
+        // 上面已把最贵的 CLAUDE.md 渲染与 KB 召回按 raw 短路掉, 剩下的都是纯字符串拼接, 丢弃不心疼。
+        plan = session_pool::PromptPlan::new();
+        plan.turn(args.prompt.clone());
+    } else {
+        plan.turn(format!("## 用户问题\n\n{}", args.prompt));
+    }
 
     let perm = args.permission_mode.cli_value();
     let conv_id_opt = args.conversation_id.clone();
@@ -1717,6 +1785,12 @@ pub(super) fn effective_cwd(work_dir: Option<&Path>) -> std::path::PathBuf {
 /// cwd 由调用方传入(= effective_cwd 的结果): 项目绑了工作目录后 cwd 是用户项目仓库,
 /// KB 根/产物目录几乎必然不在其子树 → 照常经 --add-dir 放行, claude 才读得到。
 pub(super) fn extra_claude_dirs(cwd: &Path, art_dir: &Path) -> Vec<String> {
+    // 本源模式: 一个 --add-dir 都不传, 只信任 cwd 子树 —— 与终端裸调 claude 一致。
+    // 闸设在这里(而非只在 spawn 侧)是刻意的: 本函数同时也是常驻会话指纹 add_dirs 字段的
+    // 唯一来源, 两处口径必须一致, 否则指纹算的可访问面与真 spawn 的对不上。
+    if raw_mode() {
+        return Vec::new();
+    }
     // 如果 KB root 不在 cwd 子树下(用户可能把 KB 移到别处), 用 --add-dir 显式放行
     let kb_root = std::path::PathBuf::from(
         super::bridges::kb_bridge()
@@ -1813,14 +1887,18 @@ pub(super) fn spawn_on_host(
         args.push("--add-dir".into());
         args.push(d);
     }
-    // 联网工具默认放行; 非「拒绝授权」档位再叠加本地读写执行 (Bash/PowerShell/文件),
-    // 否则 headless 下连 `python xxx.py` 都被拒, .pptx/.xlsx 这类成品根本产不出来。
-    args.push("--allowedTools".into());
-    args.push(allowed_tools_for(perm, with_task));
-    // 快速模式: 弃用冗余工具(Task/NotebookEdit)。disallowedTools 优先级高于 allowedTools。
-    if let Some(disallowed) = disallowed_tools_for(work_full, with_task) {
-        args.push("--disallowedTools".into());
-        args.push(disallowed);
+    // 本源模式: 不传任何工具白/黑名单 —— 工具面交回 CLI 自己按 --permission-mode 与用户
+    // ~/.claude 配置决定, 与终端裸调一致(见 raw_mode 文档)。常规路径照旧两条都传。
+    if !raw_mode() {
+        // 联网工具默认放行; 非「拒绝授权」档位再叠加本地读写执行 (Bash/PowerShell/文件),
+        // 否则 headless 下连 `python xxx.py` 都被拒, .pptx/.xlsx 这类成品根本产不出来。
+        args.push("--allowedTools".into());
+        args.push(allowed_tools_for(perm, with_task));
+        // 快速模式: 弃用冗余工具(Task/NotebookEdit)。disallowedTools 优先级高于 allowedTools。
+        if let Some(disallowed) = disallowed_tools_for(work_full, with_task) {
+            args.push("--disallowedTools".into());
+            args.push(disallowed);
+        }
     }
     // 模型档跟随模式(可选, 默认不启用): 多模型供应商上可让快速模式走快档(便宜快)、工作模式走强档。
     // 仅当对应环境变量显式设了 model id 才传 --model —— 单模型网关/未配置时**保持原样**(供应商
@@ -1923,6 +2001,47 @@ fn tool_input_summary(input: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 本源模式的**取值语义**闸: 只有显式非空非 "0" 才算开。
+    /// 不在测试里 set_var —— 那会污染同进程其它测试(cargo 默认多线程跑), 这里改测纯谓词,
+    /// 与 raw_mode() 内部用的是同一套判定。
+    #[test]
+    fn raw_mode_flag_semantics() {
+        let on = |v: &str| {
+            let t = v.trim();
+            !t.is_empty() && t != "0"
+        };
+        assert!(on("1"));
+        assert!(on("true"));
+        assert!(on(" yes "));
+        assert!(!on("0"));
+        assert!(!on(""));
+        assert!(!on("   "));
+    }
+
+    /// 常规(非本源)模式下, 工具白名单必须照常给足 —— 本源模式改动不许把常规路径带塌。
+    /// 这条守的是: 有人日后把 `if !raw_mode()` 写反 / 提错层级时, 常规档位立刻炸出来。
+    #[test]
+    fn normal_mode_tool_whitelist_intact() {
+        // 只读档: 仅联网, 不给任何本地执行
+        let plan_tools = allowed_tools_for("plan", false);
+        assert!(plan_tools.contains("WebSearch"));
+        assert!(!plan_tools.contains("Bash"));
+        assert!(!plan_tools.contains("PowerShell"));
+        // 常规档: 联网 + 本地读写执行(否则 headless 下产不出 pptx/xlsx)
+        let edit_tools = allowed_tools_for("acceptEdits", false);
+        assert!(edit_tools.contains("WebSearch"));
+        assert!(edit_tools.contains("Bash"));
+        assert!(edit_tools.contains("PowerShell"));
+        assert!(!edit_tools.contains("Task"), "未开动态编排不该放行 Task");
+        // 动态编排: 额外放行 Task
+        assert!(allowed_tools_for("acceptEdits", true).contains("Task"));
+        // 快速模式砍冗余工具; 工作模式放开全套
+        assert!(disallowed_tools_for(false, false)
+            .expect("快速模式应有黑名单")
+            .contains("Task"));
+        assert!(disallowed_tools_for(true, false).is_none(), "工作模式不设黑名单");
+    }
 
     /// 看门狗深检:collect_tree 收全子孙、不越界、PID 复用成环不死循环。
     #[test]

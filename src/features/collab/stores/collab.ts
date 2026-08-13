@@ -231,6 +231,77 @@ export const useCollabStore = defineStore("collab", () => {
   }
 
   /**
+   * **邮箱验证码登录**(从此唯一的登录方式)。
+   *
+   * 邮箱 + 6 位码 → 账号中心签断言(账号不存在就当场建号,注册页因此消失)
+   *              → 当前主机验签换本机会话。
+   *
+   * 同一个 uid 的设备走 SelfOwned 准入,不需要邀请码 —— 「不要还得登两个账号」落在这里。
+   * 别人的账号进不来时会明确说「要邀请码」,那条路一点没松。
+   *
+   * `inviteCode` 只在**协作者**首次加入别人的主机时才要填,自己的设备永远用不上。
+   */
+  async function loginWithEmailCode(args: {
+    email: string;
+    code: string;
+    inviteCode?: string;
+    deviceName?: string;
+  }) {
+    if (accountInfo.value === null) await loadAccountInfo();
+    // 本机自己就是账号中心时,断言由本机签 —— 地址就打本机。
+    const url = authorityUrl.value || base.value;
+    if (!url) throw new Error("还没有配置云端账号中心地址");
+    const { assertion } = await collabApi.authorityLoginCode(url, {
+      email: args.email.trim(),
+      code: args.code.trim(),
+    });
+    const invite = args.inviteCode?.trim();
+    const r = requireAuth(
+      invite
+        ? await collabApi.joinWithTicket({
+            assertion,
+            code: invite,
+            deviceName: args.deviceName ?? "我的电脑",
+          })
+        : await collabApi.loginWithAssertion(assertion)
+    );
+    persistSession(r.user, r.token);
+    await afterAuth();
+  }
+
+  /**
+   * 接管一张**本机**会话 token(桌面 `account_login_code` 顺带签好的那张)。
+   *
+   * 为什么要这个口子:桌面登录时内核已经拿断言进过本机的门、拿到会话了。前端若不接管它,
+   * 用户在自己的机器上还得再登一次 —— 那正是「登两个账号」的最后一截尾巴。
+   *
+   * base 指向本机主机:桌面内嵌主机监听在 127.0.0.1(localhost 会被 Docker 占 IPv6)。
+   */
+  async function adoptLocalSession(t: string) {
+    if (!t) return;
+    const info = await hostStatus();
+    if (info?.running && info.port) applyBase(`http://127.0.0.1:${info.port}`);
+    setToken(t);
+    token.value = t;
+    // 用这张 token 去问「我是谁」,拿回真实身份与角色 —— 不自己编一个用户对象。
+    try {
+      const u = await collabApi.me();
+      persistSession(u as unknown as CollabUser, t);
+      await afterAuth();
+    } catch {
+      // 主机刚起来还没就绪:token 先留着,下一次 init() 会补上身份。
+    }
+  }
+
+  /** 发一枚登录验证码。地址同上:优先云端账号中心,本机就是中心时打本机。 */
+  async function sendLoginCode(email: string) {
+    if (accountInfo.value === null) await loadAccountInfo();
+    const url = authorityUrl.value || base.value;
+    if (!url) throw new Error("还没有配置云端账号中心地址");
+    return collabApi.authoritySendLoginCode(url, email.trim());
+  }
+
+  /**
    * 云端注册(邮箱可选),成功即用返回的断言进当前主机。
    *
    * 注册出来的是「全局身份」,不自动等于「这台主机的成员」:主机已经有主人时,
@@ -791,6 +862,10 @@ export const useCollabStore = defineStore("collab", () => {
     loginViaAuthority,
     signupViaAuthority,
     joinViaTicket,
+    // 邮箱验证码:从此唯一的登录方式
+    sendLoginCode,
+    loginWithEmailCode,
+    adoptLocalSession,
     // 团队
     teams,
     currentTeamId,

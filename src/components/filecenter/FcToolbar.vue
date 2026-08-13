@@ -122,6 +122,7 @@ function clearSearch() {
     <div v-show="view !== 'core'" class="actions">
       <button
         class="tool-btn wizard"
+        data-spot="wizard"
         title="让 AI 更懂你:盘点 → 智能归类 → 知识图谱 → 建索引 → 进对话,一条龙引导"
         @click="emit('open-wizard')"
       >
@@ -161,6 +162,8 @@ function clearSearch() {
       </button>
       <button
         class="tool-btn"
+        data-spot="index"
+        data-coach="index"
         :disabled="building || !overview?.totalFiles"
         :title="overview?.hasEmbedProvider
           ? '为文本建/续建向量索引(硅基 BGE-M3,后台跑),建好后能按「意思」搜文件'
@@ -173,6 +176,7 @@ function clearSearch() {
       </button>
       <button
         class="tool-btn ai"
+        data-coach="titles"
         :disabled="llmTitling || !overview?.totalFiles"
         title="用大模型给乱码/杂乱的文件名起可读的中文标题(只改显示,不改磁盘文件名)"
         @click="emit('titles')"

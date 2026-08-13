@@ -508,6 +508,25 @@ export const collabApi = {
   ): Promise<AssertionResult> {
     return authorityReq(authorityUrl, "/api/account/login", args);
   },
+  /**
+   * 云端发**登录**验证码。整套账号体系唯一的公开发码口。
+   *
+   * 刻意不告诉你这个邮箱注册过没有 —— 有没有响应都一样。否则这就成了一台
+   * 「查某人是不是 Polaris 用户」的机器;而且首登即自动建号,这个区分本就没意义。
+   */
+  authoritySendLoginCode(authorityUrl: string, email: string): Promise<void> {
+    return authorityReq(authorityUrl, "/api/account/send_code", { email });
+  },
+  /**
+   * 云端验证码登录:邮箱 + 6 位码 → 身份断言。**首登即自动建号**,不需要注册页。
+   * 拿到断言后再去当前主机换本机会话(loginWithAssertion / joinWithTicket)。
+   */
+  authorityLoginCode(
+    authorityUrl: string,
+    args: { email: string; code: string }
+  ): Promise<AssertionResult> {
+    return authorityReq(authorityUrl, "/api/account/login_code", args);
+  },
   /** 云端发验证码(注册/找回共用,后端频控) */
   authoritySendCode(
     authorityUrl: string,
@@ -976,9 +995,29 @@ export function parseShareCode(
   }
 }
 
-/** 连接码 PLRK1-<base64url(json{t:token, a:[addrs], n?:nodeId})> → {token, addrs, nodeId};
- *  非该格式返回 null。与手机端 net.ts 的 parseConnectCode 同一套:主机「互联」页把
- *  地址 + owner 令牌 + iroh NodeId 打包成一串,自己的设备粘一串即连,不用分别手填。 */
+/**
+ * 连接码 `PLRK1-<base64url(json)>` 的解析。非该格式返回 null。
+ * 与手机端 net.ts 的 parseConnectCode 同一套。
+ *
+ * 载荷字段(**只加不改**,老版本解析器见到不认识的键会直接忽略,所以不必换版本号):
+ * ```
+ *   t  token      主机 owner 令牌 —— 这一项才是真正的凭据,进门只认它
+ *   a  addrs[]    主机可达地址(逐个探活,连得上哪个用哪个)
+ *   n  nodeId     iroh NodeId,P2P 打洞直连用
+ *   u  authority  这台主机的云端账号中心地址
+ *   e  email      ← 新增:这串码属于**谁的**设备网
+ *   i  uid        ← 新增:同上,机器认的那个
+ *   m  hostName   ← 新增:主机名,给人看的("书房台式机")
+ * ```
+ *
+ * 为什么要带后三项:连接码本身只回答「怎么连上这一台」,不回答「这是谁的」。于是收码人
+ * 只能一台一台地粘 —— 而他要是**本来就是这个账号的主人**,根本不该粘码,用同一个邮箱
+ * 登录就全都自动连上了。带上这三项,粘码那一刻就能认出这件事并把人引到正路上;
+ * 认不出账号的(别人的 NAS、临时设备)才走粘码这条老路。
+ *
+ * 安全上这三项都是**非凭据**信息:知道 uid/邮箱进不了任何一台机器,进门始终只认 `t`。
+ * 反过来说,连接码本来就等于一把 owner 钥匙,本就不该外传 —— 多这三项不改变它的敏感级别。
+ */
 export function parseConnectCode(
   s: string
 ): {
@@ -986,21 +1025,42 @@ export function parseConnectCode(
   addrs: string[];
   nodeId?: string;
   authority?: string;
+  email?: string;
+  uid?: string;
+  hostName?: string;
 } | null {
   const m = s.trim();
   if (!m.startsWith("PLRK1-")) return null;
   try {
     const b64 = m.slice(6).replace(/-/g, "+").replace(/_/g, "/");
     const pad = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-    const v = JSON.parse(atob(pad));
+    const bin = atob(pad);
+    // 载荷里可能有中文(机器名),生成侧按 UTF-8 逃逸过 —— 这里逆回来。
+    // 老码是纯 ASCII,逆变换对它是恒等,不会破坏兼容。
+    let json = bin;
+    try {
+      json = decodeURIComponent(
+        bin
+          .split("")
+          .map((ch) => "%" + ch.charCodeAt(0).toString(16).padStart(2, "0"))
+          .join("")
+      );
+    } catch {
+      /* 不是合法 UTF-8 序列:按原样解(老码就走这条) */
+    }
+    const v = JSON.parse(json);
     if (typeof v.t !== "string" || !Array.isArray(v.a)) return null;
+    const str = (x: unknown) => (typeof x === "string" && x ? x : undefined);
     return {
       token: v.t,
       addrs: v.a.filter((x: unknown): x is string => typeof x === "string"),
-      nodeId: typeof v.n === "string" && v.n ? v.n : undefined,
+      nodeId: str(v.n),
       // u:这台主机的账号中心。令牌本身就是凭据、进门用不着它,
       // 但收码人换账号登录时得知道往哪儿打。
-      authority: typeof v.u === "string" && v.u ? v.u : undefined,
+      authority: str(v.u),
+      email: str(v.e),
+      uid: str(v.i),
+      hostName: str(v.m),
     };
   } catch {
     return null;

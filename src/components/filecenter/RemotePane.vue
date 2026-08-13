@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errMsg } from "../../lib/err";
 /**
  * 远程源浏览(经 iroh 隧道接入的 NAS/主机):像本机一样浏览、下载它的盘。
  * 自 FileCenter.vue 原样搬出;浏览态(当前路径/条目)是纯局部状态,下沉到本组件。
@@ -30,7 +31,7 @@ async function openRemote(rel = "") {
   try {
     rentries.value = await fsList(props.source, rel);
   } catch (e) {
-    rerr.value = (e as Error).message;
+    rerr.value = errMsg(e);
     rentries.value = [];
   } finally {
     rloading.value = false;
@@ -87,7 +88,7 @@ async function downloadRemote(e: FsEntry) {
     try {
       await fsfetch.start({ port: props.source.port, token: props.source.token, rel, dest, size: e.size });
     } catch (err) {
-      rerr.value = (err as Error).message;
+      rerr.value = errMsg(err);
     } finally {
       const next = { ...dl.value };
       delete next[e.name];
@@ -104,7 +105,7 @@ async function downloadRemote(e: FsEntry) {
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
   } catch (err) {
-    rerr.value = (err as Error).message;
+    rerr.value = errMsg(err);
   }
 }
 function fmtRemoteSize(n: number): string {

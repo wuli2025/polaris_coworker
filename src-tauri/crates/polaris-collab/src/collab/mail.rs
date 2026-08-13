@@ -14,10 +14,7 @@
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
-use once_cell::sync::Lazy;
 use rusqlite::params;
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 use super::auth;
 use super::db::{self, now, open_db};
@@ -30,9 +27,6 @@ const RESEND_GAP: i64 = 60;
 const HOURLY_CAP: usize = 5;
 /// 单枚验证码最大试错次数。
 const MAX_ATTEMPTS: i64 = 5;
-
-/// 发信频控(内存态):email → 最近一小时发送时刻表。
-static SEND_LOG: Lazy<Mutex<HashMap<String, Vec<i64>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone)]
 pub struct SmtpCfg {
@@ -141,32 +135,45 @@ fn gen_code() -> Result<String, String> {
     Ok(format!("{:06}", u32::from_le_bytes(b) % 1_000_000))
 }
 
-fn rate_check(email: &str) -> Result<(), String> {
-    let t = now();
-    let mut log = SEND_LOG.lock().unwrap();
-    // 防膨胀:表过大时先剪掉一小时前的旧记录。
-    if log.len() > 2000 {
-        log.retain(|_, v| {
-            v.retain(|at| t - *at < 3600);
-            !v.is_empty()
-        });
-    }
-    let v = log.entry(email.to_string()).or_default();
-    v.retain(|at| t - *at < 3600);
-    if v.len() >= HOURLY_CAP {
-        return Err("这个邮箱一小时内发送次数已达上限,请稍后再试".into());
-    }
-    if v.last().is_some_and(|last| t - *last < RESEND_GAP) {
+/// 发码频控。**落库**(见 [`db::rate_gate`]),两道闸都要过:
+///  · 按邮箱:防对着一个账号反复要码。
+///  · 按来源 IP:防换邮箱轰炸 —— 只按邮箱计数的话,攻击者每次换个地址就能接着打,
+///    我们的 SMTP 就成了免费邮件炮台(还会把发信域名打进黑名单)。
+///
+/// `ip` 传空(拿不到来源,比如内部调用)时只走邮箱那道闸,不误伤。
+fn rate_check(email: &str, ip: &str) -> Result<(), String> {
+    // 60 秒重发间隔:单独判,好给「请一分钟后再试」这句更准的话。
+    if db::rate_since(SCOPE_EMAIL, email).is_some_and(|d| d < RESEND_GAP) {
         return Err("发送太频繁,请一分钟后再试".into());
     }
-    v.push(t);
-    Ok(())
+    db::rate_gate(
+        SCOPE_EMAIL,
+        email,
+        HOURLY_CAP as i64,
+        3600,
+        "这个邮箱一小时内发送次数已达上限,请稍后再试",
+    )?;
+    // IP 闸比邮箱闸宽(一个办公室/家庭出口后面可能真有几个人同时注册),但足以掐死轰炸。
+    db::rate_gate(
+        SCOPE_IP,
+        ip,
+        IP_HOURLY_CAP,
+        3600,
+        "当前网络的验证码请求过于频繁,请稍后再试",
+    )
 }
 
+const SCOPE_EMAIL: &str = "email";
+const SCOPE_IP: &str = "ip";
+/// 同一来源 IP 每小时的发码上限。
+const IP_HOURLY_CAP: i64 = 20;
+
 /// 生成并发送验证码(purpose: signup|reset|login)。阻塞,须放 spawn_blocking。
-pub fn issue_code(email: &str, purpose: &str) -> Result<(), String> {
+///
+/// `ip` = 请求来源(拿不到就传空串)。它只用于频控,不落业务表。
+pub fn issue_code_from(email: &str, purpose: &str, ip: &str) -> Result<(), String> {
     let email = auth::validate_email(email)?;
-    rate_check(&email)?;
+    rate_check(&email, ip)?;
     let code = gen_code()?;
     let phc = auth::hash_password(&code)?;
     // 文案要如实说明这封信是干什么用的 —— 收信人据此判断「这是不是我本人在操作」,
@@ -192,6 +199,12 @@ pub fn issue_code(email: &str, purpose: &str) -> Result<(), String> {
     )
     .map_err(|e| format!("验证码落库失败: {e}"))?;
     Ok(())
+}
+
+/// 老签名(无来源 IP)。内部调用与既有路由沿用它;新的公开发码口一律走
+/// [`issue_code_from`] 并把来源 IP 带上,否则 IP 那道闸形同虚设。
+pub fn issue_code(email: &str, purpose: &str) -> Result<(), String> {
+    issue_code_from(email, purpose, "")
 }
 
 /// 校验验证码:过期/超试错即作废,校验成功即销毁(一次性)。
@@ -309,8 +322,14 @@ mod tests {
         assert!(auth::validate_email("a b@qq.com").is_err());
         assert_eq!(auth::validate_email(" A@QQ.com ").unwrap(), "a@qq.com");
         // 频控:同邮箱 60s 内第二次直接拒(不真发信,rate_check 在 send 之前)。
-        assert!(rate_check("gate@qq.com").is_ok());
-        let e = rate_check("gate@qq.com").unwrap_err();
+        assert!(rate_check("gate@qq.com", "1.2.3.4").is_ok());
+        let e = rate_check("gate@qq.com", "1.2.3.4").unwrap_err();
         assert!(e.contains("频繁"), "{e}");
+        // 换个邮箱仍是同一个 IP —— 打满 IP 闸之后照样拒。这是「换邮箱就能接着轰炸」那个洞。
+        for i in 0..IP_HOURLY_CAP {
+            let _ = rate_check(&format!("burst{i}@qq.com"), "9.9.9.9");
+        }
+        let e = rate_check("last@qq.com", "9.9.9.9").unwrap_err();
+        assert!(e.contains("网络"), "IP 闸没生效: {e}");
     }
 }

@@ -181,7 +181,13 @@ function stopFlow(f: AutomationFlow) {
       </header>
 
       <!-- 自动做梦 · 每日晨报（回声层）-->
-      <section v-if="echo" class="dream-card" :class="{ collapsed: dreamCollapsed }">
+      <section
+        v-if="echo"
+        class="dream-card"
+        data-spot="morning"
+        data-coach="morning"
+        :class="{ collapsed: dreamCollapsed }"
+      >
         <div class="dc-head">
           <span class="dc-ic"><Moon :size="15" :stroke-width="1.8" color="#fff" /></span>
           <div class="dc-tt">

@@ -22,6 +22,10 @@ import BeamStage from "./components/BeamStage.vue";
 import CommandPalette from "./components/CommandPalette.vue";
 import TaskCenter from "./components/TaskCenter.vue";
 import FaultBoundary from "./components/FaultBoundary.vue";
+// 引导两件套(都很轻,常驻):指着按钮说一句话的「上手五件事」+ 首次触达某功能时的「点哪讲哪」。
+// 全做完/全看过后各自不再渲染、并停掉自己的计时器,常态零开销。
+import StarterGuide from "./components/StarterGuide.vue";
+import Coach from "./components/Coach.vue";
 import { useHotkeys } from "./composables/useHotkeys";
 import { installMarkdownDelegation } from "./lib/markdown";
 import { openUrl, onWsStatus, isTauri, files as fc, listen } from "./tauri";
@@ -456,6 +460,10 @@ function startSbDrag(e: MouseEvent) {
 
     <!-- 全局任务中心:盘点/建索引/智能归类等后台任务,无论切到哪个视图都常驻可见、可点回去 -->
     <TaskCenter />
+
+    <!-- 上手引导:指着按钮的五件事 + 首次触达功能时的解释气泡 -->
+    <StarterGuide />
+    <Coach />
 
 
     <!-- Docker/Web 模式断线提示条 -->

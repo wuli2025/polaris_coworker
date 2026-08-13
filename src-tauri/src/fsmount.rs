@@ -184,6 +184,12 @@ struct Mount {
     shutdown: Arc<tokio::sync::Notify>,
     /// 对端至少有一个共享根开了写。false = 这块盘挂成只读。
     writable: AtomicBool,
+    /// **本机**钉死的只读位。true = 无论对端开不开写,这块盘一律只读。
+    ///
+    /// 与 `writable` 的分工:那个是「对端让不让写」,这个是「我这边准不准写」。
+    /// 冷静期内的新设备走的就是这条 —— 云机若被拿下伪造断言进来,它拿到的也只是一块
+    /// 看得见改不动的盘,而且这 24 小时里用户随时能撤销。两个位是与关系,任一为拒即拒。
+    force_ro: AtomicBool,
     /// 桌面快捷方式的完整路径;空 = 没建成/已删。
     shortcut: Mutex<String>,
     /// 目录清单短缓存(见 [`dir_cache_ttl`])。key = 根内相对路径。
@@ -1487,6 +1493,9 @@ fn spawn_watchdog(m: Arc<Mount>) {
                     //    用户不必卸盘重挂(重挂会换盘符,正在用的窗口全断)。
                     let mc = m.clone();
                     if let Ok((_, w)) = tokio::task::spawn_blocking(move || up_caps(&mc)).await {
+                        // force_ro 必须在这里也钳一道:少了它,看门狗下一拍复核就把
+                        // 冷静期内钉死的只读盘"复核"成可写了 —— 那道闸活不过 30 秒。
+                        let w = w && !m.force_ro.load(Ordering::Relaxed);
                         let was = m.writable.swap(w, Ordering::Relaxed);
                         if was != w {
                             eprintln!(
@@ -1533,6 +1542,10 @@ fn spawn_watchdog(m: Arc<Mount>) {
 /// 把一台已连隧道的远程源挂成本机盘符。幂等:同 sourceId 重复调 = 返回现状。
 /// 对端未就绪不算失败:登记 + 起桥 + 看门狗接力,通了自动挂上。
 /// async 命令:首挂要等 iroh 握手(秒级),不能拿 thread::sleep 钉死 tokio worker。
+///
+/// 两个可选参数(前端不传即 None,老调用方零改动):
+///  · `readOnly`  本机钉死只读(设备信任契约 fs_access=ro / 新设备冷静期)。对端开着写位也不给写。
+///  · `driveHint` 上次挂成的盘符("Y:"),尽量复原 —— 每次重启换个字母,用户存的快捷方式全断。
 #[cfg_attr(feature = "desktop", tauri::command)]
 #[allow(non_snake_case)]
 pub async fn fs_mount(
@@ -1541,6 +1554,8 @@ pub async fn fs_mount(
     nodeId: String,
     upstreamPort: u16,
     token: String,
+    readOnly: Option<bool>,
+    driveHint: Option<String>,
 ) -> Result<Value, String> {
     // 已在册:确保盘还挂着,返回现状(看门狗自己会补挂)。
     if let Some(m) = mounts().lock().unwrap().get(&sourceId).cloned() {
@@ -1580,6 +1595,7 @@ pub async fn fs_mount(
         // 先按只读起(还没问过对端)。首挂探到 caps 前 Windows 就已经发 OPTIONS 了,
         // 所以下面探完 caps 才真正 net use —— 顺序颠倒会把可写盘挂成只读。
         writable: AtomicBool::new(false),
+        force_ro: AtomicBool::new(readOnly.unwrap_or(false)),
         shortcut: Mutex::new(String::new()),
         dir_cache: Mutex::new(HashMap::new()),
         prefetch: Mutex::new(Vec::new()),
@@ -1622,10 +1638,16 @@ pub async fn fs_mount(
         // 那时 writable 必须已经是终值 —— 晚一步,可写的盘就被系统当成只读挂上去了。
         let mc = m.clone();
         if let Ok((_, w)) = tokio::task::spawn_blocking(move || up_caps(&mc)).await {
-            m.writable.store(w, Ordering::Relaxed);
+            m.writable
+                .store(w && !m.force_ro.load(Ordering::Relaxed), Ordering::Relaxed);
         }
+        // 优先复原上次那个盘符:每次重启换个字母,用户存的快捷方式、脚本里的路径全断。
+        let preferred = driveHint
+            .as_deref()
+            .and_then(|d| d.chars().next())
+            .filter(|c| c.is_ascii_alphabetic());
         let mc = m.clone();
-        let mounted = tokio::task::spawn_blocking(move || mount_system(&mc, None))
+        let mounted = tokio::task::spawn_blocking(move || mount_system(&mc, preferred))
             .await
             .unwrap_or_else(|e| Err(format!("挂载任务失败:{e}")));
         match mounted {
@@ -2004,6 +2026,7 @@ mod tests {
             last_err: Mutex::new(String::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
             writable: AtomicBool::new(false),
+            force_ro: AtomicBool::new(false),
             shortcut: Mutex::new(String::new()),
             dir_cache: Mutex::new(HashMap::new()),
             prefetch: Mutex::new(Vec::new()),
@@ -2110,6 +2133,7 @@ mod tests {
             last_err: Mutex::new(String::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
             writable: AtomicBool::new(false),
+            force_ro: AtomicBool::new(false),
             shortcut: Mutex::new(String::new()),
             dir_cache: Mutex::new(HashMap::new()),
             prefetch: Mutex::new(Vec::new()),

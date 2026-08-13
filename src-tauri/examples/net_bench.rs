@@ -285,6 +285,8 @@ fn bench_drive(node: &str, token: &str) {
         node.to_string(),
         PORT,
         token.to_string(),
+        None, // readOnly:探针随对端能力,不钉死只读
+        None, // driveHint:探针不复原盘符
     ));
     let v = match mounted {
         Ok(v) => v,

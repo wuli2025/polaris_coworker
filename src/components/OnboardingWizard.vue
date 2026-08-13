@@ -9,7 +9,7 @@
  *   画像  fc.profileHtml(确定性桌面 HTML)
  * 收尾据文件构成给「建议工作流」卡片,点一下带着任务跳进对话框。
  */
-import { ref, reactive, computed, onBeforeUnmount, defineAsyncComponent } from "vue";
+import { ref, reactive, computed, watch, onBeforeUnmount, defineAsyncComponent } from "vue";
 import {
   Sparkles,
   FolderSearch,
@@ -53,10 +53,19 @@ const workflows = useWorkflowsStore();
 const wiz = useWizardStore();
 const tasks = useFileTasksStore();
 
-type Step = "intro" | "profile" | "scope" | "scan" | "model" | "organize" | "graph" | "finish";
+// scanDone 只在「只盘点」轻模式(wiz.scanOnly,搭子卡第 2 张调起)出现:扫完停一屏,
+// 把「要不要继续往下」交还用户 —— 不在 STEPS 进度条里,它是个出口不是一步。
+type Step = "intro" | "profile" | "scope" | "scan" | "scanDone" | "model" | "organize" | "graph" | "finish";
 // 进度条按画像走两套用词:个人=聚类「智能归类」,企业=框架「构建体系」。
 const STEPS = computed<{ key: Step; label: string }[]>(() => {
   const enterprise = wiz.profile === "enterprise";
+  // 轻模式只认两步。摆出六个点等于当面宣告「你要走六步」—— 那正是新手不敢点向导的原因。
+  if (wiz.scanOnly) {
+    return [
+      { key: "scope", label: "盘点范围" },
+      { key: "scan", label: "全盘扫描" },
+    ];
+  }
   return [
     { key: "scope", label: "盘点范围" },
     { key: "scan", label: "全盘扫描" },
@@ -240,6 +249,12 @@ function backToScope() {
 async function afterScan() {
   await loadOverview();
   await loadSense();
+  // 轻模式:扫完就停,不把人自动拽进「配模型 → 归类 → 图谱 → 索引」那四步。
+  step.value = wiz.scanOnly ? "scanDone" : "model";
+}
+/** 轻模式那一屏点「继续往下走」:退出轻模式,回到默认全流程(进度条也随之还原成六步)。 */
+function continueAfterScan() {
+  wiz.scanOnly = false;
   step.value = "model";
 }
 
@@ -595,6 +610,25 @@ function begin() {
   step.value = "profile";
   if (wiz.profile === "enterprise") void loadSchemas();
 }
+// 搭子卡以「只盘点」轻模式调起时,跳过欢迎屏直接进「选范围」——那张卡已经把要干什么
+// 讲清楚了,再来一屏「让 AI 更懂你」纯属重复。只在 intro(全新一轮)时跳,免得打断
+// 正在后台跑的扫描/归类(那时 step 停在 scan/organize,回来必须还在原地)。
+// immediate 是必须的:本组件在 App.vue 里是**懒挂载**的(wizMounted 由 wiz.open 触发),
+// 第一次打开时它挂上来的那一刻 wiz.open 早已是 true —— 光靠 false→true 的翻转会整个错过,
+// 于是首开永远停在欢迎屏(实测如此)。
+watch(
+  () => wiz.open,
+  (o) => {
+    if (!o || !wiz.scanOnly || step.value !== "intro") return;
+    if (wiz.profile) {
+      step.value = "scope";
+      loadRoots();
+    } else {
+      begin(); // 还没选过个人/企业 → 先选画像,选完自然进 scope
+    }
+  },
+  { immediate: true }
+);
 // 转入后台 / X / 点遮罩:只隐藏浮层,**不动 step**,后台扫描/归类继续 —— 回来还在原地。
 function close() {
   wiz.closeWizard();
@@ -622,7 +656,7 @@ onBeforeUnmount(() => {
         <button class="wiz-x" :title="inLongStep ? '转入后台(任务继续跑)' : '关闭'" @click="close"><X :size="17" :stroke-width="2" /></button>
 
         <!-- 进度条(intro 不显示) -->
-        <div v-if="step !== 'intro'" class="wiz-steps">
+        <div v-if="step !== 'intro' && step !== 'scanDone'" class="wiz-steps">
           <div
             v-for="(s, i) in STEPS"
             :key="s.key"
@@ -772,6 +806,20 @@ onBeforeUnmount(() => {
             <button class="wiz-go ghost bg" @click="close"><Layers :size="14" :stroke-width="1.8" /> 转入后台 · 去逛别处</button>
             <div class="scan-fine">扫描在后台继续,可最小化窗口或去用别的功能;扫完再点「智能向导」回来。</div>
           </template>
+        </div>
+
+        <!-- 2.5 · 只盘点(轻模式)扫完的落脚屏:到这儿就够了,继续与否由用户定 -->
+        <div v-else-if="step === 'scanDone'" class="wiz-body center">
+          <div class="scan-orb stopped"><Check :size="30" :stroke-width="1.6" /></div>
+          <div class="scan-lab big">盘点完成 · 共 {{ (overview?.totalFiles ?? scanFiles).toLocaleString() }} 个文件</div>
+          <div class="scan-fine">
+            这一件到这儿就算做完了 —— 我现在知道你有哪些文件了。<br />
+            下一件(给每个文件贴标签)慢,得跑一阵,右下角那张卡会提醒你。
+          </div>
+          <div class="scan-actions">
+            <button class="wiz-go" @click="finishDone"><Layers :size="14" :stroke-width="1.8" /> 回去看看</button>
+            <button class="wiz-go ghost" @click="continueAfterScan">继续往下走 <ChevronRight :size="14" :stroke-width="1.8" /></button>
+          </div>
         </div>
 
         <!-- 3 · 配模型 -->
