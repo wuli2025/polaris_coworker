@@ -75,29 +75,35 @@ docker compose up -d
 ### 安全默认：宿主机手动更新
 
 ```bash
-git pull
 docker compose pull
 docker compose up -d
 ```
 
 ### 可选：Polaris 更新页一键更新
 
-基础 compose 不挂 Docker socket，所以默认只能检查版本。启用前必须先设置
-`POLARIS_AUTH_TOKEN` 或 `POLARIS_REQUIRE_LOGIN=1`，公网部署还必须使用 HTTPS。Linux / NAS
-先将 `stat -c %g /var/run/docker.sock` 的结果写入 `.env` 的 `DOCKER_GID`，然后始终使用：
+基础 compose 只能检查版本。启用一键替换前必须：
+
+1. 设置 `POLARIS_AUTH_TOKEN`，或设置 `POLARIS_REQUIRE_LOGIN=1`；
+2. 公网部署通过 HTTPS 反代接入；
+3. 运行 `openssl rand -hex 32`，把输出填进 `.env` 的 `POLARIS_UPDATER_TOKEN=`；
+4. 叠加更新 overlay：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
 ```
 
-更新页发现新版后会启动固定版本的独立 Watchtower 替身。替身拉取当前镜像标签并原样重建
-`polaris-web`，因此数据卷与配置不变，服务通常只短暂断线 1–3 分钟。
+该 overlay 启动固定版本 `containrrr/watchtower:1.7.1`。Polaris App 容器**没有** Docker CLI，
+也**不挂** `/var/run/docker.sock`；它只能携带 Bearer token 调用内网 sidecar 的
+`/v1/update`。Watchtower 还同时按容器名 `polaris-web` 与
+`com.centurylinklabs.watchtower.enable=true` 标签限定目标，因此不会顺手更新其他容器。
+拉取与替换期间数据卷、端口及环境配置保持不变，服务通常只短暂断线 1–3 分钟。
 
-> `/var/run/docker.sock` 等同宿主机 root 权限。不要在匿名、无鉴权或不可信用户可访问的部署上
-> 启用。基础 compose 保持 socket-free，就是为了让未明确接受这个边界的部署继续安全失败。
+> Docker socket 仍等同宿主机 root 权限，但现在只进入用途单一的 Watchtower sidecar，
+> 不再进入能够运行项目命令的通用 App 容器。不要对外发布 sidecar 的 8080 端口，也不要
+> 复用或泄露 `POLARIS_UPDATER_TOKEN`。版本检查不需要 overlay，未配置时会安全降级为手动更新。
 
-本地定制镜像仍使用 `docker compose up -d --build`；更新脚本会拒绝替换不属于配置中 GHCR
-仓库的本地镜像，避免误覆盖定制构建。
+本地定制镜像继续使用 `docker compose up -d --build`，不要叠加远程更新 overlay，以免
+Watchtower 按配置的 GHCR 标签把本地定制构建替换为官方镜像。
 
 ---
 

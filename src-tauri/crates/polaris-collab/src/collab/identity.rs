@@ -3,6 +3,7 @@
 //! host.key = 主机长期身份密钥（600 权限，永不出主机）。邀请票据 = 一次性配对码，
 //! 24h 有效、用后即废。设备白名单 = 隧道层准入键（iroh NodeId），双因子的「设备」那一因子。
 use base64::Engine;
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rusqlite::{params, TransactionBehavior};
 #[cfg(unix)]
 use std::io::Write;
@@ -77,6 +78,84 @@ pub fn host_fingerprint() -> Result<String, String> {
     Ok(digest[..8].iter().map(|b| format!("{b:02x}")).collect())
 }
 
+// ───────────────────────── 设备码连接的 NodeId 持有证明 ─────────────────────────
+
+const CONNECT_PROOF_DOMAIN: &[u8] = b"polaris-collab/connect-pop/v1\0";
+
+/// iroh 1.x 的 EndpointId 展示为 32 字节 Ed25519 公钥 hex。所有设备契约都只存这一种
+/// 小写规范形，避免同一把公钥靠大小写变出两行 grant。
+pub fn canonical_node_id(raw: &str) -> Result<String, String> {
+    let text = raw.trim();
+    let bytes = hex::decode(text).map_err(|_| "NodeId 不是有效的 Ed25519 公钥".to_string())?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "NodeId 长度异常，应为 32 字节公钥".to_string())?;
+    VerifyingKey::from_bytes(&bytes).map_err(|_| "NodeId 不是有效的 Ed25519 公钥".to_string())?;
+    Ok(hex::encode(bytes))
+}
+
+fn connect_proof_message(node_id: &str, code: &str, challenge: &str) -> Result<Vec<u8>, String> {
+    let node_id = canonical_node_id(node_id)?;
+    let code = code.trim().to_ascii_uppercase();
+    if code.len() != 8 || !code.is_ascii() {
+        return Err("设备码格式无效".into());
+    }
+    let challenge = challenge.trim();
+    let challenge_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(challenge)
+        .map_err(|_| "连接挑战格式无效".to_string())?;
+    if challenge_bytes.len() != 32 {
+        return Err("连接挑战长度异常".into());
+    }
+
+    let mut out = Vec::with_capacity(CONNECT_PROOF_DOMAIN.len() + 4 * 3 + 128);
+    out.extend_from_slice(CONNECT_PROOF_DOMAIN);
+    for field in [challenge.as_bytes(), node_id.as_bytes(), code.as_bytes()] {
+        let len = u32::try_from(field.len()).map_err(|_| "连接证明字段过长".to_string())?;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(field);
+    }
+    Ok(out)
+}
+
+/// 用本机 `host.key` 给一次性连接挑战签名。签名前先确认调用方声称的 NodeId 的确由这把
+/// 密钥派生；绝不能拿隧道客户端的 `device.key` 代签，它与设备台账里的身份不是一把钥匙。
+pub fn sign_connect_proof(node_id: &str, code: &str, challenge: &str) -> Result<String, String> {
+    let node_id = canonical_node_id(node_id)?;
+    let signing = SigningKey::from_bytes(&get_or_create_host_key()?);
+    if hex::encode(signing.verifying_key().to_bytes()) != node_id {
+        return Err("本机 NodeId 与 host.key 不匹配，请重启互联服务后重试".into());
+    }
+    let message = connect_proof_message(&node_id, code, challenge)?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.sign(&message).to_bytes()))
+}
+
+/// 验证请求者确实持有其所报 NodeId 对应的 host.key。只暴露这个用途固定的验签入口，
+/// 不提供“拿主机身份签任意字节”的泛用 API。
+pub fn verify_connect_proof(
+    node_id: &str,
+    code: &str,
+    challenge: &str,
+    signature: &str,
+) -> Result<(), String> {
+    let node_id = canonical_node_id(node_id)?;
+    let public_bytes: [u8; 32] = hex::decode(&node_id)
+        .expect("canonical NodeId is hex")
+        .try_into()
+        .expect("canonical NodeId is 32 bytes");
+    let verifying = VerifyingKey::from_bytes(&public_bytes)
+        .map_err(|_| "NodeId 不是有效的 Ed25519 公钥".to_string())?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(signature.trim())
+        .map_err(|_| "连接签名格式无效".to_string())?;
+    let signature_bytes: [u8; 64] = raw.try_into().map_err(|_| "连接签名长度异常".to_string())?;
+    let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+    let message = connect_proof_message(&node_id, code, challenge)?;
+    verifying
+        .verify_strict(&message, &signature)
+        .map_err(|_| "NodeId 持有证明无效".to_string())
+}
+
 // ───────────────────────── 设备码(一码) ─────────────────────────
 //
 // 取代此前的三串码:PLRK1 连接码(裸奔一把 owner 令牌)、PLRS1 分享码、8 位一次性票据。
@@ -129,7 +208,12 @@ pub fn rotate_access_code(actor: &str) -> Result<String, String> {
     drop(conn);
     db::meta_set(ACCESS_CODE_KEY, &c)?;
     auth::bump_session_revocation();
-    db::audit(actor, "devicecode.rotate", "", "旧码失效,靠旧码进来的会话已断");
+    db::audit(
+        actor,
+        "devicecode.rotate",
+        "",
+        "旧码失效,靠旧码进来的会话已断",
+    );
     Ok(c)
 }
 
@@ -613,6 +697,53 @@ mod tests {
     }
 
     #[test]
+    fn connect_proof_roundtrip_and_field_binding() {
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let node_id = hex::encode(signing.verifying_key().to_bytes());
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 32]);
+        let message = connect_proof_message(&node_id, "ABCD2345", &challenge).unwrap();
+        let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(signing.sign(&message).to_bytes());
+
+        verify_connect_proof(&node_id, "ABCD2345", &challenge, &signature).unwrap();
+        assert!(verify_connect_proof(&node_id, "ABCD2346", &challenge, &signature).is_err());
+        let other_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([10u8; 32]);
+        assert!(verify_connect_proof(&node_id, "ABCD2345", &other_challenge, &signature).is_err());
+    }
+
+    #[test]
+    fn connect_proof_cannot_claim_another_node_id() {
+        let claimed = SigningKey::from_bytes(&[1u8; 32]);
+        let attacker = SigningKey::from_bytes(&[2u8; 32]);
+        let node_id = hex::encode(claimed.verifying_key().to_bytes());
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3u8; 32]);
+        let message = connect_proof_message(&node_id, "ABCD2345", &challenge).unwrap();
+        let forged = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(attacker.sign(&message).to_bytes());
+
+        assert!(verify_connect_proof(&node_id, "ABCD2345", &challenge, &forged).is_err());
+    }
+
+    #[test]
+    fn connect_proof_rejects_malformed_inputs_and_canonicalizes_node_id() {
+        let signing = SigningKey::from_bytes(&[4u8; 32]);
+        let node_id = hex::encode(signing.verifying_key().to_bytes());
+        assert_eq!(
+            canonical_node_id(&node_id.to_ascii_uppercase()).unwrap(),
+            node_id
+        );
+        assert!(canonical_node_id("not-a-node").is_err());
+        assert!(canonical_node_id(&"00".repeat(31)).is_err());
+
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([5u8; 32]);
+        assert!(verify_connect_proof(&node_id, "ABCD2345", &challenge, "not-base64!").is_err());
+        let short_signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 63]);
+        assert!(verify_connect_proof(&node_id, "ABCD2345", &challenge, &short_signature).is_err());
+        let short_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 31]);
+        assert!(connect_proof_message(&node_id, "ABCD2345", &short_challenge).is_err());
+    }
+
+    #[test]
     fn share_code_roundtrip() {
         let addrs = vec![
             "http://192.168.1.5:8484".to_string(),
@@ -672,11 +803,10 @@ mod tests {
     #[test]
     fn redeem_existing_binds_device_and_records_account() {
         let (_guard, path) = with_tmp_db();
-        let alice = crate::collab::auth::create_user("alice", "correct-horse", "owner", "Alice")
+        let alice =
+            crate::collab::auth::create_user("alice", "correct-horse", "owner", "Alice").unwrap();
+        let bob = crate::collab::auth::create_user("bob", "correct-horse", "collaborator", "Bob")
             .unwrap();
-        let bob =
-            crate::collab::auth::create_user("bob", "correct-horse", "collaborator", "Bob")
-                .unwrap();
         // 已登录账号凭码入伙:不建新号,设备绑到 alice,票据核销并记 used_by。
         let t = create_ticket("collaborator", "for-alice-laptop").unwrap();
         let dev = redeem_ticket_existing(&t.code, &alice, "Alice 二号机", "node-alice-2").unwrap();
@@ -707,8 +837,14 @@ mod tests {
         assert_eq!(a.chars().count(), 8);
         assert_eq!(access_code().unwrap(), a, "常驻码不能每次调用都变一串");
         assert!(check_access_code(&a).unwrap());
-        assert!(check_access_code(&a.to_ascii_lowercase()).unwrap(), "手打小写也得认");
-        assert!(check_access_code(&format!("  {a}  ")).unwrap(), "粘贴带空格也得认");
+        assert!(
+            check_access_code(&a.to_ascii_lowercase()).unwrap(),
+            "手打小写也得认"
+        );
+        assert!(
+            check_access_code(&format!("  {a}  ")).unwrap(),
+            "粘贴带空格也得认"
+        );
         assert!(!check_access_code("ZZZZZZZZ").unwrap());
         assert!(!check_access_code("").unwrap());
         assert!(!check_access_code(&a[..7]).unwrap(), "长度不对必须拒");
@@ -722,6 +858,9 @@ mod tests {
         let old = access_code().unwrap();
         // 一台靠码进来的设备 + 它的会话。
         super::super::grants::grant_by_code("node-guest", "访客机").unwrap();
+        // 机主后来点过「信任这台」也仍然是「靠码进来的」；信任只升权限，不能抹掉来源。
+        let trusted = super::super::grants::trust_fully("node-guest", "本机").unwrap();
+        assert_eq!(trusted.granted_by, super::super::grants::BY_CODE);
         let guest = auth::peer_guest_user().unwrap();
         let tok = auth::issue_session(guest.id, "node-guest").unwrap();
         assert!(auth::check_session(&tok).is_ok());

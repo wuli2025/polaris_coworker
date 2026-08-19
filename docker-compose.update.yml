@@ -1,18 +1,39 @@
-# 可选：允许 Polaris Web 的 owner 从「更新」页一键替换当前容器。
+# 可选：允许 Polaris Web 的 owner 从“更新”页触发容器替换。
 #
-# Docker socket 等同宿主机 root 权限，绝不能在不可信/匿名公开部署上启用。
-# 启用前至少设置 POLARIS_AUTH_TOKEN 或 POLARIS_REQUIRE_LOGIN=1，并保持 HTTPS 反代。
+# 安全边界：docker.sock 只挂进固定版本的 Watchtower sidecar；Polaris App 容器既没有
+# socket，也没有 Docker CLI。App 只能用 Bearer token 调 Watchtower 的 /v1/update 窄接口，
+# 且 Watchtower 同时钉死目标容器名与 enable 标签，不会更新宿主机上的其他容器。
 #
-# Linux / NAS：DOCKER_GID 必须等于宿主机 socket 的组 id：
-#   DOCKER_GID=$(stat -c %g /var/run/docker.sock) \
-#     docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
-# Docker Desktop 通常可用默认 0。
+# 启用前：
+#   1. 在 .env 生成并填写 POLARIS_UPDATER_TOKEN（例如 openssl rand -hex 32）；
+#   2. 设置 POLARIS_AUTH_TOKEN，或设置 POLARIS_REQUIRE_LOGIN=1；
+#   3. 保持 HTTPS 反代，然后执行：
+#      docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
 services:
   polaris:
     environment:
-      - POLARIS_DOCKER_SOCKET=1
-      - POLARIS_DOCKER_SOCKET_PATH=/var/run/docker.sock
-    group_add:
-      - "${DOCKER_GID:-0}"
+      - POLARIS_UPDATER_URL=http://polaris-updater:8080/v1/update
+      - POLARIS_UPDATER_TOKEN=${POLARIS_UPDATER_TOKEN:?请先在 .env 设置随机 POLARIS_UPDATER_TOKEN}
+    depends_on:
+      polaris-updater:
+        condition: service_started
+
+  polaris-updater:
+    image: containrrr/watchtower:1.7.1
+    container_name: polaris-updater
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_HTTP_API_TOKEN=${POLARIS_UPDATER_TOKEN:?请先在 .env 设置随机 POLARIS_UPDATER_TOKEN}
+    command:
+      - --http-api-update
+      - --label-enable
+      - --cleanup
+      - --stop-timeout
+      - 60s
+      - polaris-web
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          memory: ${POLARIS_UPDATER_MEM_LIMIT:-128m}

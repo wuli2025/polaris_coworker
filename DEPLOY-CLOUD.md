@@ -75,25 +75,26 @@ docker compose logs -f polaris
 
 ### 可选：启用网页一键更新
 
-基础 compose **不会**挂载 Docker socket；更新页仍可检查版本，但不能自行替换容器。
-确认部署已设置 `POLARIS_AUTH_TOKEN`（或 `POLARIS_REQUIRE_LOGIN=1`）并通过 HTTPS 访问后，
-才可显式叠加更新配置：
+基础 compose 仍可检查版本，但不会启动容器替换。确认部署已设置 `POLARIS_AUTH_TOKEN`
+（或 `POLARIS_REQUIRE_LOGIN=1`）并通过 HTTPS 访问后：
 
 ```bash
-# Linux / NAS：先把结果写入 .env 的 DOCKER_GID；Docker Desktop 通常保持 0
-stat -c %g /var/run/docker.sock
+# 生成随机值，把输出填进 .env 的 POLARIS_UPDATER_TOKEN=
+openssl rand -hex 32
 
 docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
 ```
 
-此后 owner 可在 Polaris「更新」页点「立即更新容器」。Polaris 会启动固定版本的独立
-Watchtower 替身，替身接手拉取和替换，因此当前容器退出不会中断更新；数据卷、端口、环境变量
-保持不变，服务通常只短暂断线 1–3 分钟。
+该 overlay 会启动固定版本 `containrrr/watchtower:1.7.1`。Polaris App 容器不含 Docker CLI，
+也不挂 Docker socket；owner 点更新时，App 只用 Bearer token 调内网 Watchtower 的
+`/v1/update`。Watchtower 同时按 `polaris-web` 容器名与 enable 标签限定更新目标，拉取和
+替换不会丢失数据卷、端口或环境变量，服务通常只短暂断线 1–3 分钟。
 
-> **安全边界：**`/var/run/docker.sock` 等同宿主机 root 权限。不要在匿名、无鉴权或不可信
-> 用户可访问的部署上启用。以后手动执行 `compose up/pull` 也要同时带这两个 `-f` 参数，
-> 否则基础 compose 会撤掉 socket 挂载。固定到 `POLARIS_IMAGE_TAG=2.9.0` 等版本标签时不会
-> 自动跨版本；要远程跟随发布版请保持 `latest`。
+> **安全边界：**`/var/run/docker.sock` 仍等同宿主机 root 权限，但只进入用途单一的
+> Watchtower sidecar，不再进入能运行项目命令的通用 App 容器。不要发布 sidecar 的 8080
+> 端口，不要复用/泄露 `POLARIS_UPDATER_TOKEN`。以后手动执行 `compose up/pull` 也要同时
+> 带这两个 `-f` 参数。固定到 `POLARIS_IMAGE_TAG=2.9.0` 等版本标签时不会自动跨版本；
+> 要远程跟随发布版请保持 `latest`。本地定制构建不要叠加该 overlay。
 
 ## 4. 验证
 

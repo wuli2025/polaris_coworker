@@ -178,20 +178,36 @@ pub fn auto_grant_self(
         return Ok((g, false));
     }
     let t = now();
-    let cooldown = if is_first_device { 0 } else { t + COOLDOWN_SECS };
+    let cooldown = if is_first_device {
+        0
+    } else {
+        t + COOLDOWN_SECS
+    };
     let conn = open_db()?;
     conn.execute(
         "INSERT INTO peer_grants(node_id,uid,name,role,fs_access,exec_access,auto_mount,\
          drive_hint,cooldown_until,granted_at,granted_by,revoked) \
          VALUES(?1,?2,?3,'owner',?4,?5,1,'',?6,?7,'auto:same-account',0)",
-        params![node_id, uid.trim(), name.trim(), FS_RW, EXEC_ALLOW, cooldown, t],
+        params![
+            node_id,
+            uid.trim(),
+            name.trim(),
+            FS_RW,
+            EXEC_ALLOW,
+            cooldown,
+            t
+        ],
     )
     .map_err(|e| format!("登记设备契约失败: {e}"))?;
     db::audit(
         uid,
         "peer.grant.auto",
         node_id,
-        if cooldown > 0 { "同账号设备·冷静期中" } else { "同账号设备·首台" },
+        if cooldown > 0 {
+            "同账号设备·冷静期中"
+        } else {
+            "同账号设备·首台"
+        },
     );
     Ok((get(node_id)?.ok_or("刚写入的契约读不回来")?, true))
 }
@@ -216,7 +232,9 @@ pub fn update(
         Some(v) => norm_exec(v)?.to_string(),
         None => cur.exec_access.clone(),
     };
-    let nm = name.map(|s| s.trim().to_string()).unwrap_or(cur.name.clone());
+    let nm = name
+        .map(|s| s.trim().to_string())
+        .unwrap_or(cur.name.clone());
     let am = auto_mount.unwrap_or(cur.auto_mount);
     let conn = open_db()?;
     conn.execute(
@@ -225,7 +243,12 @@ pub fn update(
         params![node_id, nm, fs, ex, i64::from(am), actor],
     )
     .map_err(|e| format!("改设备契约失败: {e}"))?;
-    db::audit(actor, "peer.grant.update", node_id, &format!("fs={fs} exec={ex} auto={am}"));
+    db::audit(
+        actor,
+        "peer.grant.update",
+        node_id,
+        &format!("fs={fs} exec={ex} auto={am}"),
+    );
     get(node_id)?.ok_or_else(|| "改完读不回来".into())
 }
 
@@ -280,7 +303,11 @@ pub fn remember_drive(node_id: &str, drive: &str) -> Result<(), String> {
 pub fn any_granted() -> Result<bool, String> {
     let conn = open_db()?;
     let n: i64 = conn
-        .query_row("SELECT COUNT(*) FROM peer_grants WHERE revoked=0", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM peer_grants WHERE revoked=0",
+            [],
+            |r| r.get(0),
+        )
         .map_err(|e| format!("查设备契约失败: {e}"))?;
     Ok(n > 0)
 }
@@ -362,10 +389,13 @@ pub fn exec_gate(device_id: &str) -> Result<(), String> {
     };
     match g.effective_exec() {
         EXEC_ALLOW => Ok(()),
-        EXEC_ASK if g.in_cooldown() => Err(
-            "这台设备还在新设备观察期内,暂不允许远程执行 —— 对方点一下「信任这台」即可".into(),
+        EXEC_ASK if g.in_cooldown() => {
+            Err("这台设备还在新设备观察期内,暂不允许远程执行 —— 对方点一下「信任这台」即可".into())
+        }
+        EXEC_ASK => Err(
+            "对方把这台设备的远程执行设成了「每次问」,而本机还没有弹窗确认通道 —— 请他改成「允许」"
+                .into(),
         ),
-        EXEC_ASK => Err("对方把这台设备的远程执行设成了「每次问」,而本机还没有弹窗确认通道 —— 请他改成「允许」".into()),
         _ => Err("对方没有允许这台设备远程执行(当前档位:禁止)".into()),
     }
 }
@@ -382,7 +412,9 @@ pub fn grant_by_code(node_id: &str, name: &str) -> Result<Grant, String> {
     }
     if let Some(g) = get(node_id)? {
         if g.revoked {
-            return Err("这台设备已被移出本机的信任列表 —— 请机主先在「设备与授权」里恢复它".into());
+            return Err(
+                "这台设备已被移出本机的信任列表 —— 请机主先在「设备与授权」里恢复它".into(),
+            );
         }
         return Ok(g);
     }
@@ -413,10 +445,12 @@ pub fn trust_fully(node_id: &str, actor: &str) -> Result<Grant, String> {
         return Err("这台设备还没有信任契约".into());
     }
     let conn = open_db()?;
+    // `granted_by` 同时记着准入来源。靠设备码进来的行必须一直保留 `code`，否则机主
+    // 点一次「信任这台」后再换码，rotate_access_code 就找不到并吊销它的旧会话。
     conn.execute(
         "UPDATE peer_grants SET cooldown_until=0, revoked=0, fs_access=?2, exec_access=?3, \
-         auto_mount=1, granted_by=?4 WHERE node_id=?1",
-        params![node_id, FS_RW, EXEC_ALLOW, actor],
+         auto_mount=1 WHERE node_id=?1",
+        params![node_id, FS_RW, EXEC_ALLOW],
     )
     .map_err(|e| format!("信任设备失败: {e}"))?;
     db::audit(actor, "peer.grant.trust", node_id, "已升为全权");
@@ -481,7 +515,9 @@ mod gate_tests {
         let _g = tmp("revoked");
         grant_by_code("node-bad", "谁").unwrap();
         revoke("node-bad", "本机").unwrap();
-        assert!(grant_by_code("node-bad", "谁").unwrap_err().contains("移出"));
+        assert!(grant_by_code("node-bad", "谁")
+            .unwrap_err()
+            .contains("移出"));
         assert!(fs_gate("node-bad", false).is_err());
         assert!(exec_gate("node-bad").is_err());
     }
@@ -494,7 +530,15 @@ mod gate_tests {
         db::meta_set("host_node_id", "node-me").unwrap();
         // 造一行最严的契约扣在自己头上。
         grant_by_code("node-me", "我自己").unwrap();
-        update("node-me", None, Some(FS_NONE), Some(EXEC_NONE), None, "本机").unwrap();
+        update(
+            "node-me",
+            None,
+            Some(FS_NONE),
+            Some(EXEC_NONE),
+            None,
+            "本机",
+        )
+        .unwrap();
         assert!(fs_gate("node-me", true).is_ok(), "本机不该被自己的契约锁住");
         assert!(exec_gate("node-me").is_ok());
         // 空 device_id(全局口令 / 老会话 / 本机内部调用)同样豁免。
@@ -567,7 +611,15 @@ mod tests {
     fn reconnect_does_not_reset_user_choice() {
         let _g = tmp_db("keep");
         auto_grant_self("node-a", "acct_1", "NAS", true).unwrap();
-        update("node-a", None, Some(FS_RO), Some(EXEC_NONE), Some(false), "wuli").unwrap();
+        update(
+            "node-a",
+            None,
+            Some(FS_RO),
+            Some(EXEC_NONE),
+            Some(false),
+            "wuli",
+        )
+        .unwrap();
 
         let (again, fresh) = auto_grant_self("node-a", "acct_1", "NAS", true).unwrap();
         assert!(!fresh, "已有契约不该被当成新设备");

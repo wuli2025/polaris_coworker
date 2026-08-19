@@ -336,17 +336,14 @@ pub fn create_user_with_email(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("建账号事务失败: {e}"))?;
     let user = insert_user_tx(&tx, username, &phc, role, display_name)?;
-    tx.execute(
-        "UPDATE users SET email=?1 WHERE id=?2",
-        params![e, user.id],
-    )
-    .map_err(|err| {
-        if err.to_string().contains("UNIQUE") {
-            "该邮箱已被其他账号绑定".to_string()
-        } else {
-            format!("绑定邮箱失败: {err}")
-        }
-    })?;
+    tx.execute("UPDATE users SET email=?1 WHERE id=?2", params![e, user.id])
+        .map_err(|err| {
+            if err.to_string().contains("UNIQUE") {
+                "该邮箱已被其他账号绑定".to_string()
+            } else {
+                format!("绑定邮箱失败: {err}")
+            }
+        })?;
     tx.commit().map_err(|e| format!("提交账号失败: {e}"))?;
     db::audit(username, "user.create", role, "email-signup");
     Ok(user)
@@ -545,7 +542,14 @@ pub fn create_authority_account(
     display_name: &str,
     email: &str,
 ) -> Result<(User, String), String> {
-    create_account_full(username, password, display_name, email, "collaborator", true)
+    create_account_full(
+        username,
+        password,
+        display_name,
+        email,
+        "collaborator",
+        true,
+    )
 }
 
 /// 建账号的统一实现。`sign_uid=true` 即同时签发全局 uid(权威机建号);
@@ -615,16 +619,28 @@ fn username_from_email(conn: &rusqlite::Connection, email: &str) -> Result<Strin
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
         .collect();
     // 首尾必须是字母或数字(validate_new_account_credentials 的规矩)。
-    while base.chars().next().is_some_and(|c| !c.is_ascii_alphanumeric()) {
+    while base
+        .chars()
+        .next()
+        .is_some_and(|c| !c.is_ascii_alphanumeric())
+    {
         base.remove(0);
     }
-    while base.chars().last().is_some_and(|c| !c.is_ascii_alphanumeric()) {
+    while base
+        .chars()
+        .last()
+        .is_some_and(|c| !c.is_ascii_alphanumeric())
+    {
         base.pop();
     }
     if base.chars().count() > USERNAME_MAX_CHARS - 4 {
         // 留 4 个字符给去重后缀,免得截断后再加后缀反而超长。
         base = base.chars().take(USERNAME_MAX_CHARS - 4).collect();
-        while base.chars().last().is_some_and(|c| !c.is_ascii_alphanumeric()) {
+        while base
+            .chars()
+            .last()
+            .is_some_and(|c| !c.is_ascii_alphanumeric())
+        {
             base.pop();
         }
     }
@@ -632,7 +648,11 @@ fn username_from_email(conn: &rusqlite::Connection, email: &str) -> Result<Strin
         base = format!("{base}user");
     }
     for n in 0..1000 {
-        let cand = if n == 0 { base.clone() } else { format!("{base}{n}") };
+        let cand = if n == 0 {
+            base.clone()
+        } else {
+            format!("{base}{n}")
+        };
         let taken: Option<i64> = conn
             .query_row(
                 "SELECT 1 FROM users WHERE username=?1 COLLATE NOCASE LIMIT 1",
@@ -819,19 +839,29 @@ pub fn peer_guest_user() -> Result<User, String> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("建访客身份事务失败: {e}"))?;
-    let found: Option<(i64, String, i64)> = tx
+    let found: Option<(i64, String, i64, String, String)> = tx
         .query_row(
-            "SELECT id,display_name,disabled FROM users WHERE username=?1",
+            "SELECT id,display_name,disabled,pass_hash,role FROM users WHERE username=?1",
             params![GUEST],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()
         .map_err(|e| format!("查访客身份失败: {e}"))?;
-    if let Some((id, display_name, disabled)) = found {
+    if let Some((id, display_name, disabled, pass_hash, role)) = found {
+        // `device-guest` 以前不是保留名，老库里可能真有一个同名 owner。若复用那行，
+        // 这里虽然返回 visitor，后续会话 JOIN 读到的却仍是库里的 owner，设备码就越权了。
+        if pass_hash != CODE_ONLY_SENTINEL {
+            return Err("本机已有同名账号「device-guest」，为防止设备码会话继承它的权限，设备码接入已拒绝；请先给该账号改名".into());
+        }
         if disabled != 0 {
             return Err("本机已停用「设备码接入」这条路 —— 请机主在成员列表里启用它".into());
         }
-        tx.commit().ok();
+        if role != "visitor" {
+            tx.execute("UPDATE users SET role='visitor' WHERE id=?1", params![id])
+                .map_err(|e| format!("修正设备码访客角色失败: {e}"))?;
+            bump_session_revocation();
+        }
+        tx.commit().map_err(|e| format!("提交访客身份失败: {e}"))?;
         return Ok(User {
             id,
             username: GUEST.into(),
@@ -1166,11 +1196,8 @@ pub fn backfill_uid(user_id: i64) -> Result<String, String> {
         return Ok(cur);
     }
     let uid = super::authority::new_uid();
-    conn.execute(
-        "UPDATE users SET uid=?1 WHERE id=?2",
-        params![uid, user_id],
-    )
-    .map_err(|e| format!("补签全局身份失败: {e}"))?;
+    conn.execute("UPDATE users SET uid=?1 WHERE id=?2", params![uid, user_id])
+        .map_err(|e| format!("补签全局身份失败: {e}"))?;
     db::audit("owner", "user.uid_backfill", &user_id.to_string(), &uid);
     Ok(uid)
 }
@@ -1248,10 +1275,16 @@ mod tests {
     #[test]
     fn login_accepts_email_as_identifier() {
         let _g = tmp_db();
-        let alice =
-            create_account_full("alice", "s3cret-8", "Alice", "A.Lice@Ex.COM", "owner", false)
-                .unwrap()
-                .0;
+        let alice = create_account_full(
+            "alice",
+            "s3cret-8",
+            "Alice",
+            "A.Lice@Ex.COM",
+            "owner",
+            false,
+        )
+        .unwrap()
+        .0;
 
         // 邮箱登得进,且大小写不敏感(建号时已归一化存小写)
         let (u, tok) = login("A.LICE@ex.com", "s3cret-8", "dev1").unwrap();
@@ -1283,7 +1316,10 @@ mod tests {
         assert_eq!(check_session(&tok).unwrap().username, "alice");
         // 权威侧同一把闸:回全局身份
         let (_, got_uid, got_mail) = authority_identity_by_email("a@ex.com").unwrap();
-        assert_eq!((got_uid.as_str(), got_mail.as_str()), (uid.as_str(), "a@ex.com"));
+        assert_eq!(
+            (got_uid.as_str(), got_mail.as_str()),
+            (uid.as_str(), "a@ex.com")
+        );
 
         // 没人绑的邮箱进不来
         assert!(login_with_verified_email("nobody@ex.com", "dev2").is_err());
@@ -1326,13 +1362,19 @@ mod tests {
             .into_iter()
             .find(|r| r.id == bob.id)
             .unwrap();
-        assert_eq!((row.display_name.as_str(), row.role.as_str()), ("鲍勃", "visitor"));
+        assert_eq!(
+            (row.display_name.as_str(), row.role.as_str()),
+            ("鲍勃", "visitor")
+        );
         assert_eq!(row.email, "bob2@ex.com");
         assert_eq!(row.uid, uid);
 
         // 邮箱传空串 = 解绑;昵称 None = 这次不动
         update_user_profile(bob.id, None, Some("")).unwrap();
-        assert!(list_users().unwrap().iter().any(|r| r.id == bob.id && r.email.is_empty()));
+        assert!(list_users()
+            .unwrap()
+            .iter()
+            .any(|r| r.id == bob.id && r.email.is_empty()));
 
         assert!(set_user_role(bob.id, "root").is_err(), "非法角色必须拒绝");
         // 建号与改角色同一套白名单:大小写手误也算非法,不能建出个 role_rank=0 的死号
@@ -1444,6 +1486,39 @@ mod tests {
     fn new_account_credentials_reject_invalid_password_lengths() {
         assert!(validate_new_account_credentials("alice", "1234567").is_err());
         assert!(validate_new_account_credentials("alice", &"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn device_guest_never_reuses_a_real_owner_account() {
+        let _g = tmp_db();
+        let owner = create_user("device-guest", "s3cret-8", "owner", "旧版真实账号").unwrap();
+
+        let e = peer_guest_user().unwrap_err();
+        assert!(e.contains("同名账号"), "err={e}");
+        let token = issue_session(owner.id, "node-attacker").unwrap();
+        assert_eq!(
+            check_session(&token).unwrap().role,
+            "owner",
+            "原账号本身不能被暗改"
+        );
+    }
+
+    #[test]
+    fn generated_device_guest_is_pinned_back_to_visitor() {
+        let _g = tmp_db();
+        let guest = peer_guest_user().unwrap();
+        open_db()
+            .unwrap()
+            .execute(
+                "UPDATE users SET role='owner' WHERE id=?1",
+                params![guest.id],
+            )
+            .unwrap();
+
+        let repaired = peer_guest_user().unwrap();
+        let token = issue_session(repaired.id, "node-guest").unwrap();
+        assert_eq!(repaired.role, "visitor");
+        assert_eq!(check_session(&token).unwrap().role, "visitor");
     }
 
     #[test]

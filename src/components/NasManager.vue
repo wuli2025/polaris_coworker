@@ -23,17 +23,41 @@ import {
   FolderOpen,
 } from "@lucide/vue";
 import OrbitSpinner from "./icons/OrbitSpinner.vue";
-import { nas, fsmount, type NasView, type NasRecord, type MountStatus } from "../tauri";
+import {
+  invoke,
+  nas,
+  fsmount,
+  type NasView,
+  type NasRecord,
+  type MountStatus,
+} from "../tauri";
 import { loadRemoteSources, type RemoteSource } from "../features/interconnect/remoteSources";
+
+interface MeshPeer {
+  nodeId?: string;
+  name?: string;
+  port?: number;
+  token?: string;
+  connected?: boolean;
+  error?: string;
+}
+interface MeshStatus {
+  peers?: MeshPeer[];
+}
+type ManagedRemote = RemoteSource & {
+  mesh: boolean;
+  connected: boolean;
+  error: string;
+};
 
 const emit = defineEmits<{
   (e: "close"): void;
-  (e: "browse-remote", id: string): void;
+  (e: "browse-remote", source: RemoteSource): void;
   (e: "open-interconnect"): void;
 }>();
 
 const list = ref<NasView[]>([]);
-const remoteSources = ref<RemoteSource[]>(loadRemoteSources());
+const remoteSources = ref<ManagedRemote[]>([]);
 const mounts = ref<MountStatus[]>([]);
 const loading = ref(false);
 const busyId = ref<string | null>(null);
@@ -61,22 +85,74 @@ const mountBySource = computed(() =>
   Object.fromEntries(mounts.value.map((m) => [m.sourceId, m]))
 );
 
+/**
+ * 互联有两条现役入口：老的手工 NodeId 源存在 localStorage；同账号设备和新设备码则由
+ * mesh_status 返回，后端已经直接起隧道并挂盘。这里按 NodeId 合流，优先使用 mesh 的实时
+ * 端口/token/sourceId，避免“盘已挂上，盘管理却说没有”的分裂状态。
+ */
+function mergeRemoteSources(peers: MeshPeer[]): ManagedRemote[] {
+  const byPeer = new Map<string, ManagedRemote>();
+  for (const source of loadRemoteSources()) {
+    const key = source.nodeId ? `node:${source.nodeId}` : `id:${source.id}`;
+    byPeer.set(key, {
+      ...source,
+      mesh: false,
+      connected: false,
+      error: "",
+    });
+  }
+  for (const peer of peers) {
+    const nodeId = peer.nodeId?.trim() || "";
+    if (!nodeId) continue;
+    const key = `node:${nodeId}`;
+    const existing = byPeer.get(key);
+    const live = !!peer.token && Number(peer.port) > 0;
+    if (existing && !live) {
+      byPeer.set(key, {
+        ...existing,
+        mesh: true,
+        connected: !!peer.connected,
+        error: peer.error || "",
+      });
+      continue;
+    }
+    byPeer.set(key, {
+      id: `mesh-${nodeId.slice(0, 16)}`,
+      name: peer.name?.trim() || existing?.name || "互联设备盘",
+      nodeId,
+      port: Number(peer.port) || 0,
+      token: peer.token || "",
+      createdAt: existing?.createdAt || 0,
+      mesh: true,
+      connected: !!peer.connected,
+      error: peer.error || "",
+    });
+  }
+  return [...byPeer.values()];
+}
+
 function mountOf(id: string): MountStatus | undefined {
   return mountBySource.value[id];
 }
 
-function remoteState(source: RemoteSource): string {
-  const mounted = mountOf(source.id);
-  if (!mounted) return "可在文件中心浏览";
-  if (mounted.ok && mounted.drive) {
-    return `${mounted.drive} · ${mounted.writable ? "读写" : "只读"}`;
-  }
-  if (mounted.error) return `等待重连 · ${mounted.error}`;
-  return "正在连接";
+function canBrowse(source: ManagedRemote): boolean {
+  return !!source.token && source.port > 0;
 }
 
-function browseRemote(source: RemoteSource) {
-  emit("browse-remote", source.id);
+function remoteState(source: ManagedRemote): string {
+  const mounted = mountOf(source.id);
+  if (mounted?.ok && mounted.drive) {
+    return `${mounted.drive} · ${mounted.writable ? "读写" : "只读"}`;
+  }
+  if (mounted?.error) return `等待重连 · ${mounted.error}`;
+  if (source.error) return `等待重连 · ${source.error}`;
+  if (source.mesh && !source.connected) return "正在连接";
+  return canBrowse(source) ? "可在文件中心浏览" : "等待连接就绪";
+}
+
+function browseRemote(source: ManagedRemote) {
+  if (!canBrowse(source)) return;
+  emit("browse-remote", source);
 }
 
 function flash(text: string, err = false) {
@@ -88,16 +164,18 @@ function flash(text: string, err = false) {
 
 async function refresh() {
   loading.value = true;
-  remoteSources.value = loadRemoteSources();
   try {
-    const [nasResult, mountResult] = await Promise.allSettled([
+    const [nasResult, mountResult, meshResult] = await Promise.allSettled([
       nas.list(),
       fsmount.status(),
+      invoke<MeshStatus>("mesh_status"),
     ]);
     if (nasResult.status === "fulfilled") list.value = nasResult.value;
     else flash(String(nasResult.reason), true);
-    // 老版本 / Web 壳可能没有系统挂载命令；互联源仍可在文件中心直接浏览。
+    // 老版本 / Web 壳可能没有系统挂载或 mesh 命令；另两类盘仍各自照常显示。
     mounts.value = mountResult.status === "fulfilled" ? mountResult.value : [];
+    const peers = meshResult.status === "fulfilled" ? meshResult.value.peers ?? [] : [];
+    remoteSources.value = mergeRemoteSources(peers);
   } finally {
     loading.value = false;
   }
@@ -275,7 +353,12 @@ onMounted(refresh);
                 </div>
               </div>
               <div class="card-acts">
-                <button class="act primary" @click="browseRemote(source)">
+                <button
+                  class="act primary"
+                  :disabled="!canBrowse(source)"
+                  :title="canBrowse(source) ? '在文件中心浏览' : '连接就绪后可浏览'"
+                  @click="browseRemote(source)"
+                >
                   <FolderOpen :size="14" :stroke-width="1.9" /> 浏览
                 </button>
                 <button class="act" @click="emit('open-interconnect')">

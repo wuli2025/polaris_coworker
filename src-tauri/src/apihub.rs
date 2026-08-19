@@ -413,11 +413,36 @@ mod origin_gate_tests {
 
     #[cfg(not(feature = "desktop"))]
     #[test]
-    fn docker_一键更新在开放模式下保持关闭() {
+    fn docker_一键更新要求应用鉴权与窄接口配置() {
         assert!(!docker_update_auth_configured_with(None, false));
         assert!(!docker_update_auth_configured_with(Some("  "), false));
-        assert!(docker_update_auth_configured_with(Some("machine-secret"), false));
+        assert!(docker_update_auth_configured_with(
+            Some("machine-secret"),
+            false
+        ));
         assert!(docker_update_auth_configured_with(None, true));
+
+        assert!(!updater_service_configured_with(None, Some("secret")));
+        assert!(!updater_service_configured_with(
+            Some("http://polaris-updater:8080/v1/update"),
+            None
+        ));
+        assert!(!updater_service_configured_with(
+            Some("http://polaris-updater:8080/metrics"),
+            Some("secret")
+        ));
+        assert!(!updater_service_configured_with(
+            Some("https://example.com/v1/update"),
+            Some("secret")
+        ));
+        assert!(!updater_service_configured_with(
+            Some("file:///v1/update"),
+            Some("secret")
+        ));
+        assert!(updater_service_configured_with(
+            Some("http://polaris-updater:8080/v1/update"),
+            Some("secret")
+        ));
     }
 
     #[test]
@@ -1130,9 +1155,11 @@ fn req_vec_str(a: &Args, k: &str) -> Result<Vec<String>, String> {
 /// 整段只在 server 壳编译 —— 桌面壳走 Tauri updater，用不到（否则 dead_code 警告）。
 #[cfg(not(feature = "desktop"))]
 const UPDATE_SCRIPT: &str = "/usr/local/bin/update.sh";
+#[cfg(not(feature = "desktop"))]
+const UPDATE_SERVICE_URL: &str = "http://polaris-updater:8080/v1/update";
 
-/// Docker socket 在容器内等同宿主机 root。只有部署者已经显式打开机器口令或
-/// 团队账号登录时，才允许把“一键更新”暴露给 Web；开放模式即使误挂 socket 也 fail-closed。
+/// 远程更新会触发宿主机侧容器替换。只有部署者已经显式打开机器口令或团队账号登录时，
+/// 才允许把这项能力暴露给 Web；开放模式即使误配了 updater token 也 fail-closed。
 #[cfg(not(feature = "desktop"))]
 fn docker_update_auth_configured_with(token: Option<&str>, require_login: bool) -> bool {
     token.is_some_and(|v| !v.trim().is_empty()) || require_login
@@ -1144,27 +1171,33 @@ fn docker_update_auth_configured() -> bool {
     docker_update_auth_configured_with(token.as_deref(), require_login_env())
 }
 
-/// 「网页上能不能一键更新」= 已启用鉴权 + docker.sock 挂了 + 更新脚本在镜像里。返回
-/// `(enabled, socket_present, script_present)`。
-///
-/// ★ 老版本还额外要求显式 `POLARIS_DOCKER_SOCKET=1` 才放行。群晖 Container Manager
-///   图形界面装的容器根本没人去加这个环境变量 → 「立即更新」按钮恒灰、点不动。
-///   现在这个 env 只保留**显式关闭**语义（`=0` / `=false` 才关）；但鉴权仍是硬条件，
-///   开放模式误挂 socket 也不能获得宿主机级更新入口。
+/// App 只认一个带 Bearer token 的 Watchtower HTTP API，不探测、更不接触 docker.sock。
+/// URL 与 token 都必须显式存在；URL 钉死在 Compose 内网服务名，避免一枚更新密钥被误发
+/// 到部署者可控的其他主机。
+#[cfg(not(feature = "desktop"))]
+fn updater_service_configured_with(url: Option<&str>, token: Option<&str>) -> bool {
+    let Some(url) = url.map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    url == UPDATE_SERVICE_URL && token.is_some_and(|v| !v.trim().is_empty())
+}
+
+#[cfg(not(feature = "desktop"))]
+fn updater_service_configured() -> bool {
+    let url = std::env::var("POLARIS_UPDATER_URL").ok();
+    let token = std::env::var("POLARIS_UPDATER_TOKEN").ok();
+    updater_service_configured_with(url.as_deref(), token.as_deref())
+}
+
+/// 「网页上能不能一键更新」= 已启用应用鉴权 + 隔离 updater 已配置 + 更新脚本在镜像里。
+/// 返回 `(enabled, updater_service_configured, script_present)`。
 #[cfg(not(feature = "desktop"))]
 pub(crate) fn docker_updater_bits() -> (bool, bool, bool) {
-    let socket_path = std::env::var("POLARIS_DOCKER_SOCKET_PATH")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "/var/run/docker.sock".to_string());
-    let socket = std::path::Path::new(&socket_path).exists();
+    let service = updater_service_configured();
     let script = std::path::Path::new(UPDATE_SCRIPT).exists();
-    let disabled = std::env::var("POLARIS_DOCKER_SOCKET")
-        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-        .unwrap_or(false);
     (
-        socket && script && !disabled && docker_update_auth_configured(),
-        socket,
+        service && script && docker_update_auth_configured(),
+        service,
         script,
     )
 }
@@ -1173,7 +1206,7 @@ pub(crate) fn docker_updater_bits() -> (bool, bool, bool) {
 ///
 /// 为什么把「查版本」也交给 shell：更新源是一串镜像站（Cloudflare / GitHub /
 /// 国内加速），逐源回退的逻辑已经在 update.sh 里，Rust 侧再实现一遍必然两边漂移；
-/// 而且 `--check` **不需要 docker.sock** —— 没挂 sock 的容器也能如实告诉用户
+/// 而且 `--check` **不需要 updater sidecar** —— 没启用一键替换的容器也能如实告诉用户
 /// 「有新版 x.y.z」，再引导去 SSH 兜底，而不是给一个哑掉的灰按钮。
 #[cfg(not(feature = "desktop"))]
 fn docker_check_update() -> Value {
@@ -1183,7 +1216,10 @@ fn docker_check_update() -> Value {
             "error": "镜像里没有 /usr/local/bin/update.sh（旧版镜像），请先手动装一次新镜像",
         });
     }
-    let out = match std::process::Command::new(UPDATE_SCRIPT).arg("--check").output() {
+    let out = match std::process::Command::new(UPDATE_SCRIPT)
+        .arg("--check")
+        .output()
+    {
         Ok(o) => o,
         Err(e) => {
             return json!({"ok": false, "has_update": false, "error": format!("启动 update.sh --check 失败: {e}")})
@@ -1822,14 +1858,13 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
         "updater_check" => ok(json!({"phase":"idle"})),
         "updater_apply" => Err("容器版请用 docker pull 拉新镜像更新。".to_string()),
 
-        // ── 容器自更新(前端 useUpdater.ts 容器线调用)──
-        // docker_status:报「能不能自更新」给 UpdatePanel(docker.sock 在位 + update.sh 打进镜像;
-        //   判定口径见 docker_updater_bits)。
+        // ── 容器远程更新(前端 useUpdater.ts 容器线调用)──
+        // docker_status:App 只检查隔离 updater 的 URL/token 是否配置；它永不探测 docker.sock。
         "docker_status" => {
-            let (enabled, socket, script) = docker_updater_bits();
+            let (enabled, service, script) = docker_updater_bits();
             ok(json!({
                 "updater_enabled": enabled,
-                "socket_present": socket,
+                "updater_service": service,
                 "update_script": script,
                 "auth_configured": docker_update_auth_configured(),
                 "current_version": std::env::var("POLARIS_VERSION").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
@@ -1838,36 +1873,32 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
             }))
         }
         // docker_check_update:只查不动 —— 逐个镜像源拉 manifest,回「当前/最新/有没有新版」。
-        //   不需要 docker.sock,所以没挂 sock 的容器也能看到有新版(再引导 SSH 兜底)。
+        //   不需要 updater sidecar,所以未启用一键替换的容器也能看到新版(再引导 SSH 兜底)。
         "docker_check_update" => ok(docker_check_update()),
-        // docker_update:跑 /usr/local/bin/update.sh(默认模式)——它经 docker.sock 用「自己的镜像」
-        //   起一个独立替身容器执行 pull + up -d(不能在被替换的容器里直接 up,compose 会随旧容器被杀)。
-        //   脚本起完 detached 替身即返回;真正的替换由替身异步完成(约 1~3 分钟,期间连接断,刷新即可)。
+        // docker_update:脚本用 Bearer token 调隔离 Watchtower 的 /v1/update。socket 只挂在
+        //   sidecar 内；App 容器既无 socket 也无 Docker CLI，项目命令无法取得宿主机 daemon。
         "docker_update" => {
             if !bool_def(a, "confirm", false) {
                 return Err("更新需要确认 (confirm: true)".to_string());
             }
-            let (enabled, socket, script) = docker_updater_bits();
+            let (enabled, service, script) = docker_updater_bits();
             if !docker_update_auth_configured() {
-                return Err("Docker 一键更新需要先设置 POLARIS_AUTH_TOKEN 或 POLARIS_REQUIRE_LOGIN=1；开放模式即使挂载了 docker.sock 也不会放行。".to_string());
+                return Err("Docker 一键更新需要先设置 POLARIS_AUTH_TOKEN 或 POLARIS_REQUIRE_LOGIN=1；开放模式不会获得容器替换能力。".to_string());
             }
             if !script {
                 return Err("/usr/local/bin/update.sh 不存在(镜像未含更新脚本,旧版镜像请先手动装一次新的)。".to_string());
             }
-            if !socket {
-                return Err("/var/run/docker.sock 未挂载,容器无法自己换镜像。请在容器设置里加上这个卷映射后重建容器,或在 NAS 上用 SSH 一行命令更新。".to_string());
+            if !service {
+                return Err("隔离更新服务未配置。请生成 POLARIS_UPDATER_TOKEN，并用 docker-compose.update.yml 重建服务。".to_string());
             }
             if !enabled {
-                return Err(
-                    "远程更新被显式关闭(POLARIS_DOCKER_SOCKET=0),去掉这个环境变量即可。"
-                        .to_string(),
-                );
+                return Err("容器一键更新未满足安全条件，请检查应用鉴权、updater token 与更新脚本。".to_string());
             }
             let tag = std::env::var("POLARIS_TAG")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "latest".to_string());
-            // force:版本号相同也重装(用户在网页上点了「强制重装」;update.sh 认 POLARIS_FORCE=1)。
+            // force:版本号相同也触发一轮检查(用户在网页上点了「强制重装」;脚本认 POLARIS_FORCE=1)。
             let mut cmd = std::process::Command::new(UPDATE_SCRIPT);
             if bool_def(a, "force", false) {
                 cmd.env("POLARIS_FORCE", "1");
@@ -1879,7 +1910,7 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
                     "tag": tag,
                     "stdout": String::from_utf8_lossy(&out.stdout).to_string(),
                     "stderr": String::from_utf8_lossy(&out.stderr).to_string(),
-                    "note": "替身已出发。拉取完成后当前容器会被替换(约 1~3 分钟,取决于网速),期间连接会断,稍后刷新页面即可。",
+                    "note": "隔离更新服务已接单。拉取完成后当前容器会被替换(约 1~3 分钟,取决于网速),期间连接会断,稍后刷新页面即可。",
                 })),
                 Err(e) => Err(format!("启动 update.sh 失败: {e}")),
             }
@@ -2043,7 +2074,10 @@ mod attach_gate_tests {
         std::fs::write(&outside, "SECRET").unwrap();
 
         let s = |p: &Path| p.to_string_lossy().to_string();
-        assert!(gate_attach_paths_in(&[s(&inside)], &inbox).is_ok(), "收件箱内必须放行");
+        assert!(
+            gate_attach_paths_in(&[s(&inside)], &inbox).is_ok(),
+            "收件箱内必须放行"
+        );
 
         let err = gate_attach_paths_in(&[s(&outside)], &inbox);
         assert!(err.is_err(), "收件箱外必须拒绝, 实际={err:?}");
@@ -2763,7 +2797,12 @@ mod mobile_project_e2e_tests {
         );
 
         // ③ 选中阿尔法后开新对话:走 conv_create_conversation(projectId),拿主机发的真 id
-        let (c, conv) = invoke(port, "conv_create_conversation", json!({"projectId": pa_id})).await;
+        let (c, conv) = invoke(
+            port,
+            "conv_create_conversation",
+            json!({"projectId": pa_id}),
+        )
+        .await;
         assert_eq!(c, 200, "在项目下建会话应成功,body={conv}");
         let cid = conv["id"].as_str().expect("会话应有 id").to_string();
 
@@ -2780,7 +2819,12 @@ mod mobile_project_e2e_tests {
         );
 
         // ⑤ 换到贝塔项目再开一条:cwd 必须跟着换,两条会话互不串目录
-        let (c, conv2) = invoke(port, "conv_create_conversation", json!({"projectId": pb_id})).await;
+        let (c, conv2) = invoke(
+            port,
+            "conv_create_conversation",
+            json!({"projectId": pb_id}),
+        )
+        .await;
         assert_eq!(c, 200, "body={conv2}");
         let cid2 = conv2["id"].as_str().unwrap().to_string();
         assert_eq!(

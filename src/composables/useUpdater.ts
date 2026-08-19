@@ -17,7 +17,7 @@ type UpdaterState =
 
 type DockerStatus = {
   updater_enabled: boolean;
-  socket_present: boolean;
+  updater_service: boolean;
   update_script: boolean;
   auth_configured: boolean;
   current_version: string;
@@ -48,7 +48,7 @@ export const updaterRuntime = ref<"desktop" | "docker" | "browser">(
   isTauri ? "desktop" : "browser"
 );
 export const dockerUpdaterEnabled = ref(false);
-export const dockerSocketPresent = ref(false);
+export const dockerUpdaterServiceConfigured = ref(false);
 export const dockerUpdateScriptPresent = ref(false);
 export const dockerAuthConfigured = ref(false);
 export const dockerMessage = ref("");
@@ -92,7 +92,7 @@ async function loadDockerStatus(): Promise<boolean> {
     updaterRuntime.value = "docker";
     dockerStatusLoaded = true;
     dockerUpdaterEnabled.value = !!status.updater_enabled;
-    dockerSocketPresent.value = !!status.socket_present;
+    dockerUpdaterServiceConfigured.value = !!status.updater_service;
     dockerUpdateScriptPresent.value = !!status.update_script;
     dockerAuthConfigured.value = !!status.auth_configured;
     if (!currentVersion.value) currentVersion.value = status.current_version || status.current_tag || "—";
@@ -199,7 +199,7 @@ export async function manualCheck(): Promise<void> {
 
 /**
  * 桌面：下载安装并由 Tauri 重启。
- * Docker：让 server 启动一个 detached、固定版本的 Watchtower 替身；当前容器随后会断线并被原样重建。
+ * Docker：让 server 调用隔离 Watchtower sidecar 的窄 HTTP API；当前容器随后会断线并被重建。
  */
 export async function applyUpdate(force = false): Promise<void> {
   if (updating.value) return;
@@ -216,7 +216,7 @@ export async function applyUpdate(force = false): Promise<void> {
   if (updaterRuntime.value !== "docker") return;
   const version = updateVersion.value || currentVersion.value || "latest";
   state.value = { status: "installing", version };
-  dockerMessage.value = "正在启动容器更新替身…";
+  dockerMessage.value = "正在通知隔离更新服务…";
   try {
     const result = await invoke<DockerUpdate>("docker_update", {
       confirm: true,
@@ -226,7 +226,7 @@ export async function applyUpdate(force = false): Promise<void> {
       throw new Error(result.stderr || result.stdout || `更新脚本退出码 ${result.exit_code ?? "未知"}`);
     }
     dockerMessage.value =
-      result.note || "更新替身已启动。容器将在拉取完成后短暂断线，约 1–3 分钟后刷新即可。";
+      result.note || "隔离更新服务已接单。容器会在拉取完成后短暂断线，约 1–3 分钟后刷新即可。";
     // 保持 installing：正常路径会先断线再由新容器接棒，不能在旧页面假装已经完成。
   } catch (e) {
     dockerMessage.value = "";

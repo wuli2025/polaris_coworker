@@ -88,6 +88,20 @@ fn meta(k: &str) -> String {
     crate::collab::db::meta_get(k).unwrap_or_default()
 }
 
+/// 账号 UID 只有在设备密钥仍有效时才是当前身份。旧版本退网只清 `mesh_key`，因此这里也
+/// fail closed：哪怕磁盘里残留过 UID，未入网状态也绝不再把它当成当前账号回给 UI。
+fn current_uid(enrolled: bool, stored: String) -> String {
+    if enrolled {
+        stored
+    } else {
+        String::new()
+    }
+}
+
+fn visible_uid() -> String {
+    current_uid(cfg().is_some(), meta(K_UID))
+}
+
 struct Cfg {
     url: String,
     key: String,
@@ -177,7 +191,9 @@ fn announce(c: &Cfg) -> Result<Vec<Value>, String> {
         .set("Authorization", &format!("Bearer {}", c.key))
         .send_json(json!({ "name": my_name(), "os": my_os(), "ver": my_ver() }))
         .map_err(cloud_err)?;
-    let v: Value = resp.into_json().map_err(|e| format!("云端返回的不是 JSON:{e}"))?;
+    let v: Value = resp
+        .into_json()
+        .map_err(|e| format!("云端返回的不是 JSON:{e}"))?;
     if let Some(uid) = v.get("uid").and_then(|x| x.as_str()) {
         let _ = crate::collab::db::meta_set(K_UID, uid);
     }
@@ -194,7 +210,9 @@ fn fresh_assertion(c: &Cfg) -> Result<String, String> {
         .set("Authorization", &format!("Bearer {}", c.key))
         .send_json(json!({}))
         .map_err(cloud_err)?;
-    let v: Value = resp.into_json().map_err(|e| format!("云端返回的不是 JSON:{e}"))?;
+    let v: Value = resp
+        .into_json()
+        .map_err(|e| format!("云端返回的不是 JSON:{e}"))?;
     v.get("assertion")
         .and_then(|x| x.as_str())
         .map(String::from)
@@ -207,10 +225,14 @@ fn fresh_assertion(c: &Cfg) -> Result<String, String> {
 /// 「本主机还没有邀请你」—— 如实展示给用户,他知道该去那台机器上放行。
 fn login_peer(port: u16, assertion: &str) -> Result<String, String> {
     let resp = agent()
-        .post(&format!("http://127.0.0.1:{port}/api/collab/login_assertion"))
+        .post(&format!(
+            "http://127.0.0.1:{port}/api/collab/login_assertion"
+        ))
         .send_json(json!({ "assertion": assertion, "deviceId": my_node_id() }))
         .map_err(cloud_err)?;
-    let v: Value = resp.into_json().map_err(|e| format!("对端返回的不是 JSON:{e}"))?;
+    let v: Value = resp
+        .into_json()
+        .map_err(|e| format!("对端返回的不是 JSON:{e}"))?;
     v.get("token")
         .and_then(|x| x.as_str())
         .map(String::from)
@@ -256,17 +278,21 @@ async fn ensure_peer(c: &Cfg, node_id: &str, name: &str, uid: &str) {
     // 先登记(带端口),这样重试沿用同一个口。
     links().lock().unwrap().insert(
         node_id.to_string(),
-        Link { name: name.to_string(), port, token: None, err: String::new() },
+        Link {
+            name: name.to_string(),
+            port,
+            token: None,
+            err: String::new(),
+        },
     );
 
     // 1) 起隧道(幂等:在跑 = no-op)。
     #[cfg(feature = "collab-net")]
     {
         let nid = node_id.to_string();
-        let r = tokio::task::spawn_blocking(move || {
-            crate::collab::tunnel::connect_client(&nid, port)
-        })
-        .await;
+        let r =
+            tokio::task::spawn_blocking(move || crate::collab::tunnel::connect_client(&nid, port))
+                .await;
         if let Ok(Err(e)) = r {
             set_err(node_id, format!("隧道建立失败:{e}"));
             return;
@@ -274,7 +300,10 @@ async fn ensure_peer(c: &Cfg, node_id: &str, name: &str, uid: &str) {
     }
     #[cfg(not(feature = "collab-net"))]
     {
-        set_err(node_id, "此构建没有 P2P 隧道(collab-net),设备网只能看不能连".into());
+        set_err(
+            node_id,
+            "此构建没有 P2P 隧道(collab-net),设备网只能看不能连".into(),
+        );
         return;
     }
 
@@ -348,10 +377,8 @@ async fn drop_peer(node_id: &str) {
     #[cfg(feature = "collab-net")]
     {
         let port = l.port;
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::collab::tunnel::disconnect_client(port)
-        })
-        .await;
+        let _ = tokio::task::spawn_blocking(move || crate::collab::tunnel::disconnect_client(port))
+            .await;
     }
     eprintln!("[mesh] 「{}」已移出设备网,盘符已收回", l.name);
 }
@@ -405,10 +432,16 @@ async fn reconcile_once() -> Result<usize, String> {
     };
     // 先把「自己这台机器认不认我」修好 —— 它是别的设备能不能连进来的前提。
     {
-        let c2 = Cfg { url: c.url.clone(), key: c.key.clone() };
+        let c2 = Cfg {
+            url: c.url.clone(),
+            key: c.key.clone(),
+        };
         let _ = tokio::task::spawn_blocking(move || heal_local_membership(&c2)).await;
     }
-    let c2 = Cfg { url: c.url.clone(), key: c.key.clone() };
+    let c2 = Cfg {
+        url: c.url.clone(),
+        key: c.key.clone(),
+    };
     let peers = tokio::task::spawn_blocking(move || announce(&c2))
         .await
         .unwrap_or_else(|e| Err(format!("报到任务失败:{e}")))?;
@@ -625,7 +658,11 @@ fn enroll_with_assertion(
         .and_then(|x| x.as_str())
         .ok_or("账号中心没返回设备密钥")?
         .to_string();
-    let uid = v.get("uid").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let uid = v
+        .get("uid")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // ② 把这个账号中心**钉在本机**。少了这一步,设备网只能单向:本机连得出去,
     //    别的设备连过来会被自己挡回去(「本机未配置云端账号中心,不接受身份断言」)。
@@ -644,12 +681,9 @@ fn enroll_with_assertion(
         match first {
             Ok(v) => Ok(v),
             Err(e) if crate::collab::authority::normalize_invite(invite).is_empty() => Err(e),
-            Err(_) => crate::collab::authority::join_with_ticket(
-                assertion,
-                invite,
-                &my_name(),
-                node_id,
-            ),
+            Err(_) => {
+                crate::collab::authority::join_with_ticket(assertion, invite, &my_name(), node_id)
+            }
         }
     }
     .map(|(u, t)| (u.role, t));
@@ -749,12 +783,11 @@ pub async fn mesh_devices() -> Result<Value, String> {
     };
 
     // 本机契约:node_id → 档位。
-    let grants: HashMap<String, crate::collab::grants::Grant> =
-        crate::collab::grants::list()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|g| (g.node_id.clone(), g))
-            .collect();
+    let grants: HashMap<String, crate::collab::grants::Grant> = crate::collab::grants::list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|g| (g.node_id.clone(), g))
+        .collect();
     // 实时链路 + 盘。
     let mounts: HashMap<String, Value> = crate::fsmount::fs_mount_status()
         .into_iter()
@@ -789,7 +822,11 @@ pub async fn mesh_devices() -> Result<Value, String> {
     let devices: Vec<Value> = skeleton
         .into_iter()
         .map(|mut d| {
-            let nid = d.get("nodeId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let nid = d
+                .get("nodeId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let g = grants.get(&nid);
             let m = mounts.get(&source_id(&nid));
             let (connected, err) = links_snapshot
@@ -801,7 +838,10 @@ pub async fn mesh_devices() -> Result<Value, String> {
             d["error"] = json!(err);
             d["drive"] = m.and_then(|x| x.get("drive")).cloned().unwrap_or(json!(""));
             d["mounted"] = m.and_then(|x| x.get("ok")).cloned().unwrap_or(json!(false));
-            d["writable"] = m.and_then(|x| x.get("writable")).cloned().unwrap_or(json!(false));
+            d["writable"] = m
+                .and_then(|x| x.get("writable"))
+                .cloned()
+                .unwrap_or(json!(false));
             // 档位:没有契约的设备(还没连过)给个「未批准」而不是编一个默认值。
             d["fsAccess"] = json!(g.map(|x| x.fs_access.clone()).unwrap_or_default());
             d["effectiveFs"] = json!(g.map(|x| x.effective_fs().to_string()).unwrap_or_default());
@@ -815,7 +855,7 @@ pub async fn mesh_devices() -> Result<Value, String> {
         })
         .collect();
 
-    let uid = meta(K_UID);
+    let uid = visible_uid();
     Ok(json!({
         "enrolled": cfg().is_some(),
         "url": meta(K_URL),
@@ -907,15 +947,20 @@ pub async fn mesh_rename(nodeId: String, name: String) -> Result<Value, String> 
     Ok(json!({ "ok": true }))
 }
 
-/// 退网:清掉本机的设备密钥,拆掉所有自动挂上的盘。
+/// 退网:清掉本机的设备密钥与账号 UID,拆掉所有自动挂上的盘。
 /// 云端名册上这台设备仍在(只是不再报到,很快显示离线)—— 要彻底踢掉用 [`mesh_kick`]。
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn mesh_leave() -> Result<Value, String> {
-    let _ = crate::collab::db::meta_set(K_KEY, "");
+    // 即使极少见的 SQLite 写入失败，也先把已挂盘和隧道收干净；错误最后如实上抛。
+    let key_clear = crate::collab::db::meta_set(K_KEY, "");
+    let uid_clear = crate::collab::db::meta_set(K_UID, "");
+    member_warn().lock().unwrap().clear();
     let all: Vec<String> = links().lock().unwrap().keys().cloned().collect();
     for n in all {
         drop_peer(&n).await;
     }
+    key_clear?;
+    uid_clear?;
     Ok(json!({ "enrolled": false }))
 }
 
@@ -1019,17 +1064,21 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
     let port = port_for(&node_id);
     links().lock().unwrap().insert(
         node_id.clone(),
-        Link { name: "对方设备".into(), port, token: None, err: String::new() },
+        Link {
+            name: "对方设备".into(),
+            port,
+            token: None,
+            err: String::new(),
+        },
     );
 
     // ① 隧道(幂等)。
     #[cfg(feature = "collab-net")]
     {
         let nid = node_id.clone();
-        let r = tokio::task::spawn_blocking(move || {
-            crate::collab::tunnel::connect_client(&nid, port)
-        })
-        .await;
+        let r =
+            tokio::task::spawn_blocking(move || crate::collab::tunnel::connect_client(&nid, port))
+                .await;
         if let Ok(Err(e)) = r {
             drop_peer(&node_id).await;
             return Err(format!("连不上对方(隧道建立失败):{e}"));
@@ -1041,14 +1090,36 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
         return Err("此构建没有 P2P 隧道(collab-net),连不了".into());
     }
 
-    // ② 敲门:对方验码 → 回一张会话 token + 它给这台设备的档位。
+    // ② 敲门分两步：先取一次性挑战，再用本机 host.key 证明 `me` 真是自己的 NodeId。
+    // 只有设备码而没有对应私钥的人，不能冒充台账里已经升过 rw/exec 的老设备。
     let me = my_node_id();
     let my_name_s = my_name();
     let got = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let challenge_resp = agent()
+            .post(&format!(
+                "http://127.0.0.1:{port}/api/collab/connect/challenge"
+            ))
+            .send_json(json!({ "nodeId": me.clone() }))
+            .map_err(|e| format!("取对方连接挑战失败(对方可能需要升级):{}", cloud_err(e)))?;
+        let challenge_body: Value = challenge_resp
+            .into_json()
+            .map_err(|e| format!("对方连接挑战不是 JSON:{e}"))?;
+        let challenge = challenge_body["challenge"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or("对方没返回连接挑战 —— 请先升级对方的 Polaris")?;
+        let signature = crate::collab::identity::sign_connect_proof(&me, &access, challenge)?;
+
         let resp = agent()
             .post(&format!("http://127.0.0.1:{port}/api/collab/connect"))
             .send_json(json!({
-                "code": access, "nodeId": me, "name": my_name_s, "os": my_os(), "ver": my_ver(),
+                "code": access,
+                "nodeId": me,
+                "challenge": challenge,
+                "signature": signature,
+                "name": my_name_s,
+                "os": my_os(),
+                "ver": my_ver(),
             }))
             .map_err(cloud_err)?;
         resp.into_json::<Value>()
@@ -1071,7 +1142,11 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
 
     // ③ 挂盘。对方给的是只读就挂只读 —— 挂成读写再让用户撞一鼻子灰是最糟的选择。
     let ro = v["fsAccess"].as_str().unwrap_or("ro") != crate::collab::grants::FS_RW;
-    let name = v["peerName"].as_str().filter(|s| !s.is_empty()).unwrap_or("对方设备").to_string();
+    let name = v["peerName"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("对方设备")
+        .to_string();
     let mounted = crate::fsmount::fs_mount(
         source_id(&node_id),
         name.clone(),
@@ -1138,7 +1213,7 @@ pub fn mesh_status() -> Value {
     json!({
         "enrolled": enrolled,
         "url": meta(K_URL),
-        "uid": meta(K_UID),
+        "uid": visible_uid(),
         "nodeId": my_node_id(),
         "name": my_name(),
         "peers": peers,
@@ -1154,6 +1229,22 @@ mod tests {
         assert_eq!(norm_url(" 1.2.3.4:8080/ "), "http://1.2.3.4:8080");
         assert_eq!(norm_url("https://a.com/"), "https://a.com");
         assert_eq!(norm_url("http://a.com"), "http://a.com");
+    }
+
+    #[test]
+    fn device_code_parser_requires_the_complete_plr1_shape() {
+        let (code, node) = parse_device_code("plr1-abcd2345-node-identity").unwrap();
+        assert_eq!(code, "ABCD2345");
+        assert_eq!(node, "node-identity");
+        assert!(parse_device_code("ABCD2345").is_err());
+        assert!(parse_device_code("PLR1-ABCD2345").is_err());
+        assert!(parse_device_code("PLR1--node").is_err());
+    }
+
+    #[test]
+    fn logged_out_status_never_exposes_a_stale_uid() {
+        assert_eq!(current_uid(false, "uid-from-old-login".into()), "");
+        assert_eq!(current_uid(true, "uid-current".into()), "uid-current");
     }
 
     /// sourceId 必须稳定且不超长(fsmount 拿它当 key,长 NodeId 截断后仍要唯一到实用)。
@@ -1172,7 +1263,12 @@ mod tests {
         let p1 = port_for("node-a");
         links().lock().unwrap().insert(
             "node-a".into(),
-            Link { name: "a".into(), port: p1, token: None, err: String::new() },
+            Link {
+                name: "a".into(),
+                port: p1,
+                token: None,
+                err: String::new(),
+            },
         );
         let p2 = port_for("node-b");
         assert_ne!(p1, p2, "两台设备不能撞同一个本地口");

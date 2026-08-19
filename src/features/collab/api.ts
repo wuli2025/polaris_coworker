@@ -441,8 +441,11 @@ export interface EmailStatus {
   signupOpen: boolean;
 }
 
-/** owner 邮箱服务配置(SMTP 授权码永不回显,只有 passSet) */
+/** owner 验证码邮件配置(SMTP 授权码永不回显,只有 passSet) */
 export interface EmailConfig {
+  /** false = 当前是成员主机，实际发码由 authorityUrl 指向的账号中心负责 */
+  managedHere: boolean;
+  authorityUrl?: string;
   configured: boolean;
   host: string;
   port: number;

@@ -5893,6 +5893,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "futures-util",
  "getrandom 0.2.17",
+ "hex",
  "iroh",
  "iroh-mdns-address-lookup",
  "lettre",

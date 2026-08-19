@@ -19,6 +19,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use once_cell::sync::Lazy;
 use serde::Serialize;
@@ -26,6 +27,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 static LEAD_AI_RUNNING: Lazy<parking_lot::Mutex<HashSet<i64>>> =
@@ -463,9 +465,7 @@ async fn account_signup(Json(v): Json<Value>) -> Response {
         let email = s_of(&v, "email");
         if !email.trim().is_empty() {
             if !crate::collab::mail::configured() {
-                return Err(
-                    "本账号中心没配邮件服务,发不出验证码 —— 请留空邮箱直接注册".into(),
-                );
+                return Err("本账号中心没配邮件服务,发不出验证码 —— 请留空邮箱直接注册".into());
             }
             crate::collab::mail::verify_code(&email, "signup", &s_of(&v, "code"))?;
         }
@@ -507,8 +507,7 @@ async fn account_login(Json(v): Json<Value>) -> Response {
                 u
             }
         };
-        let (u, uid, email) =
-            crate::collab::auth::authority_login(&ident, &s_of(&v, "password"))?;
+        let (u, uid, email) = crate::collab::auth::authority_login(&ident, &s_of(&v, "password"))?;
         let assertion =
             crate::collab::authority::sign_assertion(&uid, &u.username, &email, &u.display_name)?;
         Ok(json!({
@@ -577,8 +576,7 @@ async fn account_reset(Json(v): Json<Value>) -> Response {
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let email = s_of(&v, "email");
         crate::collab::mail::verify_code(&email, "reset", &s_of(&v, "code"))?;
-        let u = crate::collab::auth::find_user_by_email(&email)?
-            .ok_or("该邮箱没有绑定任何账号")?;
+        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or("该邮箱没有绑定任何账号")?;
         crate::collab::auth::set_password(u.id, &s_of(&v, "newPassword"))?;
         Ok(json!({"ok": true, "username": u.username}))
     })
@@ -631,29 +629,156 @@ async fn collab_join(Json(v): Json<Value>) -> Response {
 //  ② 进来拿到的是 **visitor** 会话 + 一行**默认只读**的设备契约,不是 owner;
 //  ③ 失败要计次 —— 8 位码 32^8,不限速的话在线爆破不是天方夜谭。
 
+const CONNECT_CHALLENGE_CAP: usize = 1024;
+const CONNECT_CHALLENGE_TTL: Duration = Duration::from_secs(60);
+const CONNECT_CHALLENGE_ERROR: &str = "连接挑战无效或已过期，请重新发起连接";
+
+struct PendingConnectChallenge {
+    node_id: String,
+    expires_at: Instant,
+}
+
+struct ConnectChallengeStore {
+    entries: HashMap<String, PendingConnectChallenge>,
+    capacity: usize,
+    ttl: Duration,
+}
+
+impl ConnectChallengeStore {
+    fn new(capacity: usize, ttl: Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity: capacity.max(1),
+            ttl,
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        self.entries.retain(|_, pending| pending.expires_at > now);
+    }
+
+    fn insert(&mut self, challenge: String, node_id: String, now: Instant) {
+        self.prune(now);
+        if self.entries.len() >= self.capacity {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by(|(key_a, a), (key_b, b)| {
+                    a.expires_at
+                        .cmp(&b.expires_at)
+                        .then_with(|| key_a.cmp(key_b))
+                })
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                self.entries.remove(&key);
+            }
+        }
+        self.entries.insert(
+            challenge,
+            PendingConnectChallenge {
+                node_id,
+                expires_at: now + self.ttl,
+            },
+        );
+    }
+
+    /// 查到即删除：NodeId 不匹配、签名错误、设备码错误或后续数据库失败都不能重放。
+    fn consume(&mut self, challenge: &str, node_id: &str, now: Instant) -> Result<(), String> {
+        let Some(pending) = self.entries.remove(challenge) else {
+            return Err(CONNECT_CHALLENGE_ERROR.into());
+        };
+        if pending.expires_at <= now || pending.node_id != node_id {
+            return Err(CONNECT_CHALLENGE_ERROR.into());
+        }
+        Ok(())
+    }
+}
+
+fn connect_challenges() -> &'static std::sync::Mutex<ConnectChallengeStore> {
+    static CHALLENGES: std::sync::OnceLock<std::sync::Mutex<ConnectChallengeStore>> =
+        std::sync::OnceLock::new();
+    CHALLENGES.get_or_init(|| {
+        std::sync::Mutex::new(ConnectChallengeStore::new(
+            CONNECT_CHALLENGE_CAP,
+            CONNECT_CHALLENGE_TTL,
+        ))
+    })
+}
+
+fn issue_connect_challenge(node_id: String) -> Result<String, String> {
+    let mut store = connect_challenges()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for _ in 0..4 {
+        let mut random = [0u8; 32];
+        getrandom::getrandom(&mut random).map_err(|e| format!("生成连接挑战失败: {e}"))?;
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random);
+        if !store.entries.contains_key(&challenge) {
+            store.insert(challenge.clone(), node_id, Instant::now());
+            return Ok(challenge);
+        }
+    }
+    Err("生成连接挑战失败，请重试".into())
+}
+
+/// 第一步只发一个短命、一次性的随机数，并把它绑定到规范化 NodeId。它不是授权，公开可取；
+/// 真正进门仍须用对应 host.key 签名，再同时通过设备码校验。
+async fn collab_connect_challenge(Json(v): Json<Value>) -> Response {
+    let node_id = match crate::collab::identity::canonical_node_id(&s_of(&v, "nodeId")) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    };
+    match issue_connect_challenge(node_id) {
+        Ok(challenge) => Json(json!({
+            "challenge": challenge,
+            "expiresIn": CONNECT_CHALLENGE_TTL.as_secs(),
+        }))
+        .into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
 /// 凭设备码进门。回一张本机会话 + 这台设备当前的档位。
 ///
 /// 幂等:同一台设备重复连不会重置机主调过的档位(`grant_by_code` 见到已有契约原样返回)。
-async fn collab_connect(
-    State(state): State<CollabState>,
-    headers: HeaderMap,
-    Json(v): Json<Value>,
-) -> Response {
+async fn collab_connect(headers: HeaderMap, Json(v): Json<Value>) -> Response {
     let peer = peer_ip_of(&headers);
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let node_id = s_of(&v, "nodeId");
-        if node_id.trim().is_empty() {
-            return Err("缺 nodeId —— 对方的 P2P 身份还没就绪,稍后重试".into());
-        }
+        let node_id = crate::collab::identity::canonical_node_id(&s_of(&v, "nodeId"))?;
         connect_throttle(&peer)?;
-        if !crate::collab::identity::check_access_code(&s_of(&v, "code"))? {
+
+        let challenge = s_of(&v, "challenge");
+        let consumed = connect_challenges()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .consume(challenge.trim(), &node_id, Instant::now());
+        if let Err(e) = consumed {
+            crate::collab::db::audit("anonymous", "connect.denied", &node_id, &e);
+            return Err(CONNECT_CHALLENGE_ERROR.into());
+        }
+
+        let code = s_of(&v, "code");
+        if let Err(e) = crate::collab::identity::verify_connect_proof(
+            &node_id,
+            &code,
+            &challenge,
+            &s_of(&v, "signature"),
+        ) {
+            crate::collab::db::audit("anonymous", "connect.denied", &node_id, &e);
+            return Err("无法证明这台设备持有其 NodeId，请重新发起连接".into());
+        }
+        if !crate::collab::identity::check_access_code(&code)? {
             crate::collab::db::audit("anonymous", "connect.denied", &node_id, "设备码不对");
             return Err("设备码不对 —— 让对方在他的「互联」页重新复制一次(他可能换过码)".into());
         }
         connect_throttle_reset(&peer);
         let name = {
             let n = s_of(&v, "name");
-            if n.trim().is_empty() { "对方设备".to_string() } else { n }
+            if n.trim().is_empty() {
+                "对方设备".to_string()
+            } else {
+                n
+            }
         };
         let g = crate::collab::grants::grant_by_code(&node_id, &name)?;
         let user = crate::collab::auth::peer_guest_user()?;
@@ -673,7 +798,6 @@ async fn collab_connect(
         }))
     })
     .await;
-    let _ = state;
     unwrap_api(out)
 }
 
@@ -719,10 +843,23 @@ fn connect_fails() -> &'static std::sync::Mutex<HashMap<String, (u32, i64)>> {
 
 const CONNECT_MAX_FAILS: u32 = 10;
 const CONNECT_LOCK_SECS: i64 = 600;
+const CONNECT_THROTTLE_CAP: usize = 4096;
 
 fn connect_throttle(peer: &str) -> Result<(), String> {
     let mut m = connect_fails().lock().unwrap_or_else(|e| e.into_inner());
     let now = crate::collab::db::now();
+    // 转发头不是可信身份，攻击者可以不断换值；频控表必须有硬上限，不能让公开端点
+    // 靠伪造 X-Forwarded-For 把进程内存一直顶高。
+    m.retain(|_, (_, last)| now - *last < CONNECT_LOCK_SECS);
+    if !m.contains_key(peer) && m.len() >= CONNECT_THROTTLE_CAP {
+        if let Some(oldest) = m
+            .iter()
+            .min_by_key(|(_, (_, last))| *last)
+            .map(|(key, _)| key.clone())
+        {
+            m.remove(&oldest);
+        }
+    }
     let e = m.entry(peer.to_string()).or_insert((0, 0));
     if e.0 >= CONNECT_MAX_FAILS && now - e.1 < CONNECT_LOCK_SECS {
         return Err(format!(
@@ -755,6 +892,55 @@ fn peer_ip_of(headers: &HeaderMap) -> String {
         .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "tunnel".to_string())
+}
+
+#[cfg(test)]
+mod connect_challenge_tests {
+    use super::*;
+
+    #[test]
+    fn challenge_is_single_use_and_node_bound() {
+        let now = Instant::now();
+        let mut store = ConnectChallengeStore::new(8, Duration::from_secs(60));
+        store.insert("once".into(), "node-a".into(), now);
+        assert!(store.consume("once", "node-a", now).is_ok());
+        assert!(store.consume("once", "node-a", now).is_err());
+
+        store.insert("bound".into(), "node-a".into(), now);
+        assert!(store.consume("bound", "node-b", now).is_err());
+        assert!(
+            store.consume("bound", "node-a", now).is_err(),
+            "NodeId 不匹配也必须烧掉挑战"
+        );
+    }
+
+    #[test]
+    fn challenge_expires_and_store_stays_bounded() {
+        let now = Instant::now();
+        let mut store = ConnectChallengeStore::new(2, Duration::from_secs(10));
+        store.insert("oldest".into(), "node-a".into(), now);
+        store.insert(
+            "middle".into(),
+            "node-b".into(),
+            now + Duration::from_secs(1),
+        );
+        store.insert(
+            "newest".into(),
+            "node-c".into(),
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(store.entries.len(), 2);
+        assert!(
+            !store.entries.contains_key("oldest"),
+            "满载时应淘汰最早到期项"
+        );
+
+        assert!(store
+            .consume("middle", "node-b", now + Duration::from_secs(12))
+            .is_err());
+        store.prune(now + Duration::from_secs(13));
+        assert!(store.entries.is_empty());
+    }
 }
 
 /// owner 显式「重新信任」账号权威(换云机 / 权威轮换了密钥)。
@@ -1155,13 +1341,25 @@ async fn collab_telemetry_report(
     }
     let dev = s_of(&v, "deviceId");
     if dev.is_empty() || dev.len() > 128 {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"deviceId 无效"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"deviceId 无效"})),
+        )
+            .into_response();
     }
     let stats = v.get("stats").cloned().unwrap_or(Value::Null);
     if !stats.is_object() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"stats 须为对象"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"stats 须为对象"})),
+        )
+            .into_response();
     }
-    if serde_json::to_string(&stats).map(|s| s.len()).unwrap_or(usize::MAX) > TELEMETRY_MAX_BYTES {
+    if serde_json::to_string(&stats)
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX)
+        > TELEMETRY_MAX_BYTES
+    {
         return (StatusCode::BAD_REQUEST, Json(json!({"error":"stats 过大"}))).into_response();
     }
     // 设备身份绑定:node_id(= deviceId)必须属当前账号(空闲则登记为其设备)。
@@ -1193,7 +1391,11 @@ async fn collab_telemetry_report(
         }
         Ok(Err(e)) => return (StatusCode::FORBIDDEN, Json(json!({"error": e}))).into_response(),
         Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"内部错误"}))).into_response()
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":"内部错误"})),
+            )
+                .into_response()
         }
     }
     {
@@ -1451,8 +1653,7 @@ async fn collab_email_reset(Json(v): Json<Value>) -> Response {
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let email = s_of(&v, "email");
         crate::collab::mail::verify_code(&email, "reset", &s_of(&v, "code"))?;
-        let u = crate::collab::auth::find_user_by_email(&email)?
-            .ok_or("该邮箱没有绑定任何账号")?;
+        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or("该邮箱没有绑定任何账号")?;
         // 联邦账号的密码只有权威说了算:在成员主机上给它写一个本地密码,等于绕开权威
         // 开了一条本机后门(云端停用了这个人,他仍能凭这个本地密码在断网回落时进来)。
         // 按**账号**判,故同机的本地应急账号照旧能自助找回。
@@ -1553,6 +1754,20 @@ async fn collab_admin_email_config_get(
     if role_rank(&ctx.role) < 3 {
         return forbid();
     }
+    if let Some(url) = crate::collab::authority::upstream_url() {
+        return Json(json!({
+            "managedHere": false,
+            "authorityUrl": url,
+            "configured": false,
+            "host": "",
+            "port": 465,
+            "user": "",
+            "from": "",
+            "passSet": false,
+            "signupOpen": false,
+        }))
+        .into_response();
+    }
     let out = tokio::task::spawn_blocking(|| -> Result<Value, String> {
         let cfg = crate::collab::mail::config();
         let (host, port, user, from) = match &cfg {
@@ -1567,6 +1782,8 @@ async fn collab_admin_email_config_get(
             ),
         };
         Ok(json!({
+            "managedHere": true,
+            "authorityUrl": "",
             "configured": cfg.is_some(),
             "host": host,
             "port": port,
@@ -1592,6 +1809,9 @@ async fn collab_admin_email_config_set(
     if role_rank(&ctx.role) < 3 {
         return forbid();
     }
+    if let Some(r) = reject_if_delegated("配置验证码邮件") {
+        return r;
+    }
     let actor = ctx.username.clone();
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let user = s_of(&v, "user");
@@ -1600,14 +1820,25 @@ async fn collab_admin_email_config_set(
         }
         let host = {
             let h = s_of(&v, "host");
-            if h.trim().is_empty() { "smtp.qq.com".into() } else { h }
+            if h.trim().is_empty() {
+                "smtp.qq.com".into()
+            } else {
+                h
+            }
         };
         let port = i_of(&v, "port").unwrap_or(465).clamp(1, 65535) as u16;
         let from = {
             let f = s_of(&v, "from");
-            if f.trim().is_empty() { user.clone() } else { f }
+            if f.trim().is_empty() {
+                user.clone()
+            } else {
+                f
+            }
         };
-        let signup = v.get("signupOpen").and_then(|x| x.as_bool()).unwrap_or(true);
+        let signup = v
+            .get("signupOpen")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(true);
         crate::collab::mail::save_config(&host, port, &user, &s_of(&v, "pass"), &from, signup)?;
         crate::collab::db::audit(&actor, "email.config", &user, "SMTP 配置更新");
         let test_to = s_of(&v, "testTo");
@@ -3649,7 +3880,8 @@ async fn fs_read_api(
     }
     let rel = q.get("path").cloned().unwrap_or_default();
     let rel_for_ext = rel.clone(); // 判「要不要压缩」看扩展名,而 rel 要被搬进阻塞任务
-    let opened = tokio::task::spawn_blocking(move || crate::collab::fsface::open_jailed(&rel)).await;
+    let opened =
+        tokio::task::spawn_blocking(move || crate::collab::fsface::open_jailed(&rel)).await;
     let (mut file, len, mtime) = match opened {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => return (StatusCode::FORBIDDEN, Json(json!({ "error": e }))).into_response(),
@@ -4080,10 +4312,7 @@ async fn mesh_revoke(headers: HeaderMap, Json(v): Json<Value>) -> Response {
 /// 写端点共用的入口闸:角色或设备契约(见 [`fs_allowed`])。
 /// 拒绝原因原样带出来 —— 「对方把这台设备设成了只读」必须显示成失败原因,
 /// 糊成一句「需要 owner 权限」会让人对着正确的操作反复试。
-async fn fs_write_guard(
-    state: &CollabState,
-    headers: &HeaderMap,
-) -> Result<AuthCtx, String> {
+async fn fs_write_guard(state: &CollabState, headers: &HeaderMap) -> Result<AuthCtx, String> {
     let ctx = auth_ctx(state, headers)
         .await
         .ok_or_else(|| "未授权".to_string())?;
@@ -4172,7 +4401,8 @@ async fn fs_write_api(
         let mut file = file;
         let mut total: u64 = 0;
         while let Ok(chunk) = rx.recv() {
-            file.write_all(&chunk).map_err(|e| format!("写盘失败: {e}"))?;
+            file.write_all(&chunk)
+                .map_err(|e| format!("写盘失败: {e}"))?;
             total += chunk.len() as u64;
         }
         file.flush().map_err(|e| format!("落盘失败: {e}"))?;
@@ -4436,6 +4666,10 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/collab/tunnel/start", post(tunnel_start_api))
         .route("/api/collab/tunnel/relays", post(tunnel_relays_api))
         // 设备码(一码):公开的敲门口 + owner 才能读/换的本机码。
+        .route(
+            "/api/collab/connect/challenge",
+            post(collab_connect_challenge),
+        )
         .route("/api/collab/connect", post(collab_connect))
         .route("/api/collab/code", get(collab_code_get))
         .route("/api/collab/code/rotate", post(collab_code_rotate))
@@ -4477,13 +4711,33 @@ mod tests {
         assert_eq!(parse_byte_range(Some("bytes=0-99"), 1000), Some((0, 99)));
         assert_eq!(parse_byte_range(Some("bytes=200-"), 1000), Some((200, 999)));
         assert_eq!(parse_byte_range(Some("bytes=-100"), 1000), Some((900, 999)));
-        assert_eq!(parse_byte_range(Some("bytes=0-9999"), 1000), Some((0, 999)), "end 越界须钳到 len-1");
-        assert_eq!(parse_byte_range(Some("bytes=500-100"), 1000), None, "倒置区间无效,按整文件");
-        assert_eq!(parse_byte_range(Some("bytes=2000-"), 1000), None, "起点越界不可满足,按整文件");
+        assert_eq!(
+            parse_byte_range(Some("bytes=0-9999"), 1000),
+            Some((0, 999)),
+            "end 越界须钳到 len-1"
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=500-100"), 1000),
+            None,
+            "倒置区间无效,按整文件"
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=2000-"), 1000),
+            None,
+            "起点越界不可满足,按整文件"
+        );
         assert_eq!(parse_byte_range(None, 1000), None);
         assert_eq!(parse_byte_range(Some("items=0-1"), 1000), None);
-        assert_eq!(parse_byte_range(Some("bytes=-0"), 1000), None, "-0 无意义按整文件");
-        assert_eq!(parse_byte_range(Some("bytes=-100"), 0), None, "空文件后缀区间按整文件");
+        assert_eq!(
+            parse_byte_range(Some("bytes=-0"), 1000),
+            None,
+            "-0 无意义按整文件"
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=-100"), 0),
+            None,
+            "空文件后缀区间按整文件"
+        );
         // 多区间只取第一段。
         assert_eq!(parse_byte_range(Some("bytes=0-1,5-9"), 1000), Some((0, 1)));
         assert_eq!(httpdate_from_secs(0), "Thu, 01 Jan 1970 00:00:00 GMT");
@@ -4493,10 +4747,24 @@ mod tests {
     /// 不可压数据是原样存储 —— 但这份名单直接决定小机器上的 CPU 账单。
     #[test]
     fn precompressed_ext_detection() {
-        for p in ["a/b/photo.JPG", "x.zip", "dir/pkg.tar.gz", "v.mp4", "s.pdf", "app.exe"] {
+        for p in [
+            "a/b/photo.JPG",
+            "x.zip",
+            "dir/pkg.tar.gz",
+            "v.mp4",
+            "s.pdf",
+            "app.exe",
+        ] {
             assert!(is_precompressed(p), "{p} 应判为已压缩");
         }
-        for p in ["notes.md", "src/main.rs", "a.txt", "data.json", "server.log", "无扩展名"] {
+        for p in [
+            "notes.md",
+            "src/main.rs",
+            "a.txt",
+            "data.json",
+            "server.log",
+            "无扩展名",
+        ] {
             assert!(!is_precompressed(p), "{p} 应判为可压缩");
         }
         // 目录名里的点不能误当扩展名。

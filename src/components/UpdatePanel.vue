@@ -28,7 +28,7 @@ import {
   loadUpdaterVersion,
   updaterRuntime,
   dockerUpdaterEnabled,
-  dockerSocketPresent,
+  dockerUpdaterServiceConfigured,
   dockerUpdateScriptPresent,
   dockerAuthConfigured,
   dockerMessage,
@@ -92,9 +92,9 @@ const lastChecked = computed(() => {
                 <template v-if="isDocker">
                   {{
                     updating
-                      ? dockerMessage || "更新替身已接手，容器即将短暂断线"
+                      ? dockerMessage || "隔离更新服务已接单，容器即将短暂断线"
                       : dockerUpdaterEnabled
-                        ? "点「立即更新」后由独立替身拉取镜像并安全替换当前容器"
+                        ? "点「立即更新」后由隔离服务拉取镜像并安全替换当前容器"
                         : "已检测到新版；启用下方安全更新配置后可在这里一键更新"
                   }}
                 </template>
@@ -155,7 +155,7 @@ const lastChecked = computed(() => {
         <div v-if="lastChecked" class="last">上次检查 {{ lastChecked }}</div>
       </div>
 
-      <!-- Docker 一键更新权限是显式 opt-in；检查版本本身不需要 socket。 -->
+      <!-- Docker 一键更新权限是显式 opt-in；版本检查本身不需要 updater sidecar。 -->
       <div v-if="isDocker && !dockerUpdaterEnabled" class="docker-setup">
         <div class="docker-setup-head">
           <ShieldAlert :size="18" :stroke-width="1.8" />
@@ -169,19 +169,20 @@ const lastChecked = computed(() => {
               <template v-else-if="!dockerUpdateScriptPresent">
                 当前是旧版或自建镜像，镜像内没有更新脚本；请先在宿主机手动更新一次。
               </template>
-              <template v-else-if="!dockerSocketPresent">
-                当前容器未挂载 Docker socket。版本检查仍可用，但容器不能替换自己。
+              <template v-else-if="!dockerUpdaterServiceConfigured">
+                隔离更新服务尚未配置。请生成 <code>POLARIS_UPDATER_TOKEN</code>，并叠加
+                <code>docker-compose.update.yml</code> 重建服务。
               </template>
               <template v-else>
-                容器更新能力已被环境变量显式关闭；移除 <code>POLARIS_DOCKER_SOCKET=0</code> 后重建容器。
+                一键更新的安全条件未满足，请核对应用鉴权与 updater token。
               </template>
             </div>
           </div>
         </div>
         <code class="docker-command">docker compose -f docker-compose.yml -f docker-compose.update.yml up -d</code>
         <p class="docker-warning">
-          Docker socket 等同宿主机 root 权限。只在启用了账号鉴权与 HTTPS 的可信部署中使用；
-          Linux / NAS 还需把 <code>DOCKER_GID</code> 设为 socket 的宿主机组 ID。
+          Docker socket 只挂在固定版本的 Watchtower sidecar，绝不进入 Polaris App 容器。
+          同时仍须启用账号鉴权并使用 HTTPS；更新 token 请使用独立随机值。
         </p>
       </div>
 
@@ -190,8 +191,8 @@ const lastChecked = computed(() => {
         <div class="how-title">更新是怎么工作的</div>
         <ol v-if="isDocker">
           <li>启动时从官方发布清单检查是否有新的容器镜像</li>
-          <li>点「立即更新容器」后，Polaris 启动一个固定版本的独立更新替身</li>
-          <li>替身拉取并替换当前容器，保留数据卷与配置；服务会短暂断线，通常 1–3 分钟后恢复</li>
+          <li>点「立即更新容器」后，Polaris 只调用隔离 Watchtower 的鉴权更新接口</li>
+          <li>Watchtower 拉取并替换带启用标签的当前容器，保留数据卷与配置；服务通常在 1–3 分钟后恢复</li>
         </ol>
         <ol v-else>
           <li>启动时自动检查 GitHub 上有没有新版本</li>

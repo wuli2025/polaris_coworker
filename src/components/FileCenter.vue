@@ -109,13 +109,7 @@ function pickRemote(s: RemoteSource) {
   view.value = "remote";
 }
 
-function browseRemoteFromManager(id: string) {
-  remoteSources.value = loadRemoteSources();
-  const source = remoteSources.value.find((s) => s.id === id);
-  if (!source) {
-    flashOp("这块互联设备盘已不在清单里，请刷新后重试");
-    return;
-  }
+function browseRemoteFromManager(source: RemoteSource) {
   nasOpen.value = false;
   pickRemote(source);
 }

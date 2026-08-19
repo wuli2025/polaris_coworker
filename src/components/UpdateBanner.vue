@@ -43,7 +43,7 @@ const isDocker = computed(() => updaterRuntime.value === "docker");
 
           <p v-if="updateError" class="upd-desc err">{{ updateError }}</p>
           <p v-else-if="updating" class="upd-desc">
-            {{ isDocker ? dockerMessage || "更新替身已接手，容器即将短暂断线" : "正在下载更新… 完成后自动重启生效" }}
+            {{ isDocker ? dockerMessage || "隔离更新服务已接单，容器即将短暂断线" : "正在下载更新… 完成后自动重启生效" }}
           </p>
           <p v-else-if="isDocker && !dockerUpdaterEnabled" class="upd-desc">
             已有新容器镜像；请前往「更新」页查看安全启用方式

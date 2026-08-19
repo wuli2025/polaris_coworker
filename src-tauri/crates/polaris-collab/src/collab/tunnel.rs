@@ -286,8 +286,7 @@ async fn build_endpoint(seed: [u8; 32]) -> Result<Endpoint, String> {
     //    既拿到单流的速度,又不会因为对端猛开流把内存吃穿。
     // 两个都可用 env 覆盖(单位 KB):内存紧张的 NAS 调小,专线大带宽调大。
     let stream_rwnd = env_kb("POLARIS_QUIC_STREAM_WINDOW_KB", 4 * 1024).clamp(64 * 1024, 64 << 20);
-    let conn_rwnd = env_kb("POLARIS_QUIC_CONN_WINDOW_KB", 32 * 1024)
-        .clamp(stream_rwnd, 512 << 20);
+    let conn_rwnd = env_kb("POLARIS_QUIC_CONN_WINDOW_KB", 32 * 1024).clamp(stream_rwnd, 512 << 20);
     let transport = QuicTransportConfig::builder()
         .keep_alive_interval(KEEP_ALIVE)
         .max_idle_timeout(Some(
@@ -341,7 +340,9 @@ async fn build_endpoint(seed: [u8; 32]) -> Result<Endpoint, String> {
     // mDNS 局域网发现(iroh-mdns-address-lookup):纯内网(n0 DNS/relay 全不可达)时,
     // 同网段设备也能互相发现直连。尽力而为:失败只丢内网发现,不影响正常组网;
     // POLARIS_MDNS=0 可关(某些企业网禁组播,mDNS 只会白噪音)。
-    let mdns_off = std::env::var("POLARIS_MDNS").map(|v| v == "0").unwrap_or(false);
+    let mdns_off = std::env::var("POLARIS_MDNS")
+        .map(|v| v == "0")
+        .unwrap_or(false);
     if !mdns_off {
         match iroh_mdns_address_lookup::MdnsAddressLookup::builder().build(ep.id()) {
             Ok(mdns) => match ep.address_lookup() {
@@ -479,7 +480,12 @@ fn env_kb(key: &str, default_kb: u64) -> u64 {
 
 /// 读一个非零的 u16 环境变量;缺失/写错/为 0 都当没设(不为一个配置错误拒绝启动)。
 fn env_u16(key: &str) -> Option<u16> {
-    std::env::var(key).ok()?.trim().parse::<u16>().ok().filter(|p| *p != 0)
+    std::env::var(key)
+        .ok()?
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|p| *p != 0)
 }
 
 /// 拆 `NodeId` 与可选的已知直连地址:`<nodeid>` 或 `<nodeid>@1.2.3.4:41641[,5.6.7.8:41641]`。
@@ -707,8 +713,7 @@ async fn run_client(t: Arc<ClientTunnel>) {
             let _guard = ConnGuard::new();
             let mut stream = tokio::io::join(recv, send);
             let buf = copy_buf_bytes();
-            let _ =
-                tokio::io::copy_bidirectional_with_sizes(&mut tcp, &mut stream, buf, buf).await;
+            let _ = tokio::io::copy_bidirectional_with_sizes(&mut tcp, &mut stream, buf, buf).await;
         });
     }
 
@@ -872,6 +877,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn host_node_id_matches_http_proof_public_key() {
+        let seed = [11u8; 32];
+        let iroh_node = SecretKey::from_bytes(&seed).public().to_string();
+        let proof_node = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&seed)
+                .verifying_key()
+                .to_bytes(),
+        );
+        assert_eq!(iroh_node, proof_node);
+        assert_eq!(identity::canonical_node_id(&iroh_node).unwrap(), proof_node);
+    }
+
     /// `NodeId@地址` 拆分:无 @ 保持老行为;有 @ 拆出地址;地址写错必须报错
     /// (静默丢弃会退回中继绕路,表现是「能用但慢 30 倍」,查不出来)。
     #[test]
@@ -928,7 +946,11 @@ mod tests {
     /// POLARIS_NET_TEST=1 门控(mDNS 走组播,部分 CI/企业网禁,不进默认闸)。
     #[test]
     fn mdns_lan_only_roundtrip() {
-        if std::env::var("POLARIS_NET_TEST").map(|v| v == "1").unwrap_or(false) == false {
+        if std::env::var("POLARIS_NET_TEST")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            == false
+        {
             eprintln!("[tunnel-test] 未设 POLARIS_NET_TEST=1,跳过 mDNS 纯内网测试");
             return;
         }
@@ -945,10 +967,11 @@ mod tests {
                 .bind()
                 .await
                 .expect("host endpoint");
-            host_ep
-                .address_lookup()
-                .expect("host address_lookup")
-                .add(MdnsAddressLookup::builder().build(host_ep.id()).expect("host mdns"));
+            host_ep.address_lookup().expect("host address_lookup").add(
+                MdnsAddressLookup::builder()
+                    .build(host_ep.id())
+                    .expect("host mdns"),
+            );
             let host_id = host_ep.id();
             tokio::spawn({
                 let ep = host_ep.clone();
@@ -974,10 +997,11 @@ mod tests {
                 .bind()
                 .await
                 .expect("client endpoint");
-            cli_ep
-                .address_lookup()
-                .expect("client address_lookup")
-                .add(MdnsAddressLookup::builder().build(cli_ep.id()).expect("client mdns"));
+            cli_ep.address_lookup().expect("client address_lookup").add(
+                MdnsAddressLookup::builder()
+                    .build(cli_ep.id())
+                    .expect("client mdns"),
+            );
 
             let conn = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
@@ -990,10 +1014,13 @@ mod tests {
             send.write_all(b"lan-only-ping").await.unwrap();
             let _ = send.finish();
             let mut got = vec![0u8; b"lan-only-ping".len()];
-            tokio::time::timeout(std::time::Duration::from_secs(10), recv.read_exact(&mut got))
-                .await
-                .expect("10s 内应收到回显")
-                .unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                recv.read_exact(&mut got),
+            )
+            .await
+            .expect("10s 内应收到回显")
+            .unwrap();
             assert_eq!(&got[..], b"lan-only-ping", "纯内网回显必须一致");
         });
     }

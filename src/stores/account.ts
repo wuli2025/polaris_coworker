@@ -103,13 +103,16 @@ export const useAccountStore = defineStore("account", () => {
    * 其实盘还挂着。这里两件一起做:退设备网(拆盘、断隧道)+ 清本机会话。
    */
   async function logout() {
+    let meshError: unknown;
     if (isTauri) {
       try {
         await invoke("mesh_leave");
-      } catch {
-        /* 没入过网:忽略 */
+      } catch (e) {
+        meshError = e;
       }
     }
+    // 无论设备网清理是否报错，本地协作会话与缓存身份都必须清掉；不能让一个后端错误
+    // 把“退出账号”卡在半路。设备网错误在收尾后再如实提示。
     await collab.logout();
     uid.value = "";
     devices.value = [];
@@ -118,6 +121,10 @@ export const useAccountStore = defineStore("account", () => {
       localStorage.removeItem(EMAIL_KEY);
     } catch {
       /* storage 不可用 */
+    }
+    if (meshError) {
+      const detail = meshError instanceof Error ? meshError.message : String(meshError);
+      throw new Error(`账号已退出，但设备网清理失败：${detail}`);
     }
   }
 

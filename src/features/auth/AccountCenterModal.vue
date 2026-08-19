@@ -38,6 +38,8 @@ const mailErr = ref("");
 const logoutBusy = ref(false);
 
 const mailCfg = reactive({
+  managedHere: true,
+  authorityUrl: "",
   host: "smtp.qq.com",
   port: 465,
   user: "",
@@ -60,6 +62,8 @@ async function loadMailConfig() {
   mailErr.value = "";
   try {
     const cfg = await collabApi.adminEmailConfig();
+    mailCfg.managedHere = cfg.managedHere;
+    mailCfg.authorityUrl = cfg.authorityUrl || "";
     mailCfg.host = cfg.host || "smtp.qq.com";
     mailCfg.port = cfg.port || 465;
     mailCfg.user = cfg.user || "";
@@ -83,6 +87,10 @@ function toggleMail() {
 
 async function saveMailConfig() {
   mailErr.value = "";
+  if (!mailCfg.managedHere) {
+    mailErr.value = "验证码由账号中心发送，请在账号中心的账号管理中配置。";
+    return;
+  }
   if (!mailCfg.user.trim()) {
     mailErr.value = "请填写发信邮箱";
     return;
@@ -132,7 +140,10 @@ async function logout() {
     emit("logged-out");
     emit("close");
   } catch (e) {
+    // account.logout 会先清本地身份，再把设备网的收尾错误上抛；即使这里有警告，账号也已退出。
     toast.error(errMsg(e));
+    emit("logged-out");
+    emit("close");
   } finally {
     logoutBusy.value = false;
   }
@@ -195,61 +206,98 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
                 <b>验证码邮件</b>
                 <small>管理员设置 · 登录验证码与账号找回邮件</small>
               </span>
-              <span v-if="mailLoaded" class="status" :class="{ ok: mailCfg.configured }">
-                {{ mailCfg.configured ? "已配置" : "未配置" }}
+              <span
+                v-if="mailLoaded"
+                class="status"
+                :class="{ ok: mailCfg.managedHere && mailCfg.configured }"
+              >
+                {{
+                  !mailCfg.managedHere
+                    ? "账号中心管理"
+                    : mailCfg.configured
+                      ? "已配置"
+                      : "未配置"
+                }}
               </span>
               <LoaderCircle v-if="mailBusy && !mailLoaded" :size="14" class="spin" />
               <ChevronDown v-else :size="15" class="chevron" />
             </button>
 
             <div v-if="mailOpen" class="mail-form">
-              <p class="mail-note">
-                这里配置的是系统发送验证码所用的邮箱，不会改变你的登录账号。
+              <p v-if="!mailCfg.managedHere" class="mail-note">
+                这台设备的验证码由统一账号中心发送，本机不保存另一套 SMTP 配置。
+                请在账号中心的“账号管理”中设置<span v-if="mailCfg.authorityUrl"
+                  >（{{ mailCfg.authorityUrl }}）</span
+                >。
               </p>
-              <div class="host-row">
+              <template v-else>
+                <p class="mail-note">
+                  这里配置的是系统发送验证码所用的邮箱，不会改变你的登录账号。
+                </p>
+                <div class="host-row">
+                  <label>
+                    <span>SMTP 服务器</span>
+                    <input v-model.trim="mailCfg.host" placeholder="smtp.qq.com" />
+                  </label>
+                  <label class="port-field">
+                    <span>端口</span>
+                    <input
+                      v-model.number="mailCfg.port"
+                      inputmode="numeric"
+                      placeholder="465"
+                    />
+                  </label>
+                </div>
                 <label>
-                  <span>SMTP 服务器</span>
-                  <input v-model.trim="mailCfg.host" placeholder="smtp.qq.com" />
+                  <span>发信邮箱</span>
+                  <input
+                    v-model.trim="mailCfg.user"
+                    type="email"
+                    autocomplete="off"
+                    placeholder="name@example.com"
+                  />
                 </label>
-                <label class="port-field">
-                  <span>端口</span>
-                  <input v-model.number="mailCfg.port" inputmode="numeric" placeholder="465" />
+                <label>
+                  <span>SMTP 授权码</span>
+                  <input
+                    v-model="mailCfg.pass"
+                    type="password"
+                    autocomplete="new-password"
+                    :placeholder="mailCfg.passSet ? '已配置，留空不改' : '邮箱后台生成的 SMTP 授权码'"
+                  />
                 </label>
-              </div>
-              <label>
-                <span>发信邮箱</span>
-                <input v-model.trim="mailCfg.user" type="email" autocomplete="off" placeholder="name@example.com" />
-              </label>
-              <label>
-                <span>SMTP 授权码</span>
-                <input
-                  v-model="mailCfg.pass"
-                  type="password"
-                  autocomplete="new-password"
-                  :placeholder="mailCfg.passSet ? '已配置，留空不改' : '邮箱后台生成的 SMTP 授权码'"
-                />
-              </label>
-              <label>
-                <span>发件人地址（可选）</span>
-                <input v-model.trim="mailCfg.from" type="email" autocomplete="off" placeholder="默认与发信邮箱相同" />
-              </label>
-              <label class="check-row">
-                <input v-model="mailCfg.signupOpen" type="checkbox" />
-                <span>允许邮箱验证码自助登录 / 首次自动开户</span>
-              </label>
-              <label>
-                <span>测试收件邮箱（可选）</span>
-                <input v-model.trim="mailCfg.testTo" type="email" autocomplete="off" placeholder="保存时发送一封测试邮件" />
-              </label>
+                <label>
+                  <span>发件人地址（可选）</span>
+                  <input
+                    v-model.trim="mailCfg.from"
+                    type="email"
+                    autocomplete="off"
+                    placeholder="默认与发信邮箱相同"
+                  />
+                </label>
+                <label class="check-row">
+                  <input v-model="mailCfg.signupOpen" type="checkbox" />
+                  <span>允许邮箱验证码自助登录 / 首次自动开户</span>
+                </label>
+                <label>
+                  <span>测试收件邮箱（可选）</span>
+                  <input
+                    v-model.trim="mailCfg.testTo"
+                    type="email"
+                    autocomplete="off"
+                    placeholder="保存时发送一封测试邮件"
+                  />
+                </label>
+                <div class="mail-actions">
+                  <span class="auth-hint">QQ 邮箱请填写“授权码”，不要填写 QQ 密码。</span>
+                  <button class="save-btn" :disabled="mailBusy" @click="saveMailConfig">
+                    <LoaderCircle v-if="mailBusy" :size="14" class="spin" />
+                    <Check v-else :size="14" />
+                    {{ mailCfg.testTo.trim() ? "保存并测试" : "保存" }}
+                  </button>
+                </div>
+              </template>
               <p v-if="mailErr" class="form-error">{{ mailErr }}</p>
-              <div class="mail-actions">
-                <span class="auth-hint">QQ 邮箱请填写“授权码”，不要填写 QQ 密码。</span>
-                <button class="save-btn" :disabled="mailBusy" @click="saveMailConfig">
-                  <LoaderCircle v-if="mailBusy" :size="14" class="spin" />
-                  <Check v-else :size="14" />
-                  {{ mailCfg.testTo.trim() ? "保存并测试" : "保存" }}
-                </button>
-              </div>
             </div>
           </section>
         </div>

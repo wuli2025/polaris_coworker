@@ -61,7 +61,9 @@ pub fn mode() -> Mode {
         return Mode::Authority;
     }
     match std::env::var("POLARIS_ACCOUNT_AUTHORITY_URL") {
-        Ok(u) if !u.trim().is_empty() => Mode::Delegated(u.trim().trim_end_matches('/').to_string()),
+        Ok(u) if !u.trim().is_empty() => {
+            Mode::Delegated(u.trim().trim_end_matches('/').to_string())
+        }
         _ => Mode::Local,
     }
 }
@@ -158,7 +160,12 @@ pub struct Claims {
 
 /// 签一张身份断言(权威机专用)。格式 `PA1.<b64u(claims)>.<b64u(sig)>`,
 /// 签名覆盖 `PA1.<b64u(claims)>` 的 ASCII 字节(前缀纳入签名,防跨版本重放)。
-pub fn sign_assertion(uid: &str, username: &str, email: &str, display_name: &str) -> Result<String, String> {
+pub fn sign_assertion(
+    uid: &str,
+    username: &str,
+    email: &str,
+    display_name: &str,
+) -> Result<String, String> {
     let sk = signing_key()?;
     let t = now();
     let claims = Claims {
@@ -365,7 +372,9 @@ pub fn upstream_forward(path: &str, body: &serde_json::Value) -> Result<serde_js
         Some((u, _, _)) => u,
         None => ensure_pinned()
             .map_err(|e| {
-                format!("这台主机还没登录过任何账号中心,替你转发不了({e})—— 请先在它上面用邮箱登录一次")
+                format!(
+                    "这台主机还没登录过任何账号中心,替你转发不了({e})—— 请先在它上面用邮箱登录一次"
+                )
             })?
             .0,
     };
@@ -778,8 +787,15 @@ fn login_with_assertion_ex(
     let claims = verify_assertion(assertion)?;
     let dev = device_id.trim();
     if !dev.is_empty() && super::grants::is_revoked(dev) {
-        db::audit(&claims.username, "auth.login.denied", dev, "设备已被本机撤销");
-        return Err("这台设备已被移出本机的信任列表 —— 请在另一台设备的「设备台账」里恢复它".into());
+        db::audit(
+            &claims.username,
+            "auth.login.denied",
+            dev,
+            "设备已被本机撤销",
+        );
+        return Err(
+            "这台设备已被移出本机的信任列表 —— 请在另一台设备的「设备台账」里恢复它".into(),
+        );
     }
     let owner = owner_uid();
     let is_mine = !owner.is_empty() && owner == claims.uid;
@@ -881,9 +897,10 @@ pub fn join_with_ticket(
     Ok((user, token))
 }
 
-/// 用户手里那串东西 → 库里的裸码。**邀请码只有一种**,但用户可能粘到三种形态:
-/// 管理面直接给的 8 位裸码、带主机地址的分享码 `PLRS1-…`、或者手打时按成了小写。
-/// 三者在这里归一,免得「明明复制了却说码不对」。
+/// 用户手里那串东西 → 库里的裸码。**邀请码只有一种**,但用户可能粘到四种形态:
+/// 管理面直接给的 8 位裸码、带主机地址的分享码 `PLRS1-…`、互联页设备码
+/// `PLR1-<裸码>-<NodeId>`、或者手打时按成了小写。都在这里归一，免得
+/// 「明明复制了却说码不对」。
 pub fn normalize_invite(raw: &str) -> String {
     let s = raw.trim();
     if s.is_empty() {
@@ -891,6 +908,14 @@ pub fn normalize_invite(raw: &str) -> String {
     }
     if let Some((code, _)) = super::identity::decode_share_code(s) {
         return code.trim().to_ascii_uppercase();
+    }
+    let lower = s.to_ascii_lowercase();
+    if let Some(body) = lower.strip_prefix("plr1-") {
+        if let Some((code, node_id)) = body.split_once('-') {
+            if !code.trim().is_empty() && !node_id.trim().is_empty() {
+                return code.trim().to_ascii_uppercase();
+            }
+        }
     }
     s.to_ascii_uppercase()
 }
@@ -1061,7 +1086,11 @@ mod tests {
     #[test]
     fn stranger_with_valid_identity_is_not_auto_admitted() {
         let _g = tmp_env();
-        upsert_member(&claims_of("acct_1", "alice", "a@b.com"), Admission::ExistingOnly).unwrap();
+        upsert_member(
+            &claims_of("acct_1", "alice", "a@b.com"),
+            Admission::ExistingOnly,
+        )
+        .unwrap();
 
         let stranger = claims_of("acct_2", "mallory", "m@b.com");
         let e = upsert_member(&stranger, Admission::ExistingOnly).unwrap_err();
@@ -1072,7 +1101,9 @@ mod tests {
         assert_eq!(u.role, "visitor");
         // 进来之后就是成员,日常登录不再需要票据。
         assert_eq!(
-            upsert_member(&stranger, Admission::ExistingOnly).unwrap().role,
+            upsert_member(&stranger, Admission::ExistingOnly)
+                .unwrap()
+                .role,
             "visitor"
         );
     }
@@ -1100,7 +1131,11 @@ mod tests {
     #[test]
     fn owner_uid_cannot_be_hijacked_by_a_later_owner() {
         let _g = tmp_env();
-        upsert_member(&claims_of("acct_me", "wuli", "w@q.com"), Admission::ExistingOnly).unwrap();
+        upsert_member(
+            &claims_of("acct_me", "wuli", "w@q.com"),
+            Admission::ExistingOnly,
+        )
+        .unwrap();
         assert_eq!(owner_uid(), "acct_me");
 
         // 攻击者拿到一张 owner 票据(或本机 owner 手滑给了他 owner 角色)。
@@ -1133,7 +1168,11 @@ mod tests {
     #[test]
     fn selfowned_does_not_leak_to_other_accounts() {
         let _g = tmp_env();
-        upsert_member(&claims_of("acct_me", "wuli", "w@q.com"), Admission::ExistingOnly).unwrap();
+        upsert_member(
+            &claims_of("acct_me", "wuli", "w@q.com"),
+            Admission::ExistingOnly,
+        )
+        .unwrap();
         let stranger = claims_of("acct_other", "mallory", "m@q.com");
         let e = login_with_assertion(&fresh_assertion_for(&stranger), "node-x").unwrap_err();
         assert!(e.contains("设备码"), "陌生账号必须仍被那道码闸挡住,err={e}");
@@ -1176,8 +1215,11 @@ mod tests {
     #[test]
     fn console_login_adopts_by_email_even_on_a_shared_host() {
         let _g = tmp_env();
-        upsert_member(&claims_of("acct_boss", "boss", "boss@q.com"), Admission::ExistingOnly)
-            .unwrap();
+        upsert_member(
+            &claims_of("acct_boss", "boss", "boss@q.com"),
+            Admission::ExistingOnly,
+        )
+        .unwrap();
         assert_eq!(owner_uid(), "acct_boss");
         // 老规矩建的本地成员:邮箱绑了,用户名与账号中心那边不一样。
         super::super::auth::create_user_with_email(
@@ -1191,7 +1233,10 @@ mod tests {
 
         let li = claims_of("acct_li", "li", "li@example.com");
         let u = upsert_member(&li, Admission::LocalConsole).unwrap();
-        assert_eq!(u.role, "collaborator", "认领不改角色 —— 不能借登录自封 owner");
+        assert_eq!(
+            u.role, "collaborator",
+            "认领不改角色 —— 不能借登录自封 owner"
+        );
         assert_eq!(owner_uid(), "acct_boss", "主人也不该被换掉");
         assert_eq!(super::super::auth::list_users().unwrap().len(), 2);
     }
@@ -1201,7 +1246,11 @@ mod tests {
     #[test]
     fn console_login_does_not_hijack_a_claimed_host() {
         let _g = tmp_env();
-        upsert_member(&claims_of("acct_me", "wuli", "w@q.com"), Admission::ExistingOnly).unwrap();
+        upsert_member(
+            &claims_of("acct_me", "wuli", "w@q.com"),
+            Admission::ExistingOnly,
+        )
+        .unwrap();
         assert_eq!(owner_uid(), "acct_me");
 
         let stranger = claims_of("acct_evil", "mallory", "m@q.com");
@@ -1214,10 +1263,17 @@ mod tests {
     #[test]
     fn console_login_refuses_to_steal_a_row_bound_to_another_account() {
         let _g = tmp_env();
-        upsert_member(&claims_of("acct_a", "alice", "a@q.com"), Admission::ExistingOnly).unwrap();
+        upsert_member(
+            &claims_of("acct_a", "alice", "a@q.com"),
+            Admission::ExistingOnly,
+        )
+        .unwrap();
         // 另一个 uid 拿着同一个邮箱来(正常账号中心不可能签出这种断言,但别人的权威可以)。
-        let e = upsert_member(&claims_of("acct_b", "bob", "a@q.com"), Admission::LocalConsole)
-            .unwrap_err();
+        let e = upsert_member(
+            &claims_of("acct_b", "bob", "a@q.com"),
+            Admission::LocalConsole,
+        )
+        .unwrap_err();
         assert!(e.contains("另一个云端账号"), "err={e}");
     }
 
@@ -1236,17 +1292,27 @@ mod tests {
 
         // 拿本机那串设备码来 → 进得去,角色是 visitor。
         let code = super::super::identity::access_code().unwrap();
-        let (u, token) = join_with_ticket(&fresh_assertion_for(&stranger), &code, "他的笔记本", "node-x")
-            .unwrap();
+        let (u, token) = join_with_ticket(
+            &fresh_assertion_for(&stranger),
+            &code,
+            "他的笔记本",
+            "node-x",
+        )
+        .unwrap();
         assert_eq!(u.role, "visitor", "设备码永远不该产出一个 owner");
         assert!(!token.is_empty());
         // 设备码是**常驻**的:同一串码换台设备再来一次照样管用(不像票据用一次就废)。
         let other = claims_of("acct_third", "carol", "c@q.com");
         assert_eq!(
-            join_with_ticket(&fresh_assertion_for(&other), &code.to_ascii_lowercase(), "第三台", "node-y")
-                .unwrap()
-                .0
-                .role,
+            join_with_ticket(
+                &fresh_assertion_for(&other),
+                &code.to_ascii_lowercase(),
+                "第三台",
+                "node-y"
+            )
+            .unwrap()
+            .0
+            .role,
             "visitor"
         );
         // 换一串之后旧码当场作废。
@@ -1255,9 +1321,9 @@ mod tests {
         assert!(join_with_ticket(&fresh_assertion_for(&d), &code, "第四台", "node-z").is_err());
     }
 
-    /// 邀请码只有一种,但用户会粘三种形态。都得认。
+    /// 邀请码只有一种,但用户会粘裸码、分享码或互联页 PLR1 设备码。都得认。
     #[test]
-    fn invite_code_accepts_bare_lowercase_and_share_form() {
+    fn invite_code_accepts_bare_lowercase_share_and_plr1_forms() {
         let _g = tmp_env();
         let share = super::super::identity::encode_share_code(
             "ABCD2345",
@@ -1266,6 +1332,15 @@ mod tests {
         assert_eq!(normalize_invite("ABCD2345"), "ABCD2345");
         assert_eq!(normalize_invite("  abcd2345 "), "ABCD2345");
         assert_eq!(normalize_invite(&share), "ABCD2345");
+        assert_eq!(
+            normalize_invite("PLR1-ABCD2345-0123456789abcdef"),
+            "ABCD2345"
+        );
+        assert_eq!(
+            normalize_invite("plr1-abcd2345-0123456789abcdef"),
+            "ABCD2345"
+        );
+        assert_eq!(normalize_invite("PLR1-ABCD2345"), "PLR1-ABCD2345");
         assert_eq!(normalize_invite("   "), "");
     }
 
@@ -1286,7 +1361,11 @@ mod tests {
     #[test]
     fn ticket_is_burned_exactly_once() {
         let _g = tmp_env();
-        upsert_member(&claims_of("acct_1", "alice", "a@b.com"), Admission::ExistingOnly).unwrap();
+        upsert_member(
+            &claims_of("acct_1", "alice", "a@b.com"),
+            Admission::ExistingOnly,
+        )
+        .unwrap();
         let t = super::super::identity::create_ticket("collaborator", "t").unwrap();
 
         assert_eq!(burn_ticket(&t.code, "bob").unwrap(), "collaborator");
@@ -1354,7 +1433,9 @@ mod tests {
         assert_eq!(ua.role, "owner");
         let token_a = super::super::auth::issue_session(ua.id, "devA").unwrap();
         assert_eq!(
-            super::super::auth::check_session(&token_a).unwrap().username,
+            super::super::auth::check_session(&token_a)
+                .unwrap()
+                .username,
             "wuli"
         );
 
@@ -1372,7 +1453,9 @@ mod tests {
             "主机 A 的会话不该在主机 B 上有效"
         );
         assert_eq!(
-            super::super::auth::check_session(&token_b).unwrap().username,
+            super::super::auth::check_session(&token_b)
+                .unwrap()
+                .username,
             "wuli"
         );
 
