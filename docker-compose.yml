@@ -19,10 +19,6 @@ services:
     build: .
     container_name: polaris-web
     restart: unless-stopped
-    # 只有显式叠加 update overlay 时，隔离的 Watchtower 才读取这个标签；Polaris 本身
-    # 永不拿 docker.sock。label-enable 保证 sidecar 不会顺手更新宿主机上的其他容器。
-    labels:
-      - com.centurylinklabs.watchtower.enable=true
     # 安全默认：只给本机 TLS 反代访问，不把带 owner 能力的明文 HTTP 直接暴露公网。
     # 仅在可信内网且明确接受明文风险时，才在 .env 设置 POLARIS_BIND_IP=0.0.0.0。
     ports:
