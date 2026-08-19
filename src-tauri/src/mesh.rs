@@ -356,11 +356,58 @@ async fn drop_peer(node_id: &str) {
     eprintln!("[mesh] 「{}」已移出设备网,盘符已收回", l.name);
 }
 
+/// 本机成员资格的**自愈**:已经入网了,却进不了自己这台机器的门。
+///
+/// 为什么必须有它:第 ④ 步(拿断言进本机的门)失败时整条登录**不回滚** —— 设备密钥留着,
+/// 于是这台机器从此「已登录」,登录卡再也不出现,那一步就永远没有第二次机会。用户看到的
+/// 正是「云端名册里两台机器都在、参数都看得见,却谁也挂不上谁的盘」。
+///
+/// 便宜:先纯本地读一次成员资格(命中即 no-op,这是绝大多数情况),真的缺才去取一张断言。
+/// 用的是本机自己的设备密钥 + [`login_with_assertion_local`],与用户在这台机器前亲手登录同权。
+fn heal_local_membership(c: &Cfg) {
+    let uid = meta(K_UID);
+    if uid.is_empty() || crate::collab::authority::is_member(&uid) {
+        return;
+    }
+    let node_id = my_node_id();
+    if node_id.is_empty() {
+        return;
+    }
+    let r = fresh_assertion(c)
+        .and_then(|a| crate::collab::authority::login_with_assertion_local(&a, &node_id));
+    match r {
+        Ok((u, _)) => {
+            eprintln!("[mesh] 本机成员资格已补上(角色 {})", u.role);
+            member_warn().lock().unwrap().clear();
+        }
+        // 补不上是有正当理由的(这台机器的主人是别人 → 要邀请码)。如实记下来给 UI 展示,
+        // 但只在原因变了的时候刷屏,别每 60 秒吼一遍同一句话。
+        Err(e) => {
+            let mut w = member_warn().lock().unwrap();
+            if *w != e {
+                eprintln!("[mesh] 本机还不认这个账号:{e}");
+                *w = e;
+            }
+        }
+    }
+}
+
+/// 最近一次「进不了本机的门」的原因。空 = 没问题。UI 拿它提示用户去要一张邀请码。
+fn member_warn() -> &'static Mutex<String> {
+    static W: OnceLock<Mutex<String>> = OnceLock::new();
+    W.get_or_init(|| Mutex::new(String::new()))
+}
+
 /// 一轮对账。返回 (清单条数, 错误) —— 错误只用于日志/状态,不中断循环。
 async fn reconcile_once() -> Result<usize, String> {
     let Some(c) = cfg() else {
         return Err("本机还没入网".into());
     };
+    // 先把「自己这台机器认不认我」修好 —— 它是别的设备能不能连进来的前提。
+    {
+        let c2 = Cfg { url: c.url.clone(), key: c.key.clone() };
+        let _ = tokio::task::spawn_blocking(move || heal_local_membership(&c2)).await;
+    }
     let c2 = Cfg { url: c.url.clone(), key: c.key.clone() };
     let peers = tokio::task::spawn_blocking(move || announce(&c2))
         .await
@@ -490,6 +537,9 @@ pub async fn account_send_code(email: String, url: Option<String>) -> Result<Val
 ///   ③ 拿断言入网,换一把长期设备密钥落库(此后再不需要邮箱验证码);
 ///   ④ 拿断言进**本机**的门,拿到本机会话 —— 同 uid 走 SelfOwned,不要邀请码。
 ///
+/// `inviteCode` 只在第 ④ 步真的被本机挡住时才用得上(这台机器已经有**别人**当主人了)。
+/// 裸码和 `PLRS1-…` 分享码都收 —— 归一在 `authority::normalize_invite`。
+///
 /// 任何一步失败都给人话,并且**已经做成的步骤不回滚**:比如网络在第 ④ 步断了,
 /// ①②③ 的成果(设备密钥)留着,下次开机后台自己就接上了,不必让用户从头再来一遍。
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -498,6 +548,7 @@ pub async fn account_login_code(
     email: String,
     code: String,
     url: Option<String>,
+    inviteCode: Option<String>,
 ) -> Result<Value, String> {
     let url = norm_url(&authority_of(url));
     // NodeId 由本机密钥推导,不需要隧道在跑 —— 老版本那句「请先设为主机」其实是误导:
@@ -507,6 +558,7 @@ pub async fn account_login_code(
     if node_id.is_empty() {
         return Err("本机 P2P 身份生成失败(数据目录写不进去?)—— 换个数据目录再试".into());
     }
+    let invite = inviteCode.unwrap_or_default();
     let out = tokio::task::spawn_blocking({
         let url = url.clone();
         let node_id = node_id.clone();
@@ -530,7 +582,7 @@ pub async fn account_login_code(
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut out = enroll_with_assertion(&url, &node_id, &assertion)?;
+            let mut out = enroll_with_assertion(&url, &node_id, &assertion, &invite, true)?;
             out["email"] = json!(email_back);
             Ok(out)
         }
@@ -543,7 +595,17 @@ pub async fn account_login_code(
 
 /// 已有一张断言时的入网 + 进本机门。`account_login_code` 与 `mesh_join` 共用这一段,
 /// 免得两条路各写一份、慢慢漂成两个语义。**阻塞**,调用方须放 spawn_blocking。
-fn enroll_with_assertion(url: &str, node_id: &str, assertion: &str) -> Result<Value, String> {
+///
+/// `console`=用户就坐在这台机器前亲手登的(桌面 App)。它决定第 ④ 步走哪一档准入:
+/// 控制台可以认领这台机器上原有的那个账号(见 `Admission::LocalConsole`),远程递进来的
+/// 断言不行。`invite` 是最后的兜底:这台机器已经有**别人**当主人时才用得上。
+fn enroll_with_assertion(
+    url: &str,
+    node_id: &str,
+    assertion: &str,
+    invite: &str,
+    console: bool,
+) -> Result<Value, String> {
     // ③ 拿断言入网,换一把长期设备密钥。
     let resp = agent()
         .post(&format!("{url}/api/mesh/enroll"))
@@ -570,10 +632,27 @@ fn enroll_with_assertion(url: &str, node_id: &str, assertion: &str) -> Result<Va
     //    桌面是双击启动的,POLARIS_ACCOUNT_AUTHORITY_URL 这种环境变量在这儿不存在,
     //    所以用户亲手登录的这一刻,就是钉住它唯一合法的时机。
     let pin = crate::collab::authority::pin_explicit(url);
-    // ④ 拿断言进本机的门。同 uid 走 SelfOwned —— 不要邀请码,这就是「不再登两次」。
-    //    本机已被别人占着(同名本地账号等)时会失败,那时只是「别人进不来」,不影响连出去。
-    let member = crate::collab::authority::login_with_assertion(assertion, node_id)
-        .map(|(u, t)| (u.role, t));
+    // ④ 拿断言进本机的门。同 uid 走 SelfOwned,本机控制台还能认领这台机器上原有的那个账号
+    //    —— 这两档合起来就是「不再登两次」。都不成且用户给了邀请码,再拿票据入伙。
+    //    全都不成时只是「别人进不来」,不影响连出去,所以这里不让整条登录失败。
+    let member = {
+        let first = if console {
+            crate::collab::authority::login_with_assertion_local(assertion, node_id)
+        } else {
+            crate::collab::authority::login_with_assertion(assertion, node_id)
+        };
+        match first {
+            Ok(v) => Ok(v),
+            Err(e) if crate::collab::authority::normalize_invite(invite).is_empty() => Err(e),
+            Err(_) => crate::collab::authority::join_with_ticket(
+                assertion,
+                invite,
+                &my_name(),
+                node_id,
+            ),
+        }
+    }
+    .map(|(u, t)| (u.role, t));
     Ok(json!({
         "key": key,
         "uid": uid,
@@ -619,16 +698,21 @@ fn authority_of(url: Option<String>) -> String {
 /// 桌面 UI 走的是 [`account_login_code`],不经过这里。
 #[cfg_attr(feature = "desktop", tauri::command)]
 #[allow(non_snake_case)]
-pub async fn mesh_join(assertion: String, url: Option<String>) -> Result<Value, String> {
+pub async fn mesh_join(
+    assertion: String,
+    url: Option<String>,
+    inviteCode: Option<String>,
+) -> Result<Value, String> {
     let node_id = my_node_id();
     if node_id.is_empty() {
         return Err("本机 P2P 身份生成失败(数据目录写不进去?)—— 换个数据目录再试".into());
     }
     let url = norm_url(&authority_of(url));
+    let invite = inviteCode.unwrap_or_default();
     let out = tokio::task::spawn_blocking({
         let url = url.clone();
         let node_id = node_id.clone();
-        move || enroll_with_assertion(&url, &node_id, &assertion)
+        move || enroll_with_assertion(&url, &node_id, &assertion, &invite, false)
     })
     .await
     .map_err(|e| format!("入网任务失败:{e}"))??;
@@ -731,13 +815,18 @@ pub async fn mesh_devices() -> Result<Value, String> {
         })
         .collect();
 
+    let uid = meta(K_UID);
     Ok(json!({
         "enrolled": cfg().is_some(),
         "url": meta(K_URL),
-        "uid": meta(K_UID),
+        "uid": uid,
         "nodeId": me,
         "name": my_name(),
         "cloudError": cloud_msg,
+        // 「这台机器认不认我」。false 时别的设备一律连不进来(它们进的就是这道门),
+        // UI 据此把话说明白 + 给出邀请码那条出路,而不是让用户对着一片"看得见连不上"猜。
+        "localMember": crate::collab::authority::is_member(&uid),
+        "localMemberWarn": member_warn().lock().unwrap().clone(),
         "devices": devices,
     }))
 }
@@ -772,11 +861,14 @@ pub async fn peer_grant_set(
     Ok(json!({ "ok": true, "effectiveFs": g.effective_fs(), "autoMount": g.auto_mount }))
 }
 
-/// 「信任这台设备」:冷静期清零,全权立即生效(顺带把误撤销的恢复回来)。
+/// 「信任这台设备」:冷静期清零 **+ 升到全权**(顺带把误撤销的恢复回来)。
+///
+/// 升档这一半是设备码那条路带来的:靠码进来的设备没有冷静期,它的限制就是
+/// `fs=ro / exec=none` 这两个档位本身。只清冷静期的话,用户点完按钮什么都不会变。
 #[cfg_attr(feature = "desktop", tauri::command)]
 #[allow(non_snake_case)]
 pub async fn peer_trust(nodeId: String) -> Result<Value, String> {
-    let g = crate::collab::grants::trust_now(&nodeId, "本机")?;
+    let g = crate::collab::grants::trust_fully(&nodeId, "本机")?;
     // 冷静期里那块盘是钉死只读挂上的,清零后必须重挂才真的可写。
     drop_peer(&nodeId).await;
     let _ = mesh_sync().await;
@@ -854,6 +946,159 @@ pub async fn mesh_kick(nodeId: String) -> Result<Value, String> {
 pub async fn mesh_sync() -> Result<Value, String> {
     let n = reconcile_once().await?;
     Ok(json!({ "peers": n }))
+}
+
+// ────────────────────────── 设备码:一码互联 ──────────────────────────
+//
+// 「主机」这个概念到此为止。每台机器都有一串自己的码,都能被连、也都能去连别人 ——
+// 界面上不再有「设为主机」「owner 令牌」「邀请码」「入伙」这些只有我们自己懂的词。
+//
+// 码的形态:`PLR1-<访问码>-<NodeId>`。
+// 为什么 NodeId 得在码里而不是像 UU远程 那样只给一串短数字:UU 有一台云端目录服务器
+// 替它把「ID → 现在在哪」查出来,我们的云端账号中心只认**同一个账号**的设备,
+// 别人的账号在上面查不到你。要做成 12 位短码,得在云机上再加一张公开的
+// 「码 → NodeId」目录表并重新部署它 —— 那是另一步,得你点头。现在这串码的好处是
+// **不依赖云端**:两台机器都断了公网、只在一个局域网里,照样粘码就连上。
+
+/// 本机设备码。用户复制的就是这一串。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn device_code() -> Result<Value, String> {
+    let node_id = my_node_id();
+    let code = tokio::task::spawn_blocking(crate::collab::identity::access_code)
+        .await
+        .map_err(|e| format!("取设备码失败:{e}"))??;
+    Ok(json!({
+        "code": code,
+        "nodeId": node_id,
+        "name": my_name(),
+        // NodeId 还没就绪(隧道没起来)时给半成品:UI 照实说「稍候」,别显示一串连不上的码。
+        "share": if node_id.is_empty() { String::new() } else { format!("PLR1-{code}-{node_id}") },
+        "ready": !node_id.is_empty(),
+    }))
+}
+
+/// 换一串码:旧码当场失效,靠旧码连进来的设备会话一并作废。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn device_code_rotate() -> Result<Value, String> {
+    let code = tokio::task::spawn_blocking(|| crate::collab::identity::rotate_access_code("本机"))
+        .await
+        .map_err(|e| format!("换码任务失败:{e}"))??;
+    let node_id = my_node_id();
+    Ok(json!({
+        "code": code,
+        "share": if node_id.is_empty() { String::new() } else { format!("PLR1-{code}-{node_id}") },
+    }))
+}
+
+/// 解析一串设备码 → (访问码, NodeId)。只认 `PLR1-<code>-<nodeId>`。
+fn parse_device_code(s: &str) -> Result<(String, String), String> {
+    let t = s.trim();
+    let body = t
+        .strip_prefix("PLR1-")
+        .or_else(|| t.strip_prefix("plr1-"))
+        .ok_or("这不是设备码 —— 它长这样:PLR1-XXXXXXXX-<一串字母数字>")?;
+    let (code, node) = body
+        .split_once('-')
+        .ok_or("设备码不完整,少了后半段 —— 让对方整串重新复制一次")?;
+    if code.trim().is_empty() || node.trim().is_empty() {
+        return Err("设备码不完整 —— 让对方整串重新复制一次".into());
+    }
+    Ok((code.trim().to_ascii_uppercase(), node.trim().to_string()))
+}
+
+/// **连对方**:粘一串码就完事 —— 起隧道 → 敲门 → 挂盘。
+///
+/// 与设备网那条路(同账号自动连)并行不悖:这条用于**别人的**机器,或者
+/// 自己的机器但云端暂时联系不上。两条路最后落到同一个地方:一行设备契约 + 一块盘。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn connect_by_code(code: String) -> Result<Value, String> {
+    let (access, node_id) = parse_device_code(&code)?;
+    if node_id == my_node_id() {
+        return Err("这是你自己这台机器的码 —— 要连的是**对方**那串".into());
+    }
+    let port = port_for(&node_id);
+    links().lock().unwrap().insert(
+        node_id.clone(),
+        Link { name: "对方设备".into(), port, token: None, err: String::new() },
+    );
+
+    // ① 隧道(幂等)。
+    #[cfg(feature = "collab-net")]
+    {
+        let nid = node_id.clone();
+        let r = tokio::task::spawn_blocking(move || {
+            crate::collab::tunnel::connect_client(&nid, port)
+        })
+        .await;
+        if let Ok(Err(e)) = r {
+            drop_peer(&node_id).await;
+            return Err(format!("连不上对方(隧道建立失败):{e}"));
+        }
+    }
+    #[cfg(not(feature = "collab-net"))]
+    {
+        drop_peer(&node_id).await;
+        return Err("此构建没有 P2P 隧道(collab-net),连不了".into());
+    }
+
+    // ② 敲门:对方验码 → 回一张会话 token + 它给这台设备的档位。
+    let me = my_node_id();
+    let my_name_s = my_name();
+    let got = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let resp = agent()
+            .post(&format!("http://127.0.0.1:{port}/api/collab/connect"))
+            .send_json(json!({
+                "code": access, "nodeId": me, "name": my_name_s, "os": my_os(), "ver": my_ver(),
+            }))
+            .map_err(cloud_err)?;
+        resp.into_json::<Value>()
+            .map_err(|e| format!("对方返回的不是 JSON:{e}"))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("敲门任务失败:{e}")));
+    let v = match got {
+        Ok(v) => v,
+        Err(e) => {
+            drop_peer(&node_id).await;
+            return Err(e);
+        }
+    };
+    let token = v["token"].as_str().unwrap_or_default().to_string();
+    if token.is_empty() {
+        drop_peer(&node_id).await;
+        return Err("对方没给会话令牌 —— 它可能是个还没升级的老版本".into());
+    }
+
+    // ③ 挂盘。对方给的是只读就挂只读 —— 挂成读写再让用户撞一鼻子灰是最糟的选择。
+    let ro = v["fsAccess"].as_str().unwrap_or("ro") != crate::collab::grants::FS_RW;
+    let name = v["peerName"].as_str().filter(|s| !s.is_empty()).unwrap_or("对方设备").to_string();
+    let mounted = crate::fsmount::fs_mount(
+        source_id(&node_id),
+        name.clone(),
+        node_id.clone(),
+        port,
+        token.clone(),
+        Some(ro),
+        None,
+    )
+    .await;
+    {
+        let mut map = links().lock().unwrap();
+        if let Some(l) = map.get_mut(&node_id) {
+            l.name = name.clone();
+            l.token = Some(token);
+            l.err = mounted.as_ref().err().cloned().unwrap_or_default();
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "nodeId": node_id,
+        "name": name,
+        "readOnly": ro,
+        "note": v["note"],
+        "drive": mounted.as_ref().ok().and_then(|x| x["drive"].as_str()).unwrap_or(""),
+        "mountError": mounted.err().unwrap_or_default(),
+    }))
 }
 
 /// 设备网现状:入网了吗、名册上有谁、各自连上了没、挂成了哪块盘。

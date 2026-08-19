@@ -77,6 +77,78 @@ pub fn host_fingerprint() -> Result<String, String> {
     Ok(digest[..8].iter().map(|b| format!("{b:02x}")).collect())
 }
 
+// ───────────────────────── 设备码(一码) ─────────────────────────
+//
+// 取代此前的三串码:PLRK1 连接码(裸奔一把 owner 令牌)、PLRS1 分享码、8 位一次性票据。
+// 三者的区别全是**我方**的内部概念(谁是主机、谁被邀请、票据烧没烧),对用户毫无意义 ——
+// 他心里只有一件事:「把我的码给你,你就能连我」。所以合成一串,而且两边完全对称:
+// 每台机器都有自己的码,都能被连,也都能去连别人。「主机」这个词从此不出现在界面上。
+//
+// 与老连接码的关键差别:码里带的是**访问码**,不是会话令牌。
+//  · 老 PLRK1:码 = owner 令牌本身 → 谁拿到谁就是 owner,而且改不了(令牌换了整串码作废,
+//    但没有任何 UI 能换它)。
+//  · 新设备码:码只是敲门用的口令,由**被连的那台机器**验;验过之后建的是一行
+//    `peer_grants` 契约(默认只读),权限由机主在台账上说了算,随时可降可撤。
+//    换一串码 = 旧码当场失效 + 靠旧码进来的会话全废。
+
+/// 本机访问码在 meta 里的键。
+const ACCESS_CODE_KEY: &str = "device_access_code";
+
+/// 取本机访问码(没有就现生成一串并落库)。
+///
+/// 这是「一台一串常驻码」的存储层:它跨重启、跨换网、跨换 IP 都不变,
+/// 用户复制一次发给谁都行,直到他自己点「换一串」。
+pub fn access_code() -> Result<String, String> {
+    if let Some(c) = db::meta_get(ACCESS_CODE_KEY) {
+        let c = c.trim().to_string();
+        if !c.is_empty() {
+            return Ok(c);
+        }
+    }
+    let c = random_code();
+    db::meta_set(ACCESS_CODE_KEY, &c)?;
+    db::audit("system", "devicecode.create", "", "");
+    Ok(c)
+}
+
+/// 换一串码。旧码当场失效,并把**靠旧码进来的**设备的会话全部作废 ——
+/// 「换一串」在用户心里就是「把之前发出去的码全部收回」,只换字符串而不断线是骗人。
+///
+/// 只清 `granted_by='code'` 那些:同账号自己的设备走的是邮箱登录那条路,与码无关,
+/// 不该被换码波及(否则用户换个码,自己的 NAS 盘就掉了)。
+pub fn rotate_access_code(actor: &str) -> Result<String, String> {
+    let c = random_code();
+    let conn = open_db()?;
+    // 靠码进来的设备:会话按 device_id(= 对端 NodeId)挂在 sessions 上。
+    conn.execute(
+        "DELETE FROM sessions WHERE device_id IN \
+         (SELECT node_id FROM peer_grants WHERE granted_by=?1)",
+        params![super::grants::BY_CODE],
+    )
+    .map_err(|e| format!("清理旧会话失败: {e}"))?;
+    drop(conn);
+    db::meta_set(ACCESS_CODE_KEY, &c)?;
+    auth::bump_session_revocation();
+    db::audit(actor, "devicecode.rotate", "", "旧码失效,靠旧码进来的会话已断");
+    Ok(c)
+}
+
+/// 验一串码。**常量时间**比较:码只有 8 位,逐字节提前返回会把它降成可爆破的长度探测。
+pub fn check_access_code(input: &str) -> Result<bool, String> {
+    let want = access_code()?;
+    let a = want.as_bytes();
+    let b = input.trim().to_ascii_uppercase();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return Ok(false);
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    Ok(diff == 0)
+}
+
 // ───────────────────────── 邀请票据 ─────────────────────────
 
 #[derive(serde::Serialize)]
@@ -625,6 +697,47 @@ mod tests {
         assert!(redeem_ticket_existing(&t2.code, &bob, "Bob 机", "node-alice-2").is_err());
         std::env::remove_var("POLARIS_COLLAB_DB");
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 设备码:一台一串、常驻不变、大小写不敏感。
+    #[test]
+    fn device_code_is_stable_and_case_insensitive() {
+        let (_guard, _path) = with_tmp_db();
+        let a = access_code().unwrap();
+        assert_eq!(a.chars().count(), 8);
+        assert_eq!(access_code().unwrap(), a, "常驻码不能每次调用都变一串");
+        assert!(check_access_code(&a).unwrap());
+        assert!(check_access_code(&a.to_ascii_lowercase()).unwrap(), "手打小写也得认");
+        assert!(check_access_code(&format!("  {a}  ")).unwrap(), "粘贴带空格也得认");
+        assert!(!check_access_code("ZZZZZZZZ").unwrap());
+        assert!(!check_access_code("").unwrap());
+        assert!(!check_access_code(&a[..7]).unwrap(), "长度不对必须拒");
+    }
+
+    /// 「换一串」= 旧码当场失效 **且** 靠旧码进来的会话断掉。
+    /// 只换字符串而不断线是骗人 —— 用户点它的本意就是「把发出去的码全收回」。
+    #[test]
+    fn rotate_kills_the_old_code_and_its_sessions() {
+        let (_guard, _path) = with_tmp_db();
+        let old = access_code().unwrap();
+        // 一台靠码进来的设备 + 它的会话。
+        super::super::grants::grant_by_code("node-guest", "访客机").unwrap();
+        let guest = auth::peer_guest_user().unwrap();
+        let tok = auth::issue_session(guest.id, "node-guest").unwrap();
+        assert!(auth::check_session(&tok).is_ok());
+        // 同账号自己的设备(走邮箱登录那条路)不该被换码波及。
+        super::super::grants::auto_grant_self("node-mine", "acct_1", "我的 NAS", true).unwrap();
+        let mine = auth::issue_session(guest.id, "node-mine").unwrap();
+
+        let new = rotate_access_code("本机").unwrap();
+        assert_ne!(new, old);
+        assert!(!check_access_code(&old).unwrap(), "旧码必须当场失效");
+        assert!(check_access_code(&new).unwrap());
+        assert!(auth::check_session(&tok).is_err(), "靠旧码进来的会话必须断");
+        assert!(
+            auth::check_session(&mine).is_ok(),
+            "自己的设备走的是另一条路,换码不该把它的盘弄掉线"
+        );
     }
 
     #[test]

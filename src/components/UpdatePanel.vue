@@ -3,13 +3,13 @@
 // 与中央对话框(UpdateBanner)共享 useUpdater 的状态——启动自动检测，
 // 这里则给用户一个随时主动检查的入口。
 import { onMounted, computed } from "vue";
-import { getVersion } from "@tauri-apps/api/app";
 import {
   RefreshCw,
   Sparkles,
   CheckCircle2,
-  LoaderCircle,
   Rocket,
+  Container,
+  ShieldAlert,
 } from "@lucide/vue";
 import OrbitSpinner from "./icons/OrbitSpinner.vue";
 import {
@@ -25,17 +25,20 @@ import {
   lastCheckedAt,
   manualCheck,
   applyUpdate,
+  loadUpdaterVersion,
+  updaterRuntime,
+  dockerUpdaterEnabled,
+  dockerSocketPresent,
+  dockerUpdateScriptPresent,
+  dockerAuthConfigured,
+  dockerMessage,
 } from "../composables/useUpdater";
 
-onMounted(async () => {
-  if (!currentVersion.value) {
-    try {
-      currentVersion.value = await getVersion();
-    } catch {
-      /* 浏览器预览态拿不到版本，忽略 */
-    }
-  }
+onMounted(() => {
+  void loadUpdaterVersion();
 });
+
+const isDocker = computed(() => updaterRuntime.value === "docker");
 
 const lastChecked = computed(() => {
   if (!lastCheckedAt.value) return "";
@@ -59,6 +62,7 @@ const lastChecked = computed(() => {
         <div class="ver-meta">
           <div class="ver-name">北极星 · Polaris</div>
           <div class="ver-num">当前版本 v{{ currentVersion || "—" }}</div>
+          <span v-if="isDocker" class="runtime-badge"><Container :size="11" /> Docker 远程版</span>
         </div>
         <button
           class="ck-btn"
@@ -85,7 +89,18 @@ const lastChecked = computed(() => {
                 发现新版本 <b>v{{ updateVersion }}</b>
               </div>
               <div class="found-hint">
-                {{ updating ? "正在下载，完成后自动重启生效" : "点「立即更新」后台下载安装，自动重启即用" }}
+                <template v-if="isDocker">
+                  {{
+                    updating
+                      ? dockerMessage || "更新替身已接手，容器即将短暂断线"
+                      : dockerUpdaterEnabled
+                        ? "点「立即更新」后由独立替身拉取镜像并安全替换当前容器"
+                        : "已检测到新版；启用下方安全更新配置后可在这里一键更新"
+                  }}
+                </template>
+                <template v-else>
+                  {{ updating ? "正在下载，完成后自动重启生效" : "点「立即更新」后台下载安装，自动重启即用" }}
+                </template>
               </div>
             </div>
           </div>
@@ -96,13 +111,20 @@ const lastChecked = computed(() => {
             <div class="bar-fill" :style="{ width: updateProgress + '%' }"></div>
           </div>
 
-          <button class="go-btn" :disabled="updating" @click="applyUpdate">
+          <button
+            class="go-btn"
+            :disabled="updating || (isDocker && !dockerUpdaterEnabled)"
+            @click="applyUpdate()"
+          >
             <OrbitSpinner
               v-if="updating"
               :size="15"
             />
             <Rocket v-else :size="15" :stroke-width="1.9" />
-            <span>{{ updating ? `更新中 ${updateProgress}%` : "立即更新" }}</span>
+            <span v-if="isDocker">
+              {{ updating ? "正在交接容器更新…" : dockerUpdaterEnabled ? "立即更新容器" : "需先启用安全更新" }}
+            </span>
+            <span v-else>{{ updating ? `更新中 ${updateProgress}%` : "立即更新" }}</span>
           </button>
         </div>
 
@@ -126,15 +148,52 @@ const lastChecked = computed(() => {
         <div v-else-if="updateError" class="err">{{ updateError }}</div>
 
         <!-- 空闲 -->
-        <div v-else class="idle">Polaris 启动时会自动检查更新</div>
+        <div v-else class="idle">
+          {{ isDocker ? "容器启动后会自动检查官方镜像版本" : "Polaris 启动时会自动检查更新" }}
+        </div>
 
         <div v-if="lastChecked" class="last">上次检查 {{ lastChecked }}</div>
+      </div>
+
+      <!-- Docker 一键更新权限是显式 opt-in；检查版本本身不需要 socket。 -->
+      <div v-if="isDocker && !dockerUpdaterEnabled" class="docker-setup">
+        <div class="docker-setup-head">
+          <ShieldAlert :size="18" :stroke-width="1.8" />
+          <div>
+            <div class="docker-setup-title">一键更新尚未启用</div>
+            <div class="docker-setup-sub">
+              <template v-if="!dockerAuthConfigured">
+                为避免把宿主机级更新能力暴露给匿名访问，请先设置
+                <code>POLARIS_AUTH_TOKEN</code> 或 <code>POLARIS_REQUIRE_LOGIN=1</code>，然后重建容器。
+              </template>
+              <template v-else-if="!dockerUpdateScriptPresent">
+                当前是旧版或自建镜像，镜像内没有更新脚本；请先在宿主机手动更新一次。
+              </template>
+              <template v-else-if="!dockerSocketPresent">
+                当前容器未挂载 Docker socket。版本检查仍可用，但容器不能替换自己。
+              </template>
+              <template v-else>
+                容器更新能力已被环境变量显式关闭；移除 <code>POLARIS_DOCKER_SOCKET=0</code> 后重建容器。
+              </template>
+            </div>
+          </div>
+        </div>
+        <code class="docker-command">docker compose -f docker-compose.yml -f docker-compose.update.yml up -d</code>
+        <p class="docker-warning">
+          Docker socket 等同宿主机 root 权限。只在启用了账号鉴权与 HTTPS 的可信部署中使用；
+          Linux / NAS 还需把 <code>DOCKER_GID</code> 设为 socket 的宿主机组 ID。
+        </p>
       </div>
 
       <!-- 工作原理 -->
       <div class="how">
         <div class="how-title">更新是怎么工作的</div>
-        <ol>
+        <ol v-if="isDocker">
+          <li>启动时从官方发布清单检查是否有新的容器镜像</li>
+          <li>点「立即更新容器」后，Polaris 启动一个固定版本的独立更新替身</li>
+          <li>替身拉取并替换当前容器，保留数据卷与配置；服务会短暂断线，通常 1–3 分钟后恢复</li>
+        </ol>
+        <ol v-else>
           <li>启动时自动检查 GitHub 上有没有新版本</li>
           <li>发现新版会在屏幕中央弹一个轻提示，点「立即更新」即可</li>
           <li>后台静默下载并安装，<b>自动重启</b>到新版 —— 无需手动重装</li>
@@ -205,6 +264,20 @@ const lastChecked = computed(() => {
   margin-top: 2px;
   font-size: 12px;
   color: var(--muted);
+}
+.runtime-badge {
+  width: fit-content;
+  margin-top: 6px;
+  padding: 3px 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--border));
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 10.5px;
+  font-weight: 600;
 }
 .ck-btn {
   display: inline-flex;
@@ -335,6 +408,59 @@ const lastChecked = computed(() => {
   margin-top: 8px;
   font-size: 11px;
   color: var(--dim);
+}
+
+.docker-setup {
+  padding: 15px 17px;
+  border: 1px solid color-mix(in srgb, var(--vermilion) 24%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--vermilion) 6%, var(--panel));
+}
+.docker-setup-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--vermilion);
+}
+.docker-setup-head > svg {
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+.docker-setup-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.docker-setup-sub {
+  margin-top: 3px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.docker-setup code {
+  font-family: var(--mono);
+}
+.docker-command {
+  display: block;
+  margin-top: 12px;
+  padding: 9px 11px;
+  overflow-x: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.docker-warning {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.65;
+}
+.docker-warning code,
+.docker-setup-sub code {
+  color: var(--text-2);
 }
 
 .how {

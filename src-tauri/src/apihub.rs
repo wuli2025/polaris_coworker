@@ -411,6 +411,15 @@ mod origin_gate_tests {
         assert_eq!(ctx.role, "owner");
     }
 
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn docker_一键更新在开放模式下保持关闭() {
+        assert!(!docker_update_auth_configured_with(None, false));
+        assert!(!docker_update_auth_configured_with(Some("  "), false));
+        assert!(docker_update_auth_configured_with(Some("machine-secret"), false));
+        assert!(docker_update_auth_configured_with(None, true));
+    }
+
     #[test]
     fn 落盘的老口令不再生效() {
         // 网页向导设过的口令曾经写在 collab.db,忘了就没有找回入口 —— 现在 effective_token
@@ -439,16 +448,18 @@ pub(crate) fn resolve_app_auth_token(
                 user_id: 0,
                 username: "admin".into(),
                 role: "owner".into(),
+                device_id: String::new(),
             });
         }
     }
     // 带了有效会话 token → 用真实身份(多用户下据此过角色闸)。
     if let Some(t) = token {
-        if let Ok(u) = crate::collab::auth::check_session(t) {
+        if let Ok((u, device_id)) = crate::collab::auth::check_session_with_device(t) {
             return Some(AuthCtx {
                 user_id: u.id,
                 username: u.username,
                 role: u.role,
+                device_id,
             });
         }
     }
@@ -462,6 +473,7 @@ pub(crate) fn resolve_app_auth_token(
             user_id: 0,
             username: "local".into(),
             role: "owner".into(),
+            device_id: String::new(),
         });
     }
     // 是否强制登录:设了全局口令,或显式打开 POLARIS_REQUIRE_LOGIN。
@@ -474,6 +486,7 @@ pub(crate) fn resolve_app_auth_token(
         user_id: 0,
         username: "local".into(),
         role: "owner".into(),
+        device_id: String::new(),
     })
 }
 
@@ -669,7 +682,21 @@ async fn exec_ep(
         )
             .into_response();
     };
-    if role_rank(&ctx.role) < 3 {
+    // 闸 3:**按设备**。会话上记着这条请求来自哪台设备,台账上那一排「远程执行:
+    // 禁止/每次问/允许」在这里才真的生效。设备码进来的对端默认禁止 —— 拿到码不等于
+    // 拿到一个 shell,那要机主在台账上单独点头。本机自己/全局口令不受此闸(device_id 为空)。
+    let dev = crate::collab::http::bearer_of(&headers)
+        .and_then(|t| crate::collab::auth::check_session_with_device(&t).ok())
+        .map(|(_, d)| d)
+        .unwrap_or_default();
+    if let Err(e) = crate::collab::grants::exec_gate(&dev) {
+        crate::collab::db::audit(&ctx.username, "exec.denied", &req.cmd, &e);
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": e }))).into_response();
+    }
+    // 角色闸只对**没有设备契约**的调用方生效:设备码进来的是 visitor,它的权限
+    // 完全由上面那道契约闸说了算,再压一道 owner 角色等于把这条路彻底堵死。
+    let by_grant = matches!(crate::collab::grants::get(&dev), Ok(Some(g)) if !g.revoked);
+    if !by_grant && role_rank(&ctx.role) < 3 {
         crate::collab::db::audit(&ctx.username, "exec.denied", &req.cmd, "角色不足");
         return (
             StatusCode::FORBIDDEN,
@@ -1104,21 +1131,42 @@ fn req_vec_str(a: &Args, k: &str) -> Result<Vec<String>, String> {
 #[cfg(not(feature = "desktop"))]
 const UPDATE_SCRIPT: &str = "/usr/local/bin/update.sh";
 
-/// 「网页上能不能一键更新」= docker.sock 挂了 + 更新脚本在镜像里。返回
+/// Docker socket 在容器内等同宿主机 root。只有部署者已经显式打开机器口令或
+/// 团队账号登录时，才允许把“一键更新”暴露给 Web；开放模式即使误挂 socket 也 fail-closed。
+#[cfg(not(feature = "desktop"))]
+fn docker_update_auth_configured_with(token: Option<&str>, require_login: bool) -> bool {
+    token.is_some_and(|v| !v.trim().is_empty()) || require_login
+}
+
+#[cfg(not(feature = "desktop"))]
+fn docker_update_auth_configured() -> bool {
+    let token = std::env::var("POLARIS_AUTH_TOKEN").ok();
+    docker_update_auth_configured_with(token.as_deref(), require_login_env())
+}
+
+/// 「网页上能不能一键更新」= 已启用鉴权 + docker.sock 挂了 + 更新脚本在镜像里。返回
 /// `(enabled, socket_present, script_present)`。
 ///
 /// ★ 老版本还额外要求显式 `POLARIS_DOCKER_SOCKET=1` 才放行。群晖 Container Manager
-///   图形界面装的容器根本没人去加这个环境变量 → 「立即更新」按钮恒灰、点不动，
-///   这是「更新点不了/拉不动」的根因之一。现在这个 env 只保留**显式关闭**语义
-///   （`=0` / `=false` 才关），有 sock 就认。
+///   图形界面装的容器根本没人去加这个环境变量 → 「立即更新」按钮恒灰、点不动。
+///   现在这个 env 只保留**显式关闭**语义（`=0` / `=false` 才关）；但鉴权仍是硬条件，
+///   开放模式误挂 socket 也不能获得宿主机级更新入口。
 #[cfg(not(feature = "desktop"))]
 pub(crate) fn docker_updater_bits() -> (bool, bool, bool) {
-    let socket = std::path::Path::new("/var/run/docker.sock").exists();
+    let socket_path = std::env::var("POLARIS_DOCKER_SOCKET_PATH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "/var/run/docker.sock".to_string());
+    let socket = std::path::Path::new(&socket_path).exists();
     let script = std::path::Path::new(UPDATE_SCRIPT).exists();
     let disabled = std::env::var("POLARIS_DOCKER_SOCKET")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(false);
-    (socket && script && !disabled, socket, script)
+    (
+        socket && script && !disabled && docker_update_auth_configured(),
+        socket,
+        script,
+    )
 }
 
 /// 跑 `update.sh --check`（只查不动），把它吐的 KEY=VALUE 解析成 JSON。
@@ -1783,7 +1831,10 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
                 "updater_enabled": enabled,
                 "socket_present": socket,
                 "update_script": script,
+                "auth_configured": docker_update_auth_configured(),
+                "current_version": std::env::var("POLARIS_VERSION").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
                 "current_tag": std::env::var("POLARIS_TAG").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "latest".to_string()),
+                "image_repo": std::env::var("POLARIS_IMAGE_REPO").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "ghcr.io/wuli2025/polaris_coworker".to_string()),
             }))
         }
         // docker_check_update:只查不动 —— 逐个镜像源拉 manifest,回「当前/最新/有没有新版」。
@@ -1797,6 +1848,9 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
                 return Err("更新需要确认 (confirm: true)".to_string());
             }
             let (enabled, socket, script) = docker_updater_bits();
+            if !docker_update_auth_configured() {
+                return Err("Docker 一键更新需要先设置 POLARIS_AUTH_TOKEN 或 POLARIS_REQUIRE_LOGIN=1；开放模式即使挂载了 docker.sock 也不会放行。".to_string());
+            }
             if !script {
                 return Err("/usr/local/bin/update.sh 不存在(镜像未含更新脚本,旧版镜像请先手动装一次新的)。".to_string());
             }

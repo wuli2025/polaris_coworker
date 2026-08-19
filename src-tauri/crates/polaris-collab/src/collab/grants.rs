@@ -292,6 +292,245 @@ pub fn is_revoked(node_id: &str) -> bool {
     matches!(get(node_id), Ok(Some(g)) if g.revoked)
 }
 
+// ───────────────────────── 入方向:按设备放行 ─────────────────────────
+//
+// 在此之前这张表**只在出方向消费**(本机挂对端的盘时定 ro/rw),入方向只判了一个
+// `revoked`。也就是说台账上那两排「盘:只读/读写」「远程执行:禁止/每次问/允许」
+// 对**连进来的人**根本不生效 —— 进得来就是 owner 全权。设备码这条路一旦开放,
+// 那等于「谁拿到码谁就能删你的盘」。下面两道闸把台账上的档位变成真的。
+//
+// 判定顺序刻意如此:
+//  ① 没有 device_id(全局口令 admin / 老会话 / 本机内部调用)→ 放行,交给原来的角色闸。
+//     这条是为了**不破坏现状**:桌面自己、owner 令牌、CI 探针走的都是这条。
+//  ② device_id 就是本机自己 → 放行。桌面登录时会话上记的是本机 NodeId,而本机
+//     也给自己建了一行契约;要是让它受契约约束,本机排在「第二台设备」时会被自己的
+//     24 小时冷静期降成只读 —— 自己把自己锁了。
+//  ③ 有契约 → 契约说了算(冷静期/撤销都已经折进 effective_*)。
+//  ④ 有 device_id 但没契约 → 放行,交给角色闸。没契约的是「还没走过设备码那条路」的
+//     老客户端(手机壳粘 PLRK1 之类),它们本来就要过 owner 闸,这里不额外收紧。
+
+/// 本机自己那台设备的 NodeId。空 = 隧道还没起过(那时也不会有对端进来)。
+fn my_node() -> String {
+    db::meta_get("host_node_id").unwrap_or_default()
+}
+
+/// 这个 device_id 是不是「不受契约约束」的自己人(见上面的 ①②④)。
+fn exempt(device_id: &str) -> bool {
+    let d = device_id.trim();
+    if d.is_empty() {
+        return true;
+    }
+    let me = my_node();
+    !me.is_empty() && me == d
+}
+
+/// **盘闸**:这台设备能不能读 / 能不能写本机共享出去的目录。
+/// 拒绝时回的是人话 —— 它会一路透到对方的资源管理器里当失败原因显示。
+pub fn fs_gate(device_id: &str, need_write: bool) -> Result<(), String> {
+    if exempt(device_id) {
+        return Ok(());
+    }
+    let Some(g) = get(device_id).unwrap_or(None) else {
+        return Ok(());
+    };
+    match g.effective_fs() {
+        FS_RW => Ok(()),
+        FS_RO if !need_write => Ok(()),
+        FS_RO => Err(if g.in_cooldown() {
+            "这台设备还在新设备观察期内,暂时只读 —— 在对方机器的「设备与授权」里点「信任这台」即可写"
+                .into()
+        } else {
+            "对方把这台设备设成了只读 —— 请他在「设备与授权」里把盘改成「可读写」".into()
+        }),
+        _ => Err(if g.revoked {
+            "这台设备已被对方移出信任列表".into()
+        } else {
+            "对方没有把盘开放给这台设备(当前档位:不挂盘)".into()
+        }),
+    }
+}
+
+/// **执行闸**:这台设备能不能在本机跑命令。`ask` 当前按拒处理 ——
+/// 「每次问」需要一条弹窗确认通道,那条通道还没有;在它到位之前宁可拒,
+/// 也不能把一个中间档静默当成「允许」。
+pub fn exec_gate(device_id: &str) -> Result<(), String> {
+    if exempt(device_id) {
+        return Ok(());
+    }
+    let Some(g) = get(device_id).unwrap_or(None) else {
+        return Ok(());
+    };
+    match g.effective_exec() {
+        EXEC_ALLOW => Ok(()),
+        EXEC_ASK if g.in_cooldown() => Err(
+            "这台设备还在新设备观察期内,暂不允许远程执行 —— 对方点一下「信任这台」即可".into(),
+        ),
+        EXEC_ASK => Err("对方把这台设备的远程执行设成了「每次问」,而本机还没有弹窗确认通道 —— 请他改成「允许」".into()),
+        _ => Err("对方没有允许这台设备远程执行(当前档位:禁止)".into()),
+    }
+}
+
+/// 拿**设备码**连进来的对端:默认只读、禁执行、不自动挂盘。
+///
+/// 与 [`auto_grant_self`] 的区别正是「这是别人」——后者是同一个账号的自己人,默认全权;
+/// 这里默认最小权限,由本机主人在台账上点「信任这台」再升档。已有契约原样沿用
+/// (用户调过的档不能被对方重连一次冲回默认值),已撤销的直接拒。
+pub fn grant_by_code(node_id: &str, name: &str) -> Result<Grant, String> {
+    let node_id = node_id.trim();
+    if node_id.is_empty() {
+        return Err("缺 NodeId".into());
+    }
+    if let Some(g) = get(node_id)? {
+        if g.revoked {
+            return Err("这台设备已被移出本机的信任列表 —— 请机主先在「设备与授权」里恢复它".into());
+        }
+        return Ok(g);
+    }
+    let t = now();
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO peer_grants(node_id,uid,name,role,fs_access,exec_access,auto_mount,\
+         drive_hint,cooldown_until,granted_at,granted_by,revoked) \
+         VALUES(?1,'',?2,'visitor',?3,?4,0,'',0,?5,?6,0)",
+        params![node_id, name.trim(), FS_RO, EXEC_NONE, t, BY_CODE],
+    )
+    .map_err(|e| format!("登记设备契约失败: {e}"))?;
+    db::audit("system", "peer.grant.code", node_id, "设备码接入·默认只读");
+    get(node_id)?.ok_or_else(|| "刚写入的契约读不回来".into())
+}
+
+/// `granted_by` 上标记「这一行是拿设备码进来的」。换码时要按它把旧会话清干净。
+pub const BY_CODE: &str = "code";
+
+/// 「信任这台设备」的完整含义:冷静期清零 + 升到全权。
+///
+/// 为什么不复用 [`trust_now`]:那个只清冷静期,对**设备码**进来的设备毫无作用 ——
+/// 它压根没有冷静期,它的限制是 `fs=ro/exec=none` 这两个档位本身。用户点的那颗按钮
+/// 心里想的是「这台我认了,放开」,所以两件事必须一起做。
+pub fn trust_fully(node_id: &str, actor: &str) -> Result<Grant, String> {
+    let node_id = node_id.trim();
+    if get(node_id)?.is_none() {
+        return Err("这台设备还没有信任契约".into());
+    }
+    let conn = open_db()?;
+    conn.execute(
+        "UPDATE peer_grants SET cooldown_until=0, revoked=0, fs_access=?2, exec_access=?3, \
+         auto_mount=1, granted_by=?4 WHERE node_id=?1",
+        params![node_id, FS_RW, EXEC_ALLOW, actor],
+    )
+    .map_err(|e| format!("信任设备失败: {e}"))?;
+    db::audit(actor, "peer.grant.trust", node_id, "已升为全权");
+    get(node_id)?.ok_or_else(|| "改完读不回来".into())
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> std::sync::MutexGuard<'static, ()> {
+        let g = db::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(
+            "POLARIS_COLLAB_DB",
+            std::env::temp_dir().join(format!(
+                "grants-gate-{tag}-{}-{}.db",
+                std::process::id(),
+                now()
+            )),
+        );
+        g
+    }
+
+    /// 设备码进来的对端:**默认只读、禁执行**。这是用户拍板的那一档。
+    #[test]
+    fn code_peer_is_read_only_until_trusted() {
+        let _g = tmp("code");
+        let peer = "node-someone-else";
+        let created = grant_by_code(peer, "小李的笔记本").unwrap();
+        assert_eq!(created.fs_access, FS_RO);
+        assert_eq!(created.exec_access, EXEC_NONE);
+        assert!(!created.auto_mount, "别人的设备不该自动挂进我的盘符");
+
+        assert!(fs_gate(peer, false).is_ok(), "读要放行");
+        let e = fs_gate(peer, true).unwrap_err();
+        assert!(e.contains("只读"), "写必须被挡住,err={e}");
+        assert!(exec_gate(peer).unwrap_err().contains("禁止"));
+
+        // 机主点「信任这台」→ 一步升到全权。
+        trust_fully(peer, "本机").unwrap();
+        assert!(fs_gate(peer, true).is_ok());
+        assert!(exec_gate(peer).is_ok());
+    }
+
+    /// 重连不能把机主调过的档冲回默认值 —— 那等于「每次重连权限重置一遍」。
+    #[test]
+    fn reconnect_keeps_the_owner_decision() {
+        let _g = tmp("keep");
+        grant_by_code("node-p", "对方").unwrap();
+        trust_fully("node-p", "本机").unwrap();
+        let again = grant_by_code("node-p", "对方").unwrap();
+        assert_eq!(again.fs_access, FS_RW, "重连不该把 rw 冲回 ro");
+        // 反过来也一样:降成不挂盘之后,对方重连仍是不挂盘。
+        update("node-p", None, Some(FS_NONE), None, None, "本机").unwrap();
+        assert_eq!(grant_by_code("node-p", "对方").unwrap().fs_access, FS_NONE);
+        assert!(fs_gate("node-p", false).unwrap_err().contains("不挂盘"));
+    }
+
+    /// 踢掉的设备拿着旧码回来也进不去。
+    #[test]
+    fn revoked_peer_cannot_reconnect_with_the_code() {
+        let _g = tmp("revoked");
+        grant_by_code("node-bad", "谁").unwrap();
+        revoke("node-bad", "本机").unwrap();
+        assert!(grant_by_code("node-bad", "谁").unwrap_err().contains("移出"));
+        assert!(fs_gate("node-bad", false).is_err());
+        assert!(exec_gate("node-bad").is_err());
+    }
+
+    /// 本机自己不受契约约束:桌面会话上记的是本机 NodeId,而本机也给自己建了一行契约。
+    /// 要是让它受约束,本机排在「第二台设备」时会被自己的 24 小时冷静期降成只读 —— 自锁。
+    #[test]
+    fn my_own_machine_is_never_gated_by_its_own_grant() {
+        let _g = tmp("self");
+        db::meta_set("host_node_id", "node-me").unwrap();
+        // 造一行最严的契约扣在自己头上。
+        grant_by_code("node-me", "我自己").unwrap();
+        update("node-me", None, Some(FS_NONE), Some(EXEC_NONE), None, "本机").unwrap();
+        assert!(fs_gate("node-me", true).is_ok(), "本机不该被自己的契约锁住");
+        assert!(exec_gate("node-me").is_ok());
+        // 空 device_id(全局口令 / 老会话 / 本机内部调用)同样豁免。
+        assert!(fs_gate("", true).is_ok());
+        assert!(exec_gate("").is_ok());
+    }
+
+    /// 没有契约的设备不额外收紧 —— 老手机壳粘 PLRK1 那条路仍旧只过角色闸。
+    #[test]
+    fn unknown_device_falls_back_to_the_role_gate() {
+        let _g = tmp("unknown");
+        db::meta_set("host_node_id", "node-me").unwrap();
+        assert!(fs_gate("node-never-seen", true).is_ok());
+        assert!(exec_gate("node-never-seen").is_ok());
+    }
+
+    /// 同账号设备的冷静期在**入方向**也真的生效了(此前只影响本机挂对端时的 ro/rw)。
+    #[test]
+    fn same_account_cooldown_now_bites_on_the_way_in() {
+        let _g = tmp("cooldown");
+        db::meta_set("host_node_id", "node-me").unwrap();
+        auto_grant_self("node-first", "acct_1", "第一台", true).unwrap();
+        let (second, _) = auto_grant_self("node-2nd", "acct_1", "新来的", false).unwrap();
+        assert!(second.in_cooldown());
+        assert!(fs_gate("node-2nd", false).is_ok(), "读照旧");
+        assert!(
+            fs_gate("node-2nd", true).unwrap_err().contains("观察期"),
+            "冷静期内写要被挡"
+        );
+        assert!(exec_gate("node-2nd").unwrap_err().contains("观察期"));
+        // 第一台没有冷静期,照旧全权。
+        assert!(fs_gate("node-first", true).is_ok());
+        assert!(exec_gate("node-first").is_ok());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

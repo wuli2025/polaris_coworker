@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // 豆包式「发现新版本」中央轻薄对话框：启动自动检测到新版后浮现，
 // 点「立即更新」后台下载安装并自动重启；「以后再说」仅关本弹窗（板块仍可更新）。
-import { Sparkles, X, LoaderCircle } from "@lucide/vue";
+import { computed } from "vue";
+import { Sparkles, X } from "@lucide/vue";
 import OrbitSpinner from "./icons/OrbitSpinner.vue";
 import {
   updateVersion,
@@ -12,7 +13,12 @@ import {
   dialogDismissed,
   applyUpdate,
   dismissUpdate,
+  updaterRuntime,
+  dockerUpdaterEnabled,
+  dockerMessage,
 } from "../composables/useUpdater";
+
+const isDocker = computed(() => updaterRuntime.value === "docker");
 </script>
 
 <template>
@@ -37,22 +43,34 @@ import {
 
           <p v-if="updateError" class="upd-desc err">{{ updateError }}</p>
           <p v-else-if="updating" class="upd-desc">
-            正在下载更新… 完成后自动重启生效
+            {{ isDocker ? dockerMessage || "更新替身已接手，容器即将短暂断线" : "正在下载更新… 完成后自动重启生效" }}
           </p>
-          <p v-else class="upd-desc">有新内容更新，点击即可立即更新 ✨</p>
+          <p v-else-if="isDocker && !dockerUpdaterEnabled" class="upd-desc">
+            已有新容器镜像；请前往「更新」页查看安全启用方式
+          </p>
+          <p v-else class="upd-desc">
+            {{ isDocker ? "新容器镜像已就绪，点击即可安全替换当前容器" : "有新内容更新，点击即可立即更新 ✨" }}
+          </p>
 
           <div v-if="updateNotes && !updating" class="upd-notes">{{ updateNotes }}</div>
 
-          <div v-if="updating" class="upd-bar">
+          <div v-if="updating && !isDocker" class="upd-bar">
             <div class="upd-bar-fill" :style="{ width: updateProgress + '%' }"></div>
           </div>
 
-          <button class="upd-go" :disabled="updating" @click="applyUpdate">
+          <button
+            class="upd-go"
+            :disabled="updating || (isDocker && !dockerUpdaterEnabled)"
+            @click="applyUpdate()"
+          >
             <OrbitSpinner
               v-if="updating"
               :size="15"
             />
-            <span>{{ updating ? `更新中 ${updateProgress}%` : "立即更新" }}</span>
+            <span v-if="isDocker">
+              {{ updating ? "正在交接容器更新…" : dockerUpdaterEnabled ? "立即更新容器" : "请在更新页启用" }}
+            </span>
+            <span v-else>{{ updating ? `更新中 ${updateProgress}%` : "立即更新" }}</span>
           </button>
 
           <button

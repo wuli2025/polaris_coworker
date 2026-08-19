@@ -451,6 +451,88 @@ pub enum Admission {
     /// 进来的 24 小时内一律按只读对待,期间用户可一键撤销。另有 `owner_uid` 只写一次的闸
     /// (见 [`super::db::meta_set_once`]),否则「谁最后登录谁是主人」会把远程夺权做成一条 API。
     SelfOwned,
+    /// **本机控制台**:用户就坐在这台机器前,在桌面 App 里亲手填了邮箱和验证码
+    /// (`account_login_code`,只有 Tauri 命令这一条路能到,不经 HTTP、不在手机数据面白名单里)。
+    ///
+    /// 为什么必须有这一档:`owner_uid` 只由**联邦登录**写下。v2.9.0 之前装的机器,主人是
+    /// 「设为主机」时建的本地账号(没有 uid、常常也没绑邮箱),于是 `owner_uid` 恒空、
+    /// `is_mine` 恒 false —— 主人在自己的电脑上用自己的邮箱登录,反被自己的机器回一句
+    /// 「本主机还没有邀请你」。两台老机器互相如此,就成了「云端名册看得见对方,却谁也挂不上谁的盘」。
+    ///
+    /// 这一档做两件事(见 [`adopt_row_for_console`]):**认领**已有的那一行(邮箱对得上,
+    /// 或这台机器还没主人且只有一个本地 owner),而不是在同一台机器上再造一个「第二个我」;
+    /// 认不到又确实没主人时,就地成为主人。
+    ///
+    /// 安全边界:这一档**只**给本地控制台。远端递进来的断言(`/api/collab/login_assertion`)
+    /// 走的仍是 [`Admission::ExistingOnly`] —— 陌生账号照旧要邀请码,这条铁律没松。
+    LocalConsole,
+}
+
+/// 本机控制台首登时,找出「其实就是同一个人」的那一行 users。找不到返回 None。
+///
+/// 两条证据,强弱分明:
+///  ① **邮箱对得上** —— 账号中心保证一个邮箱只属于一个账号,所以这是硬证据,
+///     哪怕这台机器已经有主人、有一堆成员,也认。
+///  ② 老账号常常压根没绑邮箱(`create_user` 建的本地 owner 就是),于是退而求其次:
+///     **这台机器还没有主人(`owner_uid` 空)且全机只有一个 owner、它还是个本地账号** ——
+///     这就是「我自己的电脑上那个老账号」。有第二个 owner、或已经有主人,一律不猜。
+///
+/// `host_owner` 是**进事务之前**读好的 `owner_uid`:meta 表在另一条连接上,
+/// 写事务开着的时候再去开一条连接读它是在给自己找 SQLITE_BUSY。
+fn adopt_row_for_console(
+    tx: &rusqlite::Transaction<'_>,
+    claims: &Claims,
+    host_owner: &str,
+) -> Result<Option<(i64, String)>, String> {
+    let email = claims.email.trim().to_ascii_lowercase();
+    if !email.is_empty() {
+        let hit: Option<(i64, String, String)> = tx
+            .query_row(
+                "SELECT id,role,uid FROM users WHERE email<>'' AND email=?1 COLLATE NOCASE LIMIT 1",
+                params![email],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| format!("按邮箱找本机账号失败: {e}"))?;
+        if let Some((id, role, uid)) = hit {
+            // 这一行已经绑在**另一个**云端账号上:不抢。静默顶替等于把别人在本机的
+            // 项目关系送给来人 —— 与下面那道同名不同 uid 的闸同一口径。
+            if !uid.is_empty() && uid != claims.uid {
+                return Err(format!(
+                    "本机的「{email}」已经绑在另一个云端账号上了 —— \
+                     换回原来那个账号登录,或让 owner 先在成员列表里解绑它"
+                ));
+            }
+            return Ok(Some((id, role)));
+        }
+    }
+    if !host_owner.is_empty() {
+        return Ok(None);
+    }
+    let mut st = tx
+        .prepare("SELECT id,uid FROM users WHERE role='owner' ORDER BY id")
+        .map_err(|e| format!("查本机 owner 失败: {e}"))?;
+    let owners: Vec<(i64, String)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| format!("查本机 owner 失败: {e}"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("查本机 owner 失败: {e}"))?;
+    drop(st);
+    match owners.as_slice() {
+        [(id, uid)] if uid.trim().is_empty() => Ok(Some((*id, "owner".to_string()))),
+        _ => Ok(None),
+    }
+}
+
+/// 「这台机器不认识你」的话术。**必须带「设备码」三字** —— 登录界面靠它把码输入框
+/// 自动展开(见 `EmailLogin.vue`)。顺带把「码在哪儿」说死,不让用户自己猜。
+///
+/// 注意这句话里已经没有「主机」「邀请」「入伙」了:那是我们的内部分工,不是用户的世界。
+/// 他的世界只有一件事 —— 「那台机器的码给我」。
+fn no_invite_msg() -> String {
+    "这台机器还不认得你 —— 在它的「互联」页第 ① 屏复制那串**设备码**(PLR1-…),\
+     填到下面就能进"
+        .to_string()
 }
 
 /// 把一张已验过的断言落成本机的成员资格,返回本机 `users` 行。
@@ -464,6 +546,8 @@ pub enum Admission {
 /// 用户名撞车(同名但 uid 不同)会明确报错交给 owner 处理,绝不静默顶替 ——
 /// 顶替等于把别人在本机的项目关系送给来人。
 pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, String> {
+    // 进事务之前读:meta 走的是另一条连接,写事务开着时再开一条读它 = 自找 SQLITE_BUSY。
+    let host_owner = owner_uid();
     let mut conn = open_db()?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -517,6 +601,43 @@ pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, Stri
         });
     }
 
+    // 本机控制台首登:先认领「其实就是同一个人」的那一行,而不是在同一台机器上再建一个号。
+    // 认领而不是新建,是为了让老账号名下的项目/任务关系跟着走 —— 那正是用户说的「统一一下」。
+    if matches!(admission, Admission::LocalConsole) {
+        if let Some((id, role)) = adopt_row_for_console(&tx, claims, &host_owner)? {
+            tx.execute(
+                "UPDATE users SET uid=?1, username=?2, email=?3, display_name=?4 WHERE id=?5",
+                params![
+                    claims.uid,
+                    claims.username,
+                    claims.email,
+                    claims.display_name.trim(),
+                    id
+                ],
+            )
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE") {
+                    format!(
+                        "本机另一个账号占着用户名「{}」或这个邮箱 —— 请先把它改名再登录",
+                        claims.username
+                    )
+                } else {
+                    format!("认领本机账号失败: {e}")
+                }
+            })?;
+            tx.commit().map_err(|e| format!("提交成员资格失败: {e}"))?;
+            stamp_owner_uid(&role, &claims.uid);
+            db::audit(&claims.username, "member.adopt", &claims.uid, &role);
+            return Ok(User {
+                id,
+                username: claims.username.clone(),
+                role,
+                display_name: claims.display_name.trim().into(),
+                disabled: false,
+            });
+        }
+    }
+
     // 同名不同 uid → 拒绝顶替。
     let clash: Option<String> = tx
         .query_row(
@@ -548,11 +669,10 @@ pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, Stri
         match admission {
             Admission::Invited(r) => r,
             Admission::SelfOwned => "owner".to_string(),
-            Admission::ExistingOnly => {
-                return Err(
-                    "本主机还没有邀请你 —— 请向这台主机的管理者要一张邀请码,再用它入伙".into(),
-                )
-            }
+            // 认领不到任何旧行,但这台机器确实还没有主人:坐在它跟前的这个人就是主人。
+            // 已经有主人了则照旧要邀请码 —— 换个账号在本机控制台登录不该改朝换代。
+            Admission::LocalConsole if host_owner.is_empty() => "owner".to_string(),
+            Admission::LocalConsole | Admission::ExistingOnly => return Err(no_invite_msg()),
         }
     };
     tx.execute(
@@ -580,6 +700,24 @@ pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, Stri
         display_name: claims.display_name.trim().into(),
         disabled: false,
     })
+}
+
+/// 这个云端账号在本机**已经有成员资格**了吗。纯本地读,不联网 ——
+/// 设备网的对账循环每拍都要问一次「我进得了自己这台机器的门吗」,不能为此打一趟公网。
+pub fn is_member(uid: &str) -> bool {
+    let uid = uid.trim();
+    if uid.is_empty() {
+        return false;
+    }
+    let Ok(conn) = open_db() else { return false };
+    conn.query_row(
+        "SELECT 1 FROM users WHERE uid=?1 AND disabled=0 LIMIT 1",
+        params![uid],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|x| x.is_some())
+    .unwrap_or(false)
 }
 
 /// 本机记着的主人 uid。空 = 这台机器还没有主人(全新装机)。
@@ -617,6 +755,26 @@ fn stamp_owner_uid(role: &str, uid: &str) {
 ///  · 设备被本机撤销过(peer_grants.revoked)→ 一律拒,连主人本人的设备也拒 ——
 ///    「丢了电脑」的应急撤销必须比「我是主人」优先,否则捡到电脑的人照样能进。
 pub fn login_with_assertion(assertion: &str, device_id: &str) -> Result<(User, String), String> {
+    login_with_assertion_ex(assertion, device_id, false)
+}
+
+/// **本机控制台**版的同一件事:用户就坐在这台机器前,在桌面 App 里亲手填的邮箱验证码。
+///
+/// 只多一档准入 [`Admission::LocalConsole`](认领已有的那一行 / 认领这台还没主人的机器)。
+/// 调用方只有一个 —— `mesh::account_login_code`(Tauri 命令)。**不要**把它接到任何 HTTP
+/// 路由上:那就等于把「远程夺主」做成一条 API。
+pub fn login_with_assertion_local(
+    assertion: &str,
+    device_id: &str,
+) -> Result<(User, String), String> {
+    login_with_assertion_ex(assertion, device_id, true)
+}
+
+fn login_with_assertion_ex(
+    assertion: &str,
+    device_id: &str,
+    local_console: bool,
+) -> Result<(User, String), String> {
     let claims = verify_assertion(assertion)?;
     let dev = device_id.trim();
     if !dev.is_empty() && super::grants::is_revoked(dev) {
@@ -627,6 +785,8 @@ pub fn login_with_assertion(assertion: &str, device_id: &str) -> Result<(User, S
     let is_mine = !owner.is_empty() && owner == claims.uid;
     let admission = if is_mine {
         Admission::SelfOwned
+    } else if local_console {
+        Admission::LocalConsole
     } else {
         Admission::ExistingOnly
     };
@@ -689,11 +849,22 @@ pub fn join_with_ticket(
         let token = super::auth::issue_session(u.id, node_id)?;
         return Ok((u, token));
     }
-    let code = code.trim();
+    let code = normalize_invite(code);
     if code.is_empty() {
-        return Err("请填写邀请码".into());
+        return Err("请填写这台机器的设备码".into());
     }
-    let role = burn_ticket(code, &claims.username)?;
+    // **一码**:本机那串常驻设备码在这里也认。
+    //
+    // 在此之前「进这台机器的门」有两串完全不同的码:一次性邀请票据(账号入伙用)和
+    // PLRK1 连接码(设备连接用),它们的区别纯粹是我们自己的内部分工,用户只看到
+    // 「怎么又是另一种码」。现在设备码一串通吃:拿它入伙,拿到的是 **visitor** ——
+    // 与 `/api/collab/connect` 那条路同一个档,能做什么仍由设备契约逐台说了算。
+    let role = if super::identity::check_access_code(&code).unwrap_or(false) {
+        db::audit(&claims.username, "join.devicecode", node_id, "设备码入伙");
+        "visitor".to_string()
+    } else {
+        burn_ticket(&code, &claims.username)?
+    };
     let user = upsert_member(&claims, Admission::Invited(role.clone()))?;
     // 设备白名单:入伙即登记本设备(隧道层准入的那一因子)。失败不阻断入伙。
     let nid = node_id.trim();
@@ -706,8 +877,22 @@ pub fn join_with_ticket(
         let _ = super::identity::add_device(user.id, name, nid);
     }
     let token = super::auth::issue_session(user.id, nid)?;
-    db::audit(&claims.username, "ticket.redeem.federated", code, &role);
+    db::audit(&claims.username, "ticket.redeem.federated", &code, &role);
     Ok((user, token))
+}
+
+/// 用户手里那串东西 → 库里的裸码。**邀请码只有一种**,但用户可能粘到三种形态:
+/// 管理面直接给的 8 位裸码、带主机地址的分享码 `PLRS1-…`、或者手打时按成了小写。
+/// 三者在这里归一,免得「明明复制了却说码不对」。
+pub fn normalize_invite(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if let Some((code, _)) = super::identity::decode_share_code(s) {
+        return code.trim().to_ascii_uppercase();
+    }
+    s.to_ascii_uppercase()
 }
 
 /// 原子核销一张邀请票据,返回它授予的角色。与 identity::redeem_ticket 同口径:
@@ -880,7 +1065,7 @@ mod tests {
 
         let stranger = claims_of("acct_2", "mallory", "m@b.com");
         let e = upsert_member(&stranger, Admission::ExistingOnly).unwrap_err();
-        assert!(e.contains("邀请"), "err={e}");
+        assert!(e.contains("设备码"), "err={e}");
 
         // 带票据角色才进得来,且角色由票据说了算(不是自封)。
         let u = upsert_member(&stranger, Admission::Invited("visitor".into())).unwrap();
@@ -951,7 +1136,137 @@ mod tests {
         upsert_member(&claims_of("acct_me", "wuli", "w@q.com"), Admission::ExistingOnly).unwrap();
         let stranger = claims_of("acct_other", "mallory", "m@q.com");
         let e = login_with_assertion(&fresh_assertion_for(&stranger), "node-x").unwrap_err();
-        assert!(e.contains("邀请"), "陌生账号必须仍被邀请码闸挡住,err={e}");
+        assert!(e.contains("设备码"), "陌生账号必须仍被那道码闸挡住,err={e}");
+    }
+
+    /// 用户报的那个「账号主没有邀请你」:v2.9.0 之前装的机器,主人是「设为主机」时建的
+    /// **本地账号**(没有 uid、没绑邮箱),于是 `owner_uid` 恒空 —— 主人在自己的电脑上
+    /// 用自己的邮箱登录,反被自己的机器挡在门外。控制台这一档必须把那一行认领下来。
+    #[test]
+    fn console_login_adopts_the_legacy_local_owner() {
+        let _g = tmp_env();
+        // 老机器:一个本地 owner,用户名是当年随手起的,没绑邮箱、没有 uid。
+        super::super::auth::create_user("wuli2025", "s3cret-8", "owner", "老账号").unwrap();
+        assert_eq!(owner_uid(), "", "本地账号不该钉出本机主人");
+
+        let me = claims_of("acct_me", "agdim0003", "agdim0003@outlook.com");
+        // 远端递进来的断言照旧被挡(这条铁律没松)。
+        let e = upsert_member(&me, Admission::ExistingOnly).unwrap_err();
+        assert!(e.contains("设备码"), "err={e}");
+
+        // 本人在这台机器前亲手登录 → 认领**那一行**,不是再建一个「第二个我」。
+        let u = upsert_member(&me, Admission::LocalConsole).unwrap();
+        assert_eq!(u.role, "owner");
+        assert_eq!(u.username, "agdim0003", "用户名统一到账号中心那个");
+        assert_eq!(owner_uid(), "acct_me", "认领之后这台机器才算有了主人");
+        assert_eq!(
+            super::super::auth::list_users().unwrap().len(),
+            1,
+            "认领而不是新建 —— 老账号名下的项目关系要跟着走"
+        );
+        // 从此走的是 SelfOwned 那条免票据的路。
+        assert_eq!(
+            upsert_member(&me, Admission::ExistingOnly).unwrap().role,
+            "owner"
+        );
+    }
+
+    /// 邮箱是硬证据:哪怕这台机器已经有主人、有一堆成员,邮箱对得上的那一行就是同一个人。
+    /// 它同时是「同一邮箱、用户名不同」那个症状的正解 —— 认人只认邮箱/uid,不认用户名。
+    #[test]
+    fn console_login_adopts_by_email_even_on_a_shared_host() {
+        let _g = tmp_env();
+        upsert_member(&claims_of("acct_boss", "boss", "boss@q.com"), Admission::ExistingOnly)
+            .unwrap();
+        assert_eq!(owner_uid(), "acct_boss");
+        // 老规矩建的本地成员:邮箱绑了,用户名与账号中心那边不一样。
+        super::super::auth::create_user_with_email(
+            "xiaoli",
+            "s3cret-8",
+            "collaborator",
+            "小李",
+            "Li@Example.COM",
+        )
+        .unwrap();
+
+        let li = claims_of("acct_li", "li", "li@example.com");
+        let u = upsert_member(&li, Admission::LocalConsole).unwrap();
+        assert_eq!(u.role, "collaborator", "认领不改角色 —— 不能借登录自封 owner");
+        assert_eq!(owner_uid(), "acct_boss", "主人也不该被换掉");
+        assert_eq!(super::super::auth::list_users().unwrap().len(), 2);
+    }
+
+    /// 控制台这一档不能变成「换个账号登一次就改朝换代」:机器已经有主人、
+    /// 又没有任何一行认得这个邮箱时,照旧要邀请码。
+    #[test]
+    fn console_login_does_not_hijack_a_claimed_host() {
+        let _g = tmp_env();
+        upsert_member(&claims_of("acct_me", "wuli", "w@q.com"), Admission::ExistingOnly).unwrap();
+        assert_eq!(owner_uid(), "acct_me");
+
+        let stranger = claims_of("acct_evil", "mallory", "m@q.com");
+        let e = upsert_member(&stranger, Admission::LocalConsole).unwrap_err();
+        assert!(e.contains("设备码"), "err={e}");
+        assert_eq!(owner_uid(), "acct_me");
+    }
+
+    /// 邮箱对得上、但那一行已经绑在**另一个**云端账号上:不抢,报清楚。
+    #[test]
+    fn console_login_refuses_to_steal_a_row_bound_to_another_account() {
+        let _g = tmp_env();
+        upsert_member(&claims_of("acct_a", "alice", "a@q.com"), Admission::ExistingOnly).unwrap();
+        // 另一个 uid 拿着同一个邮箱来(正常账号中心不可能签出这种断言,但别人的权威可以)。
+        let e = upsert_member(&claims_of("acct_b", "bob", "a@q.com"), Admission::LocalConsole)
+            .unwrap_err();
+        assert!(e.contains("另一个云端账号"), "err={e}");
+    }
+
+    /// **一码**:进这台机器的门,用的就是它「互联」页上那串设备码 ——
+    /// 不再有第二种码。拿它进来的是 visitor(能做什么由设备契约逐台说了算),
+    /// 绝不是 owner。
+    #[test]
+    fn the_device_code_is_the_only_code_needed_to_get_in() {
+        let _g = tmp_env();
+        // 这台机器已经有主人了 —— 陌生账号照旧进不去。
+        let me = claims_of("acct_me", "wuli", "w@q.com");
+        upsert_member(&me, Admission::ExistingOnly).unwrap();
+        let stranger = claims_of("acct_other", "mallory", "m@q.com");
+        let a = fresh_assertion_for(&stranger);
+        assert!(login_with_assertion(&a, "node-x").is_err());
+
+        // 拿本机那串设备码来 → 进得去,角色是 visitor。
+        let code = super::super::identity::access_code().unwrap();
+        let (u, token) = join_with_ticket(&fresh_assertion_for(&stranger), &code, "他的笔记本", "node-x")
+            .unwrap();
+        assert_eq!(u.role, "visitor", "设备码永远不该产出一个 owner");
+        assert!(!token.is_empty());
+        // 设备码是**常驻**的:同一串码换台设备再来一次照样管用(不像票据用一次就废)。
+        let other = claims_of("acct_third", "carol", "c@q.com");
+        assert_eq!(
+            join_with_ticket(&fresh_assertion_for(&other), &code.to_ascii_lowercase(), "第三台", "node-y")
+                .unwrap()
+                .0
+                .role,
+            "visitor"
+        );
+        // 换一串之后旧码当场作废。
+        super::super::identity::rotate_access_code("本机").unwrap();
+        let d = claims_of("acct_4th", "dave", "d@q.com");
+        assert!(join_with_ticket(&fresh_assertion_for(&d), &code, "第四台", "node-z").is_err());
+    }
+
+    /// 邀请码只有一种,但用户会粘三种形态。都得认。
+    #[test]
+    fn invite_code_accepts_bare_lowercase_and_share_form() {
+        let _g = tmp_env();
+        let share = super::super::identity::encode_share_code(
+            "ABCD2345",
+            &["http://192.168.1.9:8484".to_string()],
+        );
+        assert_eq!(normalize_invite("ABCD2345"), "ABCD2345");
+        assert_eq!(normalize_invite("  abcd2345 "), "ABCD2345");
+        assert_eq!(normalize_invite(&share), "ABCD2345");
+        assert_eq!(normalize_invite("   "), "");
     }
 
     /// 用 tmp_env 里的临时签名密钥给一组 claims 现签一张真断言,

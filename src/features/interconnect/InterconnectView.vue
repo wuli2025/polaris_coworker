@@ -33,16 +33,17 @@ import {
   ShieldCheck,
   Cpu,
   Plus,
-  LogOut,
-  Mail,
+  CircleUserRound,
   Terminal,
   Pencil,
   Eye,
+  Ticket as TicketIcon,
 } from "@lucide/vue";
 import RemoteTerminal from "./RemoteTerminal.vue";
 // 全应用唯一的登录界面。互联页未登录时整页就只有它 —— 没有地址框、没有密码、
 // 没有「设为主机」,那三样都是内部概念,不该由用户理解。
 import EmailLogin from "../auth/EmailLogin.vue";
+import AccountCenterModal from "../auth/AccountCenterModal.vue";
 import { invoke, isTauri } from "../../tauri";
 import { useCollabStore } from "../collab/stores/collab";
 import { useAppStore } from "../../stores/app";
@@ -52,7 +53,6 @@ import {
   parseConnectCode,
   type AdminDevice,
   type AuditRow,
-  type EmailStatus,
 } from "../collab/api";
 import { toast } from "../../composables/useToast";
 import { requestBeamOpen } from "../../lib/beamBus";
@@ -94,7 +94,97 @@ const TABS: { key: Tab; label: string; icon: unknown }[] = [
   { key: "topo", label: "网络拓扑", icon: Network },
 ];
 
-// ── 主机连接:owner 令牌(手机以完整权限连上本机的凭据) ──
+// ── 设备码(一码)────────────────────────────────────────────────────────────
+//
+// 此前这里有三串码,区别全是**我们自己**的内部概念:PLRK1 连接码(裸奔一把 owner 令牌)、
+// PLRS1 分享码、8 位邀请票据。用户心里只有一件事:「把我的码给你,你就能连我」。
+// 现在就一串,而且两边完全对称 —— 谁都能被连,谁都能去连,界面上不再有「主机」这个词。
+//
+// 与老连接码的要害差别:码里带的是**访问码**,不是 owner 令牌。对方拿码敲门,由这台机器
+// 验;验过之后建的是一行默认只读的设备契约,权限归你在台账上说了算,随时可降可撤。
+interface MyCode {
+  code: string;
+  nodeId: string;
+  share: string;
+  /** P2P 身份就绪了吗。没就绪时 share 是空的 —— 显示「生成中」而不是一串连不上的码。 */
+  ready: boolean;
+}
+const myCode = ref<MyCode | null>(null);
+const codeBusy = ref(false);
+const codeCopied = ref(false);
+/** 要连的那台机器的码(粘进来的)。 */
+const peerCode = ref("");
+const connNote = ref("");
+
+async function loadMyCode() {
+  if (!isTauri) return;
+  try {
+    myCode.value = await invoke<MyCode>("device_code");
+  } catch {
+    /* 老后端 / 非主机构建:这张卡不出现 */
+  }
+}
+
+async function copyMyCode() {
+  const s = myCode.value?.share;
+  if (!s) return;
+  try {
+    await navigator.clipboard.writeText(s);
+    codeCopied.value = true;
+    setTimeout(() => (codeCopied.value = false), 1500);
+  } catch {
+    toast.error("复制失败,请手动选中");
+  }
+}
+
+async function rotateMyCode() {
+  if (codeBusy.value) return;
+  if (
+    !confirm(
+      "换一串设备码?\n\n之前发出去的码全部作废,靠旧码连进来的设备会当场断开。\n" +
+        "你自己账号的设备走的是邮箱登录那条路,不受影响。"
+    )
+  )
+    return;
+  codeBusy.value = true;
+  try {
+    await invoke("device_code_rotate");
+    await loadMyCode();
+    toast.info("已换新码 —— 旧码已作废");
+  } catch (e) {
+    toast.error(errMsg(e));
+  } finally {
+    codeBusy.value = false;
+  }
+}
+
+/** 粘对方的码 → 起隧道 → 敲门 → 挂盘。一步做完。 */
+async function doConnectByCode() {
+  const c = peerCode.value.trim();
+  if (!c || connBusy.value) return;
+  connBusy.value = true;
+  connNote.value = "";
+  try {
+    const r = (await invoke("connect_by_code", { code: c })) as Record<string, unknown>;
+    peerCode.value = "";
+    const drive = String(r.drive ?? "");
+    const mountErr = String(r.mountError ?? "");
+    connNote.value = mountErr
+      ? `已连上「${r.name}」,但盘没挂上:${mountErr}`
+      : `已连上「${r.name}」${drive ? `,挂成 ${drive} 盘` : ""}${r.readOnly ? "(只读)" : ""}。${r.note ?? ""}`;
+    toast.info(connNote.value);
+    // 台账里立刻出现这台;远程源列表也刷一下(拓扑图/文件中心共用它)。
+    remotes.value = loadRemoteSources();
+    await loadMesh();
+  } catch (e) {
+    connNote.value = errMsg(e);
+    toast.error(connNote.value);
+  } finally {
+    connBusy.value = false;
+  }
+}
+
+// ── 老连接码(PLRK1)的 owner 令牌视图。仅「手动填地址/令牌」那条兼容路还在用 ──
 const tokenRevealed = ref(false);
 const tokenCopied = ref(false);
 const maskedToken = computed(() => {
@@ -154,7 +244,6 @@ const connectCode = computed(() => {
   }
 });
 const hasIroh = computed(() => !!collab.hostInfo?.nodeId);
-const codeCopied = ref(false);
 const showManual = ref(false);
 // 备用路径里那个「手工填 NodeId/令牌」是另一个开关 —— 与教程页那个共用一个 ref 的话,
 // 点一边另一边跟着展开,看着像 bug。
@@ -397,105 +486,18 @@ const mineItems = computed<UnifiedCard[]>(() => {
   return out;
 });
 
-// ── 账号:唯一入口是 EmailLogin(邮箱 + 验证码)。
-//    这里原本还有「注册 / 忘记密码」两个 tab 和六个输入框 —— 注册页因为「首登即建号」
-//    没有存在必要了,忘记密码则因为压根没有密码而不存在。
-const showLogin = ref(false);
-/** 邮箱服务状态(主机侧):owner 的「邮箱服务」面板用它显示当前配置。 */
-const emailInfo = ref<EmailStatus | null>(null);
-function openLogin() {
-  showLogin.value = true;
+// ── 账号:登录只有第一页的 EmailLogin；登录后的身份、验证码邮件和退出统一进账号管理。──
+const accountCenterOpen = ref(false);
+
+/** 把人送到唯一登录口（第一页），需要时带上预填邮箱。 */
+function openLogin(prefill = "") {
+  prefillEmail.value = prefill;
+  tab.value = "guide";
 }
 
-/**
- * 退出登录 —— **一处退干净**。
- *
- * 此前的「登出」只清本机会话:设备密钥还留着,后台照样连着别人的机器、盘还挂着。
- * 用户以为退了,其实没退。现在两件一起做(见 stores/account.ts 的 logout)。
- */
-async function doLogout() {
-  if (
-    !confirm(
-      "退出登录?\n\n本机会退出设备网:自动挂上的远程盘会卸掉,别的设备也不再自动连进来。\n重新用邮箱登录即可恢复(权限设置仍然记着)。"
-    )
-  )
-    return;
-  try {
-    await account.logout();
-    toast.info("已退出登录");
-    await refreshAll();
-    await loadMesh();
-  } catch (e) {
-    toast.error(errMsg(e));
-  }
-}
-
-
-// ── owner:邮箱服务设置(SMTP 发信,注册/找回密码的邮件从这里发出) ──
-const showMailCfg = ref(false);
-const mailCfg = reactive({
-  host: "smtp.qq.com",
-  port: 465,
-  user: "",
-  pass: "",
-  from: "",
-  signupOpen: true,
-  passSet: false,
-  testTo: "",
-});
-const mailCfgBusy = ref(false);
-const mailCfgErr = ref("");
-async function openMailCfg() {
-  showMailCfg.value = true;
-  mailCfgErr.value = "";
-  mailCfg.pass = "";
-  try {
-    const c = await collabApi.adminEmailConfig();
-    mailCfg.host = c.host || "smtp.qq.com";
-    mailCfg.port = c.port || 465;
-    mailCfg.user = c.user;
-    mailCfg.from = c.from;
-    mailCfg.signupOpen = c.signupOpen;
-    mailCfg.passSet = c.passSet;
-  } catch (e) {
-    mailCfgErr.value = errMsg(e);
-  }
-}
-async function saveMailCfg() {
-  mailCfgErr.value = "";
-  if (!mailCfg.user.trim()) {
-    mailCfgErr.value = "请填发信邮箱(如 1799820934@qq.com)";
-    return;
-  }
-  if (!mailCfg.passSet && !mailCfg.pass.trim()) {
-    mailCfgErr.value = "请填 SMTP 授权码(QQ 邮箱 → 设置 → 账号 → 开启SMTP服务领取)";
-    return;
-  }
-  mailCfgBusy.value = true;
-  try {
-    await collabApi.adminEmailConfigSet({
-      host: mailCfg.host.trim() || "smtp.qq.com",
-      port: Number(mailCfg.port) || 465,
-      user: mailCfg.user.trim(),
-      pass: mailCfg.pass,
-      from: mailCfg.from.trim(),
-      signupOpen: mailCfg.signupOpen,
-      testTo: mailCfg.testTo.trim() || undefined,
-    });
-    mailCfg.passSet = true;
-    mailCfg.pass = "";
-    toast.info(
-      mailCfg.testTo.trim()
-        ? "已保存,测试邮件已发出 —— 去收件箱确认"
-        : "邮箱服务已保存,注册/找回密码即刻可用"
-    );
-    showMailCfg.value = false;
-    emailInfo.value = await collabApi.emailStatus().catch(() => emailInfo.value);
-  } catch (e) {
-    mailCfgErr.value = errMsg(e);
-  } finally {
-    mailCfgBusy.value = false;
-  }
+async function onAccountLoggedOut() {
+  await refreshAll();
+  await loadMesh();
 }
 // ── 受控远程执行(B 方案) ────────────────────────────────────────────────
 // 主机侧:本机是否允许「互联上的对端在我这跑命令」。默认关,且 Shell 档位自带过期。
@@ -684,11 +686,23 @@ interface MeshLedger {
   name: string;
   /** 云端拉不到时的原因。不是致命错 —— 台账退回用本机契约画。 */
   cloudError: string;
+  /** **这台机器认不认我**。false = 别的设备一律连不进来(它们进的就是这道门)。 */
+  localMember?: boolean;
+  /** 认不了的原因(通常是「本主机还没有邀请你」)。 */
+  localMemberWarn?: string;
   devices: MeshDevice[];
 }
 const mesh = ref<MeshLedger>({
-  enrolled: false, url: "", uid: "", nodeId: "", name: "", cloudError: "", devices: [],
+  enrolled: false, url: "", uid: "", nodeId: "", name: "", cloudError: "",
+  localMember: true, localMemberWarn: "", devices: [],
 });
+/**
+ * 「入网了,却进不了自己这台机器的门」—— 用户看到的症状就是:云端名册里两台机器都在、
+ * 参数都看得见,却谁也挂不上谁的盘。老后端不返回这两个字段,那时一律当没问题(不误报)。
+ */
+const meshLockedOut = computed(
+  () => mesh.value.enrolled && mesh.value.localMember === false
+);
 const meshBusy = ref(false);
 const meshMounted = computed(() => mesh.value.devices.filter((d) => !!d.drive).length);
 const meshOnline = computed(() => mesh.value.devices.filter((d) => d.online).length);
@@ -712,21 +726,6 @@ async function onLoggedIn(info: Record<string, unknown>) {
   if (pinWarn) toast.error(`别的设备可能连不进来:${pinWarn}`);
   if (memberWarn) toast.error(`这个账号还不是本机成员:${memberWarn}`);
   await loadMesh();
-}
-
-async function meshLeave() {
-  if (meshBusy.value) return;
-  if (!confirm("退出设备网?本机自动挂上的远程盘会一并卸掉(手工添加的远程源不受影响)。")) return;
-  meshBusy.value = true;
-  try {
-    await invoke("mesh_leave");
-    toast.info("已退网");
-    await loadMesh();
-  } catch (e) {
-    toast.error(errMsg(e));
-  } finally {
-    meshBusy.value = false;
-  }
 }
 
 /** 立刻对一次账(不等 60s 心跳)。 */
@@ -1260,11 +1259,10 @@ watch(
   }
 );
 
-/** 「用这个邮箱登录」:把码里的邮箱带进登录框,少让用户手打一遍。 */
+/** 「用这个邮箱登录」:回第一页的登录卡,并把码里的邮箱带过去,少让用户手打一遍。 */
 function loginAsCodeOwner() {
   addForm.open = false;
-  prefillEmail.value = codeHint.value?.email ?? "";
-  showLogin.value = true;
+  openLogin(codeHint.value?.email ?? "");
 }
 /** 传给 EmailLogin 的预填邮箱(粘码认出账号时用)。 */
 const prefillEmail = ref("");
@@ -1350,6 +1348,8 @@ async function refreshAll() {
   remotes.value = loadRemoteSources(); // 文件中心新接入的远程盘同步进拓扑
   if (isTauri) await collab.hostStatus();
   await loadDevices();
+  // 设备码要跟着刷:iroh 身份是异步就绪的,首屏拿到的可能还是「生成中」。
+  await loadMyCode();
 }
 
 // 「连接码只粘一次」:已保存的远程盘(NAS 等)在启动时自动重建 iroh 隧道,
@@ -1381,6 +1381,7 @@ onMounted(async () => {
   loadMounts(); // 已挂载的远程盘盘符(徽标)
   loadWebdavLimit(); // 挂载盘大文件解锁横幅要不要出现
   loadMesh(); // 同账号设备网现状(入网了吗、名册上有谁、挂了哪些盘)
+  loadMyCode(); // 本机设备码(发给谁,谁就能连这台)
   pollRemoteStats(); // 首屏就拉一次 NAS/远程盘实况(它们在「我的设备」里)
   pollTunnelPaths(); // 首屏也拉一次隧道链路,星图别先画个写死的 P2P
   // 本机仪表每 4s 跳一帧。盘实况:启动后前 ~40s 每 4s 密集试(iroh 握手要几秒,
@@ -1460,65 +1461,63 @@ onUnmounted(() => {
             </li>
           </ol>
           <p class="sc-foot">
-            连接码那条老路仍然留着 —— 它现在只用于<b>接别人的 NAS / 临时设备</b>(不是你自己账号的机器),
-            以及手机壳还没升级到邮箱登录的旧版本。
+            要连<b>别人的</b>机器(或者你自己的、但云端暂时联系不上)?用下面的<b>设备码</b> ——
+            两边对等:你把你的码给他、他把他的码给你,谁都能连谁。
           </p>
         </section>
 
-        <!-- 主机连接卡:app 该填什么,一次看清 -->
+        <!-- ── 设备码:一码。取代了此前的连接码 / 分享码 / 邀请码三串 ── -->
         <section class="glass hero">
           <div class="hero-head">
             <MonitorSmartphone :size="18" :stroke-width="1.8" />
-            <span>让手机 / 其它设备连上这台电脑</span>
+            <span>我的设备码</span>
           </div>
 
           <template v-if="showConnect">
             <div class="hint">
-              <b>你自己的设备不用这串</b> —— 在那台设备上用<b>同一个邮箱登录</b>就自动连上了。
-              下面这串是给<b>还没升到邮箱登录的旧版手机壳</b>,以及<b>你想临时把这台机器交给别人的设备</b>用的:
-              粘上即经 iroh P2P 直连(打不通走中继),<b>以 owner 完整权限</b>——所以别外传。
-              <template v-if="!hasIroh"><br/>(本机 iroh 正在就绪,连接码稍后会自动带上 P2P 直连能力,刷新本页即可。)</template>
+              把这一串发给谁,谁就能连上这台电脑。<b>连上后默认只读</b> ——
+              对方出现在你的「设备与授权」台账里,你点一下「信任这台」才给读写和跑命令的权限。
+              <template v-if="myCode && !myCode.ready"><br/>(本机 P2P 身份还在就绪中,码稍后自动补全,刷新本页即可。)</template>
             </div>
 
-            <div class="code-box" @click="copyConnectCode">
-              <span v-if="connectCode" class="code">{{ connectCode }}</span>
-              <span v-else class="code dim">还没登录 —— 先用邮箱登录,连接码随后自动生成</span>
+            <div class="code-box" @click="copyMyCode">
+              <span v-if="myCode?.share" class="code">{{ myCode.share }}</span>
+              <span v-else class="code dim">生成中 —— 稍候刷新</span>
             </div>
             <div class="code-actions">
-              <button class="pill" @click="copyConnectCode" :disabled="!connectCode">
-                <Copy :size="13" /> {{ codeCopied ? "已复制 ✓" : "复制连接码" }}
+              <button class="pill" :disabled="!myCode?.share" @click="copyMyCode">
+                <Copy :size="13" /> {{ codeCopied ? "已复制 ✓" : "复制设备码" }}
               </button>
-              <button class="pill ghost" @click="showManual = !showManual">
-                {{ showManual ? "收起" : "手动填地址/令牌" }}
+              <button class="pill ghost" :disabled="codeBusy" @click="rotateMyCode">
+                <RefreshCw :size="13" /> 换一串
               </button>
             </div>
+            <p class="foot-note">
+              「换一串」= 之前发出去的码<b>全部作废</b>,靠旧码连进来的设备当场断开
+              (你自己账号的设备走的是邮箱登录那条路,不受影响)。
+            </p>
 
-            <div v-if="showManual" class="manual">
-              <div class="field">
-                <div class="fl">本机地址</div>
-                <div class="addr-list">
-                  <template v-if="collab.hostInfo?.urls?.length">
-                    <code v-for="u in collab.hostInfo.urls" :key="u">{{ u }}</code>
-                  </template>
-                  <span v-else class="dim">仅本机回环 —— 手机要连需开局域网(allow_lan)或走中继</span>
-                  <span v-if="collab.hostInfo?.port" class="al">端口 {{ collab.hostInfo.port }}</span>
+            <!-- ── 连别人:同一串码,反过来粘 ── -->
+            <div class="fs-share">
+              <div class="fss-head">
+                <div class="lt-txt">
+                  <span class="lt-title">连上别人的设备</span>
+                  <span class="lt-sub">粘他那台机器的设备码 —— 起隧道、敲门、挂盘一步做完。</span>
                 </div>
               </div>
-              <div class="field">
-                <div class="fl">owner 令牌</div>
-                <div class="code-box sm" @click="tokenRevealed = !tokenRevealed">
-                  <span v-if="collab.token" class="code">{{ tokenRevealed ? collab.token : maskedToken }}</span>
-                  <span v-else class="code dim">未登录</span>
-                </div>
-                <div class="code-actions">
-                  <button class="pill ghost" @click="copyToken" :disabled="!collab.token">
-                    <Copy :size="12" /> {{ tokenCopied ? "已复制 ✓" : "复制令牌" }}
-                  </button>
-                  <button class="pill ghost" @click="tokenRevealed = !tokenRevealed" :disabled="!collab.token">
-                    {{ tokenRevealed ? "隐藏" : "显示" }}
-                  </button>
-                </div>
+              <div class="lb-code-row">
+                <input
+                  v-model="peerCode"
+                  class="af-inp"
+                  placeholder="粘对方的设备码,PLR1-…"
+                  @keyup.enter="doConnectByCode"
+                />
+                <button class="cta" :disabled="connBusy || !peerCode.trim()" @click="doConnectByCode">
+                  <LoaderCircle v-if="connBusy" :size="15" class="spin" />
+                  连接
+                </button>
               </div>
+              <p v-if="connNote" class="ex-note">{{ connNote }}</p>
             </div>
 
             <div v-if="isTauri" class="lan-toggle" :class="{ busy: lanBusy }" @click="toggleRemote">
@@ -1669,7 +1668,7 @@ onUnmounted(() => {
             </div>
 
             <p class="foot-note">
-              仅供你<b>自己的设备</b>用。想让<b>别人(不同账号)</b>加入?到「协作」生成邀请码(collaborator/visitor)。
+              仅供你<b>自己的设备</b>用。想让<b>别人(不同账号)</b>加入?到第 ② 页「设备与授权 → 邀请码」生成一张发给他。
               要手机从外网(不同 WiFi)连,需走中继/隧道。
             </p>
           </template>
@@ -1682,6 +1681,7 @@ onUnmounted(() => {
               然后这里就会出现手机用的连接码。
             </div>
             <EmailLogin
+              :prefill="prefillEmail"
               lead="填邮箱收验证码。这台电脑登录后,你的手机、NAS、另一台电脑用同一个邮箱登录就自动连上。"
               @done="onLoggedIn"
             />
@@ -1719,10 +1719,15 @@ onUnmounted(() => {
               >
                 {{ account.pendingTrust.length }} 台待确认
               </button>
-              <button v-if="owner" class="ra-btn" title="配置 SMTP,让这台机器发得出验证码" @click="openMailCfg"><Mail :size="13" /> 邮箱服务</button>
-              <button class="ra-btn" @click="doLogout"><LogOut :size="13" /> 退出登录</button>
+              <button v-if="owner" class="ra-btn" title="本机设备码 —— 发给谁,谁就能连这台" @click="tab = 'guide'">
+                <TicketIcon :size="13" /> 我的设备码
+              </button>
+              <button class="ra-btn pri" @click="accountCenterOpen = true">
+                <CircleUserRound :size="13" /> 账号管理
+              </button>
             </template>
-            <button v-else class="ra-btn pri" @click="openLogin">用邮箱登录</button>
+            <!-- 登录只有一个入口:第一页。这里不再放第二个登录界面,只把人送过去。 -->
+            <button v-else class="ra-btn pri" @click="openLogin()">去第 ① 页登录</button>
           </div>
 
           <nav class="rail-nav">
@@ -1745,12 +1750,20 @@ onUnmounted(() => {
         <div class="dev-content">
         <!-- 我的设备:本机 + 已登记设备 + 已连接 NAS/远程盘,统一状态卡 + 接入卡 -->
         <template v-if="devFilter === 'mine'">
-          <!-- 未登录:整页只有一件事 —— 填邮箱。没有地址框、没有密码、没有「设为主机」。 -->
+          <!-- 未登录:**不在这里再放一个登录界面**。登录只有一个入口(第 ① 页),
+               这里只说清楚现在缺什么、去哪儿办 —— 三处登录口正是「到底该在哪儿登」的来源。 -->
           <section v-if="isTauri && !mesh.enrolled" class="glass mesh-card">
-            <EmailLogin
-              lead="你的所有设备用同一个账号。这台登录后,另一台电脑 / NAS 用同一个邮箱登录,两边自己就连上了 —— 不用连接码、不用邀请码。"
-              @done="onLoggedIn"
-            />
+            <div class="mesh-head">
+              <span class="mesh-ic"><Network :size="16" :stroke-width="2" /></span>
+              <div class="lt-txt">
+                <span class="lt-title">还没登录</span>
+                <span class="lt-sub">
+                  登录后这台机器就进了你的设备网:另一台电脑 / NAS 用<b>同一个邮箱</b>登录,
+                  两边自己就连上并互相挂盘 —— 不用连接码、不用邀请码。
+                </span>
+              </div>
+              <button class="pill" @click="openLogin()">去第 ① 页登录</button>
+            </div>
           </section>
 
           <!-- 已登录:设备台账。一个账号一份清单,逐台记住权限 -->
@@ -1767,12 +1780,19 @@ onUnmounted(() => {
               <button class="pill ghost" :disabled="meshBusy" @click="meshRefresh">
                 <RefreshCw :size="13" /> 立即对账
               </button>
-              <button class="pill ghost" :disabled="meshBusy" @click="meshLeave">退出登录</button>
             </div>
 
             <!-- 云端联系不上不是致命的:台账退回本机契约画,但要说清楚现在看到的是什么 -->
             <p v-if="mesh.cloudError" class="mesh-cloud-warn">
               云端账号中心暂时联系不上({{ mesh.cloudError }})—— 下面是本机记着的设备,已连上的不受影响。
+            </p>
+
+            <!-- 「看得见连不上」的唯一根因,直接摆在台账上面,并给出那条出路。 -->
+            <p v-if="meshLockedOut" class="mesh-cloud-warn locked">
+              <b>这台机器还没认下你这个账号</b> ——
+              所以别的设备看得见它、却连不进来(挂盘走的就是这道门)。
+              {{ mesh.localMemberWarn || "" }}
+              <button class="pill ghost" @click="openLogin()">去第 ① 页用邀请码登录</button>
             </p>
 
             <ul v-if="mesh.devices.length" class="dev-ledger">
@@ -2146,59 +2166,12 @@ onUnmounted(() => {
       </template>
     </div>
 
-    <!-- 登录 / 注册 / 忘记密码 弹层(桌面互联页切账号) -->
-    <Teleport to="body">
-      <!-- 登录弹层。这里原本是「登录 / 注册 / 忘记密码」三个 tab 加六个输入框 ——
-           与协作页那套、与设备网那张入网表单并列,同一个人被要求登三次。现在三处
-           共用同一个 EmailLogin:两个框,一套账号。 -->
-      <div v-if="showLogin" class="login-mask" @click.self="showLogin = false">
-        <div class="glass login-box">
-          <div class="lb-head">
-            <span class="lb-av" v-html="allianceAvatar"></span>
-            <div>
-              <div class="lb-title">登录</div>
-              <div class="lb-sub">一个邮箱,你所有的设备</div>
-            </div>
-            <button class="icobtn" @click="showLogin = false">✕</button>
-          </div>
-          <EmailLogin :prefill="prefillEmail" @done="showLogin = false; onLoggedIn($event)" />
-        </div>
-      </div>
-    </Teleport>
 
-    <!-- owner:邮箱服务设置(SMTP)弹层 -->
-    <Teleport to="body">
-      <div v-if="showMailCfg" class="login-mask" @click.self="showMailCfg = false">
-        <div class="glass login-box mail-box">
-          <div class="lb-head">
-            <Mail :size="22" style="flex:none" />
-            <div>
-              <div class="lb-title">邮箱服务设置</div>
-              <div class="lb-sub">注册 / 找回密码的验证码邮件从这个邮箱发出</div>
-            </div>
-            <button class="icobtn" @click="showMailCfg = false">✕</button>
-          </div>
-          <div class="lb-code-row">
-            <input v-model="mailCfg.host" class="af-inp" placeholder="SMTP 服务器(smtp.qq.com)" />
-            <input v-model.number="mailCfg.port" class="af-inp port-inp" placeholder="465" inputmode="numeric" />
-          </div>
-          <input v-model="mailCfg.user" class="af-inp" placeholder="发信邮箱(如 1799820934@qq.com)" autocapitalize="off" />
-          <input v-model="mailCfg.pass" type="password" class="af-inp"
-            :placeholder="mailCfg.passSet ? 'SMTP 授权码(已配置,留空不改)' : 'SMTP 授权码(QQ邮箱→设置→账号→开启SMTP领取)'" />
-          <input v-model="mailCfg.from" class="af-inp" placeholder="发件人地址(可选,默认同发信邮箱)" autocapitalize="off" />
-          <label class="lb-check">
-            <input v-model="mailCfg.signupOpen" type="checkbox" /> 开放邮箱自助注册(关掉则只能凭邀请票据入伙)
-          </label>
-          <input v-model="mailCfg.testTo" class="af-inp" placeholder="测试收件邮箱(可选,保存时发一封测试信)" autocapitalize="off" />
-          <p class="lb-hint">QQ 邮箱的「授权码」不是 QQ 密码:网页版 QQ 邮箱 → 设置 → 账号 → 「POP3/IMAP/SMTP 服务」开启后按提示短信验证领取。</p>
-          <p v-if="mailCfgErr" class="lb-err">{{ mailCfgErr }}</p>
-          <button class="cta full" :disabled="mailCfgBusy" @click="saveMailCfg">
-            <LoaderCircle v-if="mailCfgBusy" :size="15" class="spin" />
-            保存{{ mailCfg.testTo.trim() ? "并发测试邮件" : "" }}
-          </button>
-        </div>
-      </div>
-    </Teleport>
+    <AccountCenterModal
+      v-if="accountCenterOpen"
+      @close="accountCenterOpen = false"
+      @logged-out="onAccountLoggedOut"
+    />
 
     <!-- 远程终端:对某台互联设备发受控执行请求。模式由**对端**决定,本页只如实显示。 -->
     <Teleport to="body">
@@ -2573,6 +2546,10 @@ onUnmounted(() => {
 .mesh-cloud-warn {
   margin: 8px 0 0; font-size: 12px; line-height: 1.6; color: #f5c56b;
   background: color-mix(in srgb, #f5a524 10%, transparent); border-radius: 8px; padding: 6px 10px;
+}
+.mesh-cloud-warn.locked {
+  color: #ff9a9a; background: rgba(239, 68, 68, .1);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .dev-ledger { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .dev-ledger > li { padding: 7px 8px; border-radius: 9px; }

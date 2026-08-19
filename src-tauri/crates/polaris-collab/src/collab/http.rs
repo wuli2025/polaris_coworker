@@ -112,6 +112,9 @@ pub struct AuthCtx {
     pub user_id: i64, // 0 = 合成身份(全局口令 admin / 本机单人 local)
     pub username: String,
     pub role: String, // owner|collaborator|visitor|lead
+    /// 这条请求是**哪台设备**发来的(会话上记的 device_id;全局口令等合成身份为空)。
+    /// 盘与远程执行的按设备闸靠它 —— 见 `grants::fs_gate` / `grants::exec_gate`。
+    pub device_id: String,
 }
 
 pub fn bearer_of(headers: &HeaderMap) -> Option<String> {
@@ -146,16 +149,18 @@ pub fn resolve_auth(auth_token: &Option<String>, token: Option<&str>) -> Option<
                 user_id: 0,
                 username: "admin".into(),
                 role: "owner".into(),
+                device_id: String::new(),
             });
         }
     }
     // 轨① 会话 token。
     if let Some(t) = token {
-        if let Ok(u) = crate::collab::auth::check_session(t) {
+        if let Ok((u, device_id)) = crate::collab::auth::check_session_with_device(t) {
             return Some(AuthCtx {
                 user_id: u.id,
                 username: u.username,
                 role: u.role,
+                device_id,
             });
         }
     }
@@ -173,6 +178,29 @@ pub async fn auth_ctx(state: &CollabState, headers: &HeaderMap) -> Option<AuthCt
         .await
         .ok()
         .flatten()
+}
+
+/// 盘的入方向闸:**角色**或**设备契约**,两条路任一通过即可。
+///
+/// 为什么不能只留角色闸:设备码那条路进来的是 visitor,角色闸(owner 级)会把它一刀切死,
+/// 「拿码就能连、默认只读」根本走不通。为什么不能只留契约闸:桌面自己、owner 令牌、
+/// 老手机壳走的会话没有设备契约,只认契约会把它们全挡在外面。
+///
+/// 判定顺序:**先看契约**(它是用户在台账上亲手调的档,优先级最高,连 owner 角色也压得住 ——
+/// 冷静期里的自己人也该只读),契约没话说才退回角色闸。
+fn fs_allowed(ctx: &AuthCtx, need_write: bool) -> Result<(), String> {
+    crate::collab::grants::fs_gate(&ctx.device_id, need_write)?;
+    // 契约放行了,还要够角色 —— 除非它本来就是被契约放进来的那种设备。
+    if role_rank(&ctx.role) >= 3 || has_grant(&ctx.device_id) {
+        return Ok(());
+    }
+    Err("需要 owner 权限".into())
+}
+
+/// 这台设备有没有一行信任契约(有 = 它是经「设备码 / 同账号设备网」正式放进来的)。
+fn has_grant(device_id: &str) -> bool {
+    !device_id.trim().is_empty()
+        && matches!(crate::collab::grants::get(device_id), Ok(Some(g)) if !g.revoked)
 }
 
 pub fn role_rank(role: &str) -> u8 {
@@ -590,6 +618,143 @@ async fn collab_join(Json(v): Json<Value>) -> Response {
     })
     .await;
     unwrap_api(out)
+}
+
+// ───────────────────────── 设备码:一码进门 ─────────────────────────
+//
+// 这一组取代了「邀请码 / 票据 / owner 令牌连接码」三条路。两边完全对称:每台机器都有
+// 自己的码,谁把码给谁,谁就能连过去 —— 界面上不再有「主机」和「被邀请者」之分。
+//
+// 进门是**公开**端点(不能要求先鉴权 —— 对方就是因为没凭据才来敲门的),所以这里是
+// 整个协作面唯一一个凭一串短码放人进来的地方,三道自保必须都在:
+//  ① 码由本机验,验的是 meta 里那串常驻码(可随时换,换了旧码当场作废);
+//  ② 进来拿到的是 **visitor** 会话 + 一行**默认只读**的设备契约,不是 owner;
+//  ③ 失败要计次 —— 8 位码 32^8,不限速的话在线爆破不是天方夜谭。
+
+/// 凭设备码进门。回一张本机会话 + 这台设备当前的档位。
+///
+/// 幂等:同一台设备重复连不会重置机主调过的档位(`grant_by_code` 见到已有契约原样返回)。
+async fn collab_connect(
+    State(state): State<CollabState>,
+    headers: HeaderMap,
+    Json(v): Json<Value>,
+) -> Response {
+    let peer = peer_ip_of(&headers);
+    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let node_id = s_of(&v, "nodeId");
+        if node_id.trim().is_empty() {
+            return Err("缺 nodeId —— 对方的 P2P 身份还没就绪,稍后重试".into());
+        }
+        connect_throttle(&peer)?;
+        if !crate::collab::identity::check_access_code(&s_of(&v, "code"))? {
+            crate::collab::db::audit("anonymous", "connect.denied", &node_id, "设备码不对");
+            return Err("设备码不对 —— 让对方在他的「互联」页重新复制一次(他可能换过码)".into());
+        }
+        connect_throttle_reset(&peer);
+        let name = {
+            let n = s_of(&v, "name");
+            if n.trim().is_empty() { "对方设备".to_string() } else { n }
+        };
+        let g = crate::collab::grants::grant_by_code(&node_id, &name)?;
+        let user = crate::collab::auth::peer_guest_user()?;
+        let token = crate::collab::auth::issue_session(user.id, &node_id)?;
+        crate::collab::db::audit(&name, "connect.ok", &node_id, g.effective_fs());
+        Ok(json!({
+            "token": token,
+            "user": user,
+            "fsAccess": g.effective_fs(),
+            "execAccess": g.effective_exec(),
+            // 对方 UI 直接照这句说话,不必自己拼:一进来就说清「现在只读,等他放行」。
+            "note": if g.effective_fs() == crate::collab::grants::FS_RW {
+                "已连上,对方给了完整权限"
+            } else {
+                "已连上。默认只读 —— 等对方在他的「设备与授权」里点「信任这台」才能写入/跑命令"
+            },
+        }))
+    })
+    .await;
+    let _ = state;
+    unwrap_api(out)
+}
+
+/// 本机的设备码(owner 才看得到 —— 码就是钥匙,不能对未鉴权的请求吐)。
+async fn collab_code_get(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let out = tokio::task::spawn_blocking(|| {
+        crate::collab::identity::access_code().map(|c| json!({ "code": c }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 换一串码。旧码当场失效,靠旧码进来的设备会话一并作废。
+async fn collab_code_rotate(State(state): State<CollabState>, headers: HeaderMap) -> Response {
+    let Some(ctx) = auth_ctx(&state, &headers).await else {
+        return forbid();
+    };
+    if role_rank(&ctx.role) < 3 {
+        return forbid();
+    }
+    let actor = ctx.username.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        crate::collab::identity::rotate_access_code(&actor).map(|c| json!({ "code": c }))
+    })
+    .await;
+    unwrap_api(out)
+}
+
+/// 敲门失败计次(按来源)。8 位码 32^8 ≈ 1.1e12,但不限速的话分布式在线爆破仍然可行 ——
+/// 而这道门后面是**别人的硬盘**。连错 10 次即锁 10 分钟,锁的是来源不是码本身
+/// (锁码等于给了任何人一个把机主自己也关在外面的开关)。
+fn connect_fails() -> &'static std::sync::Mutex<HashMap<String, (u32, i64)>> {
+    static F: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (u32, i64)>>> =
+        std::sync::OnceLock::new();
+    F.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+const CONNECT_MAX_FAILS: u32 = 10;
+const CONNECT_LOCK_SECS: i64 = 600;
+
+fn connect_throttle(peer: &str) -> Result<(), String> {
+    let mut m = connect_fails().lock().unwrap_or_else(|e| e.into_inner());
+    let now = crate::collab::db::now();
+    let e = m.entry(peer.to_string()).or_insert((0, 0));
+    if e.0 >= CONNECT_MAX_FAILS && now - e.1 < CONNECT_LOCK_SECS {
+        return Err(format!(
+            "连错太多次,请 {} 分钟后再试",
+            (CONNECT_LOCK_SECS - (now - e.1)) / 60 + 1
+        ));
+    }
+    if now - e.1 >= CONNECT_LOCK_SECS {
+        *e = (0, 0);
+    }
+    e.0 += 1;
+    e.1 = now;
+    Ok(())
+}
+
+fn connect_throttle_reset(peer: &str) {
+    connect_fails()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(peer);
+}
+
+/// 请求来源标识。经 iroh 隧道进来的对端都是 127.0.0.1,所以还带上转发头 ——
+/// 取不到就退回一个固定桶(那时限速是全局的,宁可误伤也不放开)。
+fn peer_ip_of(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .or_else(|| headers.get("x-real-ip"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "tunnel".to_string())
 }
 
 /// owner 显式「重新信任」账号权威(换云机 / 权威轮换了密钥)。
@@ -3394,8 +3559,8 @@ async fn fs_list_api(
     let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
-    if role_rank(&ctx.role) < 3 {
-        return forbid();
+    if let Err(e) = fs_allowed(&ctx, false) {
+        return fs_deny(e);
     }
     let rel = q.get("path").cloned().unwrap_or_default();
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
@@ -3479,8 +3644,8 @@ async fn fs_read_api(
     let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
-    if role_rank(&ctx.role) < 3 {
-        return forbid();
+    if let Err(e) = fs_allowed(&ctx, false) {
+        return fs_deny(e);
     }
     let rel = q.get("path").cloned().unwrap_or_default();
     let rel_for_ext = rel.clone(); // 判「要不要压缩」看扩展名,而 rel 要被搬进阻塞任务
@@ -3857,7 +4022,7 @@ async fn peer_grant_trust(
         return forbid();
     }
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let g = crate::collab::grants::trust_now(&s_of(&v, "nodeId"), &ctx.username)?;
+        let g = crate::collab::grants::trust_fully(&s_of(&v, "nodeId"), &ctx.username)?;
         Ok(json!({ "ok": true, "effectiveFs": g.effective_fs() }))
     })
     .await;
@@ -3912,13 +4077,18 @@ async fn mesh_revoke(headers: HeaderMap, Json(v): Json<Value>) -> Response {
 //  ② 目录闸:fsface 逐根的写位。角色够了但目录没开写 → 一律拒。
 // 两道都得过。少任何一道,「同账号自动组网」就变成「谁进得来谁就能删盘」。
 
-/// 写端点共用的入口闸:角色不够直接 None。
-async fn fs_write_guard(state: &CollabState, headers: &HeaderMap) -> Option<AuthCtx> {
-    let ctx = auth_ctx(state, headers).await?;
-    if role_rank(&ctx.role) < 3 {
-        return None;
-    }
-    Some(ctx)
+/// 写端点共用的入口闸:角色或设备契约(见 [`fs_allowed`])。
+/// 拒绝原因原样带出来 —— 「对方把这台设备设成了只读」必须显示成失败原因,
+/// 糊成一句「需要 owner 权限」会让人对着正确的操作反复试。
+async fn fs_write_guard(
+    state: &CollabState,
+    headers: &HeaderMap,
+) -> Result<AuthCtx, String> {
+    let ctx = auth_ctx(state, headers)
+        .await
+        .ok_or_else(|| "未授权".to_string())?;
+    fs_allowed(&ctx, true)?;
+    Ok(ctx)
 }
 
 /// fsface 的错误 → 403 + 原文。写失败的原因(只读/不在根内/父目录不存在)必须如实回给
@@ -3936,8 +4106,8 @@ async fn fs_stat_api(
     let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
-    if role_rank(&ctx.role) < 3 {
-        return forbid();
+    if let Err(e) = fs_allowed(&ctx, false) {
+        return fs_deny(e);
     }
     let rel = q.get("path").cloned().unwrap_or_default();
     match tokio::task::spawn_blocking(move || crate::collab::fsface::stat(&rel)).await {
@@ -3953,12 +4123,15 @@ async fn fs_caps_api(State(state): State<CollabState>, headers: HeaderMap) -> Re
     let Some(ctx) = auth_ctx(&state, &headers).await else {
         return forbid();
     };
-    if role_rank(&ctx.role) < 3 {
-        return forbid();
+    if let Err(e) = fs_allowed(&ctx, false) {
+        return fs_deny(e);
     }
-    let out = tokio::task::spawn_blocking(|| {
+    // 写位要按**这台设备**报:契约给了只读,就别对它宣称可写 —— 挂载端信了 caps
+    // 会把盘挂成读写,用户拖进文件、等半天、再收一个「拒绝访问」。
+    let writable = fs_allowed(&ctx, true).is_ok();
+    let out = tokio::task::spawn_blocking(move || {
         let (read, write) = crate::collab::fsface::caps();
-        json!({ "read": read, "write": write })
+        json!({ "read": read, "write": write && writable })
     })
     .await;
     match out {
@@ -3975,8 +4148,9 @@ async fn fs_write_api(
     Query(q): Query<HashMap<String, String>>,
     body: Body,
 ) -> Response {
-    let Some(ctx) = fs_write_guard(&state, &headers).await else {
-        return forbid();
+    let ctx = match fs_write_guard(&state, &headers).await {
+        Ok(c) => c,
+        Err(e) => return fs_deny(e),
     };
     let rel = q.get("path").cloned().unwrap_or_default();
     // 开写(建临时文件)在阻塞线程池;拿到句柄后由 mpsc 把 async 流喂给同步写线程。
@@ -4066,8 +4240,9 @@ async fn fs_op_api(
     Query(q): Query<HashMap<String, String>>,
     axum::extract::Path(op): axum::extract::Path<String>,
 ) -> Response {
-    let Some(ctx) = fs_write_guard(&state, &headers).await else {
-        return forbid();
+    let ctx = match fs_write_guard(&state, &headers).await {
+        Ok(c) => c,
+        Err(e) => return fs_deny(e),
     };
     let rel = q.get("path").cloned().unwrap_or_default();
     let dest = q.get("dest").cloned().unwrap_or_default();
@@ -4260,7 +4435,11 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         .route("/api/collab/tunnel/status", get(tunnel_status_api))
         .route("/api/collab/tunnel/start", post(tunnel_start_api))
         .route("/api/collab/tunnel/relays", post(tunnel_relays_api))
-        // 远程文件浏览(fsface):owner 鉴权 + 路径关押,随隧道透传到对端的盘。
+        // 设备码(一码):公开的敲门口 + owner 才能读/换的本机码。
+        .route("/api/collab/connect", post(collab_connect))
+        .route("/api/collab/code", get(collab_code_get))
+        .route("/api/collab/code/rotate", post(collab_code_rotate))
+        // 远程文件浏览(fsface):角色或设备契约 + 路径关押,随隧道透传到对端的盘。
         .route("/api/fs/list", get(fs_list_api))
         .route("/api/fs/read", get(fs_read_api))
         .route("/api/fs/stat", get(fs_stat_api))

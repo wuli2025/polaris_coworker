@@ -1,0 +1,18 @@
+# 可选：允许 Polaris Web 的 owner 从「更新」页一键替换当前容器。
+#
+# Docker socket 等同宿主机 root 权限，绝不能在不可信/匿名公开部署上启用。
+# 启用前至少设置 POLARIS_AUTH_TOKEN 或 POLARIS_REQUIRE_LOGIN=1，并保持 HTTPS 反代。
+#
+# Linux / NAS：DOCKER_GID 必须等于宿主机 socket 的组 id：
+#   DOCKER_GID=$(stat -c %g /var/run/docker.sock) \
+#     docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
+# Docker Desktop 通常可用默认 0。
+services:
+  polaris:
+    environment:
+      - POLARIS_DOCKER_SOCKET=1
+      - POLARIS_DOCKER_SOCKET_PATH=/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-0}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

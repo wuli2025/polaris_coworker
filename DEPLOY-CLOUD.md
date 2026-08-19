@@ -3,8 +3,8 @@
 > 面向「只会把文件传到服务器」的用户。照着从上到下做即可。
 > 适用：一台 Linux 云服务器（Ubuntu 22.04/24.04、Debian 12 等），2 核 4G 起步，建议 4 核 8G。
 >
-> ⚠ 说明：本套 Dockerfile/compose **未在开发机实测构建**（开发机 WSL 无 docker）。
-> 首次构建若报错，按文末「构建排错」逐条对照。
+> 官方镜像由 GitHub Actions 同时发布 `linux/amd64` 与 `linux/arm64`；常规部署不需要在服务器上编译 Rust。
+> 只有修改了源码或要做定制镜像时才使用本地 `--build` 路径。
 
 ## 0. 装 Docker（服务器上执行一次）
 
@@ -53,17 +53,47 @@ nano .env
   `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`，或都留空、起服务后在
   App 内「供应商」面板登录 Claude 订阅。
 
-## 3. 构建并启动
+## 3. 拉取并启动
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+默认拉取 `ghcr.io/wuli2025/polaris_coworker:latest`，会按服务器架构自动选择 amd64 或
+arm64 镜像。只有需要从当前源码定制构建时才运行：
 
 ```bash
 docker compose up -d --build
 ```
 
-首次构建要编译 Rust，视机器 10–30 分钟属正常。看进度：
+本地构建要编译 Rust，视机器 10–30 分钟属正常。看运行日志：
 
 ```bash
 docker compose logs -f polaris
 ```
+
+### 可选：启用网页一键更新
+
+基础 compose **不会**挂载 Docker socket；更新页仍可检查版本，但不能自行替换容器。
+确认部署已设置 `POLARIS_AUTH_TOKEN`（或 `POLARIS_REQUIRE_LOGIN=1`）并通过 HTTPS 访问后，
+才可显式叠加更新配置：
+
+```bash
+# Linux / NAS：先把结果写入 .env 的 DOCKER_GID；Docker Desktop 通常保持 0
+stat -c %g /var/run/docker.sock
+
+docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
+```
+
+此后 owner 可在 Polaris「更新」页点「立即更新容器」。Polaris 会启动固定版本的独立
+Watchtower 替身，替身接手拉取和替换，因此当前容器退出不会中断更新；数据卷、端口、环境变量
+保持不变，服务通常只短暂断线 1–3 分钟。
+
+> **安全边界：**`/var/run/docker.sock` 等同宿主机 root 权限。不要在匿名、无鉴权或不可信
+> 用户可访问的部署上启用。以后手动执行 `compose up/pull` 也要同时带这两个 `-f` 参数，
+> 否则基础 compose 会撤掉 socket 挂载。固定到 `POLARIS_IMAGE_TAG=2.9.0` 等版本标签时不会
+> 自动跨版本；要远程跟随发布版请保持 `latest`。
 
 ## 4. 验证
 
@@ -163,12 +193,27 @@ docker compose up -d
 
 ## 9. 升级
 
+官方镜像部署有两条路径：
+
+1. 已启用 `docker-compose.update.yml`：owner 直接在 Polaris「更新」页检查并一键更新。
+2. 未挂 socket（安全默认）：在宿主机执行：
+
 ```bash
 cd polaris-app
-git pull                          # 方式 B 用户：重新上传解压覆盖
-docker compose up -d --build      # 重建镜像并滚动重启，数据在卷里不受影响
-docker image prune -f             # 清理旧镜像层
+git pull
+docker compose pull
+docker compose up -d
+docker image prune -f             # 可选：清理旧镜像层
 ```
+
+如果部署的是本地定制源码，则继续使用：
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+数据在命名卷中，以上容器替换都不会删除数据。不要用 `docker compose down -v` 做升级。
 
 ## 构建排错
 

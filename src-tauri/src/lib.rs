@@ -381,6 +381,11 @@ pub fn run() {
             mesh::peer_grant_set,
             mesh::peer_trust,
             mesh::peer_revoke,
+            // 设备码(一码):看自己的码 / 换一串 / 粘对方的码连过去。
+            // 取代了 PLRK1 连接码 + PLRS1 分享码 + 8 位邀请票据这三串。
+            mesh::device_code,
+            mesh::device_code_rotate,
+            mesh::connect_by_code,
             // 远程盘挂载(成员侧:对端共享目录 → 本机系统盘符,自动挑 Z:/Y:…)
             fsmount::fs_mount,
             fsmount::fs_unmount,

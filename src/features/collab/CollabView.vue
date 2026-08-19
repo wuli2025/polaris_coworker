@@ -4,7 +4,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   Handshake,
   LoaderCircle,
-  LogOut,
+  CircleUserRound,
   Plus,
   Plug,
   Kanban,
@@ -27,12 +27,17 @@ import LeadAgentCard from "./LeadAgentCard.vue";
 import TeamMembers from "./TeamMembers.vue";
 // 全应用唯一的登录界面 —— 与互联页共用同一个组件、同一个账号。
 import EmailLogin from "../auth/EmailLogin.vue";
+import AccountCenterModal from "../auth/AccountCenterModal.vue";
+import { useAccountStore } from "../../stores/account";
 import { toast } from "../../composables/useToast";
 
 const collab = useCollabStore();
+const account = useAccountStore();
+const accountCenterOpen = ref(false);
 
 onMounted(() => {
   void collab.init();
+  void account.refresh();
   if (isTauri) {
     void collab.hostStatus().then((s) => {
       // 主机自启续联:本机在当主机但 base 丢了(如清过缓存)→ 自动指回本机
@@ -362,11 +367,6 @@ async function doAuth() {
   }
 }
 
-async function doLogout() {
-  if (!confirm("退出协作登录?")) return;
-  await collab.logout();
-}
-
 // ── 已登录:主界面(GitHub 式:团队 → 项目 → 看板) ──
 const rightPane = ref<"board" | "team" | "admin">("board");
 
@@ -441,6 +441,7 @@ function pickProject(id: number) {
 
 const displayName = computed(
   () =>
+    account.label ||
     collab.user?.display_name ||
     collab.user?.displayName ||
     collab.user?.username ||
@@ -675,7 +676,7 @@ const MAIN_TABS: { key: AuthTab; label: string }[] = [
             <Crown v-if="collab.isOwner" :size="11" :stroke-width="2" />
             {{ collab.isOwner ? "管理者" : "成员" }}
           </span>
-          <button class="icon-btn" title="退出登录" @click="doLogout"><LogOut :size="14" /></button>
+          <button class="icon-btn" title="账号管理" @click="accountCenterOpen = true"><CircleUserRound :size="14" /></button>
         </div>
 
         <!-- 团队切换器 -->
@@ -848,6 +849,11 @@ const MAIN_TABS: { key: AuthTab; label: string }[] = [
         </div>
       </div>
     </div>
+
+    <AccountCenterModal
+      v-if="accountCenterOpen"
+      @close="accountCenterOpen = false"
+    />
   </div>
 </template>
 

@@ -187,7 +187,7 @@ function clearSearch() {
       </button>
       <button
         class="tool-btn"
-        title="盘管理:记住你登陆过的 NAS(主机/共享/账号),一键映射成网络盘,挂上后就能被「盘点」扫到"
+        title="盘管理:统一查看本机 SMB 网络盘与「互联」接入的设备盘，可直接浏览或去互联管理"
         @click="emit('open-nas')"
       >
         <Server :size="14" :stroke-width="1.8" />

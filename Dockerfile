@@ -67,6 +67,10 @@ WORKDIR /build/src-tauri
 RUN cargo build --release -p polaris-cli --bin polaris-server --features collab-net \
     && (strip target/release/polaris-server || true)
 
+# ── Docker CLI：仅供显式启用的容器自更新调用 ─────────────────────
+# 直接复用官方多架构 CLI，避免在运行层安装完整 docker.io（体积大且带 daemon）。
+FROM docker:27.5.1-cli AS docker-cli
+
 # ── stage 3: 运行层 ────────────────────────────────────────────
 FROM debian:bookworm-slim
 ARG APT_MIRROR=
@@ -141,13 +145,20 @@ RUN useradd -m -u 1000 -s /bin/bash polaris \
     && mkdir -p /home/polaris/Polaris /home/polaris/.claude /srv/web /app/resources \
     && chown -R polaris:polaris /home/polaris /srv/web /app/resources
 
-COPY --from=web    --chown=polaris:polaris /build/dist /srv/web
-COPY --from=server --chown=polaris:polaris /build/src-tauri/target/release/polaris-server /usr/local/bin/polaris-server
-COPY --from=server --chown=polaris:polaris /build/src-tauri/resources /app/resources
+COPY --from=web        --chown=polaris:polaris /build/dist /srv/web
+COPY --from=server     --chown=polaris:polaris /build/src-tauri/target/release/polaris-server /usr/local/bin/polaris-server
+COPY --from=server     --chown=polaris:polaris /build/src-tauri/resources /app/resources
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+# package.json 是容器当前版本的唯一来源；update.sh 的 --check 与网页更新页都读它。
+COPY --chown=polaris:polaris package.json /app/package.json
+COPY --chmod=0755 docker/update.sh /usr/local/bin/update.sh
 
 ENV POLARIS_PORT=8080 \
     POLARIS_WEB_DIR=/srv/web \
     POLARIS_RESOURCE_DIR=/app/resources \
+    POLARIS_VERSION_FILE=/app/package.json \
+    POLARIS_IMAGE_REPO=ghcr.io/wuli2025/polaris_coworker \
+    POLARIS_CONTAINER_NAME=polaris-web \
     HOME=/home/polaris
 
 USER polaris

@@ -16,9 +16,11 @@ polaris-video-work-kbwiki
 polaris-video-work-longoutput
 polaris-video-work-zhiyuan
 workspace
-docs
+# 只保留 Rust include_str! 在构建期必须读取的那一份文档
+docs/*
 *.html
 !index.html
+!docs/beam-guide.html
 # 知识库内容运行时由卷挂载/种子提供，不进镜像
 PolarisKB
 # updater 私钥等

@@ -2,9 +2,9 @@
 /**
  * 盘管理 —— NAS 网络盘(SMB)的记忆与一键映射。
  *
- * 列出「之前登陆过 / 系统里发现的」NAS,记住它们的登陆方式(主机/共享/账号/密码/偏好盘符),
- * 点「连接」用 net use 一键挂成盘符,挂上后立刻能被「盘点」扫到;也可断开 / 编辑 / 忘记。
- * 凭据明文存本地(~/Polaris/data/nas.json),不上传。
+ * 统一展示两类盘：本机 SMB 网络盘，以及由「互联」通过 iroh 接入的设备盘。
+ * SMB 仍走 nas.* 记忆/映射；互联盘只复用 remoteSources + fsmount 状态并跳文件中心浏览，
+ * 两套传输契约不混用。SMB 凭据仅存本机(~/Polaris/data/nas.json)，不上传。
  */
 import { ref, reactive, computed, onMounted } from "vue";
 import {
@@ -17,16 +17,24 @@ import {
   Unlink,
   Pencil,
   RefreshCw,
-  LoaderCircle,
   Check,
   Info,
+  Network,
+  FolderOpen,
 } from "@lucide/vue";
 import OrbitSpinner from "./icons/OrbitSpinner.vue";
-import { nas, type NasView, type NasRecord } from "../tauri";
+import { nas, fsmount, type NasView, type NasRecord, type MountStatus } from "../tauri";
+import { loadRemoteSources, type RemoteSource } from "../features/interconnect/remoteSources";
 
-const emit = defineEmits<{ (e: "close"): void }>();
+const emit = defineEmits<{
+  (e: "close"): void;
+  (e: "browse-remote", id: string): void;
+  (e: "open-interconnect"): void;
+}>();
 
 const list = ref<NasView[]>([]);
+const remoteSources = ref<RemoteSource[]>(loadRemoteSources());
+const mounts = ref<MountStatus[]>([]);
 const loading = ref(false);
 const busyId = ref<string | null>(null);
 const toast = reactive({ show: false, text: "", err: false });
@@ -49,6 +57,27 @@ const editHasPassword = ref(false);
 
 const saved = computed(() => list.value.filter((n) => !n.discovered));
 const discovered = computed(() => list.value.filter((n) => n.discovered));
+const mountBySource = computed(() =>
+  Object.fromEntries(mounts.value.map((m) => [m.sourceId, m]))
+);
+
+function mountOf(id: string): MountStatus | undefined {
+  return mountBySource.value[id];
+}
+
+function remoteState(source: RemoteSource): string {
+  const mounted = mountOf(source.id);
+  if (!mounted) return "可在文件中心浏览";
+  if (mounted.ok && mounted.drive) {
+    return `${mounted.drive} · ${mounted.writable ? "读写" : "只读"}`;
+  }
+  if (mounted.error) return `等待重连 · ${mounted.error}`;
+  return "正在连接";
+}
+
+function browseRemote(source: RemoteSource) {
+  emit("browse-remote", source.id);
+}
 
 function flash(text: string, err = false) {
   toast.text = text;
@@ -59,10 +88,16 @@ function flash(text: string, err = false) {
 
 async function refresh() {
   loading.value = true;
+  remoteSources.value = loadRemoteSources();
   try {
-    list.value = await nas.list();
-  } catch (e) {
-    flash(String(e), true);
+    const [nasResult, mountResult] = await Promise.allSettled([
+      nas.list(),
+      fsmount.status(),
+    ]);
+    if (nasResult.status === "fulfilled") list.value = nasResult.value;
+    else flash(String(nasResult.reason), true);
+    // 老版本 / Web 壳可能没有系统挂载命令；互联源仍可在文件中心直接浏览。
+    mounts.value = mountResult.status === "fulfilled" ? mountResult.value : [];
   } finally {
     loading.value = false;
   }
@@ -192,7 +227,7 @@ onMounted(refresh);
       <header class="nas-head">
         <div class="nas-title">
           <Server :size="18" :stroke-width="1.8" />
-          <span>盘管理 · 我的 NAS</span>
+          <span>盘管理 · 本机与互联</span>
         </div>
         <div class="nas-head-actions">
           <button class="ghost-btn" :disabled="loading" title="刷新" @click="refresh">
@@ -207,11 +242,51 @@ onMounted(refresh);
 
       <div class="nas-sub">
         <Info :size="13" :stroke-width="1.8" />
-        <span>记住你登陆过的 NAS,点「连接」一键挂成网络盘(SMB),挂上后就能被「盘点」扫到。账号密码仅存本机。</span>
+        <span>这里统一管理本机 SMB 网络盘和「互联」接入的设备盘。连上后可直接浏览，也能被文件中心盘点。</span>
       </div>
 
       <div class="nas-body">
-        <!-- 编辑/新增表单 -->
+        <!-- 互联设备盘：数据源与互联页完全相同；这里只提供浏览和去互联管理，
+             不拿 iroh 连接去调用 SMB 的 connect/disconnect。 -->
+        <section class="nas-sect remote-section">
+          <div class="sect-head">
+            <div>
+              <h4>互联设备盘</h4>
+              <span class="sect-note">另一台电脑 / NAS 用同一邮箱接入后会自动出现在这里</span>
+            </div>
+            <button class="add-btn" @click="emit('open-interconnect')">
+              <Network :size="14" :stroke-width="2" /> 去互联添加
+            </button>
+          </div>
+          <div v-if="!remoteSources.length" class="empty-hint remote-empty">
+            暂无互联设备盘。到「互联」用同一邮箱登录另一台设备，或输入它的设备码；连接成功后这里会同步出现。
+          </div>
+          <ul v-else class="nas-list">
+            <li v-for="source in remoteSources" :key="source.id" class="nas-card remote-card" :class="{ on: mountOf(source.id)?.ok }">
+              <div class="card-ic"><Network :size="20" :stroke-width="1.7" /></div>
+              <div class="card-main">
+                <div class="card-top">
+                  <span class="card-name">{{ source.name || "互联设备盘" }}</span>
+                  <span v-if="mountOf(source.id)?.ok" class="badge ok">已连接</span>
+                </div>
+                <div class="card-unc">互联设备 · {{ source.nodeId.slice(0, 8) }}…{{ source.nodeId.slice(-6) }}</div>
+                <div class="card-meta" :class="{ warn: !!mountOf(source.id)?.error }">
+                  <span>{{ remoteState(source) }}</span>
+                </div>
+              </div>
+              <div class="card-acts">
+                <button class="act primary" @click="browseRemote(source)">
+                  <FolderOpen :size="14" :stroke-width="1.9" /> 浏览
+                </button>
+                <button class="act" @click="emit('open-interconnect')">
+                  <Network :size="14" :stroke-width="1.9" /> 管理
+                </button>
+              </div>
+            </li>
+          </ul>
+        </section>
+
+        <!-- 编辑/新增本机 SMB 表单 -->
         <section v-if="editing" class="nas-form glass-in">
           <div class="form-grid">
             <label class="fld">
@@ -254,14 +329,14 @@ onMounted(refresh);
           </div>
         </section>
 
-        <!-- 已记住的 NAS -->
+        <!-- 已记住的本机 SMB 网络盘 -->
         <section class="nas-sect">
           <div class="sect-head">
-            <h4>已记住的 NAS</h4>
-            <button v-if="!editing" class="add-btn" @click="openNew"><Plus :size="14" :stroke-width="2" /> 添加 NAS</button>
+            <h4>本机网络盘（SMB）</h4>
+            <button v-if="!editing" class="add-btn" @click="openNew"><Plus :size="14" :stroke-width="2" /> 添加网络盘</button>
           </div>
           <div v-if="!saved.length" class="empty-hint">
-            还没有记住的 NAS。点「添加 NAS」填一次主机/共享/账号,以后一键连接。
+            还没有记住的 SMB 网络盘。点「添加网络盘」填一次主机 / 共享 / 账号，以后一键连接。
           </div>
           <ul v-else class="nas-list">
             <li v-for="n in saved" :key="n.id" class="nas-card" :class="{ on: n.connected }">
@@ -359,22 +434,28 @@ onMounted(refresh);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(8, 12, 22, 0.46);
+  background: var(--overlay);
   backdrop-filter: blur(6px);
   padding: 24px;
 }
 .nas-panel {
-  width: min(720px, 96vw);
+  width: min(860px, 96vw);
   max-height: 88vh;
   display: flex;
   flex-direction: column;
+  color: var(--text);
+  color-scheme: light;
   border-radius: 20px;
-  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.16));
-  background: var(--glass-bg, rgba(22, 27, 38, 0.78));
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
   backdrop-filter: blur(26px) saturate(1.3);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
   position: relative;
+}
+:global(html[data-theme="dark"]) .nas-panel,
+:global(html[data-theme="aurora-dark"]) .nas-panel {
+  color-scheme: dark;
 }
 .nas-head {
   display: flex;
@@ -400,14 +481,15 @@ onMounted(refresh);
   width: 32px;
   height: 32px;
   border-radius: 10px;
-  border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.05);
-  color: inherit;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+  color: var(--text-2);
   cursor: pointer;
   transition: background 0.16s, border-color 0.16s;
 }
 .ghost-btn:hover {
-  background: rgba(255, 255, 255, 0.11);
+  background: var(--selection-bg-hover);
+  color: var(--text);
 }
 .nas-sub {
   display: flex;
@@ -417,9 +499,9 @@ onMounted(refresh);
   padding: 9px 11px;
   font-size: 12.3px;
   line-height: 1.55;
-  color: var(--muted, #aeb6c6);
-  background: rgba(120, 160, 255, 0.08);
-  border: 1px solid rgba(120, 160, 255, 0.16);
+  color: var(--text-2);
+  background: var(--primary-soft);
+  border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
   border-radius: 11px;
 }
 .nas-sub svg {
@@ -437,8 +519,8 @@ onMounted(refresh);
   margin: 6px 0 16px;
   padding: 14px;
   border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
 }
 .glass-in {
   animation: glassIn 0.18s ease;
@@ -463,23 +545,27 @@ onMounted(refresh);
   max-width: 120px;
 }
 .fld > span {
-  color: var(--muted, #aeb6c6);
-  font-weight: 550;
+  color: var(--text-2);
+  font-weight: 600;
 }
 .fld input {
-  height: 34px;
+  height: 36px;
   padding: 0 11px;
   border-radius: 9px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(0, 0, 0, 0.22);
-  color: inherit;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
   font-size: 13px;
   outline: none;
   transition: border-color 0.16s, box-shadow 0.16s;
 }
+.fld input::placeholder {
+  color: var(--dim);
+  opacity: 1;
+}
 .fld input:focus {
-  border-color: rgba(120, 170, 255, 0.6);
-  box-shadow: 0 0 0 3px rgba(120, 170, 255, 0.16);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
 }
 .chk {
   display: flex;
@@ -487,7 +573,7 @@ onMounted(refresh);
   gap: 8px;
   margin-top: 12px;
   font-size: 12.5px;
-  color: var(--muted, #aeb6c6);
+  color: var(--text-2);
   cursor: pointer;
 }
 .chk input {
@@ -516,12 +602,13 @@ onMounted(refresh);
   transition: filter 0.16s, background 0.16s;
 }
 .btn-ghost {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(255, 255, 255, 0.12);
-  color: inherit;
+  background: var(--panel);
+  border-color: var(--border);
+  color: var(--text-2);
 }
 .btn-ghost:hover {
-  background: rgba(255, 255, 255, 0.13);
+  background: var(--selection-bg-hover);
+  color: var(--text);
 }
 .btn-primary {
   background: linear-gradient(135deg, #5b8cff, #6f6aff);
@@ -547,11 +634,11 @@ onMounted(refresh);
   font-size: 12.5px;
   font-weight: 650;
   letter-spacing: 0.3px;
-  color: var(--muted, #c2c9d6);
+  color: var(--text-2);
 }
 .sect-note {
   font-size: 11.3px;
-  color: var(--muted, #8a92a3);
+  color: var(--muted);
 }
 .add-btn {
   display: inline-flex;
@@ -563,22 +650,42 @@ onMounted(refresh);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  color: #8db4ff;
-  background: rgba(120, 160, 255, 0.1);
-  border: 1px solid rgba(120, 160, 255, 0.22);
+  color: var(--primary);
+  background: var(--primary-soft);
+  border: 1px solid color-mix(in srgb, var(--primary) 25%, transparent);
   transition: background 0.16s;
 }
 .add-btn:hover {
-  background: rgba(120, 160, 255, 0.18);
+  background: color-mix(in srgb, var(--primary) 18%, var(--panel));
 }
 .empty-hint {
   padding: 18px 14px;
   font-size: 12.6px;
   line-height: 1.6;
   text-align: center;
-  color: var(--muted, #8a92a3);
-  border: 1px dashed rgba(255, 255, 255, 0.13);
+  color: var(--muted);
+  border: 1px dashed var(--border);
   border-radius: 12px;
+}
+
+.remote-section {
+  margin: 6px 0 16px;
+  padding: 0 12px 12px;
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--primary-soft) 54%, var(--panel));
+}
+.remote-section .sect-head > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.remote-empty {
+  background: var(--panel);
+}
+.remote-card {
+  background: color-mix(in srgb, var(--panel) 92%, var(--primary-soft));
 }
 
 /* 卡片 */
@@ -596,16 +703,16 @@ onMounted(refresh);
   gap: 12px;
   padding: 12px 13px;
   border-radius: 13px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-soft);
+  background: var(--panel);
   transition: border-color 0.16s, background 0.16s, transform 0.16s;
 }
 .nas-card:hover {
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--panel-hover);
 }
 .nas-card.on {
-  border-color: rgba(90, 220, 150, 0.4);
-  background: rgba(60, 200, 130, 0.07);
+  border-color: color-mix(in srgb, var(--ok) 42%, var(--border));
+  background: var(--ok-soft);
 }
 .nas-card.discovered {
   border-style: dashed;
@@ -617,12 +724,12 @@ onMounted(refresh);
   height: 42px;
   flex: 0 0 auto;
   border-radius: 11px;
-  color: #9fb6e8;
-  background: rgba(120, 160, 255, 0.12);
+  color: var(--primary);
+  background: var(--primary-soft);
 }
 .nas-card.on .card-ic {
-  color: #74e0a0;
-  background: rgba(90, 220, 150, 0.14);
+  color: var(--ok);
+  background: var(--ok-soft);
 }
 .card-main {
   flex: 1 1 auto;
@@ -648,14 +755,14 @@ onMounted(refresh);
   border-radius: 999px;
 }
 .badge.ok {
-  color: #6ee2a4;
-  background: rgba(90, 220, 150, 0.16);
+  color: var(--ok);
+  background: var(--ok-soft);
 }
 .card-unc {
   margin-top: 2px;
   font-size: 11.8px;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  color: var(--muted, #9aa3b2);
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -665,7 +772,10 @@ onMounted(refresh);
   display: flex;
   gap: 6px;
   font-size: 11.3px;
-  color: var(--muted, #828b9c);
+  color: var(--muted);
+}
+.card-meta.warn {
+  color: var(--vermilion);
 }
 .card-meta .dot {
   opacity: 0.5;
@@ -686,13 +796,14 @@ onMounted(refresh);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  color: inherit;
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-2);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
   transition: background 0.16s, filter 0.16s;
 }
 .act:hover {
-  background: rgba(255, 255, 255, 0.14);
+  color: var(--text);
+  background: var(--selection-bg-hover);
 }
 .act:disabled {
   opacity: 0.55;
@@ -743,6 +854,17 @@ onMounted(refresh);
 .toast-leave-to {
   opacity: 0;
   transform: translateX(-50%) translateY(8px);
+}
+
+@media (max-width: 680px) {
+  .nas-overlay { align-items: flex-end; padding: 8px; }
+  .nas-panel { width: 100%; max-height: 94vh; border-radius: 17px 17px 10px 10px; }
+  .form-grid { grid-template-columns: 1fr; }
+  .fld.fld-sm { max-width: none; }
+  .sect-head { align-items: flex-start; }
+  .nas-card { align-items: flex-start; flex-wrap: wrap; }
+  .card-main { min-width: calc(100% - 56px); }
+  .card-acts { width: 100%; justify-content: flex-end; }
 }
 
 .spin {

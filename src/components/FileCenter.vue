@@ -109,6 +109,22 @@ function pickRemote(s: RemoteSource) {
   view.value = "remote";
 }
 
+function browseRemoteFromManager(id: string) {
+  remoteSources.value = loadRemoteSources();
+  const source = remoteSources.value.find((s) => s.id === id);
+  if (!source) {
+    flashOp("这块互联设备盘已不在清单里，请刷新后重试");
+    return;
+  }
+  nasOpen.value = false;
+  pickRemote(source);
+}
+
+function openInterconnectFromManager() {
+  nasOpen.value = false;
+  app.setView("interconnect");
+}
+
 // ── 核心层(知识体系):个人=知识网/聚类,企业=Schema-Guided 抽出的实体关系三元组 ──
 interface OntoTypeLite { id: string; name: string; hint: string }
 interface OntoSchema {
@@ -720,8 +736,13 @@ onBeforeUnmount(() => {
       @open-nas="nasOpen = true"
     />
 
-    <!-- 盘管理:NAS 网络盘的记忆与一键映射 -->
-    <NasManager v-if="nasOpen" @close="nasOpen = false" />
+    <!-- 盘管理:本机 SMB 与互联设备盘共用一个入口 -->
+    <NasManager
+      v-if="nasOpen"
+      @close="nasOpen = false"
+      @browse-remote="browseRemoteFromManager"
+      @open-interconnect="openInterconnectFromManager"
+    />
 
     <!-- AI 整理名称进度 -->
     <div v-if="titleMsg && view !== 'core'" class="fc-llm">

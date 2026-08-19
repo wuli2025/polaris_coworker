@@ -10,20 +10,24 @@
 
 ```bash
 # 1) 准备环境变量
-cp .env.example .env
-#   编辑 .env，至少填一种鉴权：
+cp .env.server.example .env
+#   编辑 .env，至少填一种模型鉴权：
 #   - ANTHROPIC_API_KEY=sk-ant-...           （Claude 官方）
-#   - 或 ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN（智谱/Kimi/DeepSeek/聚合站）
-#   访问口令默认不要（家用 NAS 直接用）；只有真把 8080 暴露到公网时才设
-#   POLARIS_AUTH_TOKEN=<一串口令>
+#   - 或 ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN（兼容端点）
+#   真把服务暴露公网时必须设置 POLARIS_AUTH_TOKEN（或 POLARIS_REQUIRE_LOGIN=1），
+#   并保持 POLARIS_BIND_IP=127.0.0.1、通过 HTTPS 反代接入。
 
-# 2) 一键构建 + 拉起
-docker compose up -d --build
+# 2) 拉取官方多架构镜像并启动
+docker compose pull
+docker compose up -d
 
 # 3) 浏览器打开
 #   http://localhost:8080          ← 默认免口令，直接进
 #   若设了口令：http://localhost:8080/?token=<你的口令>
 ```
+
+官方镜像为 `ghcr.io/wuli2025/polaris_coworker:latest`，支持 `linux/amd64` 与
+`linux/arm64`。只有需要从当前源码定制构建时才改用 `docker compose up -d --build`。
 
 健康检查：`curl http://localhost:8080/api/health` → `ok`。
 
@@ -66,22 +70,34 @@ docker compose up -d --build
 
 ---
 
-## 三、⭐ Windows 更新后，如何快速同步到 Docker
+## 三、更新 Docker 版
 
-**因为是同一份源码，更新只需重建镜像，无需任何移植。**
+### 安全默认：宿主机手动更新
 
 ```bash
-# 在 Windows 上正常改完代码、提交后（桌面版照常 cargo build / 发版）：
-git pull              # 或把最新源码同步到部署机
-docker compose up -d --build
+git pull
+docker compose pull
+docker compose up -d
 ```
 
-`Dockerfile` 做了**依赖缓存分层**：第三方依赖（axum/tokio/解析库等）单独成层，
-只要 `Cargo.toml`/`Cargo.lock` 没变，重建时**不会重编依赖**，
-通常 1–3 分钟即可出新镜像。前端同理（`package-lock.json` 不变则复用 `npm ci` 层）。
+### 可选：Polaris 更新页一键更新
 
-> 维护纪律：改后端时若新增了 `#[tauri::command]`，记得在 `src/server.rs` 的
-> `dispatch_sync` 里加一条对应分发（一行）。其余业务逻辑改动**两端自动共享**。
+基础 compose 不挂 Docker socket，所以默认只能检查版本。启用前必须先设置
+`POLARIS_AUTH_TOKEN` 或 `POLARIS_REQUIRE_LOGIN=1`，公网部署还必须使用 HTTPS。Linux / NAS
+先将 `stat -c %g /var/run/docker.sock` 的结果写入 `.env` 的 `DOCKER_GID`，然后始终使用：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
+```
+
+更新页发现新版后会启动固定版本的独立 Watchtower 替身。替身拉取当前镜像标签并原样重建
+`polaris-web`，因此数据卷与配置不变，服务通常只短暂断线 1–3 分钟。
+
+> `/var/run/docker.sock` 等同宿主机 root 权限。不要在匿名、无鉴权或不可信用户可访问的部署上
+> 启用。基础 compose 保持 socket-free，就是为了让未明确接受这个边界的部署继续安全失败。
+
+本地定制镜像仍使用 `docker compose up -d --build`；更新脚本会拒绝替换不属于配置中 GHCR
+仓库的本地镜像，避免误覆盖定制构建。
 
 ---
 
@@ -89,11 +105,12 @@ docker compose up -d --build
 
 | 卷 | 容器内路径 | 内容 |
 |---|---|---|
-| `polaris-data` | `/root/Polaris` | 知识库 `PolarisKB/`、对话历史、项目、产物、技能 |
-| `polaris-claude` | `/root/.claude` | claude 凭证、`settings.json`（供应商切换/OAuth 登录态） |
-| `polaris-config` | `/root/.config` | KB 设置等 XDG 配置 |
+| `polaris-data` | `/home/polaris/Polaris` | 知识库、对话历史、项目、协作数据库与账号权威密钥 |
+| `polaris-claude` | `/home/polaris/.claude` | Claude 凭证、`settings.json`（供应商切换/OAuth 登录态） |
+| `gitea-data` | `/data`（可选 Gitea 容器） | 只有启用 `gitea` profile 时使用的仓库存储 |
 
-容器重建（`up --build`）数据不丢。备份直接备份这三个卷即可。
+容器更新/重建不删除命名卷。备份直接备份这些卷即可；不要用 `docker compose down -v`
+执行常规升级。
 
 ---
 
@@ -101,7 +118,7 @@ docker compose up -d --build
 
 - **API Key 模式（推荐，最稳）**：`.env` 里设 `ANTHROPIC_API_KEY` 或第三方
   `ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`。容器把这些环境变量传给 spawn 的 claude。
-- **供应商坞切换**：进入 App 内「供应商」面板切换/新增，会写入 `/root/.claude/settings.json`（持久化）。
+- **供应商坞切换**：进入 App 内「供应商」面板切换/新增，会写入 `/home/polaris/.claude/settings.json`（持久化）。
 - **OAuth 订阅（Claude Pro / Codex）**：无头容器难走设备码流程。变通：把已登录的
   `~/.claude` 内容拷进 `polaris-claude` 卷复用。本期主推 API Key。
 - **访问口令：默认没有**（2026-07-25 起）。容器起来谁连上谁能用，不弹口令框、不看来源。
@@ -146,7 +163,7 @@ docker compose up -d --build
 | 可运行项目（一键起前后端） | ⚠ 受限 | 容器内嵌套起服务受限，list/status 可用 |
 | Docker 沙箱板块 | ⛔ 降级 | Docker-in-Docker 风险高，返回 stub |
 | 环境医生（安装 claude/node） | ⛔ 简化 | 镜像已预装，安装类命令返回提示 |
-| 自动更新 / 托盘 / 宠物窗 | ⛔ 删除 | 桌面专属；更新走 `docker pull` / `up --build` |
+| 自动更新 | ✅ 可选 | 默认只检查版本；显式叠加 `docker-compose.update.yml` 后 owner 可一键替换容器 |
 
 ---
 

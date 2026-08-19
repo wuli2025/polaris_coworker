@@ -77,6 +77,10 @@ static SESSION_REVOKE_GEN: AtomicU64 = AtomicU64::new(0);
 
 struct CachedSession {
     user: User,
+    /// 签这张会话时记下的设备标识(对端 NodeId / 本机 NodeId / 空)。
+    /// 入方向的按设备闸(见 `grants::fs_gate`/`exec_gate`)要用它,所以必须跟着缓存走 ——
+    /// 每次请求为它单独查一次库,等于把会话缓存这层优化白做了。
+    device_id: String,
     /// 会话自身到期时刻(来自 sessions.expires_at):命中也要查,否则过期会话被 TTL 延长最多 TTL 秒。
     expires_at: i64,
     cached_at: i64,
@@ -800,9 +804,59 @@ pub fn authority_identity_by_email(email: &str) -> Result<(User, String, String)
     ))
 }
 
+/// 拿**设备码**连进来的对端共用的这一行 users。没有就现建(visitor,密码位是哨兵)。
+///
+/// 为什么不给每台设备建一个账号:账号是「人」,设备码进来的是「一台机器」——
+/// 给每台机器造一个账号,成员列表很快就会变成一堆没人认得的名字,而且删账号
+/// 与踢设备成了两件要分别做的事。真正区分它们的是会话上的 `device_id`,
+/// 权限也由 `peer_grants` 逐台记 —— 这一行只是让会话表挂得住。
+///
+/// 角色钉死 visitor:设备码那条路**永远**不该产出一个能建项目、跑任务的成员。
+/// 它能做的事全部来自设备契约(盘 ro/rw、执行 none/ask/allow),由机主逐台放。
+pub fn peer_guest_user() -> Result<User, String> {
+    const GUEST: &str = "device-guest";
+    let mut conn = open_db()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("建访客身份事务失败: {e}"))?;
+    let found: Option<(i64, String, i64)> = tx
+        .query_row(
+            "SELECT id,display_name,disabled FROM users WHERE username=?1",
+            params![GUEST],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("查访客身份失败: {e}"))?;
+    if let Some((id, display_name, disabled)) = found {
+        if disabled != 0 {
+            return Err("本机已停用「设备码接入」这条路 —— 请机主在成员列表里启用它".into());
+        }
+        tx.commit().ok();
+        return Ok(User {
+            id,
+            username: GUEST.into(),
+            role: "visitor".into(),
+            display_name,
+            disabled: false,
+        });
+    }
+    let user = insert_user_tx(&tx, GUEST, CODE_ONLY_SENTINEL, "visitor", "设备码接入")?;
+    tx.commit().map_err(|e| format!("提交访客身份失败: {e}"))?;
+    db::audit("system", "user.create", GUEST, "设备码接入的共用身份");
+    Ok(user)
+}
+
 /// 校验会话 token → 返回用户（check_auth 的核心）。过期或吊销即失败。
 /// 短缓存命中(TTL 内且吊销版本未变)直接返回,免开库;未命中走每线程复用连接查库。
 pub fn check_session(token: &str) -> Result<User, String> {
+    check_session_with_device(token).map(|(u, _)| u)
+}
+
+/// 同 [`check_session`],但把会话上记的**设备标识**一并带出来。
+///
+/// 入方向的按设备闸(`grants::fs_gate` / `grants::exec_gate`)靠它认出「这条请求
+/// 是哪台设备发来的」—— 没有它,台账上那两排权限档对连进来的人就是摆设。
+pub fn check_session_with_device(token: &str) -> Result<(User, String), String> {
     let t = now();
     // 版本号必须在查缓存/查库**之前**读:若查询期间发生吊销,写入缓存的条目带旧版本号,
     // 下次请求即判陈旧 —— 堵住「查到旧数据 + 吊销后才写缓存」的竞态窗口。
@@ -820,12 +874,12 @@ pub fn check_session(token: &str) -> Result<User, String> {
                 && t - e.cached_at < SESSION_CACHE_TTL_SECS
                 && t < e.expires_at
             {
-                return Ok(e.user.clone());
+                return Ok((e.user.clone(), e.device_id.clone()));
             }
             cache.remove(token); // 陈旧 → 惰性剔除,落库重查
         }
     }
-    let (user, expires_at) = check_session_db(token, t)?;
+    let (user, device_id, expires_at) = check_session_db(token, t)?;
     let mut cache = SESSION_CACHE.lock();
     // 硬上限防 token 洪泛撑爆内存:先剔陈旧;仍超限就整体清空(纯性能缓存,清空只是回落到查库)。
     if cache.len() >= SESSION_CACHE_CAP {
@@ -840,20 +894,22 @@ pub fn check_session(token: &str) -> Result<User, String> {
         token.to_string(),
         CachedSession {
             user: user.clone(),
+            device_id: device_id.clone(),
             expires_at,
             cached_at: t,
             gen,
             db_path: cur_db,
         },
     );
-    Ok(user)
+    Ok((user, device_id))
 }
 
-/// check_session 的落库部分(原逻辑不变,连接改走每线程复用的 with_conn)。返回 (用户, 会话到期时刻)。
-fn check_session_db(token: &str, t: i64) -> Result<(User, i64), String> {
+/// check_session 的落库部分(原逻辑不变,连接改走每线程复用的 with_conn)。
+/// 返回 (用户, 设备标识, 会话到期时刻)。
+fn check_session_db(token: &str, t: i64) -> Result<(User, String, i64), String> {
     db::with_conn(|conn| {
         let row = conn.query_row(
-            "SELECT u.id,u.username,u.role,u.display_name,u.disabled,s.expires_at \
+            "SELECT u.id,u.username,u.role,u.display_name,u.disabled,s.expires_at,s.device_id \
              FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?1",
             params![token],
             |r| {
@@ -864,10 +920,11 @@ fn check_session_db(token: &str, t: i64) -> Result<(User, i64), String> {
                     r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             },
         );
-        let (id, username, role, display_name, disabled, expires_at) =
+        let (id, username, role, display_name, disabled, expires_at, device_id) =
             row.map_err(|_| "会话无效，请重新登录".to_string())?;
         if disabled != 0 {
             return Err("账号已停用".into());
@@ -884,6 +941,7 @@ fn check_session_db(token: &str, t: i64) -> Result<(User, i64), String> {
                 display_name,
                 disabled: false,
             },
+            device_id,
             expires_at,
         ))
     })

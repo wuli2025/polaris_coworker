@@ -133,12 +133,22 @@ async function submit() {
         email: email.value.trim(),
         code: code.value.trim(),
         url: authorityUrl.value.trim() || null,
+        // 只有「这台机器已经有别人当主人」时才用得上。以前这个框在桌面这条路上
+        // 压根没被读过 —— 用户填了也白填,于是「邀请码」看着像个摆设。
+        inviteCode: inviteCode.value.trim() || null,
       })) as Record<string, unknown>;
       // 拿到的本机会话直接给协作 store 用 —— 用户在自己的机器上不该再登第二次。
       const token = String(r.token ?? "");
       if (token) await collab.adoptLocalSession(token);
       account.rememberEmail(email.value);
       await account.refresh();
+      // 入网成了、但**没进得了本机的门**:这是「半成品」,不是失败(设备密钥已经拿到,
+      // 连得出去)。但用户必须当场看见原因和下一步,不然他只会看到「登录成功却什么都没连上」。
+      const warn = String(r.memberWarn ?? "");
+      if (warn) {
+        err.value = warn;
+        if (warn.includes("设备码")) showInvite.value = true;
+      }
       emit("done", r);
     } else {
       await collab.loginWithEmailCode({
@@ -152,8 +162,8 @@ async function submit() {
     }
   } catch (e) {
     const m = errMsg(e);
-    // 进不了**别人**的主机 = 缺邀请码。把那个输入框自动展开,别让用户猜。
-    if (m.includes("邀请")) showInvite.value = true;
+    // 进不了**别人**的机器 = 缺它的设备码。把那个输入框自动展开,别让用户猜。
+    if (m.includes("设备码") || m.includes("邀请")) showInvite.value = true;
     err.value = m;
   } finally {
     busy.value = false;
@@ -223,15 +233,17 @@ function back() {
         </button>
       </div>
 
-      <!-- 协作者加入别人的主机才要;自己的设备用不上,所以默认藏起来 -->
+      <!-- 进**别人**的机器才要;自己的设备用不上,所以默认藏起来 -->
       <div v-if="showInvite" class="el-extra">
-        <input v-model="inviteCode" class="el-inp" placeholder="邀请码(加入别人的主机时才要)" />
+        <input v-model="inviteCode" class="el-inp" placeholder="那台机器的设备码,PLR1-… 或直接填 8 位码" />
         <p class="el-note">
-          这台主机不是你的 —— 需要它的管理者给你一张邀请码。<b>你自己的设备不需要邀请码。</b>
+          <b>你自己的设备不用填这个</b> —— 同一个邮箱登录就自动互联。
+          只有要进<b>别人</b>的机器才填:让他打开<b>互联页第 ① 屏</b>,把那串<b>设备码</b>发给你。
+          <b>全应用就这一种码</b>,他发给谁都是同一串。
         </p>
       </div>
       <button v-else class="el-link el-quiet" @click="showInvite = true">
-        要加入别人的主机?填邀请码
+        要进别人的机器?填它的设备码
       </button>
     </template>
 
@@ -257,30 +269,34 @@ function back() {
 .el-head { display: flex; gap: 11px; align-items: flex-start; }
 .el-ic {
   flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
-  color: var(--acc, #4f8cff); background: color-mix(in srgb, var(--acc, #4f8cff) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--acc, #4f8cff) 26%, transparent);
+  color: var(--acc, var(--primary)); background: color-mix(in srgb, var(--acc, var(--primary)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--acc, var(--primary)) 26%, transparent);
 }
 .el-title { margin: 0; font-size: 16px; font-weight: 650; }
 .el-lead { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
 .el-inp {
   width: 100%; padding: 9px 12px; border-radius: 9px; font-size: 14px;
-  color: var(--fg); background: rgba(255, 255, 255, .05);
-  border: 1px solid rgba(255, 255, 255, .14); outline: none;
+  color: var(--text); background: var(--panel);
+  border: 1px solid var(--border); outline: none;
 }
-.el-inp:focus { border-color: color-mix(in srgb, var(--acc, #4f8cff) 60%, transparent); }
+.el-inp::placeholder { color: var(--dim); opacity: 1; }
+.el-inp:focus {
+  border-color: color-mix(in srgb, var(--acc, var(--primary)) 60%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc, var(--primary)) 12%, transparent);
+}
 .el-inp.el-sm { font-size: 12.5px; padding: 7px 10px; }
 .el-code { letter-spacing: 6px; font-family: ui-monospace, Consolas, monospace; text-align: center; }
 .el-cta {
   display: flex; align-items: center; justify-content: center; gap: 7px;
   padding: 10px 14px; border-radius: 10px; border: none; cursor: pointer;
   font-size: 14px; font-weight: 600; color: #fff;
-  background: linear-gradient(135deg, var(--acc, #4f8cff), #8b5cf6);
+  background: linear-gradient(135deg, var(--acc, var(--primary)), #8b5cf6);
 }
 .el-cta:disabled { opacity: .5; cursor: not-allowed; }
 .el-row { display: flex; justify-content: space-between; align-items: center; }
 .el-link {
   display: inline-flex; align-items: center; gap: 4px; background: none; border: none;
-  color: var(--acc, #4f8cff); font-size: 12.5px; cursor: pointer; padding: 2px 0;
+  color: var(--acc, var(--primary)); font-size: 12.5px; cursor: pointer; padding: 2px 0;
 }
 .el-link:disabled { color: var(--muted); cursor: default; }
 .el-link.el-quiet { color: var(--muted); }

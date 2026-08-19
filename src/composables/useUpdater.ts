@@ -1,22 +1,9 @@
-// ─────────────────────────────────────────────────────────────
-// 自动更新（GitHub Releases 托管）—— 前端 = 后端状态机的「视图」
-//
-// 旧版是「纯前端、一堆离散 ref 各自维护」；现在更新逻辑收进 Rust 的唯一状态机
-// （src-tauri/src/updater.rs，借鉴 OpenCode 桌面端 updater-controller）：
-//   - 单飞：并发 check/apply 只跑一次，多次点击不重入；
-//   - 可观测：后端每次状态流转 emit("updater://state")，这里 listen 订阅；
-//   - 持久化 + 重启续提示：发现新版本落盘，下次启动离线也能先看到「有更新待装」。
-//
-// 本文件只做两件事：① 订阅后端状态 → 映射成下面这些「兼容旧名」的派生量
-// （UpdateBanner / UpdatePanel 无需改动）；② 把用户动作转发成后端命令。
-// 无网络 / 还没发布 release / 非 Tauri 运行时都会被静默吞掉，不打扰用户。
-// ─────────────────────────────────────────────────────────────
+// 自动更新统一视图：桌面走 Tauri updater 状态机，Docker/Web 走同源 HTTP 命令。
+// 两条运行时只在这里分叉，UpdateBanner / UpdatePanel 继续消费同一组派生状态。
 import { computed, ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
+import { invoke, isTauri, listen } from "../tauri";
 
-// 后端 updater.rs 的 UpdaterState（serde tag = "status"）。
 type UpdaterState =
   | { status: "disabled" }
   | { status: "idle" }
@@ -28,24 +15,58 @@ type UpdaterState =
   | { status: "installing"; version: string }
   | { status: "error"; message: string };
 
-// 后端状态机的当前态（唯一真相源）。
-const state = ref<UpdaterState>({ status: "idle" });
+type DockerStatus = {
+  updater_enabled: boolean;
+  socket_present: boolean;
+  update_script: boolean;
+  auth_configured: boolean;
+  current_version: string;
+  current_tag: string;
+  image_repo: string;
+};
 
-// ── 兼容旧契约：以下导出全部由 state 派生，消费组件（Banner/Panel）零改动 ──
-export const currentVersion = ref<string>(""); // 当前已安装版本（前端取）
-export const lastCheckedAt = ref<number | null>(null); // 上次检查时间戳(ms)
-export const dialogDismissed = ref(false); // 中央对话框「以后再说」—— 纯前端态
+type DockerCheck = {
+  ok: boolean;
+  current?: string;
+  latest?: string;
+  has_update: boolean;
+  image?: string;
+  source?: string;
+  error?: string;
+};
+
+type DockerUpdate = {
+  success: boolean;
+  exit_code?: number | null;
+  stdout?: string;
+  stderr?: string;
+  note?: string;
+};
+
+const state = ref<UpdaterState>({ status: "idle" });
+export const updaterRuntime = ref<"desktop" | "docker" | "browser">(
+  isTauri ? "desktop" : "browser"
+);
+export const dockerUpdaterEnabled = ref(false);
+export const dockerSocketPresent = ref(false);
+export const dockerUpdateScriptPresent = ref(false);
+export const dockerAuthConfigured = ref(false);
+export const dockerMessage = ref("");
+
+export const currentVersion = ref<string>("");
+export const lastCheckedAt = ref<number | null>(null);
+export const dialogDismissed = ref(false);
 
 const versionOf = (s: UpdaterState): string | null =>
   "version" in s ? s.version : null;
 
-export const updateVersion = computed<string | null>(() => versionOf(state.value)); // 有值=有更新
-export const remoteVersion = updateVersion; // 远程最新版本号（语义同上）
+export const updateVersion = computed<string | null>(() => versionOf(state.value));
+export const remoteVersion = updateVersion;
 export const updateNotes = computed<string>(() =>
-  state.value.status === "available" ? state.value.notes : "",
+  state.value.status === "available" ? state.value.notes : ""
 );
 export const updating = computed(
-  () => state.value.status === "downloading" || state.value.status === "installing",
+  () => state.value.status === "downloading" || state.value.status === "installing"
 );
 export const updateProgress = computed(() => {
   const s = state.value;
@@ -54,7 +75,7 @@ export const updateProgress = computed(() => {
   return 0;
 });
 export const updateError = computed(() =>
-  state.value.status === "error" ? state.value.message : "",
+  state.value.status === "error" ? state.value.message : ""
 );
 export const checking = computed(() => state.value.status === "checking");
 export const upToDate = computed(() => state.value.status === "up-to-date");
@@ -62,86 +83,158 @@ export const checkFailed = computed(() => state.value.status === "error");
 
 let subscribed = false;
 let autoChecked = false;
+let dockerStatusLoaded = false;
 
-async function ensureCurrentVersion(): Promise<void> {
-  if (currentVersion.value) return;
+async function loadDockerStatus(): Promise<boolean> {
+  if (isTauri) return false;
   try {
-    currentVersion.value = await getVersion();
+    const status = await invoke<DockerStatus>("docker_status");
+    updaterRuntime.value = "docker";
+    dockerStatusLoaded = true;
+    dockerUpdaterEnabled.value = !!status.updater_enabled;
+    dockerSocketPresent.value = !!status.socket_present;
+    dockerUpdateScriptPresent.value = !!status.update_script;
+    dockerAuthConfigured.value = !!status.auth_configured;
+    if (!currentVersion.value) currentVersion.value = status.current_version || status.current_tag || "—";
+    return true;
   } catch {
-    /* 非 Tauri 运行时（纯浏览器预览）拿不到，忽略 */
+    // npm run dev 的纯浏览器预览没有后端；它不是“更新失败”，只是没有更新能力。
+    updaterRuntime.value = "browser";
+    dockerStatusLoaded = false;
+    return false;
   }
 }
 
-/** 订阅后端状态机：先拉一次快照，再 listen 增量。幂等。 */
+/** 供更新页挂载时只加载运行时/当前版本，不触发网络版本检查。 */
+export async function loadUpdaterVersion(): Promise<void> {
+  if (currentVersion.value) return;
+  if (isTauri) {
+    try {
+      currentVersion.value = await getVersion();
+    } catch {
+      /* Tauri 初始化早期拿不到时，下一次检查再补。 */
+    }
+    return;
+  }
+  await loadDockerStatus();
+}
+
 async function ensureSubscribed(): Promise<void> {
-  if (subscribed) return;
+  if (!isTauri || subscribed) return;
   subscribed = true;
   try {
-    await listen<UpdaterState>("updater://state", (ev) => {
-      state.value = ev.payload;
+    await listen<UpdaterState>("updater://state", (payload) => {
+      state.value = payload;
     });
-    // 拉一次初始快照（可能在 listen 建立前就已被 init 设过 available）。
     state.value = await invoke<UpdaterState>("updater_get_state");
   } catch (e) {
-    subscribed = false; // 非 Tauri 运行时：留待下次，静默
+    subscribed = false;
     console.warn("[updater] subscribe failed:", e);
   }
 }
 
-/**
- * 启动时调用一次：订阅 + 触发后端检查，发现新版即由 UpdateBanner 自动弹出。
- *
- * **冷启动重试**：开机那一刻网络常还没就绪 → 首次检查直接失败(error)，中央弹窗就不弹了，
- * 用户只能手动去「更新」页才看到。这里改成「渐进退避重试」——只要还没拿到确定结论
- * （发现新版 / 已最新），就隔几秒再试，直到网络恢复，保证「点开 app 就会弹」。
- */
+async function checkDocker(): Promise<UpdaterState> {
+  if (!dockerStatusLoaded && !(await loadDockerStatus())) {
+    return { status: "disabled" };
+  }
+  state.value = { status: "checking" };
+  const result = await invoke<DockerCheck>("docker_check_update");
+  lastCheckedAt.value = Date.now();
+  if (result.current) currentVersion.value = result.current;
+  if (!result.ok) {
+    return {
+      status: "error",
+      message: result.error || "Docker 版本源暂时不可用",
+    };
+  }
+  if (result.has_update && result.latest) {
+    return {
+      status: "available",
+      version: result.latest,
+      notes: `Docker 镜像 ${result.image || ""} 已有新版本。更新会在后台替换容器，数据卷与配置保持不变。`,
+    };
+  }
+  return { status: "up-to-date" };
+}
+
+async function checkOnce(): Promise<UpdaterState> {
+  await loadUpdaterVersion();
+  if (isTauri) {
+    await ensureSubscribed();
+    const result = await invoke<UpdaterState>("updater_check");
+    lastCheckedAt.value = Date.now();
+    return result;
+  }
+  return checkDocker();
+}
+
+/** 启动时错峰检查；仅网络错误退避，拿到确定结论立即收手。 */
 export async function checkForUpdate(): Promise<void> {
   if (autoChecked) return;
   autoChecked = true;
-  await ensureCurrentVersion();
-  await ensureSubscribed();
-  // 首查错峰推迟 5s（避开首帧 IPC 突发——启动检查更新不抢开屏后的第一波命令），
-  // 随后 4s/12s/30s 退避重试（覆盖冷启动到网络就绪的常见窗口）。
   const delays = [5000, 4000, 12000, 30000];
   for (const wait of delays) {
-    if (wait) await new Promise((r) => setTimeout(r, wait));
+    await new Promise((resolve) => setTimeout(resolve, wait));
     try {
-      const st = await invoke<UpdaterState>("updater_check");
-      lastCheckedAt.value = Date.now();
-      // 已有确定结论(available=有更新会触发弹窗 / up-to-date=已最新)即收手；
-      // 仅「检查失败」才继续退避重试。downloading/installing 也视为已在推进、收手。
-      if (st.status !== "error") return;
+      const result = await checkOnce();
+      state.value = result;
+      if (result.status === "disabled" || result.status !== "error") return;
     } catch (e) {
+      state.value = { status: "error", message: String(e) };
       console.warn("[updater] auto check failed, will retry:", e);
     }
   }
 }
 
-/** 用户在「更新」板块点「检查更新」：转发到后端（单飞），带 UI 反馈。 */
 export async function manualCheck(): Promise<void> {
-  await ensureCurrentVersion();
-  await ensureSubscribed();
-  dialogDismissed.value = false; // 手动检查后允许中央对话框再次出现
+  dialogDismissed.value = false;
   try {
-    await invoke("updater_check");
-    lastCheckedAt.value = Date.now();
+    state.value = { status: "checking" };
+    state.value = await checkOnce();
   } catch (e) {
+    state.value = { status: "error", message: String(e) };
     console.warn("[updater] manual check failed:", e);
   }
 }
 
-/** 用户点「立即更新」：后端下载 + 安装 + 自重启（进度由 updater://state 推送）。 */
-export async function applyUpdate(): Promise<void> {
+/**
+ * 桌面：下载安装并由 Tauri 重启。
+ * Docker：让 server 启动一个 detached、固定版本的 Watchtower 替身；当前容器随后会断线并被原样重建。
+ */
+export async function applyUpdate(force = false): Promise<void> {
   if (updating.value) return;
+  if (isTauri) {
+    try {
+      await invoke("updater_apply");
+    } catch (e) {
+      state.value = { status: "error", message: String(e) };
+      console.warn("[updater] apply failed:", e);
+    }
+    return;
+  }
+
+  if (updaterRuntime.value !== "docker") return;
+  const version = updateVersion.value || currentVersion.value || "latest";
+  state.value = { status: "installing", version };
+  dockerMessage.value = "正在启动容器更新替身…";
   try {
-    await invoke("updater_apply");
-    // 正常路径里后端会自重启，不会走到这里。
+    const result = await invoke<DockerUpdate>("docker_update", {
+      confirm: true,
+      force,
+    });
+    if (!result.success) {
+      throw new Error(result.stderr || result.stdout || `更新脚本退出码 ${result.exit_code ?? "未知"}`);
+    }
+    dockerMessage.value =
+      result.note || "更新替身已启动。容器将在拉取完成后短暂断线，约 1–3 分钟后刷新即可。";
+    // 保持 installing：正常路径会先断线再由新容器接棒，不能在旧页面假装已经完成。
   } catch (e) {
-    console.warn("[updater] apply failed:", e);
+    dockerMessage.value = "";
+    state.value = { status: "error", message: String(e) };
+    console.warn("[updater] docker apply failed:", e);
   }
 }
 
-/** 「以后再说」：只关中央对话框，本次会话不再自动弹（板块入口仍在）。 */
 export function dismissUpdate(): void {
   dialogDismissed.value = true;
 }

@@ -13,9 +13,9 @@
 
 services:
   polaris:
-    # 预构建镜像优先(R2 一键安装脚本 docker load 后直接 up,无需源码);
-    # 本地有源码想自建时 docker compose up -d --build 走下面的 build。
-    image: polaris-server:${POLARIS_IMAGE_TAG:-latest}
+    # 官方预构建镜像（GitHub Actions 推到 GHCR）。本地有源码想自建时
+    # `docker compose up -d --build` 会用下面的 build 覆盖同一标签。
+    image: ${POLARIS_IMAGE_REPO:-ghcr.io/wuli2025/polaris_coworker}:${POLARIS_IMAGE_TAG:-latest}
     build: .
     container_name: polaris-web
     restart: unless-stopped
@@ -32,6 +32,16 @@ services:
       # 留空（默认）= 免口令，谁连上谁能用：家用 NAS 在 NAT 后面公网连不上，
       # 而口令忘了没有找回入口。只有真做了公网映射/反代域名才在 .env 里填上它。
       - POLARIS_AUTH_TOKEN=${POLARIS_AUTH_TOKEN:-}
+      - POLARIS_REQUIRE_LOGIN=${POLARIS_REQUIRE_LOGIN:-}
+      - POLARIS_LAN_ONLY=${POLARIS_LAN_ONLY:-}
+      - POLARIS_TRUST_PROXY=${POLARIS_TRUST_PROXY:-}
+      # 容器更新契约：基础 compose 不挂 docker.sock，因此默认只能检查版本；
+      # 要在网页点“一键更新”，叠加 docker-compose.update.yml（显式接受 socket 权限）。
+      - POLARIS_IMAGE_REPO=${POLARIS_IMAGE_REPO:-ghcr.io/wuli2025/polaris_coworker}
+      - POLARIS_TAG=${POLARIS_IMAGE_TAG:-latest}
+      - POLARIS_CONTAINER_NAME=${POLARIS_CONTAINER_NAME:-polaris-web}
+      - POLARIS_UPDATE_MANIFEST_URLS=${POLARIS_UPDATE_MANIFEST_URLS:-}
+      - POLARIS_WATCHTOWER_IMAGE=${POLARIS_WATCHTOWER_IMAGE:-containrrr/watchtower:1.7.1}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
@@ -47,8 +57,8 @@ services:
       - POLARIS_FABLE_WORKERS=${POLARIS_FABLE_WORKERS:-2}
       - POLARIS_FABLE_MMAP_MB=${POLARIS_FABLE_MMAP_MB:-64}
       - POLARIS_FABLE_CACHE_MB=${POLARIS_FABLE_CACHE_MB:-8}
-      # ── 邮箱服务(注册验证码/找回密码)。env 优先;留空则用 owner 在
-      #    Web「邮箱服务设置」面板存的配置。QQ 邮箱 PASS=SMTP 授权码(不是 QQ 密码)。
+      # ── 验证码邮件（登录/找回）。env 优先；留空则由 owner 在
+      #    Web「账号管理 → 验证码邮件」里设置。QQ 的 PASS 是 SMTP 授权码。
       - POLARIS_SMTP_HOST=${POLARIS_SMTP_HOST:-}
       - POLARIS_SMTP_PORT=${POLARIS_SMTP_PORT:-}
       - POLARIS_SMTP_USER=${POLARIS_SMTP_USER:-}
@@ -61,6 +71,8 @@ services:
       # 随卷备份即可;丢了所有成员主机都要重新信任)。
       - POLARIS_ACCOUNT_AUTHORITY=${POLARIS_ACCOUNT_AUTHORITY:-}
       - POLARIS_ACCOUNT_AUTHORITY_URL=${POLARIS_ACCOUNT_AUTHORITY_URL:-}
+      - POLARIS_ACCOUNT_OPEN_SIGNUP=${POLARIS_ACCOUNT_OPEN_SIGNUP:-}
+      - POLARIS_ACCOUNT_KEY=${POLARIS_ACCOUNT_KEY:-}
       # ── 互联(iroh 隧道 / 远程盘)──
       # 固定 UDP 口:要与上面 ports 里发布的那个一致(理由见 ports 处注释)。
       - POLARIS_IROH_PORT=${POLARIS_IROH_PORT:-41641}
