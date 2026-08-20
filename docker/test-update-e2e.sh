@@ -91,9 +91,10 @@ docker build --build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg BUILD_REVISION=e2e
   -t "$IMAGE_REPO:target" "$WORK" >/dev/null
 
 echo "Starting source Polaris container"
+APP_PORT=$((20000 + ($$ % 10000)))
 if ! docker run -d --name "$APP" --network "$NETWORK" --restart unless-stopped \
   --add-host polaris-updater:host-gateway \
-  -p 127.0.0.1::8080 \
+  -p "127.0.0.1:$APP_PORT:8080" \
   -v "$VOLUME:/home/polaris/Polaris" \
   --label com.centurylinklabs.watchtower.enable=true \
   -e "POLARIS_AUTH_TOKEN=$TOKEN" \
@@ -111,9 +112,8 @@ if ! docker run -d --name "$APP" --network "$NETWORK" --restart unless-stopped \
   echo "failed to start source Polaris container" >&2
   exit 1
 fi
-APP_PORT="$(docker port "$APP" 8080/tcp | sed -n 's/.*://p' | head -n 1)" \
-  || { echo "failed to inspect Polaris port mapping" >&2; exit 1; }
-[ -n "$APP_PORT" ] || { echo "Polaris port mapping missing" >&2; exit 1; }
+[ "$(docker port "$APP" 8080/tcp)" = "127.0.0.1:$APP_PORT" ] \
+  || { echo "Polaris fixed port mapping missing" >&2; exit 1; }
 echo "Source Polaris published at 127.0.0.1:$APP_PORT"
 BASE_URL="http://127.0.0.1:$APP_PORT"
 AUTH="Authorization: Bearer $TOKEN"
