@@ -49,10 +49,11 @@ trap cleanup EXIT INT TERM
 
 docker network create "$NETWORK" >/dev/null
 docker volume create "$VOLUME" >/dev/null
+REGISTRY_PORT=$((40000 + ($$ % 20000)))
 docker run -d --name "$REGISTRY" --network "$NETWORK" --network-alias registry \
-  -p 127.0.0.1::5000 registry:2 >/dev/null
-REGISTRY_PORT="$(docker port "$REGISTRY" 5000/tcp | sed -n 's/.*://p' | head -n 1)"
-[ -n "$REGISTRY_PORT" ] || { echo "registry port mapping missing" >&2; exit 1; }
+  -p "127.0.0.1:$REGISTRY_PORT:5000" registry:2 >/dev/null
+[ "$(docker port "$REGISTRY" 5000/tcp)" = "127.0.0.1:$REGISTRY_PORT" ] \
+  || { echo "registry fixed port mapping missing" >&2; exit 1; }
 IMAGE_REPO="127.0.0.1:$REGISTRY_PORT/polaris-e2e"
 
 wait_registry() {
