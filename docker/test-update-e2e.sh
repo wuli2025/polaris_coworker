@@ -55,6 +55,18 @@ REGISTRY_PORT="$(docker port "$REGISTRY" 5000/tcp | sed -n 's/.*://p' | head -n 
 [ -n "$REGISTRY_PORT" ] || { echo "registry port mapping missing" >&2; exit 1; }
 IMAGE_REPO="127.0.0.1:$REGISTRY_PORT/polaris-e2e"
 
+wait_registry() {
+  limit=$1
+  i=0
+  while [ "$i" -lt "$limit" ]; do
+    if curl -fsS "http://127.0.0.1:$REGISTRY_PORT/v2/" >/dev/null 2>&1; then return 0; fi
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+wait_registry 30 || { echo "disposable registry never became ready" >&2; exit 1; }
+
 cat >"$WORK/Dockerfile" <<'DOCKERFILE'
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
@@ -205,6 +217,7 @@ PULL_ID="$(printf '%s' "$PULL_REQUEST" | jq -r .requestId)"
 docker stop "$REGISTRY" >/dev/null
 wait_request_failure "$PULL_ID" 45
 docker start "$REGISTRY" >/dev/null
+wait_registry 30 || { echo "disposable registry did not recover after restart" >&2; exit 1; }
 docker rm -f "$UPDATER" >/dev/null
 docker run -d --name "$UPDATER" --network host \
   -e "WATCHTOWER_HTTP_API_TOKEN=$UPDATER_TOKEN" \
