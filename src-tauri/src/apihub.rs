@@ -486,6 +486,19 @@ mod origin_gate_tests {
 
     #[cfg(not(feature = "desktop"))]
     #[test]
+    fn docker_registry_同时接受多架构索引与单架构_manifest() {
+        for media_type in [
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        ] {
+            assert!(REGISTRY_MANIFEST_ACCEPT.contains(media_type), "{media_type}");
+        }
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
     fn docker_镜像索引按当前架构选择且拒绝缺失平台() {
         let index = json!({
             "manifests": [
@@ -1367,6 +1380,9 @@ pub(crate) fn docker_build_identity() -> Value {
 }
 
 #[cfg(not(feature = "desktop"))]
+const REGISTRY_MANIFEST_ACCEPT: &str = "application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json";
+
+#[cfg(not(feature = "desktop"))]
 #[derive(Debug, Clone)]
 struct RegistryTarget {
     revision: String,
@@ -1540,7 +1556,7 @@ fn docker_registry_target() -> Result<RegistryTarget, String> {
         "GET",
         &index_url,
         auth,
-        Some("application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json"),
+        Some(REGISTRY_MANIFEST_ACCEPT),
     )
     .call()
     .map_err(|e| format!("读取镜像索引失败:{e}"))?;
@@ -1564,7 +1580,7 @@ fn docker_registry_target() -> Result<RegistryTarget, String> {
             "GET",
             &manifest_url,
             auth,
-            Some("application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"),
+            Some(REGISTRY_MANIFEST_ACCEPT),
         )
         .call()
         .map_err(|e| format!("读取 {arch} manifest 失败:{e}"))?

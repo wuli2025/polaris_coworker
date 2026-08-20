@@ -170,7 +170,10 @@ docker push "$IMAGE_REPO:latest" >/dev/null
 # 不能让目标镜像留在 runner 本地：否则 Watchtower 可能直接复用本地 tag，所谓“拉取失败”
 # 和 happy path 都没有真的证明 registry pull。source 容器仍由 source tag/镜像 ID 保留。
 docker image rm "$IMAGE_REPO:target" "$IMAGE_REPO:latest" >/dev/null
-invoke docker_check_update '{}' | jq -e '.ok and .has_update and .target_revision == "e2e-target"' >/dev/null
+CHECK_RESULT="$(invoke docker_check_update '{}')" \
+  || { echo "docker_check_update request failed" >&2; exit 1; }
+printf '%s' "$CHECK_RESULT" | jq -e '.ok and .has_update and .target_revision == "e2e-target"' >/dev/null \
+  || { echo "docker_check_update did not resolve the target OCI revision: $CHECK_RESULT" >&2; exit 1; }
 
 # Wrong updater Bearer token must become an explicit failed state, not an endless spinner.
 docker run -d --name "$UPDATER" --network "$NETWORK" --network-alias polaris-updater \
