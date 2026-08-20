@@ -77,7 +77,8 @@ docker push "$IMAGE_REPO:latest" >/dev/null
 docker build --build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg BUILD_REVISION=e2e-target \
   -t "$IMAGE_REPO:target" "$WORK" >/dev/null
 
-docker run -d --name "$APP" --network "$NETWORK" --restart unless-stopped \
+echo "Starting source Polaris container"
+if ! docker run -d --name "$APP" --network "$NETWORK" --restart unless-stopped \
   -p 127.0.0.1::8080 \
   -v "$VOLUME:/home/polaris/Polaris" \
   --label com.centurylinklabs.watchtower.enable=true \
@@ -92,9 +93,14 @@ docker run -d --name "$APP" --network "$NETWORK" --restart unless-stopped \
   -e POLARIS_UPDATE_DEADLINE_SECONDS=20 \
   -e POLARIS_UPDATE_TRIGGER_DELAY_SECONDS=2 \
   -e POLARIS_E2E_SENTINEL=runtime-kept \
-  "$IMAGE_REPO:latest" >/dev/null
-APP_PORT="$(docker port "$APP" 8080/tcp | sed -n 's/.*://p' | head -n 1)"
+  "$IMAGE_REPO:latest" >/dev/null; then
+  echo "failed to start source Polaris container" >&2
+  exit 1
+fi
+APP_PORT="$(docker port "$APP" 8080/tcp | sed -n 's/.*://p' | head -n 1)" \
+  || { echo "failed to inspect Polaris port mapping" >&2; exit 1; }
 [ -n "$APP_PORT" ] || { echo "Polaris port mapping missing" >&2; exit 1; }
+echo "Source Polaris published at 127.0.0.1:$APP_PORT"
 BASE_URL="http://127.0.0.1:$APP_PORT"
 AUTH="Authorization: Bearer $TOKEN"
 
