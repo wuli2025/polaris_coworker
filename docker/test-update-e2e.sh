@@ -94,6 +94,7 @@ docker run -d --name "$APP" --network "$NETWORK" --restart unless-stopped \
   -e POLARIS_E2E_SENTINEL=runtime-kept \
   "$IMAGE_REPO:latest" >/dev/null
 APP_PORT="$(docker port "$APP" 8080/tcp | sed -n 's/.*://p' | head -n 1)"
+[ -n "$APP_PORT" ] || { echo "Polaris port mapping missing" >&2; exit 1; }
 BASE_URL="http://127.0.0.1:$APP_PORT"
 AUTH="Authorization: Bearer $TOKEN"
 
@@ -146,11 +147,17 @@ wait_request_failure() {
   return 1
 }
 
-wait_ready 90
-docker exec "$APP" sh -c 'printf keep > /home/polaris/Polaris/e2e-sentinel'
+wait_ready 90 || { echo "source Polaris never became ready at $BASE_URL" >&2; exit 1; }
+docker exec "$APP" sh -c 'printf keep > /home/polaris/Polaris/e2e-sentinel' \
+  || { echo "source Polaris data volume is not writable" >&2; exit 1; }
 SOURCE_ID="$(docker inspect -f '{{.Id}}' "$APP")"
-SOURCE_BOOT="$(curl -fsS "$BASE_URL/api/build" | jq -r .bootId)"
-[ "$(curl -fsS "$BASE_URL/api/build" | jq -r .buildRevision)" = "e2e-source" ]
+SOURCE_BUILD="$(curl -fsS "$BASE_URL/api/build")" \
+  || { echo "source /api/build is unavailable" >&2; exit 1; }
+SOURCE_BOOT="$(printf '%s' "$SOURCE_BUILD" | jq -r '.bootId // empty')"
+SOURCE_REVISION="$(printf '%s' "$SOURCE_BUILD" | jq -r '.buildRevision // empty')"
+[ -n "$SOURCE_BOOT" ] || { echo "source /api/build has no bootId: $SOURCE_BUILD" >&2; exit 1; }
+[ "$SOURCE_REVISION" = "e2e-source" ] \
+  || { echo "source marker mismatch: expected e2e-source, got $SOURCE_REVISION; build=$SOURCE_BUILD" >&2; exit 1; }
 
 docker tag "$IMAGE_REPO:target" "$IMAGE_REPO:latest"
 docker push "$IMAGE_REPO:latest" >/dev/null

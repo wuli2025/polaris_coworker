@@ -1,0 +1,33 @@
+name: Docker click-update E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: Published Polaris image tag or digest to exercise
+        required: true
+        default: ghcr.io/wuli2025/polaris_coworker:latest
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  watchtower-e2e:
+    name: Real Watchtower replacement
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run disposable click-update E2E
+        shell: bash
+        env:
+          POLARIS_E2E: "1"
+          BASE_IMAGE: ${{ inputs.base_image }}
+        run: |
+          sh -n docker/update.sh
+          sh -n docker/test-update-e2e.sh
+          sh docker/test-update-e2e.sh
