@@ -190,9 +190,9 @@ const lastChecked = computed(() => {
       <div class="how">
         <div class="how-title">更新是怎么工作的</div>
         <ol v-if="isDocker">
-          <li>启动时从官方发布清单检查是否有新的容器镜像</li>
-          <li>点「立即更新容器」后，Polaris 只调用隔离 Watchtower 的鉴权更新接口</li>
-          <li>Watchtower 拉取并替换带启用标签的当前容器，保留数据卷与配置；服务通常在 1–3 分钟后恢复</li>
+          <li>启动时读取当前架构镜像的 OCI build revision，确认运行中的容器是否落后</li>
+          <li>点「立即更新容器」后，请求会立即交给隔离 Watchtower；页面按 requestId 跟踪，不依赖旧容器保持连接</li>
+          <li>只有新 boot 与目标 revision 同时命中、且服务重新就绪才算成功；失败或 15 分钟未确认会停止等待并显示重试指引</li>
         </ol>
         <ol v-else>
           <li>启动时自动检查 GitHub 上有没有新版本</li>

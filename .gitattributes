@@ -1,2 +1,11 @@
-# macOS 启动脚本必须 LF,否则 bash 报错
+# Repository policy files and executable scripts stay LF on every platform.
+.gitattributes text eol=lf
 *.command text eol=lf
+*.sh text eol=lf
+
+# Windows contributors legitimately edit CRLF files. Keep the real whitespace checks enabled while
+# treating CR at end-of-line as the line terminator rather than a trailing-space defect.
+* whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
+# package-lock.json 历史上按 CRLF 入库；保持既有格式，避免一次依赖更新重写整份 lockfile。
+package-lock.json -text

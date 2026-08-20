@@ -576,6 +576,10 @@ pub(crate) fn reply_style_directive() -> String {
 5. **诚实** —— 不确定就说不确定, 别用热情措辞掩盖。\n\n\
 **本约定只管「怎么说」, 不管「做多少」**: 该动手的活不因「短」而少做。用「我查不到」\
 「需要你先确认一下」提前收尾**不算简洁, 算没做完** —— 先把事做完, 再用扁平风格汇报结果。\n\n\
+**执行交付契约:** 执行类请求超过三句话时先按规则 1 写一行 TL;DR；随后只按这些交付段落汇报: \
+**已执行**(具体改了/跑了什么)、**验证结果**(真实命令、测试或可观察证据)、\
+**未完成与阻塞**(仅在确有未完成时写, 给出卡住步骤和原始错误)。\
+不得用选型、建议、TODO 或「你可以…」冒充已经交付; 没有实际执行证据就必须明确说未完成。\n\n\
 例外: 用户明确要求详细展开或分步教学时可适度展开, 但仍先给结论、保持结构化。"
         .to_string()
 }
@@ -1243,6 +1247,16 @@ mod tests {
         assert!(detect_search_intent("在知识库里找一下上次的会议纪要"));
         assert!(detect_search_intent("search my notes about polaris"));
         assert!(!detect_search_intent("讲个笑话"));
+    }
+
+    #[test]
+    fn execution_delivery_contract_requires_actions_evidence_and_honest_blockers() {
+        let directive = reply_style_directive();
+        assert!(directive.contains("**已执行**"));
+        assert!(directive.contains("**验证结果**"));
+        assert!(directive.contains("**未完成与阻塞**"));
+        assert!(directive.contains("不得用选型、建议、TODO"));
+        assert!(directive.contains("没有实际执行证据就必须明确说未完成"));
     }
 
     /// 装软件/配环境类请求必须命中脚本意图 —— 这是「事事有回应事事无着落」的实证样本:

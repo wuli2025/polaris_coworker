@@ -1,240 +1,500 @@
-// 自动更新统一视图：桌面走 Tauri updater 状态机，Docker/Web 走同源 HTTP 命令。
-// 两条运行时只在这里分叉，UpdateBanner / UpdatePanel 继续消费同一组派生状态。
-import { computed, ref } from "vue";
-import { getVersion } from "@tauri-apps/api/app";
-import { invoke, isTauri, listen } from "../tauri";
+import { ref } from "vue";
+import { invoke, listen, isTauri, BackendHttpError } from "../tauri";
 
-type UpdaterState =
-  | { status: "disabled" }
-  | { status: "idle" }
-  | { status: "checking" }
-  | { status: "up-to-date" }
-  | { status: "available"; version: string; notes: string }
-  | { status: "downloading"; version: string; percent: number }
-  | { status: "ready"; version: string }
-  | { status: "installing"; version: string }
-  | { status: "error"; message: string };
+export type UpdaterRuntime = "unknown" | "desktop" | "docker" | "browser";
 
-type DockerStatus = {
-  updater_enabled: boolean;
-  updater_service: boolean;
-  update_script: boolean;
-  auth_configured: boolean;
-  current_version: string;
-  current_tag: string;
-  image_repo: string;
-};
+export const currentVersion = ref("");
+export const updateVersion = ref<string | null>(null);
+export const updateNotes = ref("");
+export const updating = ref(false);
+export const updateProgress = ref(0);
+export const updateError = ref("");
+export const checking = ref(false);
+export const upToDate = ref(false);
+export const checkFailed = ref(false);
+export const dialogDismissed = ref(false);
+export const lastCheckedAt = ref<number | null>(null);
+export const updaterRuntime = ref<UpdaterRuntime>("unknown");
 
-type DockerCheck = {
-  ok: boolean;
-  current?: string;
-  latest?: string;
-  has_update: boolean;
-  image?: string;
-  source?: string;
-  error?: string;
-};
-
-type DockerUpdate = {
-  success: boolean;
-  exit_code?: number | null;
-  stdout?: string;
-  stderr?: string;
-  note?: string;
-};
-
-const state = ref<UpdaterState>({ status: "idle" });
-export const updaterRuntime = ref<"desktop" | "docker" | "browser">(
-  isTauri ? "desktop" : "browser"
-);
 export const dockerUpdaterEnabled = ref(false);
 export const dockerUpdaterServiceConfigured = ref(false);
 export const dockerUpdateScriptPresent = ref(false);
 export const dockerAuthConfigured = ref(false);
 export const dockerMessage = ref("");
+export const dockerRequestId = ref<string | null>(null);
 
-export const currentVersion = ref<string>("");
-export const lastCheckedAt = ref<number | null>(null);
-export const dialogDismissed = ref(false);
-
-const versionOf = (s: UpdaterState): string | null =>
-  "version" in s ? s.version : null;
-
-export const updateVersion = computed<string | null>(() => versionOf(state.value));
-export const remoteVersion = updateVersion;
-export const updateNotes = computed<string>(() =>
-  state.value.status === "available" ? state.value.notes : ""
-);
-export const updating = computed(
-  () => state.value.status === "downloading" || state.value.status === "installing"
-);
-export const updateProgress = computed(() => {
-  const s = state.value;
-  if (s.status === "downloading") return s.percent;
-  if (s.status === "installing" || s.status === "ready") return 100;
-  return 0;
-});
-export const updateError = computed(() =>
-  state.value.status === "error" ? state.value.message : ""
-);
-export const checking = computed(() => state.value.status === "checking");
-export const upToDate = computed(() => state.value.status === "up-to-date");
-export const checkFailed = computed(() => state.value.status === "error");
-
-let subscribed = false;
+let versionLoaded = false;
+let listenerReady = false;
 let autoChecked = false;
-let dockerStatusLoaded = false;
+let dockerPollGeneration = 0;
+let lastDockerCheck: DockerCheck | null = null;
 
-async function loadDockerStatus(): Promise<boolean> {
-  if (isTauri) return false;
+const DOCKER_UPDATE_TIMEOUT_MS = 15 * 60 * 1000;
+const DOCKER_POLL_INTERVAL_MS = 2_000;
+
+interface DockerStatus {
+  updater_enabled: boolean;
+  updater_service: boolean;
+  update_script: boolean;
+  auth_configured: boolean;
+  current_version?: string;
+  current_revision?: string;
+  boot_id?: string;
+  current_tag?: string;
+  image_repo?: string;
+}
+
+interface DockerCheck {
+  ok: boolean;
+  current?: string;
+  latest?: string;
+  current_revision?: string;
+  target_revision?: string;
+  target_digest?: string;
+  has_update: boolean;
+  image?: string;
+  source?: string;
+  error?: string;
+}
+
+interface DockerUpdateAccepted {
+  accepted: boolean;
+  upToDate?: boolean;
+  requestId?: string;
+  targetRevision?: string;
+  targetVersion?: string;
+  targetDigest?: string;
+  sourceBootId?: string;
+  deadline?: number;
+  note?: string;
+}
+
+interface DockerBuild {
+  bootId?: string;
+  version?: string;
+  buildRevision?: string;
+}
+
+interface DockerTriggerResult {
+  state?: string;
+  exitCode?: number | null;
+  message?: string;
+}
+
+interface DockerUpdateStatus {
+  requestId: string;
+  state:
+    | "queued"
+    | "triggering"
+    | "waiting_restart"
+    | "succeeded"
+    | "failed"
+    | "unconfirmed";
+  deadline?: number;
+  sourceBootId?: string;
+  sourceRevision?: string;
+  targetRevision?: string;
+  targetVersion?: string;
+  targetDigest?: string;
+  currentBuild?: DockerBuild;
+  triggerResult?: DockerTriggerResult | null;
+}
+
+interface DockerWaitTarget {
+  requestId?: string;
+  sourceBootId: string;
+  targetRevision: string;
+  targetVersion?: string;
+  deadlineMs: number;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isDockerStatus(value: unknown): value is DockerStatus {
+  if (!value || typeof value !== "object") return false;
+  const status = value as Partial<DockerStatus>;
+  return (
+    typeof status.updater_enabled === "boolean" &&
+    typeof status.updater_service === "boolean" &&
+    typeof status.update_script === "boolean" &&
+    typeof status.auth_configured === "boolean"
+  );
+}
+
+async function readDockerBuild(): Promise<DockerBuild | null> {
   try {
-    const status = await invoke<DockerStatus>("docker_status");
-    updaterRuntime.value = "docker";
-    dockerStatusLoaded = true;
-    dockerUpdaterEnabled.value = !!status.updater_enabled;
-    dockerUpdaterServiceConfigured.value = !!status.updater_service;
-    dockerUpdateScriptPresent.value = !!status.update_script;
-    dockerAuthConfigured.value = !!status.auth_configured;
-    if (!currentVersion.value) currentVersion.value = status.current_version || status.current_tag || "—";
-    return true;
+    const response = await fetch("/api/build", { cache: "no-store" });
+    if (!response.ok) return null;
+    const value = (await response.json()) as DockerBuild;
+    return value && typeof value === "object" ? value : null;
   } catch {
-    // npm run dev 的纯浏览器预览没有后端；它不是“更新失败”，只是没有更新能力。
-    updaterRuntime.value = "browser";
-    dockerStatusLoaded = false;
+    return null;
+  }
+}
+
+async function dockerReady(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/ready", { cache: "no-store" });
+    return response.ok;
+  } catch {
     return false;
   }
 }
 
-/** 供更新页挂载时只加载运行时/当前版本，不触发网络版本检查。 */
-export async function loadUpdaterVersion(): Promise<void> {
-  if (currentVersion.value) return;
-  if (isTauri) {
-    try {
-      currentVersion.value = await getVersion();
-    } catch {
-      /* Tauri 初始化早期拿不到时，下一次检查再补。 */
-    }
-    return;
+function dockerFailureMessage(status: DockerUpdateStatus): string {
+  const detail = status.triggerResult?.message?.trim();
+  if (detail) return detail;
+  if (status.triggerResult?.exitCode != null) {
+    return `隔离更新服务执行失败（退出码 ${status.triggerResult.exitCode}）`;
   }
-  await loadDockerStatus();
-}
-
-async function ensureSubscribed(): Promise<void> {
-  if (!isTauri || subscribed) return;
-  subscribed = true;
-  try {
-    await listen<UpdaterState>("updater://state", (payload) => {
-      state.value = payload;
-    });
-    state.value = await invoke<UpdaterState>("updater_get_state");
-  } catch (e) {
-    subscribed = false;
-    console.warn("[updater] subscribe failed:", e);
-  }
-}
-
-async function checkDocker(): Promise<UpdaterState> {
-  if (!dockerStatusLoaded && !(await loadDockerStatus())) {
-    return { status: "disabled" };
-  }
-  state.value = { status: "checking" };
-  const result = await invoke<DockerCheck>("docker_check_update");
-  lastCheckedAt.value = Date.now();
-  if (result.current) currentVersion.value = result.current;
-  if (!result.ok) {
-    return {
-      status: "error",
-      message: result.error || "Docker 版本源暂时不可用",
-    };
-  }
-  if (result.has_update && result.latest) {
-    return {
-      status: "available",
-      version: result.latest,
-      notes: `Docker 镜像 ${result.image || ""} 已有新版本。更新会在后台替换容器，数据卷与配置保持不变。`,
-    };
-  }
-  return { status: "up-to-date" };
-}
-
-async function checkOnce(): Promise<UpdaterState> {
-  await loadUpdaterVersion();
-  if (isTauri) {
-    await ensureSubscribed();
-    const result = await invoke<UpdaterState>("updater_check");
-    lastCheckedAt.value = Date.now();
-    return result;
-  }
-  return checkDocker();
-}
-
-/** 启动时错峰检查；仅网络错误退避，拿到确定结论立即收手。 */
-export async function checkForUpdate(): Promise<void> {
-  if (autoChecked) return;
-  autoChecked = true;
-  const delays = [5000, 4000, 12000, 30000];
-  for (const wait of delays) {
-    await new Promise((resolve) => setTimeout(resolve, wait));
-    try {
-      const result = await checkOnce();
-      state.value = result;
-      if (result.status === "disabled" || result.status !== "error") return;
-    } catch (e) {
-      state.value = { status: "error", message: String(e) };
-      console.warn("[updater] auto check failed, will retry:", e);
-    }
-  }
-}
-
-export async function manualCheck(): Promise<void> {
-  dialogDismissed.value = false;
-  try {
-    state.value = { status: "checking" };
-    state.value = await checkOnce();
-  } catch (e) {
-    state.value = { status: "error", message: String(e) };
-    console.warn("[updater] manual check failed:", e);
-  }
+  return "隔离更新服务未能拉取并替换容器";
 }
 
 /**
- * 桌面：下载安装并由 Tauri 重启。
- * Docker：让 server 调用隔离 Watchtower sidecar 的窄 HTTP API；当前容器随后会断线并被重建。
+ * Wait for observable replacement evidence. A Watchtower HTTP 200 is deliberately
+ * insufficient: success means both a new process boot and the requested OCI revision.
  */
-export async function applyUpdate(force = false): Promise<void> {
-  if (updating.value) return;
-  if (isTauri) {
-    try {
-      await invoke("updater_apply");
-    } catch (e) {
-      state.value = { status: "error", message: String(e) };
-      console.warn("[updater] apply failed:", e);
+async function waitForDockerReplacement(target: DockerWaitTarget): Promise<void> {
+  const generation = ++dockerPollGeneration;
+  const startedAt = Date.now();
+  const deadlineMs = Math.min(
+    target.deadlineMs || startedAt + DOCKER_UPDATE_TIMEOUT_MS,
+    startedAt + DOCKER_UPDATE_TIMEOUT_MS,
+  );
+
+  while (generation === dockerPollGeneration) {
+    const now = Date.now();
+    if (now >= deadlineMs) {
+      throw new Error(
+        "15 分钟内未观察到目标容器启动。更新没有被确认，请查看 docker logs polaris-updater 后重试。",
+      );
+    }
+
+    const elapsed = now - startedAt;
+    updateProgress.value = Math.min(92, 8 + Math.round((elapsed / (deadlineMs - startedAt)) * 84));
+
+    const build = await readDockerBuild();
+    if (
+      build?.bootId &&
+      build.bootId !== target.sourceBootId &&
+      build.buildRevision === target.targetRevision
+    ) {
+      dockerMessage.value = "目标容器已启动，正在等待服务就绪…";
+      if (await dockerReady()) {
+        updateProgress.value = 100;
+        currentVersion.value = build.version || target.targetVersion || currentVersion.value;
+        updateVersion.value = null;
+        upToDate.value = true;
+        dockerMessage.value = "更新完成，正在载入新容器…";
+        await sleep(500);
+        window.location.reload();
+        return;
+      }
+    } else if (!build) {
+      dockerMessage.value = "旧容器正在退出，等待新容器恢复…";
+    } else if (build.bootId !== target.sourceBootId) {
+      dockerMessage.value = "容器已经重启，正在核对目标镜像版本…";
+    }
+
+    if (target.requestId) {
+      try {
+        const status = await invoke<DockerUpdateStatus>("docker_update_status", {
+          requestId: target.requestId,
+        });
+        if (status.state === "failed") {
+          throw new Error(`${dockerFailureMessage(status)}。请查看 docker logs polaris-updater。`);
+        }
+        if (status.state === "unconfirmed") {
+          throw new Error(
+            "Watchtower 已返回，但没有观察到目标 build 启动；本次更新未确认。请查看 docker logs polaris-updater 后重试。",
+          );
+        }
+        if (status.state === "waiting_restart") {
+          dockerMessage.value = "镜像扫描已返回，等待目标容器实际替换…";
+        } else if (status.state === "succeeded") {
+          dockerMessage.value = "目标 build 已确认，等待服务就绪…";
+        } else if (build) {
+          dockerMessage.value = "隔离更新服务已接单，正在拉取并替换容器…";
+        }
+      } catch (error) {
+        const message = errorText(error);
+        // During a real replacement /api/invoke is expected to disconnect. Only
+        // explicit terminal states stop polling; transport failures remain recoverable.
+        if (
+          message.includes("隔离更新服务执行失败") ||
+          message.includes("本次更新未确认") ||
+          message.includes("docker logs polaris-updater")
+        ) {
+          throw error;
+        }
+      }
+    }
+
+    await sleep(DOCKER_POLL_INTERVAL_MS);
+  }
+}
+
+async function loadDockerStatus(): Promise<boolean> {
+  try {
+    const raw = await invoke<unknown>("docker_status");
+    if (!isDockerStatus(raw)) {
+      updaterRuntime.value = "browser";
+      return false;
+    }
+    const status = raw;
+    updaterRuntime.value = "docker";
+    dockerUpdaterEnabled.value = status.updater_enabled;
+    dockerUpdaterServiceConfigured.value = status.updater_service;
+    dockerUpdateScriptPresent.value = status.update_script;
+    dockerAuthConfigured.value = status.auth_configured;
+    if (status.current_version) currentVersion.value = status.current_version;
+    dockerMessage.value = status.updater_enabled
+      ? "安全更新服务已就绪"
+      : !status.auth_configured
+        ? "需先启用机器口令或账号登录，开放模式禁止远程更新"
+        : !status.update_script
+          ? "当前镜像没有更新脚本，请先在宿主机手动更新一次"
+          : !status.updater_service
+            ? "隔离更新服务未配置，请叠加 docker-compose.update.yml"
+            : "Docker 一键更新尚未满足安全条件";
+    return true;
+  } catch (error) {
+    // Reaching a server that rejects or fails docker_status is not browser preview.
+    updaterRuntime.value = "docker";
+    dockerUpdaterEnabled.value = false;
+    dockerMessage.value =
+      error instanceof BackendHttpError && error.status === 401
+        ? "请先登录团队账号或输入正确的 POLARIS_AUTH_TOKEN，才能读取更新状态"
+        : error instanceof BackendHttpError && error.status === 403
+          ? "当前账号不是 owner，不能管理容器更新"
+          : `Docker 更新服务异常：${errorText(error)}`;
+    updateError.value = dockerMessage.value;
+    return false;
+  }
+}
+
+async function checkDocker(): Promise<void> {
+  const isDocker = await loadDockerStatus();
+  if (!isDocker) {
+    if (updaterRuntime.value === "browser") {
+      upToDate.value = true;
+      checkFailed.value = false;
+    } else {
+      checkFailed.value = true;
     }
     return;
   }
 
-  if (updaterRuntime.value !== "docker") return;
-  const version = updateVersion.value || currentVersion.value || "latest";
-  state.value = { status: "installing", version };
-  dockerMessage.value = "正在通知隔离更新服务…";
+  const result = await invoke<DockerCheck>("docker_check_update");
+  lastDockerCheck = result;
+  if (!result.ok) {
+    throw new Error(result.error || "OCI 镜像版本检查失败");
+  }
+
+  if (result.current) currentVersion.value = result.current;
+  if (result.has_update) {
+    updateVersion.value = result.latest || result.target_revision?.slice(0, 12) || "新版镜像";
+    const revision = result.target_revision?.slice(0, 12);
+    updateNotes.value = revision
+      ? `目标镜像 ${result.image || ""}\nBuild ${revision}`.trim()
+      : `目标镜像 ${result.image || ""}`.trim();
+    upToDate.value = false;
+  } else {
+    updateVersion.value = null;
+    updateNotes.value = "";
+    upToDate.value = true;
+  }
+  checkFailed.value = false;
+}
+
+export async function loadUpdaterVersion(): Promise<void> {
+  if (versionLoaded) return;
+  versionLoaded = true;
+
+  if (!isTauri) {
+    const docker = await loadDockerStatus();
+    if (!docker && updaterRuntime.value === "browser") currentVersion.value ||= "Web";
+    return;
+  }
+
+  updaterRuntime.value = "desktop";
   try {
-    const result = await invoke<DockerUpdate>("docker_update", {
-      confirm: true,
-      force,
-    });
-    if (!result.success) {
-      throw new Error(result.stderr || result.stdout || `更新脚本退出码 ${result.exit_code ?? "未知"}`);
+    const state = await invoke<{ current_version?: string }>("updater_get_state");
+    if (state?.current_version) currentVersion.value = state.current_version;
+  } catch {
+    // updater state is optional on unsupported desktop builds
+  }
+}
+
+async function ensureListener(): Promise<void> {
+  if (listenerReady || !isTauri) return;
+  listenerReady = true;
+  await listen<{ phase: string; progress: number; note: string; version: string }>(
+    "updater-event",
+    (p) => {
+      if (!p) return;
+      if (p.version) updateVersion.value = p.version;
+      updateProgress.value = p.progress ?? 0;
+      if (p.phase === "downloading" || p.phase === "installing") updating.value = true;
+      if (p.phase === "done") {
+        updating.value = false;
+        updateProgress.value = 100;
+      }
+      if (p.phase === "error") {
+        updating.value = false;
+        updateError.value = p.note || "更新失败";
+      }
+    },
+  );
+}
+
+export async function autoCheck(): Promise<void> {
+  if (autoChecked) return;
+  autoChecked = true;
+  await loadUpdaterVersion();
+  if (isTauri) await ensureListener();
+
+  checking.value = true;
+  updateError.value = "";
+  checkFailed.value = false;
+  try {
+    if (!isTauri) {
+      await checkDocker();
+    } else {
+      const info = await invoke<{ available: boolean; version: string; notes: string }>(
+        "updater_check",
+      );
+      if (info?.available) {
+        updateVersion.value = info.version;
+        updateNotes.value = info.notes || "";
+        upToDate.value = false;
+      } else {
+        upToDate.value = true;
+      }
     }
-    dockerMessage.value =
-      result.note || "隔离更新服务已接单。容器会在拉取完成后短暂断线，约 1–3 分钟后刷新即可。";
-    // 保持 installing：正常路径会先断线再由新容器接棒，不能在旧页面假装已经完成。
-  } catch (e) {
-    dockerMessage.value = "";
-    state.value = { status: "error", message: String(e) };
-    console.warn("[updater] docker apply failed:", e);
+  } catch (error) {
+    checkFailed.value = true;
+    updateError.value = errorText(error);
+  } finally {
+    checking.value = false;
+    lastCheckedAt.value = Date.now();
+  }
+}
+
+export async function checkForUpdate(): Promise<void> {
+  await autoCheck();
+}
+
+export async function manualCheck(): Promise<void> {
+  await loadUpdaterVersion();
+  if (isTauri) await ensureListener();
+  checking.value = true;
+  updateError.value = "";
+  checkFailed.value = false;
+  upToDate.value = false;
+  dialogDismissed.value = false;
+  try {
+    if (!isTauri) {
+      await checkDocker();
+    } else {
+      const info = await invoke<{ available: boolean; version: string; notes: string }>(
+        "updater_check",
+      );
+      if (info?.available) {
+        updateVersion.value = info.version;
+        updateNotes.value = info.notes || "";
+      } else {
+        updateVersion.value = null;
+        updateNotes.value = "";
+        upToDate.value = true;
+      }
+    }
+  } catch (error) {
+    checkFailed.value = true;
+    updateError.value = errorText(error);
+  } finally {
+    checking.value = false;
+    lastCheckedAt.value = Date.now();
+  }
+}
+
+export async function applyUpdate(): Promise<void> {
+  updateError.value = "";
+  updating.value = true;
+  updateProgress.value = 2;
+
+  try {
+    if (!isTauri) {
+      if (!dockerUpdaterEnabled.value) {
+        throw new Error(
+          dockerMessage.value ||
+            "Docker 一键更新未启用，请先配置账号鉴权和隔离 updater sidecar。",
+        );
+      }
+
+      const before = await readDockerBuild();
+      const targetRevision = lastDockerCheck?.target_revision || "";
+      if (!before?.bootId || !targetRevision) {
+        throw new Error("缺少当前 boot 或目标 OCI revision，请重新检查更新后再试。",);
+      }
+
+      dockerMessage.value = "正在把更新请求交给隔离更新服务…";
+      let accepted: DockerUpdateAccepted | null = null;
+      try {
+        accepted = await invoke<DockerUpdateAccepted>("docker_update", { confirm: true });
+      } catch (error) {
+        // A structured HTTP failure means the server rejected the request before handoff.
+        // Only a transport disconnect is ambiguous (the old container may have just exited).
+        if (error instanceof BackendHttpError) throw error;
+        dockerMessage.value = "连接已中断，正在确认容器是否已开始替换…";
+      }
+
+      if (accepted?.upToDate || accepted?.accepted === false) {
+        updateVersion.value = null;
+        upToDate.value = true;
+        updateProgress.value = 100;
+        dockerMessage.value = accepted.note || "当前容器已经是目标 build";
+        return;
+      }
+
+      const resolvedTarget = accepted?.targetRevision || targetRevision;
+      const resolvedBoot = accepted?.sourceBootId || before.bootId;
+      if (!resolvedTarget || !resolvedBoot) {
+        throw new Error("更新请求缺少目标 build 证据，已停止等待，请重新检查后再试。",);
+      }
+      dockerRequestId.value = accepted?.requestId || null;
+      dockerMessage.value = accepted?.note || "更新请求已接单，正在拉取目标镜像…";
+      updateProgress.value = 8;
+      await waitForDockerReplacement({
+        requestId: accepted?.requestId,
+        sourceBootId: resolvedBoot,
+        targetRevision: resolvedTarget,
+        targetVersion: accepted?.targetVersion || lastDockerCheck?.latest,
+        deadlineMs: accepted?.deadline
+          ? accepted.deadline * 1000
+          : Date.now() + DOCKER_UPDATE_TIMEOUT_MS,
+      });
+      return;
+    }
+
+    await ensureListener();
+    await invoke("updater_apply", { confirm: true });
+  } catch (error) {
+    dockerPollGeneration += 1;
+    updateError.value = errorText(error);
+    dockerMessage.value = updateError.value;
+  } finally {
+    updating.value = false;
+    if (updateError.value) updateProgress.value = 0;
   }
 }
 
 export function dismissUpdate(): void {
-  dialogDismissed.value = true;
+  if (!updating.value) dialogDismissed.value = true;
 }

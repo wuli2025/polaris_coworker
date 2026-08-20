@@ -225,7 +225,7 @@ export function renderMd(text: string, enhance = true): string {
 }
 
 // 一个「回合」= 一条用户消息 + 其后的助手正文/工具/产物，直到下一条用户消息。
-// 助手多段文本拼成一块 markdown；工具折叠成 pill；所有生成文件聚合到回合末尾。
+// timeline 保留真实到达顺序；text/tools 仅作复制、参考文件和统计聚合；产物统一收在回合末尾。
 export interface TurnTool {
   name: string;
   /** 连续同名合并的次数 */
@@ -233,13 +233,31 @@ export interface TurnTool {
   /** 各次调用的输入摘要(命令/路径/检索词) */
   details: string[];
 }
+export interface TurnTimelineText {
+  kind: "text";
+  text: string;
+  severity: "normal" | "warning" | "error";
+  /** 定稿回合可预渲染，活跃回合现场渲染。 */
+  html?: string;
+}
+export interface TurnTimelineTool {
+  kind: "tool";
+  tool: TurnTool;
+  /** 指向 Turn.tools 的稳定下标，用于展开状态 key。 */
+  toolIndex: number;
+}
+export type TurnTimelineItem = TurnTimelineText | TurnTimelineTool;
+
 export interface Turn {
   key: number;
   user?: Bubble;
+  /** 所有正常助手文本的可复制聚合，不参与显示顺序。 */
   text: string;
   tools: TurnTool[];
   artifacts: string[];
   errors: string[];
+  /** 正文、工具、警告和错误的真实到达顺序。 */
+  timeline: TurnTimelineItem[];
   hasAssistant: boolean;
   /** 回合时间(用户消息时刻,无则首条气泡时刻) */
   at?: number;
@@ -257,7 +275,8 @@ export interface Turn {
    *  活跃末回合缺省 → 由 TurnItem 现场 renderMd,流式中逐帧更新)。 */
   html?: string;
 }
-export const ERR_RE = /^\[(错误|发送失败|result error)/;
+export const ERR_RE = /^\[(错误|发送失败|本轮超时|result error)/i;
+export const WARN_RE = /^\[(警告|stderr)/i;
 
 /** 豆包式「参考文件」: 本回合 Read 过的文件, 去重、剔除本回合产物与被截断的摘要。
  *  (原 ChatPanel.refFiles 原样搬入, 改为在 buildTurnsSlice 收尾时按回合算一次) */
@@ -296,6 +315,7 @@ export function buildTurnsSlice(list: Bubble[], startKey: number): Turn[] {
       tools: [],
       artifacts: [],
       errors: [],
+      timeline: [],
       hasAssistant: false,
       at: user?.at,
       refs: [],
@@ -314,25 +334,43 @@ export function buildTurnsSlice(list: Bubble[], startKey: number): Turn[] {
     if (t.at === undefined && b.at !== undefined) t.at = b.at;
     if (b.role === "tool") {
       const name = b.tool || "工具";
-      // 合并连续同名工具，避免刷屏;输入摘要逐条留底供展开查看
-      const last = t.tools[t.tools.length - 1];
-      if (last?.name === name) {
-        last.count++;
-        if (b.toolDetail) last.details.push(b.toolDetail);
+      // 只合并 timeline 中真正连续的同名工具；正文/告警隔开的调用必须留在原位置。
+      const lastItem = t.timeline[t.timeline.length - 1];
+      if (lastItem?.kind === "tool" && lastItem.tool.name === name) {
+        lastItem.tool.count++;
+        if (b.toolDetail) lastItem.tool.details.push(b.toolDetail);
       } else {
-        t.tools.push({
+        const tool: TurnTool = {
           name,
           count: 1,
           details: b.toolDetail ? [b.toolDetail] : [],
-        });
+        };
+        const toolIndex = t.tools.length;
+        t.tools.push(tool);
+        t.timeline.push({ kind: "tool", tool, toolIndex });
       }
     } else {
       const txt = b.text || "";
-      if (ERR_RE.test(txt.trim())) {
-        t.errors.push(txt);
-      } else if (txt) {
-        t.text += (t.text ? "\n\n" : "") + txt;
-        t.hasAssistant = true;
+      const trimmed = txt.trim();
+      const severity: TurnTimelineText["severity"] =
+        b.severity === "warning" || WARN_RE.test(trimmed)
+          ? "warning"
+          : b.severity === "error" || b.err || ERR_RE.test(trimmed)
+            ? "error"
+            : "normal";
+      if (txt) {
+        if (severity === "normal") {
+          t.text += (t.text ? "\n\n" : "") + txt;
+          t.hasAssistant = true;
+        } else {
+          t.errors.push(txt);
+        }
+        const lastItem = t.timeline[t.timeline.length - 1];
+        if (lastItem?.kind === "text" && lastItem.severity === severity) {
+          lastItem.text += (lastItem.text ? "\n\n" : "") + txt;
+        } else {
+          t.timeline.push({ kind: "text", text: txt, severity });
+        }
       }
       if (b.artifacts) {
         for (const a of b.artifacts)

@@ -1,23 +1,38 @@
 #!/bin/sh
 # Polaris Docker remote-update helper.
 #
-# --check: query the same latest.json used by desktop releases; no Docker access needed.
-# default: after a successful check, call the authenticated HTTP API of the isolated Watchtower
-# sidecar. This app container never receives docker.sock or a Docker CLI.
+# --check   : release-manifest diagnostic only; product update availability is decided from OCI revision.
+# --trigger : call the isolated Watchtower HTTP API. A 200 means only “the scan returned”; replacement
+#             success is proved by the new server boot/revision, never by this script response.
 set -eu
 
 DEFAULT_IMAGE_REPO="ghcr.io/wuli2025/polaris_coworker"
 DEFAULT_UPDATER_URL="http://polaris-updater:8080/v1/update"
 VERSION_FILE="${POLARIS_VERSION_FILE:-/app/package.json}"
 IMAGE_REPO="${POLARIS_IMAGE_REPO:-$DEFAULT_IMAGE_REPO}"
+IMAGE_TAG="${POLARIS_TAG:-latest}"
 UPDATER_URL="${POLARIS_UPDATER_URL:-$DEFAULT_UPDATER_URL}"
 UPDATER_TOKEN="${POLARIS_UPDATER_TOKEN:-}"
+RESULT_FILE="${POLARIS_UPDATE_RESULT_FILE:-}"
 
 one_line() {
   printf '%s' "$1" | tr '\r\n=' '   '
 }
 
+write_result() {
+  state=$1
+  code=$2
+  [ -n "$RESULT_FILE" ] || return 0
+  tmp="${RESULT_FILE}.tmp.$$"
+  printf '{"state":"%s","exitCode":%s}\n' "$state" "$code" > "$tmp"
+  mv -f "$tmp" "$RESULT_FILE"
+}
+
 current_version() {
+  if [ -n "${POLARIS_BUILD_VERSION:-}" ]; then
+    printf '%s' "$POLARIS_BUILD_VERSION"
+    return
+  fi
   if [ -n "${POLARIS_VERSION:-}" ]; then
     printf '%s' "$POLARIS_VERSION"
     return
@@ -30,7 +45,6 @@ current_version() {
 }
 
 extract_version() {
-  # Accept both Tauri latest.json ("version") and GitHub release API ("tag_name").
   sed -n \
     -e 's/.*"version"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' \
     -e 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' \
@@ -42,8 +56,8 @@ fetch_latest() {
   if [ -n "$custom" ]; then
     urls="$custom"
   else
-    urls="https://llmwiki.cloud/latest.json
-https://github.com/wuli2025/polaris_coworker/releases/latest/download/latest.json
+    # llmwiki.cloud/latest.json 当前返回官网 HTML，不能继续把它伪装成版本源。
+    urls="https://github.com/wuli2025/polaris_coworker/releases/latest/download/latest.json
 https://api.github.com/repos/wuli2025/polaris_coworker/releases/latest
 https://gh-proxy.com/https://github.com/wuli2025/polaris_coworker/releases/latest/download/latest.json"
   fi
@@ -84,7 +98,7 @@ check_update() {
     printf 'current=%s\n' "$(one_line "$current")"
     printf 'latest=%s\n' "$(one_line "$LATEST_VERSION")"
     printf 'has_update=%s\n' "$has"
-    printf 'image=%s:latest\n' "$(one_line "$IMAGE_REPO")"
+    printf 'image=%s:%s\n' "$(one_line "$IMAGE_REPO")" "$(one_line "$IMAGE_TAG")"
     printf 'source=%s\n' "$(one_line "$LATEST_SOURCE")"
     return 0
   fi
@@ -93,57 +107,64 @@ check_update() {
   printf 'current=%s\n' "$(one_line "$current")"
   printf 'latest=\n'
   printf 'has_update=0\n'
-  printf 'image=%s:latest\n' "$(one_line "$IMAGE_REPO")"
-  printf 'error=四个版本源都不可用，请检查容器网络或设置 POLARIS_UPDATE_MANIFEST_URLS\n'
+  printf 'image=%s:%s\n' "$(one_line "$IMAGE_REPO")" "$(one_line "$IMAGE_TAG")"
+  printf 'error=版本清单不可用；产品内 Docker 更新会改用 OCI revision 检查\n'
   return 1
 }
 
-if [ "${1:-}" = "--check" ]; then
-  check_update
-  exit $?
-fi
-
-if [ "${POLARIS_FORCE:-0}" != "1" ]; then
-  check=$(check_update) || {
-    printf '%s\n' "$check"
-    echo "版本检查失败；未启动更新。需要跳过检查时使用“强制重装”。" >&2
-    exit 2
-  }
-  printf '%s\n' "$check"
-  has=$(printf '%s\n' "$check" | sed -n 's/^has_update=//p' | tail -n 1)
-  if [ "$has" != "1" ]; then
-    echo "当前已经是版本清单中的最新版；未启动替换。"
-    exit 0
-  fi
-fi
+case "${1:-}" in
+  --check)
+    check_update
+    exit $?
+    ;;
+  --trigger)
+    ;;
+  *)
+    echo "用法: update.sh --check | --trigger" >&2
+    exit 64
+    ;;
+esac
 
 if [ -z "$UPDATER_TOKEN" ]; then
+  write_result failed 3
   echo "隔离更新服务未配置：请通过 docker-compose.update.yml 设置 POLARIS_UPDATER_TOKEN" >&2
   exit 3
 fi
 if [ "$UPDATER_URL" != "$DEFAULT_UPDATER_URL" ]; then
+  write_result failed 4
   echo "POLARIS_UPDATER_URL 只能指向隔离内网端点 $DEFAULT_UPDATER_URL" >&2
   exit 4
 fi
 
 if [ "${POLARIS_DRY_RUN:-0}" = "1" ]; then
+  write_result watchtower_returned 0
   echo "dry_run=1"
   echo "updater=$(one_line "$UPDATER_URL")"
   exit 0
 fi
 
-# Watchtower 的 HTTP API 只有“立即执行一轮更新”这一项能力；socket 留在 sidecar 内，
-# Polaris 即使运行项目命令也接触不到 Docker daemon。Bearer token 只放请求头，不写日志。
-# Watchtower v1.7.1 会等这一轮更新完成后才回 HTTP；真的替换本容器时，curl 会随旧容器
-# 一起退出，而 sidecar 内的更新不受影响。给完整拉镜像留 15 分钟上限，不能用 30 秒误报失败。
-response=$(curl -fsS --connect-timeout 5 --max-time 900 \
-  -H "Authorization: Bearer $UPDATER_TOKEN" \
-  "$UPDATER_URL") || {
-    echo "隔离更新服务不可用或拒绝了请求；确认 update overlay 已启动且两端 token 一致" >&2
-    exit 5
-  }
+# 只供 disposable CI 故障注入：让后端先返回 accepted，再关闭临时 registry，
+# 从而证明真实 pull 失败会在有限截止时间内离开等待态。生产环境无法启用这段延迟。
+if [ "${POLARIS_UPDATE_E2E:-0}" = "1" ]; then
+  delay="${POLARIS_UPDATE_TRIGGER_DELAY_SECONDS:-0}"
+  case "$delay" in
+    ''|*[!0-9]*) delay=0 ;;
+  esac
+  if [ "$delay" -gt 0 ]; then sleep "$delay"; fi
+fi
 
-printf 'started=1\n'
-printf 'updater=%s\n' "$(one_line "$UPDATER_URL")"
-printf 'response=%s\n' "$(one_line "$response")"
-echo "隔离更新服务已接单；它会拉取新镜像并只替换带启用标签的 Polaris 容器。"
+write_result triggering 0
+# Watchtower 1.7.1 会同步执行扫描/拉取/替换。若它真的替换本容器，本 curl 会随旧容器
+# 一起结束，但 sidecar 内已开始的 callback 不依赖客户端连接；新容器用 boot/revision 证明结果。
+if ! curl -fsS --connect-timeout 5 --max-time 900 \
+  -H "Authorization: Bearer $UPDATER_TOKEN" \
+  "$UPDATER_URL" >/dev/null; then
+  write_result failed 5
+  echo "隔离更新服务不可用或拒绝请求；确认 overlay 已启动且两端 token 一致" >&2
+  exit 5
+fi
+
+# 空 200 可能是 no-op、锁跳过或内部失败；这里只记录“HTTP 返回”，绝不声称镜像已更新。
+write_result watchtower_returned 0
+printf 'watchtower_returned=1\n'
+echo "Watchtower 扫描已返回；是否替换成功由新容器 build revision 继续确认。"

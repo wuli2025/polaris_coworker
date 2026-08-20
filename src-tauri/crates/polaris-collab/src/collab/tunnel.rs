@@ -805,6 +805,45 @@ pub fn status() -> serde_json::Value {
     })
 }
 
+/// 一条出站隧道的真实运行态。设备网不能只凭“曾经分到过 token”宣称已连接；
+/// 这里直接读 tunnel registry 和 iroh connection 的关闭状态，供 mesh 对账做健康判定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientState {
+    pub running: bool,
+    pub connected: bool,
+    pub state: String,
+    pub last_error: String,
+}
+
+pub fn client_state(listen_port: u16) -> ClientState {
+    let tunnel = CLIENTS.lock().unwrap().get(&listen_port).cloned();
+    let Some(tunnel) = tunnel else {
+        return ClientState {
+            running: false,
+            connected: false,
+            state: "stopped".into(),
+            last_error: String::new(),
+        };
+    };
+    let running = tunnel.alive.load(Ordering::SeqCst);
+    let state = tunnel.state.lock().unwrap().clone();
+    let last_error = tunnel.last_error.lock().unwrap().clone();
+    let connected = running
+        && state == "connected"
+        && tunnel
+            .conn
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|conn| conn.close_reason().is_none());
+    ClientState {
+        running,
+        connected,
+        state,
+        last_error,
+    }
+}
+
 /// 本机主机 NodeId(不绑 Endpoint,直接由 host.key 种子导出)。挂牌到云机网关时上报用。
 pub fn host_node_id() -> Result<String, String> {
     let seed = identity::get_or_create_host_key()?;

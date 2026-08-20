@@ -133,11 +133,14 @@ const renderTurns = computed<Turn[]>(() => {
     prefixTurns = c.turns;
   } else {
     prefixTurns = buildTurnsSlice(list.slice(0, split), 0);
-    // 定稿回合的正文 html 在此一次预渲染挂到 turn 上(renderMarkdown 有按原文的内部
-    // 缓存,这里主要省掉的是每帧的 TL;DR 正则 + ANSI 清洗前处理与字符串拼接),模板
-    // (TurnItem)直接 v-html turn.html;活跃末回合不挂,由 TurnItem 每帧现场渲染。
+    // 定稿回合的 timeline 正文逐段预渲染；工具前后的段落保持原位置，不能再合成一块。
+    // 活跃末回合不挂 html，由 TurnItem 每帧现场渲染。
     for (const t of prefixTurns) {
-      if (t.text) t.html = renderMd(t.text, true);
+      for (const item of t.timeline) {
+        if (item.kind === "text" && item.severity === "normal" && item.text) {
+          item.html = renderMd(item.text, true);
+        }
+      }
     }
     turnsPrefixCache = {
       sig: list

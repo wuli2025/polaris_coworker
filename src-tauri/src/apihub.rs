@@ -445,6 +445,138 @@ mod origin_gate_tests {
         ));
     }
 
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn docker_镜像_marker_优先于_watchtower_保留的旧环境变量() {
+        assert_eq!(
+            select_build_value(
+                Some("target-rev".into()),
+                Some("source-rev".into()),
+                "local"
+            ),
+            "target-rev"
+        );
+        assert_eq!(
+            select_build_value(None, Some("env-rev".into()), "local"),
+            "env-rev"
+        );
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn docker_明文_registry_只豁免精确的本机主机名() {
+        for base in [
+            "http://localhost:5000",
+            "http://127.0.0.1:5000",
+            "http://[::1]:5000",
+            "http://registry:5000",
+        ] {
+            assert!(insecure_registry_host_is_local(base), "{base}");
+        }
+        for base in [
+            "http://localhost.evil.example:5000",
+            "http://127.0.0.1.evil.example:5000",
+            "http://registry.evil.example:5000",
+            "http://user@localhost:5000",
+            "https://localhost:5000",
+        ] {
+            assert!(!insecure_registry_host_is_local(base), "{base}");
+        }
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn docker_镜像索引按当前架构选择且拒绝缺失平台() {
+        let index = json!({
+            "manifests": [
+                {"digest":"sha256:arm", "platform":{"os":"linux", "architecture":"arm64"}},
+                {"digest":"sha256:amd", "platform":{"os":"linux", "architecture":"amd64"}},
+                {"digest":"sha256:win", "platform":{"os":"windows", "architecture":"amd64"}}
+            ]
+        });
+        assert_eq!(
+            select_platform_manifest(&index, "amd64").unwrap(),
+            "sha256:amd"
+        );
+        assert_eq!(
+            select_platform_manifest(&index, "arm64").unwrap(),
+            "sha256:arm"
+        );
+        assert!(select_platform_manifest(&index, "riscv64").is_err());
+        assert!(select_platform_manifest(&json!({"manifests":[]}), "amd64").is_err());
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn docker_镜像必须有可证明的_revision() {
+        let config = json!({"config":{"Labels":{
+            "org.opencontainers.image.revision":"abcdef123456",
+            "io.polaris.app.version":"2.9.0"
+        }}});
+        assert_eq!(
+            image_build_labels(&config).unwrap(),
+            ("abcdef123456".into(), "2.9.0".into())
+        );
+        let no_version = json!({"config":{"Labels":{
+            "org.opencontainers.image.revision":"abcdef123456"
+        }}});
+        assert_eq!(image_build_labels(&no_version).unwrap().1, "unknown");
+        assert!(image_build_labels(&json!({"config":{"Labels":{}}})).is_err());
+        assert!(image_build_labels(&json!({"config":{"Labels":{
+            "org.opencontainers.image.revision":""
+        }}}))
+        .is_err());
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn docker_更新状态只在新_boot_命中目标_revision_时成功() {
+        let request = json!({
+            "sourceBootId":"old-boot",
+            "targetRevision":"target-rev",
+            "deadline":200
+        });
+        let old = json!({"bootId":"old-boot", "buildRevision":"old-rev"});
+        let wrong = json!({"bootId":"new-boot", "buildRevision":"other-rev"});
+        let target = json!({"bootId":"new-boot", "buildRevision":"target-rev"});
+
+        assert_eq!(
+            derive_docker_update_state(&request, None, &old, 100),
+            "triggering"
+        );
+        assert_eq!(
+            derive_docker_update_state(
+                &request,
+                Some(&json!({"state":"watchtower_returned"})),
+                &old,
+                100,
+            ),
+            "waiting_restart"
+        );
+        assert_eq!(
+            derive_docker_update_state(&request, None, &wrong, 200),
+            "unconfirmed"
+        );
+        assert_eq!(
+            derive_docker_update_state(&request, None, &target, 250),
+            "succeeded"
+        );
+        assert_eq!(
+            derive_docker_update_state(&request, Some(&json!({"state":"failed"})), &old, 100,),
+            "failed"
+        );
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn docker_更新_request_id_不能逃逸状态目录() {
+        assert!(valid_update_request_id("1723456789-0"));
+        assert!(!valid_update_request_id(""));
+        assert!(!valid_update_request_id("../request"));
+        assert!(!valid_update_request_id("123.json"));
+        assert!(!valid_update_request_id(&"1".repeat(65)));
+    }
+
     #[test]
     fn 落盘的老口令不再生效() {
         // 网页向导设过的口令曾经写在 collab.db,忘了就没有找回入口 —— 现在 effective_token
@@ -1157,6 +1289,503 @@ fn req_vec_str(a: &Args, k: &str) -> Result<Vec<String>, String> {
 const UPDATE_SCRIPT: &str = "/usr/local/bin/update.sh";
 #[cfg(not(feature = "desktop"))]
 const UPDATE_SERVICE_URL: &str = "http://polaris-updater:8080/v1/update";
+#[cfg(not(feature = "desktop"))]
+const DEFAULT_IMAGE_REPO: &str = "ghcr.io/wuli2025/polaris_coworker";
+#[cfg(not(feature = "desktop"))]
+const BUILD_REVISION_FILE: &str = "/app/polaris-build-revision";
+#[cfg(not(feature = "desktop"))]
+const BUILD_VERSION_FILE: &str = "/app/polaris-build-version";
+
+#[cfg(not(feature = "desktop"))]
+fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+#[cfg(not(feature = "desktop"))]
+fn nonempty_file(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+#[cfg(not(feature = "desktop"))]
+fn select_build_value(marker: Option<String>, env: Option<String>, fallback: &str) -> String {
+    marker.or(env).unwrap_or_else(|| fallback.to_string())
+}
+
+#[cfg(not(feature = "desktop"))]
+fn current_build_revision() -> String {
+    static REVISION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    REVISION
+        .get_or_init(|| {
+            // Watchtower 会保留旧容器的运行时 Env；若只读 ENV，新镜像可能仍显示旧 revision。
+            // 镜像文件系统里的 marker 随 image 一起替换，才是当前运行 build 的权威证据。
+            select_build_value(
+                nonempty_file(BUILD_REVISION_FILE),
+                nonempty_env("POLARIS_BUILD_REVISION"),
+                "local",
+            )
+        })
+        .clone()
+}
+
+#[cfg(not(feature = "desktop"))]
+fn current_build_version() -> String {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            select_build_value(
+                nonempty_file(BUILD_VERSION_FILE),
+                nonempty_env("POLARIS_BUILD_VERSION").or_else(|| nonempty_env("POLARIS_VERSION")),
+                env!("CARGO_PKG_VERSION"),
+            )
+        })
+        .clone()
+}
+
+/// 每个 server 进程一枚稳定、重启必变的 id。公开给 `/api/build` 与更新状态合并使用；
+/// 它不含密钥或部署信息，只证明“浏览器看到的是不是同一个进程”。
+#[cfg(not(feature = "desktop"))]
+pub(crate) fn docker_build_identity() -> Value {
+    static BOOT_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT_ID.get_or_init(|| {
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{}-{started}", std::process::id())
+    });
+    json!({
+        "bootId": boot,
+        "version": current_build_version(),
+        "buildRevision": current_build_revision(),
+    })
+}
+
+#[cfg(not(feature = "desktop"))]
+#[derive(Debug, Clone)]
+struct RegistryTarget {
+    revision: String,
+    version: String,
+    index_digest: String,
+    image: String,
+}
+
+#[cfg(not(feature = "desktop"))]
+fn image_repo_and_tag() -> (String, String) {
+    (
+        nonempty_env("POLARIS_IMAGE_REPO").unwrap_or_else(|| DEFAULT_IMAGE_REPO.into()),
+        nonempty_env("POLARIS_TAG").unwrap_or_else(|| "latest".into()),
+    )
+}
+
+#[cfg(not(feature = "desktop"))]
+fn insecure_registry_host_is_local(base: &str) -> bool {
+    let Some(authority) = base.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = authority.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, suffix)) = rest.split_once(']') else {
+            return false;
+        };
+        if !suffix.is_empty() && !suffix.starts_with(':') {
+            return false;
+        }
+        host
+    } else {
+        authority
+            .split_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.eq_ignore_ascii_case("registry")
+}
+
+#[cfg(not(feature = "desktop"))]
+fn registry_endpoint(repo: &str) -> Result<(String, String, bool), String> {
+    let Some((host, name)) = repo.split_once('/') else {
+        return Err("POLARIS_IMAGE_REPO 必须是 registry/namespace/image".into());
+    };
+    if let Some(base) = nonempty_env("POLARIS_REGISTRY_API_URL") {
+        let lower = base.to_ascii_lowercase();
+        let insecure = lower.starts_with("http://");
+        if !insecure && !lower.starts_with("https://") {
+            return Err("POLARIS_REGISTRY_API_URL 只允许 HTTP(S) registry API".into());
+        }
+        let explicitly_allowed = std::env::var("POLARIS_ALLOW_INSECURE_REGISTRY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let local = insecure_registry_host_is_local(&lower);
+        if insecure && !(explicitly_allowed || local) {
+            return Err("自定义 registry API 使用明文 HTTP；仅测试环境可设置 POLARIS_ALLOW_INSECURE_REGISTRY=1".into());
+        }
+        return Ok((
+            base.trim_end_matches('/').to_string(),
+            name.to_string(),
+            false,
+        ));
+    }
+    if host != "ghcr.io" {
+        return Err(
+            "自定义镜像仓库需同时设置 POLARIS_REGISTRY_API_URL，才能验证目标 digest".into(),
+        );
+    }
+    Ok(("https://ghcr.io".into(), name.to_string(), true))
+}
+
+#[cfg(not(feature = "desktop"))]
+fn registry_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(8))
+        .timeout_read(std::time::Duration::from_secs(25))
+        .timeout_write(std::time::Duration::from_secs(10))
+        .build()
+}
+
+#[cfg(not(feature = "desktop"))]
+fn registry_request(
+    method: &str,
+    url: &str,
+    bearer: Option<&str>,
+    accept: Option<&str>,
+) -> ureq::Request {
+    let mut req = registry_agent().request(method, url);
+    if let Some(token) = bearer {
+        req = req.set("Authorization", &format!("Bearer {token}"));
+    }
+    if let Some(value) = accept {
+        req = req.set("Accept", value);
+    }
+    req
+}
+
+#[cfg(not(feature = "desktop"))]
+fn select_platform_manifest(index: &Value, arch: &str) -> Result<String, String> {
+    index
+        .get("manifests")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.pointer("/platform/os").and_then(Value::as_str) == Some("linux")
+                    && item
+                        .pointer("/platform/architecture")
+                        .and_then(Value::as_str)
+                        == Some(arch)
+            })
+        })
+        .and_then(|item| item.get("digest"))
+        .and_then(Value::as_str)
+        .filter(|digest| !digest.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("镜像索引没有 linux/{arch} manifest"))
+}
+
+#[cfg(not(feature = "desktop"))]
+fn image_build_labels(config: &Value) -> Result<(String, String), String> {
+    let labels = config.pointer("/config/Labels").unwrap_or(&Value::Null);
+    let revision = labels
+        .get("org.opencontainers.image.revision")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or("镜像缺少 org.opencontainers.image.revision，无法证明更新目标")?
+        .to_string();
+    let version = labels
+        .get("io.polaris.app.version")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    Ok((revision, version))
+}
+
+#[cfg(not(feature = "desktop"))]
+fn docker_registry_target() -> Result<RegistryTarget, String> {
+    let (repo, tag) = image_repo_and_tag();
+    let (api, name, ghcr) = registry_endpoint(&repo)?;
+    let token = if ghcr {
+        let resp = registry_agent()
+            .get("https://ghcr.io/token")
+            .query("service", "ghcr.io")
+            .query("scope", &format!("repository:{name}:pull"))
+            .call()
+            .map_err(|e| format!("GHCR 匿名 pull token 获取失败:{e}"))?;
+        let value: Value = resp
+            .into_json()
+            .map_err(|e| format!("GHCR token 响应无效:{e}"))?;
+        Some(
+            value
+                .get("token")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .ok_or("GHCR 没返回匿名 pull token")?
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let auth = token.as_deref();
+    let index_url = format!("{api}/v2/{name}/manifests/{tag}");
+    let index_resp = registry_request(
+        "GET",
+        &index_url,
+        auth,
+        Some("application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json"),
+    )
+    .call()
+    .map_err(|e| format!("读取镜像索引失败:{e}"))?;
+    let index_digest = index_resp
+        .header("Docker-Content-Digest")
+        .filter(|value| !value.is_empty())
+        .ok_or("registry 未返回 Docker-Content-Digest，无法钉住更新目标")?
+        .to_string();
+    let index: Value = index_resp
+        .into_json()
+        .map_err(|e| format!("镜像索引不是 JSON:{e}"))?;
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let manifest: Value = if index.get("manifests").is_some() {
+        let manifest_digest = select_platform_manifest(&index, arch)?;
+        let manifest_url = format!("{api}/v2/{name}/manifests/{manifest_digest}");
+        registry_request(
+            "GET",
+            &manifest_url,
+            auth,
+            Some("application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"),
+        )
+        .call()
+        .map_err(|e| format!("读取 {arch} manifest 失败:{e}"))?
+        .into_json()
+        .map_err(|e| format!("架构 manifest 不是 JSON:{e}"))?
+    } else if index.pointer("/config/digest").is_some() {
+        // 普通 `docker build && push` 可能直接发布单架构 manifest，而不是 index。
+        // 当前容器能拉起这个 tag 已经证明架构兼容；仍从 config label 核对目标 revision。
+        index
+    } else {
+        return Err("registry 返回内容既不是 OCI index，也不是 image manifest".into());
+    };
+    let config_digest = manifest
+        .pointer("/config/digest")
+        .and_then(Value::as_str)
+        .ok_or("架构 manifest 没有 config digest")?;
+    let config_url = format!("{api}/v2/{name}/blobs/{config_digest}");
+    let config: Value = registry_request("GET", &config_url, auth, None)
+        .call()
+        .map_err(|e| format!("读取镜像 config 失败:{e}"))?
+        .into_json()
+        .map_err(|e| format!("镜像 config 不是 JSON:{e}"))?;
+    let (revision, version) = image_build_labels(&config)?;
+    Ok(RegistryTarget {
+        revision,
+        version,
+        index_digest,
+        image: format!("{repo}:{tag}"),
+    })
+}
+
+#[cfg(not(feature = "desktop"))]
+fn update_state_dir() -> PathBuf {
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().join("Polaris").join("data").join("updates"))
+        .unwrap_or_else(|| PathBuf::from("/home/polaris/Polaris/data/updates"))
+}
+
+#[cfg(not(feature = "desktop"))]
+fn atomic_write_json(path: &Path, value: &Value) -> Result<(), String> {
+    let parent = path.parent().ok_or("更新状态路径没有父目录")?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("创建更新状态目录失败:{e}"))?;
+    let tmp = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().and_then(|v| v.to_str()).unwrap_or("state"),
+        std::process::id()
+    ));
+    let bytes = serde_json::to_vec(value).map_err(|e| format!("序列化更新状态失败:{e}"))?;
+    std::fs::write(&tmp, bytes).map_err(|e| format!("写更新状态失败:{e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("提交更新状态失败:{e}"))
+}
+
+#[cfg(not(feature = "desktop"))]
+fn read_json_file(path: &Path) -> Option<Value> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+#[cfg(not(feature = "desktop"))]
+fn update_request_id() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{now}-{seq}")
+}
+
+#[cfg(not(feature = "desktop"))]
+fn valid_update_request_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value.chars().all(|c| c.is_ascii_digit() || c == '-')
+}
+
+#[cfg(not(feature = "desktop"))]
+fn derive_docker_update_state(
+    request: &Value,
+    result: Option<&Value>,
+    identity: &Value,
+    now: u64,
+) -> &'static str {
+    let target = request
+        .get("targetRevision")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let original_boot = request
+        .get("sourceBootId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let current_revision = identity
+        .get("buildRevision")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let current_boot = identity.get("bootId").and_then(Value::as_str).unwrap_or("");
+    let deadline = request.get("deadline").and_then(Value::as_u64).unwrap_or(0);
+    let script_state = result
+        .and_then(|v| v.get("state"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    if !target.is_empty()
+        && current_revision == target
+        && !original_boot.is_empty()
+        && current_boot != original_boot
+    {
+        "succeeded"
+    } else if script_state == "failed" {
+        "failed"
+    } else if deadline > 0 && now >= deadline {
+        "unconfirmed"
+    } else if script_state == "watchtower_returned" {
+        "waiting_restart"
+    } else {
+        "triggering"
+    }
+}
+
+#[cfg(not(feature = "desktop"))]
+fn docker_update_status(request_id: &str) -> Result<Value, String> {
+    if !valid_update_request_id(request_id) {
+        return Err("更新 requestId 无效".into());
+    }
+    let dir = update_state_dir();
+    let request_path = dir.join(format!("{request_id}.json"));
+    let mut request = read_json_file(&request_path).ok_or("找不到这次更新请求")?;
+    let result = read_json_file(&dir.join(format!("{request_id}.result.json")));
+    let identity = docker_build_identity();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let state = derive_docker_update_state(&request, result.as_ref(), &identity, now);
+    request["state"] = json!(state);
+    request["currentBuild"] = json!(identity);
+    request["triggerResult"] = result.unwrap_or(Value::Null);
+    Ok(request)
+}
+
+#[cfg(not(feature = "desktop"))]
+fn docker_update_deadline_secs() -> u64 {
+    if std::env::var("POLARIS_UPDATE_E2E").ok().as_deref() == Some("1") {
+        return nonempty_env("POLARIS_UPDATE_DEADLINE_SECONDS")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(15 * 60)
+            .clamp(10, 15 * 60);
+    }
+    15 * 60
+}
+
+#[cfg(not(feature = "desktop"))]
+fn spawn_docker_update(target: &RegistryTarget) -> Result<Value, String> {
+    let request_id = update_request_id();
+    let dir = update_state_dir();
+    let request_path = dir.join(format!("{request_id}.json"));
+    let result_path = dir.join(format!("{request_id}.result.json"));
+    let identity = docker_build_identity();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let deadline = now.saturating_add(docker_update_deadline_secs());
+    let request = json!({
+        "requestId": request_id,
+        "state": "queued",
+        "requestedAt": now,
+        "deadline": deadline,
+        "sourceBootId": identity.get("bootId").cloned().unwrap_or(Value::Null),
+        "sourceRevision": current_build_revision(),
+        "targetRevision": target.revision,
+        "targetVersion": target.version,
+        "targetDigest": target.index_digest,
+        "image": target.image,
+    });
+    atomic_write_json(&request_path, &request)?;
+
+    let mut child = std::process::Command::new(UPDATE_SCRIPT)
+        .arg("--trigger")
+        .env("POLARIS_UPDATE_RESULT_FILE", &result_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动后台更新触发器失败:{e}"))?;
+    let result_for_waiter = result_path.clone();
+    if let Err(e) = std::thread::Builder::new()
+        .name("docker-update-trigger".into())
+        .spawn(move || {
+            let waited = child.wait();
+            if result_for_waiter.exists() {
+                return;
+            }
+            let (code, message) = match waited {
+                Ok(status) => (
+                    status.code(),
+                    format!("更新触发器退出，但没有留下结果（status={status}）"),
+                ),
+                Err(e) => (None, format!("等待更新触发器失败:{e}")),
+            };
+            let _ = atomic_write_json(
+                &result_for_waiter,
+                &json!({"state":"failed", "exitCode":code, "message":message}),
+            );
+        })
+    {
+        // 子进程已经成功 handoff；此时再因“回收线程起不来”返回失败会制造假阴性。
+        // 没有 waiter 的最坏结果是脚本未留结果时到 deadline 进入 unconfirmed，仍是有限状态。
+        eprintln!("[docker-update] 回收线程启动失败，更新触发器仍在运行:{e}");
+    }
+
+    Ok(json!({
+        "accepted": true,
+        "requestId": request_id,
+        "targetRevision": target.revision,
+        "targetVersion": target.version,
+        "targetDigest": target.index_digest,
+        "sourceBootId": identity.get("bootId").cloned().unwrap_or(Value::Null),
+        "deadline": deadline,
+        "note": "更新请求已在本机排队；页面会等待容器重启并核对目标 build，不会把 Watchtower 的空 200 当成成功。",
+    }))
+}
 
 /// 远程更新会触发宿主机侧容器替换。只有部署者已经显式打开机器口令或团队账号登录时，
 /// 才允许把这项能力暴露给 Web；开放模式即使误配了 updater token 也 fail-closed。
@@ -1202,52 +1831,34 @@ pub(crate) fn docker_updater_bits() -> (bool, bool, bool) {
     )
 }
 
-/// 跑 `update.sh --check`（只查不动），把它吐的 KEY=VALUE 解析成 JSON。
-///
-/// 为什么把「查版本」也交给 shell：更新源是一串镜像站（Cloudflare / GitHub /
-/// 国内加速），逐源回退的逻辑已经在 update.sh 里，Rust 侧再实现一遍必然两边漂移；
-/// 而且 `--check` **不需要 updater sidecar** —— 没启用一键替换的容器也能如实告诉用户
-/// 「有新版 x.y.z」，再引导去 SSH 兜底，而不是给一个哑掉的灰按钮。
+/// 读取运行 tag 的 OCI index/config，并以 build revision 判断是否真的有可拉取的新镜像。
+/// main 上即使 semver 没变，只要 `latest` revision 变了也能正确提示；反过来 release JSON
+/// 变了但固定 tag 没变时，不再制造“有更新”假象。
 #[cfg(not(feature = "desktop"))]
 fn docker_check_update() -> Value {
-    if !std::path::Path::new(UPDATE_SCRIPT).exists() {
-        return json!({
-            "ok": false, "has_update": false,
-            "error": "镜像里没有 /usr/local/bin/update.sh（旧版镜像），请先手动装一次新镜像",
-        });
-    }
-    let out = match std::process::Command::new(UPDATE_SCRIPT)
-        .arg("--check")
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            return json!({"ok": false, "has_update": false, "error": format!("启动 update.sh --check 失败: {e}")})
+    match docker_registry_target() {
+        Ok(target) => {
+            let current_revision = current_build_revision();
+            json!({
+                "ok": true,
+                "current": current_build_version(),
+                "latest": target.version,
+                "current_revision": current_revision,
+                "target_revision": target.revision,
+                "target_digest": target.index_digest,
+                "has_update": current_revision != target.revision,
+                "image": target.image,
+                "source": "oci-registry",
+            })
         }
-    };
-    let mut map = serde_json::Map::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if let Some((k, v)) = line.split_once('=') {
-            let (k, v) = (k.trim(), v.trim());
-            if k.is_empty() {
-                continue;
-            }
-            let val = match k {
-                "ok" | "has_update" => json!(v == "1"),
-                _ => json!(v),
-            };
-            map.insert(k.to_string(), val);
-        }
+        Err(error) => json!({
+            "ok": false,
+            "current": current_build_version(),
+            "current_revision": current_build_revision(),
+            "has_update": false,
+            "error": error,
+        }),
     }
-    if map.is_empty() {
-        return json!({
-            "ok": false, "has_update": false,
-            "error": format!("update.sh --check 没有输出：{}", String::from_utf8_lossy(&out.stderr)),
-        });
-    }
-    map.entry("ok").or_insert(json!(false));
-    map.entry("has_update").or_insert(json!(false));
-    Value::Object(map)
 }
 
 /// server 壳全量命令分发(≈200 命令,同步直调各引擎函数)。desktop 下这些引擎命令是
@@ -1867,16 +2478,18 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
                 "updater_service": service,
                 "update_script": script,
                 "auth_configured": docker_update_auth_configured(),
-                "current_version": std::env::var("POLARIS_VERSION").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+                "current_version": current_build_version(),
+                "current_revision": current_build_revision(),
+                "boot_id": docker_build_identity().get("bootId").cloned().unwrap_or(Value::Null),
                 "current_tag": std::env::var("POLARIS_TAG").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "latest".to_string()),
-                "image_repo": std::env::var("POLARIS_IMAGE_REPO").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "ghcr.io/wuli2025/polaris_coworker".to_string()),
+                "image_repo": std::env::var("POLARIS_IMAGE_REPO").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| DEFAULT_IMAGE_REPO.to_string()),
             }))
         }
         // docker_check_update:只查不动 —— 逐个镜像源拉 manifest,回「当前/最新/有没有新版」。
         //   不需要 updater sidecar,所以未启用一键替换的容器也能看到新版(再引导 SSH 兜底)。
         "docker_check_update" => ok(docker_check_update()),
-        // docker_update:脚本用 Bearer token 调隔离 Watchtower 的 /v1/update。socket 只挂在
-        //   sidecar 内；App 容器既无 socket 也无 Docker CLI，项目命令无法取得宿主机 daemon。
+        // docker_update:先验证 registry 目标并持久化 request，再 detached 触发 Watchtower。
+        // HTTP handler 立即返回；真正替换时旧 App 可正常退出，sidecar 内更新继续执行。
         "docker_update" => {
             if !bool_def(a, "confirm", false) {
                 return Err("更新需要确认 (confirm: true)".to_string());
@@ -1894,27 +2507,20 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
             if !enabled {
                 return Err("容器一键更新未满足安全条件，请检查应用鉴权、updater token 与更新脚本。".to_string());
             }
-            let tag = std::env::var("POLARIS_TAG")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "latest".to_string());
-            // force:版本号相同也触发一轮检查(用户在网页上点了「强制重装」;脚本认 POLARIS_FORCE=1)。
-            let mut cmd = std::process::Command::new(UPDATE_SCRIPT);
-            if bool_def(a, "force", false) {
-                cmd.env("POLARIS_FORCE", "1");
+            let target = docker_registry_target()?;
+            if current_build_revision() == target.revision {
+                return ok(json!({
+                    "accepted": false,
+                    "upToDate": true,
+                    "targetRevision": target.revision,
+                    "targetVersion": target.version,
+                    "targetDigest": target.index_digest,
+                    "note": "当前容器已经运行 registry 中这个 tag 的目标 build。",
+                }));
             }
-            match cmd.output() {
-                Ok(out) => ok(json!({
-                    "success": out.status.success(),
-                    "exit_code": out.status.code(),
-                    "tag": tag,
-                    "stdout": String::from_utf8_lossy(&out.stdout).to_string(),
-                    "stderr": String::from_utf8_lossy(&out.stderr).to_string(),
-                    "note": "隔离更新服务已接单。拉取完成后当前容器会被替换(约 1~3 分钟,取决于网速),期间连接会断,稍后刷新页面即可。",
-                })),
-                Err(e) => Err(format!("启动 update.sh 失败: {e}")),
-            }
+            ok(spawn_docker_update(&target)?)
         }
+        "docker_update_status" => ok(docker_update_status(&req_str(a, "requestId")?)?),
 
         other => Err(format!("未知命令: {other}")),
     }
@@ -2214,6 +2820,12 @@ async fn serve_file(
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("private, no-store"),
+    );
+    // 浏览器导航 / WebSocket 无法附 Authorization，文件 URL 因而可能带短期 token。
+    // 禁止它随预览文件里的外链 Referer 泄到第三方站点。
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("referrer-policy"),
+        header::HeaderValue::from_static("no-referrer"),
     );
     let active_content = matches!(
         canon

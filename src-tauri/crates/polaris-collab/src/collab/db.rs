@@ -588,6 +588,20 @@ pub fn meta_set(k: &str, v: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 一组 meta 键值在同一事务里原子写入。身份配置不能出现 URL 已换、key/uid 仍是旧值的撕裂状态。
+pub fn meta_set_many(entries: &[(&str, &str)]) -> Result<(), String> {
+    let mut conn = open_db()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for (k, v) in entries {
+        tx.execute(
+            "INSERT INTO meta(k,v) VALUES(?1,?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            [*k, *v],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
 /// 滑动窗口频控(**落库**)。返回 Ok 即放行并记一次;超限回 Err(人话)。
 ///
 /// 为什么不能留在内存里:原先的发码频控是进程内的 HashMap,重启即清零 —— 攻击者只要撑到
@@ -716,6 +730,15 @@ mod tests {
         assert_eq!(meta_get("host_node_id").as_deref(), Some("node-abc"));
         meta_set("host_node_id", "node-xyz").unwrap(); // upsert 覆盖
         assert_eq!(meta_get("host_node_id").as_deref(), Some("node-xyz"));
+        meta_set_many(&[
+            ("mesh_url", "https://authority"),
+            ("mesh_key", "key"),
+            ("mesh_uid", "uid"),
+        ])
+        .unwrap();
+        assert_eq!(meta_get("mesh_url").as_deref(), Some("https://authority"));
+        assert_eq!(meta_get("mesh_key").as_deref(), Some("key"));
+        assert_eq!(meta_get("mesh_uid").as_deref(), Some("uid"));
         std::env::remove_var("POLARIS_COLLAB_DB");
         let _ = std::fs::remove_file(&tmp);
     }

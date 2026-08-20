@@ -171,7 +171,7 @@ struct Mount {
     node_id: String,
     /// iroh 隧道在本机的代理口(fsapi 同款)。
     upstream_port: u16,
-    token: String,
+    token: Mutex<String>,
     /// WebDAV 桥的路径密钥:`http://127.0.0.1:{dav_port}/{secret}/…`。
     secret: String,
     dav_port: u16,
@@ -336,6 +336,10 @@ fn up_url(m: &Mount, api: &str, rel: &str) -> String {
     )
 }
 
+fn auth_header(m: &Mount) -> String {
+    format!("Bearer {}", m.token.lock().unwrap())
+}
+
 fn up_err(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, resp) => {
@@ -354,7 +358,7 @@ fn up_err(e: ureq::Error) -> String {
 fn up_list(m: &Mount, rel: &str) -> Result<Vec<UpEntry>, String> {
     let resp = agent_short()
         .get(&up_url(m, "/api/fs/list", rel))
-        .set("Authorization", &format!("Bearer {}", m.token))
+        .set("Authorization", &auth_header(m))
         .call()
         .map_err(up_err)?;
     let v: Value = resp.into_json().map_err(|e| format!("响应非 JSON:{e}"))?;
@@ -376,7 +380,7 @@ fn up_list_cached(m: &Mount, rel: &str) -> Result<Vec<UpEntry>, String> {
 fn up_stat(m: &Mount, rel: &str) -> Result<UpEntry, String> {
     let resp = agent_short()
         .get(&up_url(m, "/api/fs/stat", rel))
-        .set("Authorization", &format!("Bearer {}", m.token))
+        .set("Authorization", &auth_header(m))
         .call()
         .map_err(up_err)?;
     let v: Value = resp.into_json().map_err(|e| format!("响应非 JSON:{e}"))?;
@@ -388,7 +392,7 @@ fn up_stat(m: &Mount, rel: &str) -> Result<UpEntry, String> {
 fn up_caps(m: &Mount) -> (bool, bool) {
     let out = agent_short()
         .get(&format!("http://127.0.0.1:{}/api/fs/caps", m.upstream_port))
-        .set("Authorization", &format!("Bearer {}", m.token))
+        .set("Authorization", &auth_header(m))
         .call();
     match out {
         Ok(resp) => {
@@ -414,7 +418,7 @@ fn up_op(m: &Mount, op: &str, rel: &str, dest: Option<&str>) -> Result<(), Strin
     }
     agent_short()
         .post(&url)
-        .set("Authorization", &format!("Bearer {}", m.token))
+        .set("Authorization", &auth_header(m))
         .set("Content-Length", "0")
         .call()
         .map_err(up_err)?;
@@ -432,7 +436,7 @@ fn up_write(
     // 上传不设总超时:大文件经中继可以慢。空闲读超时由 agent_read 兜(不许卡死)。
     let mut req = agent_read()
         .put(&up_url(m, "/api/fs/write", rel))
-        .set("Authorization", &format!("Bearer {}", m.token));
+        .set("Authorization", &auth_header(m));
     if let Some(n) = len {
         req = req.set("Content-Length", &n.to_string());
     }
@@ -481,7 +485,7 @@ fn up_read_stream(
 ) -> Result<ureq::Response, String> {
     let mut req = agent_read()
         .get(&up_url(m, "/api/fs/read", rel))
-        .set("Authorization", &format!("Bearer {}", m.token));
+        .set("Authorization", &auth_header(m));
     if let Some(r) = range {
         req = req.set("Range", r);
     }
@@ -1584,7 +1588,7 @@ pub async fn fs_mount(
         },
         node_id: nodeId,
         upstream_port: upstreamPort,
-        token,
+        token: Mutex::new(token),
         secret,
         dav_port,
         drive: Mutex::new(String::new()),
@@ -1673,6 +1677,23 @@ pub async fn fs_mount(
     }
     spawn_watchdog(m.clone());
     Ok(view(&m))
+}
+
+/// 刷新一块既有远程盘的上游会话，不拆 WebDAV 桥、不换盘符。
+/// mesh 的身份断言会定期换出新 token；旧实现把 token 钉死在首挂时，失效后即使隧道
+/// 已恢复，看门狗仍会拿旧凭据无限 401。返回 false 表示这块盘尚未登记，调用方应走首挂。
+pub fn fs_mount_refresh_token(source_id: &str, token: &str) -> bool {
+    let mount = mounts().lock().unwrap().get(source_id).cloned();
+    let Some(mount) = mount else { return false };
+    let mut current = mount.token.lock().unwrap();
+    if *current != token {
+        *current = token.to_string();
+        drop(current);
+        mount.cache_clear();
+        mount.last_ok.store(0, Ordering::Relaxed);
+        mount.last_err.lock().unwrap().clear();
+    }
+    true
 }
 
 /// 卸载一块远程盘(拆桥 + 删盘符)。幂等。
@@ -2017,7 +2038,7 @@ mod tests {
             name: "t".into(),
             node_id: String::new(),
             upstream_port: port,
-            token: "tok".into(),
+            token: Mutex::new("tok".into()),
             secret: "s".into(),
             dav_port: 0,
             drive: Mutex::new(String::new()),
@@ -2124,7 +2145,7 @@ mod tests {
             name: "t".into(),
             node_id: String::new(),
             upstream_port: port,
-            token: "tok".into(),
+            token: Mutex::new("tok".into()),
             secret: "s".into(),
             dav_port: 0,
             drive: Mutex::new(String::new()),
@@ -2173,6 +2194,39 @@ mod tests {
         assert_eq!(parse_content_range_span("bytes 0-0/1"), Some(1));
         assert_eq!(parse_content_range("bytes */12345"), None, "不可满足区间没有起点");
         assert_eq!(parse_content_range_span("bogus"), None);
+    }
+
+    #[test]
+    fn refresh_token_keeps_registered_mount_and_clears_stale_health() {
+        let id = "token-refresh-test";
+        let mount = Arc::new(Mount {
+            source_id: id.into(),
+            name: "t".into(),
+            node_id: "n".into(),
+            upstream_port: 1,
+            token: Mutex::new("old".into()),
+            secret: "s".into(),
+            dav_port: 0,
+            drive: Mutex::new("Z:".into()),
+            alive: Arc::new(AtomicBool::new(true)),
+            last_ok: AtomicU64::new(99),
+            last_err: Mutex::new("HTTP 401".into()),
+            shutdown: Arc::new(tokio::sync::Notify::new()),
+            writable: AtomicBool::new(false),
+            force_ro: AtomicBool::new(false),
+            shortcut: Mutex::new(String::new()),
+            dir_cache: Mutex::new(HashMap::new()),
+            prefetch: Mutex::new(Vec::new()),
+        });
+        mounts().lock().unwrap().insert(id.into(), mount.clone());
+
+        assert!(fs_mount_refresh_token(id, "new"));
+        assert_eq!(&*mount.token.lock().unwrap(), "new");
+        assert_eq!(&*mount.drive.lock().unwrap(), "Z:", "刷新凭据不能换盘符");
+        assert_eq!(mount.last_ok.load(Ordering::Relaxed), 0);
+        assert!(mount.last_err.lock().unwrap().is_empty());
+        mounts().lock().unwrap().remove(id);
+        assert!(!fs_mount_refresh_token(id, "again"));
     }
 
     #[test]

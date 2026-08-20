@@ -96,7 +96,22 @@ docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
 也**不挂** `/var/run/docker.sock`；它只能携带 Bearer token 调用内网 sidecar 的
 `/v1/update`。Watchtower 还同时按容器名 `polaris-web` 与
 `com.centurylinklabs.watchtower.enable=true` 标签限定目标，因此不会顺手更新其他容器。
-拉取与替换期间数据卷、端口及环境配置保持不变，服务通常只短暂断线 1–3 分钟。
+
+“检查更新”读取当前 tag 的 OCI index、当前 CPU 架构 manifest 和 config labels，以 Git build
+revision 判断（即使版本号未变，`latest` 指向新提交也能识别）。运行中的 build 身份读取镜像内
+`/app/polaris-build-revision`，不相信 Watchtower 可能从旧容器保留下来的同名环境变量。点更新后 HTTP 请求立即返回
+`requestId`，页面继续等待：只有 `/api/build` 同时出现**新 bootId + 目标 revision**，且
+`/api/ready` 恢复，才会报告成功并重载页面。Watchtower 空 200/no-op 不算成功；拉取失败、
+鉴权错误或 15 分钟仍未观察到替换都会退出转圈并保留明确错误，可修复后直接重试。更新过程
+保持数据卷、端口、网络、标签、环境变量与 restart policy。
+
+从不含 `/usr/local/bin/update.sh` 的旧镜像升级时，需要先在宿主机执行一次上面的手动更新；
+这是唯一一次 bootstrap，之后才会出现网页一键更新能力。排错先看：
+
+```bash
+docker logs polaris-updater
+docker logs polaris-web
+```
 
 > Docker socket 仍等同宿主机 root 权限，但现在只进入用途单一的 Watchtower sidecar，
 > 不再进入能够运行项目命令的通用 App 容器。不要对外发布 sidecar 的 8080 端口，也不要

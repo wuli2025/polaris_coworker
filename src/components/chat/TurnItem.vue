@@ -27,6 +27,7 @@ import {
   renderMd,
   isImageArtifact,
   type Turn,
+  type TurnTimelineText,
 } from "./shared";
 import ImageStrip from "./ImageStrip.vue";
 import { useArtifactsStore } from "../../stores/artifacts";
@@ -57,13 +58,10 @@ const emit = defineEmits<{
 // 每次打开文件都变化的字符串 prop。
 const artifactsStore = useArtifactsStore();
 
-// 正文 html:定稿回合直接用 renderTurns 预渲染挂在 turn.html 上的结果(命中前缀
-// 缓存时连字符串都复用);活跃回合才现场 renderMd(TL;DR 摘取 + ANSI 清洗每帧只在
-// 这一个回合上跑)。computed 缓存在组件实例上,turn 引用不变就不重算;renderMd
-// 内部读 mdVersion,异步高亮完成后父级重建前缀 → 新 turn.html 自动刷进来。
-const html = computed(() =>
-  props.turn.html ?? renderMd(props.turn.text, !props.pending)
-);
+// timeline 正文:定稿段优先复用 ChatPanel 预渲染结果；活跃段现场渲染。
+function timelineHtml(item: TurnTimelineText): string {
+  return item.html ?? renderMd(item.text, !props.pending);
+}
 
 // Kimi 式产物区:主预览件单独成卡,其余文件收进「文件夹」入口。
 // 展开时也只内联渲染前 MAX_INLINE 行,溢出的引导去文件管理器看,永不铺满对话框卡死。
@@ -137,33 +135,6 @@ const overflowCount = computed(() =>
       "
       class="msg ai"
     >
-      <!-- 工具调用：低调 pill,点击展开输入摘要 -->
-      <div v-if="turn.tools.length" class="tool-strip">
-        <template v-for="(tl, j) in turn.tools" :key="j">
-          <button
-            class="tool-pill"
-            :class="{
-              open: expandedTool === `${turn.key}:${j}`,
-              clickable: tl.details.length > 0,
-            }"
-            @click="tl.details.length && emit('toggle-tool', turn.key, j)"
-          >
-            <Wrench :size="11" :stroke-width="1.8" />
-            {{ toolLabel(tl.name) }}
-            <span v-if="tl.count > 1" class="tp-count">×{{ tl.count }}</span>
-          </button>
-        </template>
-      </div>
-      <div
-        v-for="(tl, j) in turn.tools"
-        :key="'d' + j"
-        v-show="expandedTool === `${turn.key}:${j}`"
-        class="tool-detail"
-      >
-        <div class="td-head">{{ toolLabel(tl.name) }} · 输入摘要</div>
-        <div v-for="(d, x) in tl.details" :key="x" class="td-line">{{ d }}</div>
-      </div>
-
       <!-- 参考文件：豆包式小胶囊, 收在回答最前面, 点开右侧预览
            (turn.refs 在构建回合时一次算好,这里只读,不再每帧内联重算) -->
       <div v-if="turn.text && turn.refs.length" class="ref-files">
@@ -180,17 +151,51 @@ const overflowCount = computed(() =>
         </button>
       </div>
 
-      <!-- 正文：markdown 渲染(流式中的活跃回合跳过异步高亮排队) -->
-      <div v-if="turn.text" class="md" v-html="html"></div>
+      <!-- 真实执行时间线：正文 → 工具 → 正文/结果 → warning/error，不再把工具全部提到顶部。 -->
+      <template v-for="(item, j) in turn.timeline" :key="`${item.kind}:${j}`">
+        <div v-if="item.kind === 'tool'" class="timeline-tool">
+          <div class="tool-strip">
+            <button
+              class="tool-pill"
+              :class="{
+                open: expandedTool === `${turn.key}:${item.toolIndex}`,
+                clickable: item.tool.details.length > 0,
+              }"
+              @click="
+                item.tool.details.length &&
+                emit('toggle-tool', turn.key, item.toolIndex)
+              "
+            >
+              <Wrench :size="11" :stroke-width="1.8" />
+              {{ toolLabel(item.tool.name) }}
+              <span v-if="item.tool.count > 1" class="tp-count">×{{ item.tool.count }}</span>
+            </button>
+          </div>
+          <div
+            v-show="expandedTool === `${turn.key}:${item.toolIndex}`"
+            class="tool-detail"
+          >
+            <div class="td-head">{{ toolLabel(item.tool.name) }} · 输入摘要</div>
+            <div v-for="(d, x) in item.tool.details" :key="x" class="td-line">{{ d }}</div>
+          </div>
+        </div>
+        <div
+          v-else-if="item.severity === 'normal'"
+          class="md timeline-text"
+          v-html="timelineHtml(item)"
+        ></div>
+        <div
+          v-else
+          class="issue-line"
+          :class="item.severity"
+        >
+          {{ item.text }}
+        </div>
+      </template>
 
       <!-- 生成中：三点呼吸 -->
       <div v-if="pending" class="typing">
         <span></span><span></span><span></span>
-      </div>
-
-      <!-- 错误行 -->
-      <div v-for="(e, j) in turn.errors" :key="'e' + j" class="err-line">
-        {{ e }}
       </div>
 
       <!-- 生成的文件(Kimi 式：一文件一预览)——
@@ -493,16 +498,27 @@ const overflowCount = computed(() =>
   }
 }
 
-.err-line {
+.issue-line {
   font-family: var(--mono);
   font-size: 12px;
-  color: var(--vermilion);
-  background: var(--vermilion-soft);
   border-radius: 6px;
   padding: 6px 10px;
-  margin-top: 8px;
+  margin: 8px 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.issue-line.error {
+  color: var(--vermilion);
+  background: var(--vermilion-soft);
+}
+.issue-line.warning {
+  color: color-mix(in srgb, var(--gold, #d4b06a) 72%, var(--text));
+  background: color-mix(in srgb, var(--gold, #d4b06a) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--gold, #d4b06a) 28%, transparent);
+}
+.timeline-text + .timeline-tool,
+.timeline-tool + .timeline-text {
+  margin-top: 8px;
 }
 
 /* 生成的文件：回答末尾 */

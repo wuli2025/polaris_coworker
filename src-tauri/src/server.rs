@@ -188,6 +188,7 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/api/health", get(health))
         .route("/api/live", get(health))
         .route("/api/ready", get(ready))
+        .route("/api/build", get(build))
         .route("/api/status", get(status))
         .fallback(get(spa_fallback))
         .with_state(state)
@@ -496,6 +497,12 @@ fn claude_config_status() -> Value {
 /// 详细依赖/资源状态由 owner-only 且带缓存的 `/api/status` 提供。
 async fn health() -> Response {
     "ok".into_response()
+}
+
+/// 公开构建身份只含版本与一次启动随机性，不泄露部署配置。更新页靠它区分
+/// “旧连接重新连上”与“新容器已经以目标 revision 启动”。
+async fn build() -> Json<Value> {
+    Json(crate::apihub::docker_build_identity())
 }
 
 static READY_CACHE: Lazy<tokio::sync::Mutex<Option<(Instant, bool)>>> =

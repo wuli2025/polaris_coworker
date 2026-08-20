@@ -28,6 +28,8 @@ export interface Bubble {
   /** 后端 error 事件合成的展示用错误气泡。delta 不得拼进来——否则 stderr 一行
    *  告警之后的全部正文都会被追加进错误气泡、整段被前端当错误吞掉。 */
   err?: boolean;
+  /** 展示严重度：stderr 等过程诊断是 warning，只有本轮真实失败才是 error。 */
+  severity?: "warning" | "error";
 }
 
 /** 对话框只展示用户能直接打开的常见成品格式(与后端 chat.rs DISPLAY_EXTS 同步);
@@ -202,8 +204,10 @@ export const useChatStore = defineStore("chatRuntime", () => {
     const arr = ensureArr(convId);
     arr.push({
       role: "assistant",
-      text: "[本轮超时] 后端长时间无响应，已停止该轮（可重发从断点续跑）。",
+      text: `[本轮超时] ${humanizeError(new Error("后端长时间无响应，已停止该轮；可重发并从断点续跑"))}`,
       at: Date.now(),
+      err: true,
+      severity: "error",
     });
     sendingByConv.value[convId] = false;
     delete reqByConv.value[convId];
@@ -426,6 +430,8 @@ export const useChatStore = defineStore("chatRuntime", () => {
         role: "assistant",
         text: `[发送失败] ${humanizeError(e)}`,
         at: Date.now(),
+        err: true,
+        severity: "error",
       });
       sendingByConv.value[convId] = false;
       sessions.finish(convId);
@@ -478,7 +484,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
     const arr = ensureArr(cid);
     const last = arr[arr.length - 1];
     // 末条是错误气泡时新开一条:正文绝不拼进错误气泡(见 Bubble.err 注释)
-    if (last && last.role === "assistant" && !last.err) last.text += text;
+    if (last && last.role === "assistant" && !last.err && !last.severity) last.text += text;
     else arr.push({ role: "assistant", text, at: Date.now() });
   }
   function flushDelta(cid: string) {
@@ -522,7 +528,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
         if (path) {
           let target: Bubble | undefined;
           for (let i = arr.length - 1; i >= 0; i--) {
-            if (arr[i].role === "assistant" && !arr[i].err) {
+            if (arr[i].role === "assistant" && !arr[i].err && !arr[i].severity) {
               target = arr[i];
               break;
             }
@@ -563,8 +569,20 @@ export const useChatStore = defineStore("chatRuntime", () => {
         const n = parseInt(ev.text ?? "", 10);
         if (!Number.isNaN(n)) tokensByConv.value[cid] = n;
       } else if (ev.kind === "error") {
-        // stderr 行 / 退出错误：仅展示，不作为终态（终态由 done 处理）
-        arr.push({ role: "assistant", text: `[错误] ${ev.text ?? ""}`, err: true });
+        // Claude CLI 会把普通诊断写到 stderr；这不代表本轮失败，后续正文仍应正常展示。
+        // 新 emitter 可直接给 severity；旧 emitter 继续用稳定的 [stderr] 前缀兼容判定。
+        const raw = ev.text ?? "";
+        const warning = ev.severity === "warning" || /^\[stderr\]/i.test(raw.trim());
+        const detail = warning ? raw.replace(/^\[stderr\]\s*/i, "") : raw;
+        arr.push({
+          role: "assistant",
+          text: warning
+            ? `[警告] ${detail}`
+            : `[错误] ${humanizeError(new Error(detail || "本轮执行失败"))}`,
+          err: !warning,
+          severity: warning ? "warning" : "error",
+          at: Date.now(),
+        });
       } else if (ev.kind === "done") {
         // 终态：结束运行态 + 工位会话；若用户不在看该对话则打墨蓝未读点
         sendingByConv.value[cid] = false;

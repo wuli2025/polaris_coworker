@@ -27,6 +27,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Read application version
+        id: app
+        shell: bash
+        run: echo "version=$(node -p \"require('./package.json').version\")" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -53,8 +58,11 @@ jobs:
           labels: |
             org.opencontainers.image.title=Polaris
             org.opencontainers.image.description=Polaris collaboration server and Web application
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.polaris.app.version=${{ steps.app.outputs.version }}
 
       - name: Build and publish multi-platform image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -63,7 +71,20 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            POLARIS_BUILD_REVISION=${{ github.sha }}
+            POLARIS_BUILD_VERSION=${{ steps.app.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+
+      - name: Validate Docker click-update path with real Watchtower
+        shell: bash
+        env:
+          POLARIS_E2E: "1"
+          BASE_IMAGE: ${{ env.REGISTRY_IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          sh -n docker/update.sh
+          sh -n docker/test-update-e2e.sh
+          sh docker/test-update-e2e.sh

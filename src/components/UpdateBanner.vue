@@ -23,7 +23,7 @@ const isDocker = computed(() => updaterRuntime.value === "docker");
 
 <template>
   <Transition name="upd-fade">
-    <div v-if="updateVersion && !dialogDismissed" class="upd-mask">
+    <div v-if="(updateVersion || updateError) && !dialogDismissed" class="upd-mask">
       <Transition name="upd-pop" appear>
         <div class="upd-card">
           <button
@@ -38,7 +38,10 @@ const isDocker = computed(() => updaterRuntime.value === "docker");
           <div class="upd-badge"><Sparkles :size="22" :stroke-width="1.6" /></div>
 
           <div class="upd-title">
-            发现新版本 <span class="upd-ver">v{{ updateVersion }}</span>
+            <template v-if="updateVersion">
+              发现新版本 <span class="upd-ver">v{{ updateVersion }}</span>
+            </template>
+            <template v-else>更新未完成</template>
           </div>
 
           <p v-if="updateError" class="upd-desc err">{{ updateError }}</p>
@@ -59,6 +62,7 @@ const isDocker = computed(() => updaterRuntime.value === "docker");
           </div>
 
           <button
+            v-if="updateVersion"
             class="upd-go"
             :disabled="updating || (isDocker && !dockerUpdaterEnabled)"
             @click="applyUpdate()"

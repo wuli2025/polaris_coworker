@@ -4,17 +4,18 @@
 //! 粘贴,还要各自保管对端的 owner 令牌。这个模块把那一步整个删掉:
 //!
 //! ```text
-//! 用户在互联页填一次「云端账号中心 + 账号密码」
-//!   → 本机拿到身份断言 → 向云端目录入网,换一把长期设备密钥(落 collab.db)
+//! 用户在统一登录页填「邮箱 + 验证码」
+//!   → 本机拿到身份断言 → pin 账号中心并通过本机成员准入
+//!   → 向云端目录入网,把长期设备密钥 + UID + URL 原子落入 collab.db
 //!   → 后台每 60s:报到 + 取同账号设备清单
-//!       对清单里每台还没连上的设备:
+//!       对清单里的设备实探 tunnel/session:
 //!         iroh 隧道 → 拿新断言去**对端**换它的本机会话 token → fs_mount 挂成本机盘符
 //! ```
 //!
 //! 三条设计上的要紧事:
-//!  · **云端从不持有任何设备的访问权。** 它只签「你是 uid X」这句话;进不进得去某台机器,
-//!    由那台机器自己的成员资格说了算(`login_assertion` → `upsert_member` 的 ExistingOnly 闸)。
-//!    云机被拿下,也开不了你家电脑的盘。
+//!  · **云端不持有远程盘会话或设备私钥。** 它只签身份断言；对端还要经过自己的成员资格、
+//!    设备 proof、grant/冷静期与撤销闸。账号中心签名权一旦失陷仍是严重事件（可伪造身份），
+//!    因而公网传输必须 HTTPS、authority 必须 pin，不能把“云端不存盘 token”夸成绝对安全。
 //!  · **设备密钥落本机、可按设备吊销。** 丢一台电脑不必改密码,在别的设备上把它踢出设备网即可。
 //!  · **对端离线不拆盘。** 只要它还在设备网名册上,盘符就留着,由 fsmount 看门狗等它回来 ——
 //!    拆了再挂会换盘符,正在用的资源管理器窗口全断,那比"暂时读不到"糟得多。
@@ -35,8 +36,8 @@ const PORT_BASE: u16 = 18800;
 /// 与云端账号中心通信的超时。连不上要快失败:后台循环下一拍再试,不能把线程吊死。
 const CLOUD_TIMEOUT: Duration = Duration::from_secs(12);
 
-/// 默认的云端账号中心 —— 官方云机。桌面用户不填地址时用它,自建账号中心的人
-/// 照旧在表单里覆盖(前端 `InterconnectView.vue` 的 DEFAULT_AUTHORITY_URL 与此同值)。
+/// 默认账号中心仍是现有云机。它目前只有 HTTP，因而新登录不会静默使用：UI 会展开
+/// 高级设置并要求用户显式确认明文风险；自建部署应通过环境变量或表单提供真实 HTTPS 地址。
 const DEFAULT_AUTHORITY: &str = "http://43.139.209.127:8080";
 
 /// 入网地址:用户填了就用用户的;没填先看环境变量(server 形态),最后落到官方云机。
@@ -124,8 +125,36 @@ struct Link {
     port: u16,
     /// 对端主机签给我的会话 token;None = 还没换到(下一拍重试)。
     token: Option<String>,
+    /// 当前链路阶段：connecting / authenticating / mounting / ready / degraded。
+    phase: String,
+    /// 稳定错误码，UI 不再靠中文文案猜故障类型。
+    error_code: String,
+    /// 最近一次 tunnel + token 探测同时通过的 unix 秒。
+    last_verified_at: u64,
     /// 最近一次失败原因(UI 如实展示,不糊成「连接中」)。
     err: String,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn link_connected(link: &Link) -> bool {
+    let recently_verified = link.token.is_some()
+        && link.last_verified_at > 0
+        && now_secs().saturating_sub(link.last_verified_at) <= 180;
+    #[cfg(feature = "collab-net")]
+    {
+        recently_verified && crate::collab::tunnel::client_state(link.port).connected
+    }
+    #[cfg(not(feature = "collab-net"))]
+    {
+        let _ = recently_verified;
+        false
+    }
 }
 
 fn links() -> &'static Mutex<HashMap<String, Link>> {
@@ -180,7 +209,50 @@ fn norm_url(u: &str) -> String {
     if t.starts_with("http://") || t.starts_with("https://") {
         t.to_string()
     } else {
-        format!("http://{t}")
+        format!("https://{t}")
+    }
+}
+
+fn loopback_http(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    host == "localhost"
+        || host.starts_with("localhost:")
+        || host == "127.0.0.1"
+        || host.starts_with("127.0.0.1:")
+        || host == "[::1]"
+        || host.starts_with("[::1]:")
+}
+
+/// 登录凭据、OTP、assertion 与长期 meshKey 都会经过账号中心。公网 HTTP 必须显式确认，
+/// 不能再因为用户把“高级地址”留空，就静默把整套身份发到明文 IP。
+fn validate_authority_url(raw: &str, allow_insecure_http: bool) -> Result<String, String> {
+    let url = norm_url(raw);
+    if url == "https://" || url == "http://" {
+        return Err("请填写账号中心地址".into());
+    }
+    if url.starts_with("https://") || loopback_http(&url) {
+        return Ok(url);
+    }
+    if url.starts_with("http://") {
+        if allow_insecure_http {
+            return Ok(url);
+        }
+        return Err(format!(
+            "账号中心 {url} 使用明文 HTTP，邮箱、验证码和设备密钥可能被窃取。请改用 HTTPS；若这是你明确信任的旧服务，请在高级设置勾选‘仍使用不安全 HTTP’后重试"
+        ));
+    }
+    Err("账号中心地址只支持 https://（本机调试可用 http://localhost）".into())
+}
+
+fn authority_transport_state(url: &str) -> &'static str {
+    if url.starts_with("https://") || loopback_http(url) {
+        "secure"
+    } else {
+        "insecure_legacy"
     }
 }
 
@@ -239,75 +311,166 @@ fn login_peer(port: u16, assertion: &str) -> Result<String, String> {
         .ok_or_else(|| "对端没返回会话 token".into())
 }
 
+/// 同时验证 loopback 隧道与对端 session。`token.is_some()` 只能说明过去登录成功过，
+/// 不能证明 tunnel 仍 connected、session 没被撤销；用轻量 `/api/collab/me` 才是事实。
+fn probe_peer_session(port: u16, token: &str) -> Result<(), String> {
+    agent()
+        .get(&format!("http://127.0.0.1:{port}/api/collab/me"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+        .map(|_| ())
+        .map_err(cloud_err)
+}
+
 // ────────────────────────────── 对账:清单 → 隧道 + 盘符 ──────────────────────────────
 
-/// 确保一台设备连上并挂成盘。已连上的直接返回(fs_mount 幂等,后续维护交给它的看门狗)。
-///
-/// 连不连、挂不挂、挂成只读还是可读写,**全看本机的信任契约**(`peer_grants`):
-/// 用户在设备台账上调过的档位,这里逐条照办,重启也照办 —— 这就是「记住权限状态」。
+/// 确保一台设备的 tunnel、session 与挂载凭据都真实可用；历史 token 只是一条缓存，
+/// 每轮对账都要用 tunnel registry + `/api/collab/me` 重新证明，不能拿缓存冒充在线。
 async fn ensure_peer(c: &Cfg, node_id: &str, name: &str, uid: &str) {
-    let already = links()
-        .lock()
-        .unwrap()
-        .get(node_id)
-        .map(|l| l.token.is_some())
-        .unwrap_or(false);
-    if already {
-        return;
-    }
     // 首次见到这台同账号设备 → 自动批准(带冷静期);已有契约 = 原样沿用用户调过的档。
     let first = !crate::collab::grants::any_granted().unwrap_or(false);
     let grant = match crate::collab::grants::auto_grant_self(node_id, uid, name, first) {
         Ok((g, _)) => g,
         Err(e) => {
-            set_err(node_id, format!("登记设备契约失败:{e}"));
+            set_err(node_id, "grant_failed", format!("登记设备契约失败:{e}"));
             return;
         }
     };
-    if grant.revoked {
-        // 用户把这台踢了 —— 名册上还在(云端没踢)但本机不认。别连,也别每拍刷屏。
-        return;
-    }
-    if !grant.should_mount() {
-        // 用户把这台的自动挂载关了/盘档设成 none:隧道也不必起,起了只是白占端口。
+    if grant.revoked || !grant.should_mount() {
+        // 授权降为不可挂载时要立刻收回已经存在的盘和隧道，不能只阻止下一次新建。
+        drop_peer(node_id).await;
         return;
     }
     let ro = grant.effective_fs() == crate::collab::grants::FS_RO;
     let drive_hint = grant.drive_hint.clone();
     let port = port_for(node_id);
-    // 先登记(带端口),这样重试沿用同一个口。
-    links().lock().unwrap().insert(
-        node_id.to_string(),
-        Link {
+    {
+        let mut map = links().lock().unwrap();
+        let link = map.entry(node_id.to_string()).or_insert_with(|| Link {
             name: name.to_string(),
             port,
             token: None,
+            phase: "connecting".into(),
+            error_code: String::new(),
+            last_verified_at: 0,
             err: String::new(),
-        },
-    );
+        });
+        link.name = name.to_string();
+    }
 
-    // 1) 起隧道(幂等:在跑 = no-op)。
+    // 快路径也必须实探。会话仍有效且 mount 已登记时，仅原位刷新 token，盘符完全不动。
+    let cached = links()
+        .lock()
+        .unwrap()
+        .get(node_id)
+        .and_then(|l| l.token.clone());
+    if let Some(token) = cached {
+        #[cfg(feature = "collab-net")]
+        let tunnel_ok = crate::collab::tunnel::client_state(port).connected;
+        #[cfg(not(feature = "collab-net"))]
+        let tunnel_ok = false;
+        if tunnel_ok {
+            let probe_token = token.clone();
+            let probe = tokio::task::spawn_blocking(move || probe_peer_session(port, &probe_token))
+                .await
+                .unwrap_or_else(|e| Err(format!("探活任务失败:{e}")));
+            if probe.is_ok() {
+                let sid = source_id(node_id);
+                if crate::fsmount::fs_mount_refresh_token(&sid, &token) {
+                    let mounted = crate::fsmount::fs_mount_status()
+                        .into_iter()
+                        .find(|v| v.get("sourceId").and_then(|x| x.as_str()) == Some(sid.as_str()));
+                    let mount_ok = mounted
+                        .as_ref()
+                        .and_then(|v| v.get("ok"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    mark_verified(node_id, if mount_ok { "ready" } else { "mounting" });
+                    return;
+                }
+                // session/tunnel 健康但挂载记录丢了：直接复用已经实探通过的 session。
+                // 账号中心临时离线不应阻止一块仍获授权的远程盘恢复。
+                match crate::fsmount::fs_mount(
+                    sid,
+                    name.to_string(),
+                    node_id.to_string(),
+                    port,
+                    token.clone(),
+                    Some(ro),
+                    Some(drive_hint.clone()),
+                )
+                .await
+                {
+                    Ok(v) => {
+                        let mount_ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                        mark_verified(node_id, if mount_ok { "ready" } else { "mounting" });
+                        if let Some(d) = v["drive"].as_str().filter(|s| !s.is_empty()) {
+                            let _ = crate::collab::grants::remember_drive(node_id, d);
+                        }
+                    }
+                    Err(e) => set_err(node_id, "mount_failed", format!("挂盘失败:{e}")),
+                }
+                return;
+            } else if let Err(e) = probe {
+                set_err(node_id, "session_probe_failed", e);
+            }
+        } else {
+            let detail = {
+                #[cfg(feature = "collab-net")]
+                {
+                    let s = crate::collab::tunnel::client_state(port);
+                    if s.last_error.is_empty() {
+                        format!("隧道状态:{}", s.state)
+                    } else {
+                        s.last_error
+                    }
+                }
+                #[cfg(not(feature = "collab-net"))]
+                {
+                    "此构建没有 P2P 隧道(collab-net)".to_string()
+                }
+            };
+            set_err(node_id, "tunnel_unhealthy", detail);
+        }
+        if let Some(l) = links().lock().unwrap().get_mut(node_id) {
+            l.token = None;
+        }
+    }
+
+    set_phase(node_id, "connecting");
     #[cfg(feature = "collab-net")]
     {
         let nid = node_id.to_string();
         let r =
             tokio::task::spawn_blocking(move || crate::collab::tunnel::connect_client(&nid, port))
                 .await;
-        if let Ok(Err(e)) = r {
-            set_err(node_id, format!("隧道建立失败:{e}"));
-            return;
+        match r {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                set_err(
+                    node_id,
+                    "tunnel_connect_failed",
+                    format!("隧道建立失败:{e}"),
+                );
+                return;
+            }
+            Err(e) => {
+                set_err(node_id, "tunnel_task_failed", format!("隧道任务失败:{e}"));
+                return;
+            }
         }
     }
     #[cfg(not(feature = "collab-net"))]
     {
         set_err(
             node_id,
+            "collab_net_missing",
             "此构建没有 P2P 隧道(collab-net),设备网只能看不能连".into(),
         );
         return;
     }
 
-    // 2) 换对端会话 token。
+    set_phase(node_id, "authenticating");
     let url = c.url.clone();
     let key = c.key.clone();
     let got = tokio::task::spawn_blocking(move || {
@@ -319,15 +482,20 @@ async fn ensure_peer(c: &Cfg, node_id: &str, name: &str, uid: &str) {
     let token = match got {
         Ok(t) => t,
         Err(e) => {
-            set_err(node_id, e);
+            set_err(node_id, "peer_login_failed", e);
             return;
         }
     };
 
-    // 3) 挂盘。fs_mount 幂等且自带看门狗:对端未就绪也只是"稍后自动挂上"。
-    //    ro=true 时钉死只读 —— 冷静期内的新设备走的就是这条(对端就算开着写位也不给写)。
-    //    drive_hint 是上次的盘符,尽量复原:每次重启换个字母,用户存的快捷方式和脚本全断。
+    set_phase(node_id, "mounting");
     let sid = source_id(node_id);
+    if crate::fsmount::fs_mount_refresh_token(&sid, &token) {
+        if let Some(l) = links().lock().unwrap().get_mut(node_id) {
+            l.token = Some(token);
+        }
+        mark_verified(node_id, "mounting");
+        return;
+    }
     match crate::fsmount::fs_mount(
         sid,
         name.to_string(),
@@ -340,13 +508,11 @@ async fn ensure_peer(c: &Cfg, node_id: &str, name: &str, uid: &str) {
     .await
     {
         Ok(v) => {
-            let mut map = links().lock().unwrap();
-            if let Some(l) = map.get_mut(node_id) {
+            if let Some(l) = links().lock().unwrap().get_mut(node_id) {
                 l.token = Some(token);
-                l.err.clear();
             }
-            drop(map);
-            // 记住这次挂成了哪个盘符,下次优先复原它。
+            let mount_ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+            mark_verified(node_id, if mount_ok { "ready" } else { "mounting" });
             if let Some(d) = v["drive"].as_str().filter(|s| !s.is_empty()) {
                 let _ = crate::collab::grants::remember_drive(node_id, d);
             }
@@ -356,14 +522,31 @@ async fn ensure_peer(c: &Cfg, node_id: &str, name: &str, uid: &str) {
                 if ro { ",只读" } else { "" }
             );
         }
-        Err(e) => set_err(node_id, format!("挂盘失败:{e}")),
+        Err(e) => set_err(node_id, "mount_failed", format!("挂盘失败:{e}")),
     }
 }
 
-fn set_err(node_id: &str, e: String) {
-    eprintln!("[mesh] {node_id} 接入未成:{e}");
+fn set_phase(node_id: &str, phase: &str) {
+    if let Some(l) = links().lock().unwrap().get_mut(node_id) {
+        l.phase = phase.to_string();
+    }
+}
+
+fn mark_verified(node_id: &str, phase: &str) {
+    if let Some(l) = links().lock().unwrap().get_mut(node_id) {
+        l.phase = phase.to_string();
+        l.error_code.clear();
+        l.err.clear();
+        l.last_verified_at = now_secs();
+    }
+}
+
+fn set_err(node_id: &str, code: &str, e: String) {
+    eprintln!("[mesh] {node_id} 接入未成({code}):{e}");
     let mut map = links().lock().unwrap();
     if let Some(l) = map.get_mut(node_id) {
+        l.phase = "degraded".into();
+        l.error_code = code.to_string();
         l.err = e;
     }
 }
@@ -372,8 +555,10 @@ fn set_err(node_id: &str, e: String) {
 /// **只在"名册里没了"时拆** —— 单纯离线不拆(见文件头第三条)。
 async fn drop_peer(node_id: &str) {
     let l = links().lock().unwrap().remove(node_id);
-    let Some(l) = l else { return };
+    // 挂载注册表和链路表应当同生共死，但撤权路径必须以“收回能力”为准：即使某次
+    // 异常只留下了挂载，也照样幂等卸掉，不能因链路记录缺失而提前返回。
     let _ = crate::fsmount::fs_unmount(source_id(node_id)).await;
+    let Some(l) = l else { return };
     #[cfg(feature = "collab-net")]
     {
         let port = l.port;
@@ -383,14 +568,13 @@ async fn drop_peer(node_id: &str) {
     eprintln!("[mesh] 「{}」已移出设备网,盘符已收回", l.name);
 }
 
-/// 本机成员资格的**自愈**:已经入网了,却进不了自己这台机器的门。
+/// 本机成员资格的**旧状态自愈**：历史版本可能已先保存 meshKey，却没能进自己这台机器的门。
 ///
-/// 为什么必须有它:第 ④ 步(拿断言进本机的门)失败时整条登录**不回滚** —— 设备密钥留着,
-/// 于是这台机器从此「已登录」,登录卡再也不出现,那一步就永远没有第二次机会。用户看到的
-/// 正是「云端名册里两台机器都在、参数都看得见,却谁也挂不上谁的盘」。
+/// 新登录现在会在云端 enroll 前完成本机准入，不再产生这种半成品；这里仍要照顾磁盘上已经
+/// 存在的旧状态，否则升级后登录卡不会再出现，而设备之间仍会因为缺少本机成员资格互相挡回去。
 ///
-/// 便宜:先纯本地读一次成员资格(命中即 no-op,这是绝大多数情况),真的缺才去取一张断言。
-/// 用的是本机自己的设备密钥 + [`login_with_assertion_local`],与用户在这台机器前亲手登录同权。
+/// 便宜：先纯本地读一次成员资格（命中即 no-op，这是绝大多数情况），真的缺才去取一张断言。
+/// 用的是本机自己的设备密钥 + [`login_with_assertion_local`]，与用户在这台机器前亲手登录同权。
 fn heal_local_membership(c: &Cfg) {
     let uid = meta(K_UID);
     if uid.is_empty() || crate::collab::authority::is_member(&uid) {
@@ -423,6 +607,48 @@ fn heal_local_membership(c: &Cfg) {
 fn member_warn() -> &'static Mutex<String> {
     static W: OnceLock<Mutex<String>> = OnceLock::new();
     W.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// enrollment 的“有密钥”和“能双向互联”是两回事。旧版本可能已经留下 meshKey，
+/// 却没有正确 pin authority 或本机成员资格；这里每次从真实持久状态推导，不相信旧成功标志。
+fn enrollment_state() -> (String, bool, bool, String) {
+    let Some(c) = cfg() else {
+        return ("logged_out".into(), false, false, "本机还没登录".into());
+    };
+    let secure = authority_transport_state(&c.url) == "secure";
+    let pinned = crate::collab::authority::pinned()
+        .is_some_and(|(url, _, _)| url.trim_end_matches('/') == c.url.trim_end_matches('/'));
+    if !pinned {
+        return (
+            "authority_mismatch".into(),
+            false,
+            secure,
+            "本机信任的账号中心与设备网地址不一致，入站身份验证已阻断".into(),
+        );
+    }
+    let uid = meta(K_UID);
+    if uid.is_empty() || !crate::collab::authority::is_member(&uid) {
+        let detail = member_warn().lock().unwrap().clone();
+        return (
+            "pending_local_admission".into(),
+            false,
+            secure,
+            if detail.is_empty() {
+                "账号已登记到设备网，但尚未成为本机成员；后台会继续自愈".into()
+            } else {
+                detail
+            },
+        );
+    }
+    if !secure {
+        return (
+            "insecure_legacy".into(),
+            true,
+            false,
+            "当前账号中心仍使用明文 HTTP；互联可用，但登录凭据和设备密钥存在被窃取风险".into(),
+        );
+    }
+    ("ready".into(), true, true, String::new())
 }
 
 /// 一轮对账。返回 (清单条数, 错误) —— 错误只用于日志/状态,不中断循环。
@@ -546,8 +772,12 @@ pub fn spawn_if_enrolled() {
 /// `url` 留空 = 官方云端账号中心。这个参数只为自建账号中心的人保留,UI 收在「高级」里。
 #[cfg_attr(feature = "desktop", tauri::command)]
 #[allow(non_snake_case)]
-pub async fn account_send_code(email: String, url: Option<String>) -> Result<Value, String> {
-    let url = norm_url(&authority_of(url));
+pub async fn account_send_code(
+    email: String,
+    url: Option<String>,
+    allowInsecureHttp: Option<bool>,
+) -> Result<Value, String> {
+    let url = validate_authority_url(&authority_of(url), allowInsecureHttp.unwrap_or(false))?;
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         agent()
             .post(&format!("{url}/api/account/send_code"))
@@ -567,14 +797,14 @@ pub async fn account_send_code(email: String, url: Option<String>) -> Result<Val
 /// 的来源:
 ///   ① 拿验证码换身份断言(账号不存在就当场建号 —— 注册页因此可以整个消失);
 ///   ② 把这个账号中心**钉在本机**(少了它,别的设备连过来会被自己挡回去);
-///   ③ 拿断言入网,换一把长期设备密钥落库(此后再不需要邮箱验证码);
-///   ④ 拿断言进**本机**的门,拿到本机会话 —— 同 uid 走 SelfOwned,不要邀请码。
+///   ③ 拿断言进**本机**的门,确保当前账号确实获准使用这台主机;
+///   ④ 前三步都通过后才入设备网,换一把长期设备密钥并与 UID/URL 原子落库。
 ///
-/// `inviteCode` 只在第 ④ 步真的被本机挡住时才用得上(这台机器已经有**别人**当主人了)。
+/// `inviteCode` 只在第 ③ 步真的被本机挡住时才用得上(这台机器已经有**别人**当主人了)。
 /// 裸码和 `PLRS1-…` 分享码都收 —— 归一在 `authority::normalize_invite`。
 ///
-/// 任何一步失败都给人话,并且**已经做成的步骤不回滚**:比如网络在第 ④ 步断了,
-/// ①②③ 的成果(设备密钥)留着,下次开机后台自己就接上了,不必让用户从头再来一遍。
+/// 云端 enroll 或最终落库失败会直接保留在登录界面并允许重试；不会再保存一份缺 UID、
+/// authority pin 或本机成员资格的“已入网”半成品。已经安全建立的本机 pin/成员关系可幂等复用。
 #[cfg_attr(feature = "desktop", tauri::command)]
 #[allow(non_snake_case)]
 pub async fn account_login_code(
@@ -582,8 +812,9 @@ pub async fn account_login_code(
     code: String,
     url: Option<String>,
     inviteCode: Option<String>,
+    allowInsecureHttp: Option<bool>,
 ) -> Result<Value, String> {
-    let url = norm_url(&authority_of(url));
+    let url = validate_authority_url(&authority_of(url), allowInsecureHttp.unwrap_or(false))?;
     // NodeId 由本机密钥推导,不需要隧道在跑 —— 老版本那句「请先设为主机」其实是误导:
     // 真正需要主机在跑的是「别人连得进来」,不是「我拿得到身份」。所以这里不再拦人,
     // 拿不到才报错(那是密钥文件写不进去,是真问题)。
@@ -639,7 +870,30 @@ fn enroll_with_assertion(
     invite: &str,
     console: bool,
 ) -> Result<Value, String> {
-    // ③ 拿断言入网,换一把长期设备密钥。
+    // ② 先钉账号中心。若本机已经信任另一套 authority，必须在取得长期 meshKey 之前
+    // fail closed；否则会落出“云端已入网、别的设备永远进不来”的半成品。
+    crate::collab::authority::pin_explicit(url)
+        .map_err(|e| format!("账号中心信任未建立，尚未入网：{e}"))?;
+
+    // ③ 再让当前账号进本机的门。邀请码兜底也必须在 enroll 前完成；本地准入失败时
+    // 用户仍停留在登录界面，可以补设备码重试，而不是拿到 meshKey 后被假成功页藏住。
+    let first = if console {
+        crate::collab::authority::login_with_assertion_local(assertion, node_id)
+    } else {
+        crate::collab::authority::login_with_assertion(assertion, node_id)
+    };
+    let (user, token) = match first {
+        Ok(v) => v,
+        Err(e) if crate::collab::authority::normalize_invite(invite).is_empty() => {
+            return Err(format!("本机成员准入未完成，尚未入网：{e}"));
+        }
+        Err(_) => {
+            crate::collab::authority::join_with_ticket(assertion, invite, &my_name(), node_id)
+                .map_err(|e| format!("本机成员准入未完成，尚未入网：{e}"))?
+        }
+    };
+
+    // ④ 本地两道前置闸均通过后，才去云端换长期设备密钥。
     let resp = agent()
         .post(&format!("{url}/api/mesh/enroll"))
         .send_json(json!({
@@ -664,46 +918,27 @@ fn enroll_with_assertion(
         .unwrap_or("")
         .to_string();
 
-    // ② 把这个账号中心**钉在本机**。少了这一步,设备网只能单向:本机连得出去,
-    //    别的设备连过来会被自己挡回去(「本机未配置云端账号中心,不接受身份断言」)。
-    //    桌面是双击启动的,POLARIS_ACCOUNT_AUTHORITY_URL 这种环境变量在这儿不存在,
-    //    所以用户亲手登录的这一刻,就是钉住它唯一合法的时机。
-    let pin = crate::collab::authority::pin_explicit(url);
-    // ④ 拿断言进本机的门。同 uid 走 SelfOwned,本机控制台还能认领这台机器上原有的那个账号
-    //    —— 这两档合起来就是「不再登两次」。都不成且用户给了邀请码,再拿票据入伙。
-    //    全都不成时只是「别人进不来」,不影响连出去,所以这里不让整条登录失败。
-    let member = {
-        let first = if console {
-            crate::collab::authority::login_with_assertion_local(assertion, node_id)
-        } else {
-            crate::collab::authority::login_with_assertion(assertion, node_id)
-        };
-        match first {
-            Ok(v) => Ok(v),
-            Err(e) if crate::collab::authority::normalize_invite(invite).is_empty() => Err(e),
-            Err(_) => {
-                crate::collab::authority::join_with_ticket(assertion, invite, &my_name(), node_id)
-            }
-        }
-    }
-    .map(|(u, t)| (u.role, t));
     Ok(json!({
         "key": key,
         "uid": uid,
-        "pinWarn": pin.err().unwrap_or_default(),
-        "memberRole": member.as_ref().map(|(r, _)| r.clone()).unwrap_or_default(),
-        // 本机会话 token:前端拿它直接调本机的 /api/peer/* 管设备档位,
-        // 不必让用户在自己的机器上再登一次。
-        "token": member.as_ref().map(|(_, t)| t.clone()).unwrap_or_default(),
-        "memberWarn": member.err().unwrap_or_default(),
+        "pinWarn": "",
+        "memberRole": user.role,
+        "token": token,
+        "memberWarn": "",
     }))
 }
 
 /// 入网成功后的落库 + 起循环。同步小操作,单独抽出来是为了让两条登录路共用同一份收尾。
 fn finish_enroll(url: &str, node_id: &str, out: &Value) -> Result<Value, String> {
-    crate::collab::db::meta_set(K_URL, url)?;
-    crate::collab::db::meta_set(K_KEY, out["key"].as_str().unwrap_or(""))?;
-    crate::collab::db::meta_set(K_UID, out["uid"].as_str().unwrap_or(""))?;
+    let key = out["key"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .ok_or("入网结果缺少设备密钥，未保存登录状态")?;
+    let uid = out["uid"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .ok_or("入网结果缺少账号 UID，未保存登录状态")?;
+    crate::collab::db::meta_set_many(&[(K_URL, url), (K_KEY, key), (K_UID, uid)])?;
     spawn_loop();
     Ok(json!({
         "enrolled": true,
@@ -736,12 +971,13 @@ pub async fn mesh_join(
     assertion: String,
     url: Option<String>,
     inviteCode: Option<String>,
+    allowInsecureHttp: Option<bool>,
 ) -> Result<Value, String> {
     let node_id = my_node_id();
     if node_id.is_empty() {
         return Err("本机 P2P 身份生成失败(数据目录写不进去?)—— 换个数据目录再试".into());
     }
-    let url = norm_url(&authority_of(url));
+    let url = validate_authority_url(&authority_of(url), allowInsecureHttp.unwrap_or(false))?;
     let invite = inviteCode.unwrap_or_default();
     let out = tokio::task::spawn_blocking({
         let url = url.clone();
@@ -797,11 +1033,23 @@ pub async fn mesh_devices() -> Result<Value, String> {
                 .map(|s| (s.to_string(), v.clone()))
         })
         .collect();
-    let links_snapshot: HashMap<String, (bool, String)> = links()
+    let links_snapshot: HashMap<String, (bool, String, String, String, u64)> = links()
         .lock()
         .unwrap()
         .iter()
-        .map(|(k, l)| (k.clone(), (l.token.is_some(), l.err.clone())))
+        .map(|(k, l)| {
+            let connected = link_connected(l);
+            (
+                k.clone(),
+                (
+                    connected,
+                    l.err.clone(),
+                    l.phase.clone(),
+                    l.error_code.clone(),
+                    l.last_verified_at,
+                ),
+            )
+        })
         .collect();
 
     // 云端台账为骨架;云端拉不到就拿本机契约当骨架(断网也要能看见自己批过哪些设备)。
@@ -829,12 +1077,15 @@ pub async fn mesh_devices() -> Result<Value, String> {
                 .to_string();
             let g = grants.get(&nid);
             let m = mounts.get(&source_id(&nid));
-            let (connected, err) = links_snapshot
+            let (connected, err, phase, error_code, last_verified_at) = links_snapshot
                 .get(&nid)
                 .cloned()
-                .unwrap_or((false, String::new()));
+                .unwrap_or((false, String::new(), "stopped".into(), String::new(), 0));
             d["isSelf"] = json!(d.get("self").and_then(|x| x.as_bool()).unwrap_or(nid == me));
             d["connected"] = json!(connected);
+            d["phase"] = json!(phase);
+            d["errorCode"] = json!(error_code);
+            d["lastVerifiedAt"] = json!(last_verified_at);
             d["error"] = json!(err);
             d["drive"] = m.and_then(|x| x.get("drive")).cloned().unwrap_or(json!(""));
             d["mounted"] = m.and_then(|x| x.get("ok")).cloned().unwrap_or(json!(false));
@@ -856,8 +1107,13 @@ pub async fn mesh_devices() -> Result<Value, String> {
         .collect();
 
     let uid = visible_uid();
+    let (enrollment_state, ready, secure, enrollment_warn) = enrollment_state();
     Ok(json!({
         "enrolled": cfg().is_some(),
+        "ready": ready,
+        "secure": secure,
+        "enrollmentState": enrollment_state,
+        "enrollmentWarn": enrollment_warn,
         "url": meta(K_URL),
         "uid": uid,
         "nodeId": me,
@@ -952,15 +1208,13 @@ pub async fn mesh_rename(nodeId: String, name: String) -> Result<Value, String> 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn mesh_leave() -> Result<Value, String> {
     // 即使极少见的 SQLite 写入失败，也先把已挂盘和隧道收干净；错误最后如实上抛。
-    let key_clear = crate::collab::db::meta_set(K_KEY, "");
-    let uid_clear = crate::collab::db::meta_set(K_UID, "");
+    let clear = crate::collab::db::meta_set_many(&[(K_KEY, ""), (K_UID, "")]);
     member_warn().lock().unwrap().clear();
     let all: Vec<String> = links().lock().unwrap().keys().cloned().collect();
     for n in all {
         drop_peer(&n).await;
     }
-    key_clear?;
-    uid_clear?;
+    clear?;
     Ok(json!({ "enrolled": false }))
 }
 
@@ -984,6 +1238,37 @@ pub async fn mesh_kick(nodeId: String) -> Result<Value, String> {
     .map_err(|e| format!("吊销任务失败:{e}"))??;
     drop_peer(&nodeId).await;
     Ok(json!({ "ok": true }))
+}
+
+/// 丢失设备的一次性安全操作：云端撤 meshKey + 本机撤准入，两条腿无论谁先失败都继续。
+/// 返回 partial 供 UI 明确提示并允许重试；两边接口都幂等，重复点击不会恢复任何权限。
+#[cfg_attr(feature = "desktop", tauri::command)]
+#[allow(non_snake_case)]
+pub async fn mesh_device_remove(nodeId: String) -> Result<Value, String> {
+    let node_id = nodeId.trim().to_string();
+    if node_id.is_empty() {
+        return Err("缺 NodeId".into());
+    }
+    if node_id == my_node_id() {
+        return Err("不能从当前设备上移出当前设备；请使用退出登录".into());
+    }
+
+    let cloud = mesh_kick(node_id.clone()).await;
+    let local = crate::collab::grants::revoke(&node_id, "本机");
+    // 即便本地 SQLite 极少见地报错，也先拆掉当前内存链路，缩小权限窗口。
+    drop_peer(&node_id).await;
+
+    let cloud_ok = cloud.is_ok();
+    let local_ok = local.is_ok();
+    Ok(json!({
+        "ok": cloud_ok && local_ok,
+        "partial": cloud_ok != local_ok,
+        "cloudRevoked": cloud_ok,
+        "localRevoked": local_ok,
+        "retryable": !(cloud_ok && local_ok),
+        "cloudError": cloud.err().unwrap_or_default(),
+        "localError": local.err().unwrap_or_default(),
+    }))
 }
 
 /// 立刻对一次账(UI 点「刷新」用,不必等下一拍心跳)。
@@ -1038,6 +1323,9 @@ pub async fn device_code_rotate() -> Result<Value, String> {
 /// 解析一串设备码 → (访问码, NodeId)。只认 `PLR1-<code>-<nodeId>`。
 fn parse_device_code(s: &str) -> Result<(String, String), String> {
     let t = s.trim();
+    if t.to_ascii_uppercase().starts_with("PLRK1-") {
+        return Err("legacy_code_unsupported:这是旧版 PLRK1 设备码，缺少一次性挑战和主机密钥证明，不能安全降级使用；请让对方升级 Polaris 后重新复制 PLR1 设备码".into());
+    }
     let body = t
         .strip_prefix("PLR1-")
         .or_else(|| t.strip_prefix("plr1-"))
@@ -1068,6 +1356,9 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
             name: "对方设备".into(),
             port,
             token: None,
+            phase: "connecting".into(),
+            error_code: String::new(),
+            last_verified_at: 0,
             err: String::new(),
         },
     );
@@ -1158,10 +1449,30 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
     )
     .await;
     {
+        let mount_ok = mounted
+            .as_ref()
+            .ok()
+            .and_then(|v| v.get("ok"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let mut map = links().lock().unwrap();
         if let Some(l) = map.get_mut(&node_id) {
             l.name = name.clone();
             l.token = Some(token);
+            l.phase = if mount_ok {
+                "ready"
+            } else if mounted.is_ok() {
+                "mounting"
+            } else {
+                "degraded"
+            }
+            .into();
+            l.error_code = if mounted.is_ok() {
+                String::new()
+            } else {
+                "mount_failed".into()
+            };
+            l.last_verified_at = now_secs();
             l.err = mounted.as_ref().err().cloned().unwrap_or_default();
         }
     }
@@ -1180,6 +1491,7 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn mesh_status() -> Value {
     let enrolled = cfg().is_some();
+    let (enrollment_state, ready, secure, enrollment_warn) = enrollment_state();
     // fsmount 的实况(盘符/读写档/在线)按 sourceId 对进来,前端一处就能全画出来。
     let mounts: HashMap<String, Value> = crate::fsmount::fs_mount_status()
         .into_iter()
@@ -1199,7 +1511,10 @@ pub fn mesh_status() -> Value {
                 "nodeId": node_id,
                 "name": l.name,
                 "port": l.port,
-                "connected": l.token.is_some(),
+                "connected": link_connected(l),
+                "phase": l.phase,
+                "errorCode": l.error_code,
+                "lastVerifiedAt": l.last_verified_at,
                 "error": l.err,
                 // 对端会话 token 交给前端:远程终端(/api/exec)与「浏览盘」都靠它。
                 // 与手工添加的远程源同一口径 —— 那条路的 owner 令牌本来就存在前端。
@@ -1212,6 +1527,10 @@ pub fn mesh_status() -> Value {
         .collect();
     json!({
         "enrolled": enrolled,
+        "ready": ready,
+        "secure": secure,
+        "enrollmentState": enrollment_state,
+        "enrollmentWarn": enrollment_warn,
         "url": meta(K_URL),
         "uid": visible_uid(),
         "nodeId": my_node_id(),
@@ -1225,10 +1544,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn url_normalization() {
-        assert_eq!(norm_url(" 1.2.3.4:8080/ "), "http://1.2.3.4:8080");
+    fn url_normalization_prefers_https_and_public_http_requires_consent() {
+        assert_eq!(norm_url(" example.com/ "), "https://example.com");
         assert_eq!(norm_url("https://a.com/"), "https://a.com");
         assert_eq!(norm_url("http://a.com"), "http://a.com");
+        assert!(validate_authority_url("http://a.com", false)
+            .unwrap_err()
+            .contains("明文 HTTP"));
+        assert_eq!(
+            validate_authority_url("http://a.com", true).unwrap(),
+            "http://a.com"
+        );
+        assert_eq!(
+            validate_authority_url("http://127.0.0.1:8080", false).unwrap(),
+            "http://127.0.0.1:8080"
+        );
     }
 
     #[test]
@@ -1239,12 +1569,32 @@ mod tests {
         assert!(parse_device_code("ABCD2345").is_err());
         assert!(parse_device_code("PLR1-ABCD2345").is_err());
         assert!(parse_device_code("PLR1--node").is_err());
+        assert!(parse_device_code("PLRK1-old-owner-token")
+            .unwrap_err()
+            .starts_with("legacy_code_unsupported:"));
     }
 
     #[test]
     fn logged_out_status_never_exposes_a_stale_uid() {
         assert_eq!(current_uid(false, "uid-from-old-login".into()), "");
         assert_eq!(current_uid(true, "uid-current".into()), "uid-current");
+    }
+
+    #[test]
+    fn cached_token_without_a_live_tunnel_is_not_connected() {
+        let link = Link {
+            name: "stale".into(),
+            port: 65_534,
+            token: Some("cached-session".into()),
+            phase: "ready".into(),
+            error_code: String::new(),
+            last_verified_at: now_secs(),
+            err: String::new(),
+        };
+        assert!(
+            !link_connected(&link),
+            "刚验证过的 token 也不能把不存在的 tunnel 冒充成在线"
+        );
     }
 
     /// sourceId 必须稳定且不超长(fsmount 拿它当 key,长 NodeId 截断后仍要唯一到实用)。
@@ -1267,6 +1617,9 @@ mod tests {
                 name: "a".into(),
                 port: p1,
                 token: None,
+                phase: "connecting".into(),
+                error_code: String::new(),
+                last_verified_at: 0,
                 err: String::new(),
             },
         );

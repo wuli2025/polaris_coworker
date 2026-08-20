@@ -8,7 +8,7 @@
  *
  * 两条运行时路径,对用户是同一件事:
  *  · 桌面(Tauri):一条 `account_login_code` 命令办完四步 —— 换断言 → 钉账号中心 →
- *    入网换设备密钥 → 进本机门。回来时这台机器已经在设备网里了。
+ *    通过本机准入 → 入网并原子保存设备密钥/UID。回来时这台机器已经在设备网里了。
  *  · 网页/手机壳:走 HTTP —— 账号中心换断言 → 当前主机验签换会话。没有设备网那一层
  *    (浏览器里没有 iroh),但账号是同一个。
  *
@@ -62,6 +62,7 @@ const inviteCode = ref("");
 const showInvite = ref(false);
 /** 自建账号中心的人才需要;默认空 = 官方云端账号中心。 */
 const authorityUrl = ref("");
+const allowInsecureHttp = ref(false);
 const showAdvanced = ref(false);
 
 const busy = ref(false);
@@ -96,18 +97,21 @@ async function sendCode() {
   err.value = "";
   busy.value = true;
   try {
-    if (isTauri) {
+    if (isTauri && props.joinMesh) {
       await invoke("account_send_code", {
         email: email.value.trim(),
         url: authorityUrl.value.trim() || null,
+        allowInsecureHttp: allowInsecureHttp.value,
       });
     } else {
-      await collab.sendLoginCode(email.value.trim());
+      await collab.sendLoginCode(email.value.trim(), allowInsecureHttp.value);
     }
     step.value = "code";
     startCooldown();
   } catch (e) {
-    err.value = errMsg(e);
+    const m = errMsg(e);
+    if (m.includes("明文 HTTP") || m.includes("HTTPS")) showAdvanced.value = true;
+    err.value = m;
   } finally {
     busy.value = false;
   }
@@ -136,14 +140,15 @@ async function submit() {
         // 只有「这台机器已经有别人当主人」时才用得上。以前这个框在桌面这条路上
         // 压根没被读过 —— 用户填了也白填,于是「邀请码」看着像个摆设。
         inviteCode: inviteCode.value.trim() || null,
+        allowInsecureHttp: allowInsecureHttp.value,
       })) as Record<string, unknown>;
       // 拿到的本机会话直接给协作 store 用 —— 用户在自己的机器上不该再登第二次。
       const token = String(r.token ?? "");
       if (token) await collab.adoptLocalSession(token);
       account.rememberEmail(email.value);
       await account.refresh();
-      // 入网成了、但**没进得了本机的门**:这是「半成品」,不是失败(设备密钥已经拿到,
-      // 连得出去)。但用户必须当场看见原因和下一步,不然他只会看到「登录成功却什么都没连上」。
+      // 新后端只有本机准入 + 云端 enroll + 原子落库全通过才会返回；仍兼容老后端可能
+      // 带回的半入网告警，升级过程不能把真实阻塞静默吞掉。
       const warn = String(r.memberWarn ?? "");
       if (warn) {
         err.value = warn;
@@ -155,6 +160,7 @@ async function submit() {
         email: email.value.trim(),
         code: code.value.trim(),
         inviteCode: inviteCode.value.trim(),
+        allowInsecureHttp: allowInsecureHttp.value,
       });
       account.rememberEmail(email.value);
       await account.refresh();
@@ -164,6 +170,7 @@ async function submit() {
     const m = errMsg(e);
     // 进不了**别人**的机器 = 缺它的设备码。把那个输入框自动展开,别让用户猜。
     if (m.includes("设备码") || m.includes("邀请")) showInvite.value = true;
+    if (m.includes("明文 HTTP") || m.includes("HTTPS")) showAdvanced.value = true;
     err.value = m;
   } finally {
     busy.value = false;
@@ -252,14 +259,30 @@ function back() {
     <!-- 自建账号中心的人才需要。默认收起来 —— 地址不是用户该操心的东西 -->
     <div class="el-adv">
       <button class="el-link el-quiet" @click="showAdvanced = !showAdvanced">
-        {{ showAdvanced ? "收起" : "高级:自建了账号中心?" }}
+        {{
+          showAdvanced
+            ? "收起"
+            : isTauri && props.joinMesh
+              ? "高级:自建了账号中心?"
+              : "高级:当前账号中心仍是 HTTP?"
+        }}
       </button>
       <input
-        v-if="showAdvanced"
+        v-if="showAdvanced && isTauri && props.joinMesh"
         v-model="authorityUrl"
         class="el-inp el-sm"
-        placeholder="账号中心地址(留空 = 官方云端账号中心)"
+        placeholder="账号中心地址（优先 https://；留空使用旧官方地址并要求确认）"
       />
+      <label v-if="showAdvanced" class="el-risk">
+        <input v-model="allowInsecureHttp" type="checkbox" />
+        <span>
+          {{
+            isTauri && props.joinMesh
+              ? "我确认这个旧账号中心使用明文 HTTP，邮箱、验证码和设备密钥可能被同链路窃取"
+              : "我确认当前主机指定的账号中心使用明文 HTTP，邮箱、验证码和身份断言可能被同链路窃取"
+          }}
+        </span>
+      </label>
     </div>
   </div>
 </template>
@@ -308,6 +331,8 @@ function back() {
 }
 .el-extra { display: flex; flex-direction: column; gap: 6px; }
 .el-adv { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.el-risk { display: flex; align-items: flex-start; gap: 7px; color: var(--vermilion, #e35d5d); font-size: 11.5px; line-height: 1.5; }
+.el-risk input { flex: none; width: 14px; height: 14px; margin-top: 2px; accent-color: var(--vermilion, #e35d5d); }
 .spin { animation: el-spin 1s linear infinite; }
 @keyframes el-spin { to { transform: rotate(360deg); } }
 </style>

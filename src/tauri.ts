@@ -11,6 +11,12 @@ import {
   type UnlistenFn,
 } from "@tauri-apps/api/event";
 
+import {
+  BACKEND_CREDENTIAL_EVENT,
+  readBackendToken,
+  writeMachineToken,
+} from "./lib/backendCredentials";
+
 export const isTauri =
   typeof window !== "undefined" &&
   // @ts-ignore tauri injects this
@@ -27,16 +33,21 @@ type BackendMode = "http" | "stub";
 let backendMode: BackendMode | null = null;
 let probePromise: Promise<void> | null = null;
 
-/** 访问口令：URL ?token= 优先落盘 localStorage，之后从 localStorage 读。 */
+/** 访问凭据：URL ?token= 写入机器口令；未设机器口令时回退统一账号 session。 */
 function authToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
     const u = new URL(window.location.href);
     const fromUrl = u.searchParams.get("token");
-    if (fromUrl) localStorage.setItem("POLARIS_AUTH_TOKEN", fromUrl);
-    return localStorage.getItem("POLARIS_AUTH_TOKEN");
+    if (fromUrl) {
+      writeMachineToken(fromUrl);
+      // URL 口令只用于首次导入；立即从地址栏、浏览器历史和后续 Referer 中抹掉。
+      u.searchParams.delete("token");
+      window.history.replaceState(window.history.state, "", `${u.pathname}${u.search}${u.hash}`);
+    }
+    return readBackendToken();
   } catch {
-    return null;
+    return readBackendToken();
   }
 }
 
@@ -170,7 +181,7 @@ function requireToken(): Promise<void> {
           tokenPromptDismissedAt = Date.now();
           return;
         }
-        localStorage.setItem("POLARIS_AUTH_TOKEN", t);
+        writeMachineToken(t);
         if (!(await tokenRejected())) {
           // 口令生效：WS 若正带着旧口令（或没带）连接，掐掉让它带新口令自动重连。
           try {
@@ -288,6 +299,16 @@ function askTokenOnce(opts: TokenDialogOpts = {}): Promise<string | null> {
   });
 }
 
+export class BackendHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "BackendHttpError";
+    this.status = status;
+  }
+}
+
 async function httpInvoke<T>(
   cmd: string,
   args?: Record<string, unknown>,
@@ -311,7 +332,7 @@ async function httpInvoke<T>(
     } catch {
       /* ignore */
     }
-    throw new Error(msg);
+    throw new BackendHttpError(res.status, msg);
   }
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;
@@ -341,6 +362,16 @@ export async function uploadToBackend(
 let ws: WebSocket | null = null;
 const wsListeners = new Map<string, Set<(p: unknown) => void>>();
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+if (typeof window !== "undefined") {
+  window.addEventListener(BACKEND_CREDENTIAL_EVENT, () => {
+    // 协作登录/登出或机器口令变化后，旧 WS 仍带着旧 token；立即重连才能让权限生效。
+    try {
+      ws?.close();
+    } catch {
+      /* ignore */
+    }
+  });
+}
 // 指数退避:1s 起,每次失败翻倍 + 少量抖动,封顶 30s;连上即复位。
 // 避免后端宕机/重启时每 1.5s 硬敲(语义对齐 mobile/src/lib/net.ts)。
 const WS_BACKOFF_MIN = 1000;
@@ -1058,6 +1089,13 @@ export interface ChatStreamEvent {
   text?: string;
   tool?: string;
   conversationId?: string;
+  /** Optional structured fields used by newer emitters; old backends remain compatible. */
+  callId?: string;
+  phase?: string;
+  status?: string;
+  summary?: string;
+  severity?: "info" | "warning" | "error";
+  retryable?: boolean;
 }
 
 /** 分批构建清单 polaris.build.json 的一个单元 */

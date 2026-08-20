@@ -662,6 +662,9 @@ interface MeshDevice {
   /** 就是你正坐着的这台 */
   isSelf: boolean;
   connected: boolean;
+  phase?: string;
+  errorCode?: string;
+  lastVerifiedAt?: number;
   error: string;
   drive: string;
   mounted: boolean;
@@ -680,6 +683,10 @@ interface MeshDevice {
 }
 interface MeshLedger {
   enrolled: boolean;
+  ready?: boolean;
+  secure?: boolean;
+  enrollmentState?: "ready" | "pending_local_admission" | "authority_mismatch" | "insecure_legacy" | "logged_out";
+  enrollmentWarn?: string;
   url: string;
   uid: string;
   nodeId: string;
@@ -693,7 +700,8 @@ interface MeshLedger {
   devices: MeshDevice[];
 }
 const mesh = ref<MeshLedger>({
-  enrolled: false, url: "", uid: "", nodeId: "", name: "", cloudError: "",
+  enrolled: false, ready: false, secure: true, enrollmentState: "logged_out", enrollmentWarn: "",
+  url: "", uid: "", nodeId: "", name: "", cloudError: "",
   localMember: true, localMemberWarn: "", devices: [],
 });
 /**
@@ -701,7 +709,14 @@ const mesh = ref<MeshLedger>({
  * 参数都看得见,却谁也挂不上谁的盘。老后端不返回这两个字段,那时一律当没问题(不误报)。
  */
 const meshLockedOut = computed(
-  () => mesh.value.enrolled && mesh.value.localMember === false
+  () =>
+    mesh.value.enrolled &&
+    (mesh.value.ready === false ||
+      mesh.value.enrollmentState === "pending_local_admission" ||
+      mesh.value.enrollmentState === "authority_mismatch")
+);
+const meshInsecure = computed(
+  () => mesh.value.enrolled && mesh.value.enrollmentState === "insecure_legacy"
 );
 const meshBusy = ref(false);
 const meshMounted = computed(() => mesh.value.devices.filter((d) => !!d.drive).length);
@@ -786,12 +801,7 @@ async function meshRename(d: MeshDevice) {
   }
 }
 
-/**
- * 把一台设备移出(丢了电脑时用)。**两道闸一起点**:
- *  · 本机 peer_revoke:它连断言都递不进来 —— 云端被绕过也拦得住;
- *  · 云端 mesh_kick  :它拿不到新断言,也不再出现在别的设备的名册里。
- * 只点一道都留着一半路,所以这里一起做。
- */
+/** 丢失设备的一次性安全操作：后端无论哪条腿失败都会继续撤另一条，并返回可重试状态。 */
 async function meshKick(d: MeshDevice) {
   if (meshBusy.value) return;
   if (
@@ -802,14 +812,24 @@ async function meshKick(d: MeshDevice) {
     return;
   meshBusy.value = true;
   try {
-    await invoke("peer_revoke", { nodeId: d.nodeId });
-    try {
-      await invoke("mesh_kick", { nodeId: d.nodeId });
-    } catch (e) {
-      // 云端那道没点成(断网/云机挂了)不算白干:本机这道已经生效,如实告知。
-      toast.error(`本机已拦下它,但云端目录没同步:${errMsg(e)}`);
+    const result = await invoke<{
+      ok: boolean;
+      partial: boolean;
+      cloudRevoked: boolean;
+      localRevoked: boolean;
+      retryable: boolean;
+      cloudError?: string;
+      localError?: string;
+    }>("mesh_device_remove", { nodeId: d.nodeId });
+    if (result.ok) {
+      toast.info("已从云端设备网和本机准入中移出");
+    } else {
+      const missing = [
+        !result.localRevoked ? `本机撤销失败:${result.localError || "未知错误"}` : "",
+        !result.cloudRevoked ? `云端撤销失败:${result.cloudError || "未知错误"}` : "",
+      ].filter(Boolean);
+      toast.error(`已完成能完成的撤销；${missing.join("；")}。恢复网络后可直接重试。`);
     }
-    toast.info("已移出");
     await loadMesh();
   } catch (e) {
     toast.error(errMsg(e));
@@ -1703,7 +1723,7 @@ onUnmounted(() => {
               <div class="rail-name" :title="account.uid">{{ account.label || "未登录" }}</div>
               <div class="rail-sub">
                 <span class="odot" :class="{ off: !authed }"></span>
-                {{ authed ? `${mesh.devices.length || 1} 台设备 · ${meshOnline || 1} 台在线` : "点下方登录" }}
+                {{ authed ? `${mesh.devices.length} 台设备 · ${meshOnline} 台在线` : "点下方登录" }}
               </div>
             </div>
           </div>
@@ -1787,12 +1807,18 @@ onUnmounted(() => {
               云端账号中心暂时联系不上({{ mesh.cloudError }})—— 下面是本机记着的设备,已连上的不受影响。
             </p>
 
-            <!-- 「看得见连不上」的唯一根因,直接摆在台账上面,并给出那条出路。 -->
+            <p v-if="meshInsecure" class="mesh-cloud-warn locked">
+              <b>当前设备网仍使用旧版明文 HTTP 账号中心</b> ——
+              互联暂时可用，但邮箱验证码、身份断言和设备密钥可能被同链路窃取。
+              {{ mesh.enrollmentWarn || "请尽快迁移到 HTTPS 账号中心。" }}
+            </p>
+
+            <!-- 「看得见连不上」直接按后端真实 enrollment state 解释，不再拿 meshKey 当成功。 -->
             <p v-if="meshLockedOut" class="mesh-cloud-warn locked">
-              <b>这台机器还没认下你这个账号</b> ——
+              <b>{{ mesh.enrollmentState === "authority_mismatch" ? "本机账号中心信任不一致" : "这台机器还没认下你这个账号" }}</b> ——
               所以别的设备看得见它、却连不进来(挂盘走的就是这道门)。
-              {{ mesh.localMemberWarn || "" }}
-              <button class="pill ghost" @click="openLogin()">去第 ① 页用邀请码登录</button>
+              {{ mesh.enrollmentWarn || mesh.localMemberWarn || "" }}
+              <button class="pill ghost" @click="openLogin()">去第 ① 页修复登录</button>
             </p>
 
             <ul v-if="mesh.devices.length" class="dev-ledger">

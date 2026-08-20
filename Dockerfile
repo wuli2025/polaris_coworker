@@ -69,6 +69,8 @@ RUN cargo build --release -p polaris-cli --bin polaris-server --features collab-
 
 # ── stage 3: 运行层 ────────────────────────────────────────────
 FROM debian:bookworm-slim
+ARG POLARIS_BUILD_REVISION=local
+ARG POLARIS_BUILD_VERSION=0.0.0
 ARG APT_MIRROR=
 RUN if [ -n "$APT_MIRROR" ]; then sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; fi
 # bookworm 自带 git 2.39 ≥ 2.38（merge-tree 冲突试算可用）
@@ -139,6 +141,8 @@ RUN set -eu; \
 # collab.db 落 ~/Polaris/data/；claude 凭证落 ~/.claude）
 RUN useradd -m -u 1000 -s /bin/bash polaris \
     && mkdir -p /home/polaris/Polaris /home/polaris/.claude /srv/web /app/resources \
+    && printf '%s\n' "$POLARIS_BUILD_REVISION" > /app/polaris-build-revision \
+    && printf '%s\n' "$POLARIS_BUILD_VERSION" > /app/polaris-build-version \
     && chown -R polaris:polaris /home/polaris /srv/web /app/resources
 
 COPY --from=web        --chown=polaris:polaris /build/dist /srv/web
@@ -146,7 +150,7 @@ COPY --from=server     --chown=polaris:polaris /build/src-tauri/target/release/p
 COPY --from=server     --chown=polaris:polaris /build/src-tauri/resources /app/resources
 # 更新脚本只通过内网调用隔离的 Watchtower HTTP API；本镜像既不含 Docker CLI，
 # 也永不挂宿主机 docker.sock（socket 仅属于可选 updater sidecar）。
-# package.json 是容器当前版本的唯一来源；update.sh 的 --check 与网页更新页都读它。
+# package.json 仅供旧的 update.sh --check 人工诊断；产品更新页读取 OCI config 的 build revision。
 COPY --chown=polaris:polaris package.json /app/package.json
 COPY --chmod=0755 docker/update.sh /usr/local/bin/update.sh
 
@@ -154,6 +158,8 @@ ENV POLARIS_PORT=8080 \
     POLARIS_WEB_DIR=/srv/web \
     POLARIS_RESOURCE_DIR=/app/resources \
     POLARIS_VERSION_FILE=/app/package.json \
+    POLARIS_BUILD_REVISION=${POLARIS_BUILD_REVISION} \
+    POLARIS_BUILD_VERSION=${POLARIS_BUILD_VERSION} \
     POLARIS_IMAGE_REPO=ghcr.io/wuli2025/polaris_coworker \
     HOME=/home/polaris
 

@@ -87,8 +87,16 @@ docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
 
 该 overlay 会启动固定版本 `containrrr/watchtower:1.7.1`。Polaris App 容器不含 Docker CLI，
 也不挂 Docker socket；owner 点更新时，App 只用 Bearer token 调内网 Watchtower 的
-`/v1/update`。Watchtower 同时按 `polaris-web` 容器名与 enable 标签限定更新目标，拉取和
-替换不会丢失数据卷、端口或环境变量，服务通常只短暂断线 1–3 分钟。
+`/v1/update`。Watchtower 同时按 `polaris-web` 容器名与 enable 标签限定更新目标。
+版本检查直接读取当前 tag 的 OCI revision；运行态 revision 取自新镜像文件系统里的 build marker，
+不会被 Watchtower 保留的旧容器环境变量骗成旧版本。点更新后页面拿到 `requestId` 就结束旧请求，再通过
+公开的 `/api/build` 与 `/api/ready` 等待恢复。只有新 bootId、目标 revision 和 ready 三项都
+命中才算成功；空 200/no-op 不会冒充成功，错误或 15 分钟截止会停止等待并允许重试。替换会
+保留数据卷、端口、网络、标签、环境变量与 restart policy。
+
+旧镜像如果提示没有 `/usr/local/bin/update.sh`，先在宿主机手动执行一次
+`docker compose pull` 和带两个 `-f` 的 `up -d` 完成 bootstrap。之后排错可直接看：
+`docker logs polaris-updater` 与 `docker logs polaris-web`。
 
 > **安全边界：**`/var/run/docker.sock` 仍等同宿主机 root 权限，但只进入用途单一的
 > Watchtower sidecar，不再进入能运行项目命令的通用 App 容器。不要发布 sidecar 的 8080

@@ -31,6 +31,7 @@ import {
   type TaskCard,
   type TaskMessage,
 } from "../api";
+import { validateAuthorityTransport } from "../../auth/authorityTransport";
 
 const USER_KEY = "polaris.collab.user.v1";
 const TEAM_KEY = "polaris.collab.teamId.v1";
@@ -221,6 +222,7 @@ export const useCollabStore = defineStore("collab", () => {
   async function loginViaAuthority(username: string, password: string) {
     const url = authorityUrl.value;
     if (!url) throw new Error("本机没有配置云端账号中心地址");
+    validateAuthorityTransport(url);
     const { assertion } = await collabApi.authorityLogin(url, {
       username,
       password,
@@ -246,11 +248,13 @@ export const useCollabStore = defineStore("collab", () => {
     code: string;
     inviteCode?: string;
     deviceName?: string;
+    allowInsecureHttp?: boolean;
   }) {
     if (accountInfo.value === null) await loadAccountInfo();
     // 本机自己就是账号中心时,断言由本机签 —— 地址就打本机。
     const url = authorityUrl.value || base.value;
     if (!url) throw new Error("还没有配置云端账号中心地址");
+    validateAuthorityTransport(url, args.allowInsecureHttp);
     const { assertion } = await collabApi.authorityLoginCode(url, {
       email: args.email.trim(),
       code: args.code.trim(),
@@ -294,10 +298,11 @@ export const useCollabStore = defineStore("collab", () => {
   }
 
   /** 发一枚登录验证码。地址同上:优先云端账号中心,本机就是中心时打本机。 */
-  async function sendLoginCode(email: string) {
+  async function sendLoginCode(email: string, allowInsecureHttp = false) {
     if (accountInfo.value === null) await loadAccountInfo();
     const url = authorityUrl.value || base.value;
     if (!url) throw new Error("还没有配置云端账号中心地址");
+    validateAuthorityTransport(url, allowInsecureHttp);
     return collabApi.authoritySendLoginCode(url, email.trim());
   }
 
@@ -319,6 +324,7 @@ export const useCollabStore = defineStore("collab", () => {
   }) {
     const url = authorityUrl.value;
     if (!url) throw new Error("本机没有配置云端账号中心地址");
+    validateAuthorityTransport(url);
     const { assertion } = await collabApi.authoritySignup(url, args);
     const r = requireAuth(
       args.inviteCode?.trim()
@@ -342,6 +348,7 @@ export const useCollabStore = defineStore("collab", () => {
   }) {
     const url = authorityUrl.value;
     if (!url) throw new Error("本机没有配置云端账号中心地址");
+    validateAuthorityTransport(url);
     const { assertion } = await collabApi.authorityLogin(url, {
       username: args.username,
       password: args.password,

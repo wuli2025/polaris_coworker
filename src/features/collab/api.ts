@@ -10,8 +10,13 @@
  * 错误约定:后端错误响应形如 {error:string},统一抛成 Error(message)。
  */
 
+import {
+  COLLAB_SESSION_TOKEN_KEY,
+  notifyBackendCredentialChanged,
+} from "../../lib/backendCredentials";
+
 const BASE_KEY = "polaris.collab.base.v1";
-const TOKEN_KEY = "polaris.collab.token.v1";
+const TOKEN_KEY = COLLAB_SESSION_TOKEN_KEY;
 const DEVICE_KEY = "polaris.collab.deviceId.v1";
 
 // ── 类型 ──────────────────────────────────────────────
@@ -315,6 +320,7 @@ export function setToken(token: string): void {
   } catch {
     /* storage 不可用 */
   }
+  notifyBackendCredentialChanged();
 }
 
 /** 本机设备指纹:首次生成后固定,登录/入伙都带上 */
