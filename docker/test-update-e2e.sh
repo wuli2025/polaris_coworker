@@ -79,6 +79,7 @@ docker build --build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg BUILD_REVISION=e2e
 
 echo "Starting source Polaris container"
 if ! docker run -d --name "$APP" --network "$NETWORK" --restart unless-stopped \
+  --add-host polaris-updater:host-gateway \
   -p 127.0.0.1::8080 \
   -v "$VOLUME:/home/polaris/Polaris" \
   --label com.centurylinklabs.watchtower.enable=true \
@@ -175,8 +176,12 @@ CHECK_RESULT="$(invoke docker_check_update '{}')" \
 printf '%s' "$CHECK_RESULT" | jq -e '.ok and .has_update and .target_revision == "e2e-target"' >/dev/null \
   || { echo "docker_check_update did not resolve the target OCI revision: $CHECK_RESULT" >&2; exit 1; }
 
+# The disposable image is named with the host's 127.0.0.1 registry endpoint so the Docker daemon
+# accepts its plain HTTP registry without changing daemon-wide insecure-registry settings. Watchtower
+# therefore uses host networking in this test; the App reaches its narrow API through host-gateway.
+# Production Compose remains on its private bridge network and never publishes the updater port.
 # Wrong updater Bearer token must become an explicit failed state, not an endless spinner.
-docker run -d --name "$UPDATER" --network "$NETWORK" --network-alias polaris-updater \
+docker run -d --name "$UPDATER" --network host \
   -e WATCHTOWER_HTTP_API_TOKEN=definitely-wrong \
   -v /var/run/docker.sock:/var/run/docker.sock \
   containrrr/watchtower:1.7.1 --http-api-update --label-enable --cleanup \
@@ -188,7 +193,7 @@ wait_request_state "$(printf '%s' "$BAD_REQUEST" | jq -r .requestId)" failed 30
 docker rm -f "$UPDATER" >/dev/null
 
 # Correct Watchtower, but unavailable registry: accepted first, then bounded unconfirmed.
-docker run -d --name "$UPDATER" --network "$NETWORK" --network-alias polaris-updater \
+docker run -d --name "$UPDATER" --network host \
   -e "WATCHTOWER_HTTP_API_TOKEN=$UPDATER_TOKEN" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   containrrr/watchtower:1.7.1 --http-api-update --label-enable --cleanup \
@@ -201,7 +206,7 @@ docker stop "$REGISTRY" >/dev/null
 wait_request_failure "$PULL_ID" 45
 docker start "$REGISTRY" >/dev/null
 docker rm -f "$UPDATER" >/dev/null
-docker run -d --name "$UPDATER" --network "$NETWORK" --network-alias polaris-updater \
+docker run -d --name "$UPDATER" --network host \
   -e "WATCHTOWER_HTTP_API_TOKEN=$UPDATER_TOKEN" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   containrrr/watchtower:1.7.1 --http-api-update --label-enable --cleanup \
