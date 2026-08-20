@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       base_image:
-        description: Published Polaris image tag or digest to exercise
+        description: Published Polaris image used as the runtime-layer base
         required: true
         default: ghcr.io/wuli2025/polaris_coworker:latest
 
@@ -16,17 +16,42 @@ jobs:
   watchtower-e2e:
     name: Real Watchtower replacement
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # Probe-branch acceleration: compile only the current amd64 server stage, then place that
+      # binary over the already-published runtime image. This exercises the current backend fix
+      # without waiting for the unrelated arm64/Claude/runtime layers to publish first.
+      - name: Build current server probe image
+        shell: bash
+        env:
+          PUBLISHED_BASE: ${{ inputs.base_image }}
+        run: |
+          set -euo pipefail
+          docker build --target server -t polaris-e2e-server-build:local .
+          work="$(mktemp -d)"
+          cid="$(docker create polaris-e2e-server-build:local)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+          docker cp "$cid:/build/src-tauri/target/release/polaris-server" "$work/polaris-server"
+          docker rm "$cid" >/dev/null
+          cid=""
+          cat >"$work/Dockerfile" <<'DOCKERFILE'
+          ARG PUBLISHED_BASE
+          FROM ${PUBLISHED_BASE}
+          USER root
+          COPY --chmod=0755 polaris-server /usr/local/bin/polaris-server
+          USER polaris
+          DOCKERFILE
+          docker build --build-arg "PUBLISHED_BASE=$PUBLISHED_BASE" -t polaris-e2e-current:local "$work"
+
       - name: Run disposable click-update E2E
         shell: bash
         env:
           POLARIS_E2E: "1"
-          BASE_IMAGE: ${{ inputs.base_image }}
+          BASE_IMAGE: polaris-e2e-current:local
         run: |
           sh -n docker/update.sh
           sh -n docker/test-update-e2e.sh
