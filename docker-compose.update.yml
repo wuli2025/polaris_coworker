@@ -27,6 +27,8 @@ services:
     restart: unless-stopped
     environment:
       - WATCHTOWER_HTTP_API_TOKEN=${POLARIS_UPDATER_TOKEN:?请先在 .env 设置随机 POLARIS_UPDATER_TOKEN}
+      # Watchtower 1.7.1 默认协商到旧 API 1.25；Docker Engine 29 已拒绝低于 1.40 的客户端。
+      - DOCKER_API_VERSION=${POLARIS_DOCKER_API_VERSION:-1.40}
     command:
       - --http-api-update
       - --label-enable

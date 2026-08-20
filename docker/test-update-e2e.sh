@@ -195,6 +195,7 @@ printf '%s' "$CHECK_RESULT" | jq -e '.ok and .has_update and .target_revision ==
 # Production Compose remains on its private bridge network and never publishes the updater port.
 # Wrong updater Bearer token must become an explicit failed state, not an endless spinner.
 docker run -d --name "$UPDATER" --network host \
+  -e DOCKER_API_VERSION=1.40 \
   -e WATCHTOWER_HTTP_API_TOKEN=definitely-wrong \
   -v /var/run/docker.sock:/var/run/docker.sock \
   containrrr/watchtower:1.7.1 --http-api-update --label-enable --cleanup \
@@ -207,6 +208,7 @@ docker rm -f "$UPDATER" >/dev/null
 
 # Correct Watchtower, but unavailable registry: accepted first, then bounded unconfirmed.
 docker run -d --name "$UPDATER" --network host \
+  -e DOCKER_API_VERSION=1.40 \
   -e "WATCHTOWER_HTTP_API_TOKEN=$UPDATER_TOKEN" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   containrrr/watchtower:1.7.1 --http-api-update --label-enable --cleanup \
@@ -221,6 +223,7 @@ docker start "$REGISTRY" >/dev/null
 wait_registry 30 || { echo "disposable registry did not recover after restart" >&2; exit 1; }
 docker rm -f "$UPDATER" >/dev/null
 docker run -d --name "$UPDATER" --network host \
+  -e DOCKER_API_VERSION=1.40 \
   -e "WATCHTOWER_HTTP_API_TOKEN=$UPDATER_TOKEN" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   containrrr/watchtower:1.7.1 --http-api-update --label-enable --cleanup \
