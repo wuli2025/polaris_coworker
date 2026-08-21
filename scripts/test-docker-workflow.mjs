@@ -10,6 +10,11 @@ const promotionIndex = workflow.indexOf("Promote verified image tags");
 
 assert.ok(verifyIndex >= 0 && verifyIndex < publishIndex, "a verify job must gate the publish job");
 assert.match(workflow.slice(publishIndex, publishIndex + 300), /needs: verify/);
+assert.match(
+  workflow.slice(verifyIndex, publishIndex),
+  /uses: actions\/checkout@v4\s+with:\s+fetch-depth: 2/,
+  "release verification needs the parent commit for git show --check",
+);
 assert.match(workflow, /tags: \$\{\{ env\.REGISTRY_IMAGE \}\}:staging-\$\{\{ github\.sha \}\}/);
 assert.doesNotMatch(
   workflow.slice(0, watchtowerIndex),
