@@ -85,7 +85,9 @@ jobs:
 
       - name: Validate NAS compose contract
         shell: bash
-        run: sh docker/test-nas-compose.sh
+        run: |
+          sh docker/test-nas-compose.sh
+          sh docker/test-nas-bootstrap.sh
 
       - name: Validate Docker click-update path with real Watchtower
         shell: bash

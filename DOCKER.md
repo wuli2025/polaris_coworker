@@ -74,12 +74,22 @@ docker compose up -d
 
 ### 旧架构只迁移一次
 
+没有 Git 目录时直接运行：
+
 ```bash
 curl -fsSL https://llmwiki.cloud/docker/nas-bootstrap.sh | sudo sh
 ```
 
+如果原安装目录就是 Polaris Git 仓库，在该目录先快进源码，再运行同一份迁移器：
+
+```bash
+git switch main
+git pull --ff-only origin main
+sudo sh docker/nas-bootstrap.sh
+```
+
 迁移脚本会保留旧数据挂载，并把旧容器停止后改名留作恢复；验证新容器失败时会自动恢复旧容器。
-它不会询问用户访问口令或 updater token。
+拉取新镜像发生在停止旧容器之前；它不会递归改文件属主，也不会询问用户访问口令或 updater token。
 
 ### 2.9.2 及后续：Polaris 更新页一键更新
 
@@ -102,7 +112,7 @@ revision 判断（即使版本号未变，`latest` 指向新提交也能识别�
 鉴权错误或 15 分钟仍未观察到替换都会退出转圈并保留明确错误，可修复后直接重试。更新过程
 保持数据卷、端口、网络、标签、环境变量与 restart policy。
 
-从不含 `/usr/local/bin/update.sh` 的旧镜像升级时，需要先在宿主机执行一次上面的手动更新；
+从不含 `/usr/local/bin/update.sh` 的旧镜像升级时，需要先在宿主机执行一次上面的迁移命令；
 这是唯一一次 bootstrap，之后才会出现网页一键更新能力。排错先看：
 
 ```bash

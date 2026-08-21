@@ -434,7 +434,7 @@ export async function applyUpdate(): Promise<void> {
       if (!dockerUpdaterEnabled.value) {
         throw new Error(
           dockerMessage.value ||
-            "Docker 一键更新未启用，请先配置账号鉴权和隔离 updater sidecar。",
+            "Docker 一键更新未启用，请重新运行官网安装/迁移命令。",
         );
       }
 
