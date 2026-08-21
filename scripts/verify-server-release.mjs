@@ -4,7 +4,9 @@ import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:net";
+import { get } from "node:http";
 
 const releaseDir = resolve(
   process.env.POLARIS_RELEASE_DIR ?? new URL("../src-tauri/target/release", import.meta.url).pathname,
@@ -19,6 +21,47 @@ async function requireExecutable(path, label) {
   } catch {
     throw new Error(`${label} release executable is missing: ${path}`);
   }
+}
+
+async function unusedPort() {
+  const listener = createServer();
+  await new Promise((resolveReady, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "127.0.0.1", resolveReady);
+  });
+  const port = listener.address().port;
+  await new Promise((resolveClosed) => listener.close(resolveClosed));
+  return port;
+}
+
+function healthStatus(port) {
+  return new Promise((resolveStatus) => {
+    const request = get(`http://127.0.0.1:${port}/api/health`, (response) => {
+      response.resume();
+      resolveStatus(response.statusCode === 200);
+    });
+    request.setTimeout(500, () => request.destroy());
+    request.on("error", () => resolveStatus(false));
+  });
+}
+
+async function waitForHealth(port, child) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (child.exitCode !== null) return false;
+    if (await healthStatus(port)) return true;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  return false;
+}
+
+async function stopChild(child) {
+  if (child.exitCode !== null) return;
+  child.kill("SIGTERM");
+  await Promise.race([
+    new Promise((resolveExit) => child.once("exit", resolveExit)),
+    new Promise((resolveWait) => setTimeout(resolveWait, 3_000)),
+  ]);
+  if (child.exitCode === null) child.kill("SIGKILL");
 }
 
 async function main() {
@@ -56,11 +99,46 @@ async function main() {
     if (bytes.length < 1_000 || bytes.subarray(0, 2).toString("ascii") !== "PK") {
       throw new Error("polaris-forge did not produce a valid PPTX container");
     }
+
+    const port = await unusedPort();
+    const logs = [];
+    const child = spawn(server, [], {
+      env: {
+        ...process.env,
+        HOME: scratch,
+        POLARIS_PORT: String(port),
+        POLARIS_WEB_DIR: scratch,
+        POLARIS_PERSISTENT_AGENT: "0",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (chunk) => logs.push(String(chunk)));
+    child.stderr.on("data", (chunk) => logs.push(String(chunk)));
+    try {
+      if (!(await waitForHealth(port, child))) {
+        throw new Error(`polaris-server did not become healthy: ${logs.join("").slice(-2_000)}`);
+      }
+      await access(
+        join(scratch, "Polaris", "skills", "browser-use", "scripts", "browser_use_runner.py"),
+        constants.F_OK,
+      );
+      await access(
+        join(scratch, "Polaris", "skills", "turbo-download", "scripts", "fast_download.py"),
+        constants.F_OK,
+      );
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        throw new Error("polaris-server did not seed every built-in Agent skill runtime");
+      }
+      throw error;
+    } finally {
+      await stopChild(child);
+    }
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
 
-  console.log("PASS server release includes a callable native Forge CLI");
+  console.log("PASS server release includes native Forge and every built-in Agent skill runtime");
 }
 
 main().catch((error) => {
