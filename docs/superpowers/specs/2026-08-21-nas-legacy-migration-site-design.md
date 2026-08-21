@@ -13,7 +13,7 @@
 
 官网 `https://llmwiki.cloud/nas#nas`、安装脚本与机器可读清单必须指向同一套最新镜像身份，不能再出现页面写 2.6.2、R2 清单写 2.7.0、GHCR 已是 2.9.2 的分裂状态。
 
-用户明确要求 NAS 暂时保持完全免口令体验，后续再由账号体系接管。因此不询问、生成或强制配置 `POLARIS_AUTH_TOKEN`，也不要求 `POLARIS_REQUIRE_LOGIN` 或 `POLARIS_LAN_ONLY`。`POLARIS_UPDATER_TOKEN` 只用于 Polaris 容器到 Watchtower sidecar 的内部协议鉴权，不是用户访问口令；它由安装/迁移脚本静默生成并写入权限收紧的 `.env`，不展示、不向用户索取。
+用户明确要求 NAS 暂时保持完全免口令体验，后续再由账号体系接管。因此不询问、生成或强制配置 `POLARIS_AUTH_TOKEN`，也不要求 `POLARIS_REQUIRE_LOGIN` 或 `POLARIS_LAN_ONLY`。`POLARIS_UPDATER_TOKEN` 只用于 Polaris 容器到 Watchtower sidecar 的内部协议鉴权，不是用户访问口令；安装/迁移脚本可用时静默生成随机值，Compose 同时提供仅在项目私有网络内使用的非空内部默认值。该值不展示、不向用户索取，缺少 `openssl` 也不得卡住安装或更新。
 
 ## 2. 已确认的根因
 
@@ -32,7 +32,7 @@
 
 1. 切回并快进更新 `main`；
 2. 保留已有 `.env`，不存在时从 `.env.server.example` 创建；
-3. 缺少 `POLARIS_UPDATER_TOKEN` 时静默生成；
+3. 缺少 `POLARIS_UPDATER_TOKEN` 时尽量静默生成；生成工具不可用时使用 Compose 内部默认值继续启动；
 4. 保持 `POLARIS_AUTH_TOKEN`、`POLARIS_REQUIRE_LOGIN` 与 `POLARIS_LAN_ONLY` 为空，设置 `POLARIS_BIND_IP=0.0.0.0` 供 NAS 所在网络访问；
 5. 执行仓库内的迁移准备命令：记录旧容器身份并在 `.env` 写入 `POLARIS_RUNTIME_USER=0:0`，沿用旧版默认的 root 数据属主，但不再给应用容器 Docker socket；
 6. 拉取并启动 `docker-compose.yml` 与 `docker-compose.update.yml`；
@@ -60,7 +60,7 @@ Compose 项目沿用原目录和卷名，所以命名卷不会被删除。迁移
 
 ### 3.3 路径 C：2.9.2 及后续页面更新
 
-`POLARIS_UPDATER_TOKEN` 继续保护内部 Watchtower HTTP API；该端口不发布到宿主机。只要固定的 updater 内网地址和内部 token 已配置，应用侧就启用远程更新能力，不再要求用户访问口令、账号登录或 LAN-only 开关。
+`POLARIS_UPDATER_TOKEN` 继续保护内部 Watchtower HTTP API；该端口不发布到宿主机。Compose overlay 保证两端总能拿到同一个非空内部值；脚本生成的随机值优先，没有生成工具时退回项目内固定默认值。只要固定的 updater 内网地址和内部值已配置，应用侧就启用远程更新能力，不再要求用户访问口令、账号登录或 LAN-only 开关。
 
 这意味着当前任何能够打开该 NAS Polaris 页面的人都可以触发一次官方镜像检查/替换，符合现阶段“NAS 本身只在可达网络内使用”的产品约定。触发方不能指定镜像、容器、命令或 Docker API：应用只能请求固定内网 Watchtower 地址，Watchtower 仍只更新带 enable 标签且名为 `polaris-web` 的官方镜像。未来账号体系上线后，再把触发入口收敛到账号 owner 权限，本次不提前加入用户口令。
 
@@ -71,7 +71,7 @@ POLARIS_BIND_IP=0.0.0.0
 POLARIS_AUTH_TOKEN=
 POLARIS_REQUIRE_LOGIN=
 # POLARIS_LAN_ONLY 留空；网络可达范围由 NAS/路由器自身决定
-# POLARIS_UPDATER_TOKEN 由脚本静默追加 64 位十六进制随机值，不在页面展示
+# POLARIS_UPDATER_TOKEN 可由脚本静默追加；省略时 Compose 使用内部默认值
 POLARIS_IMAGE_REPO=ghcr.io/wuli2025/polaris_coworker
 POLARIS_IMAGE_TAG=latest
 # 仅旧版数据迁移写入；全新安装省略并使用镜像默认 UID/GID 1000
@@ -119,7 +119,7 @@ POLARIS_RUNTIME_USER=0:0
 - 无法识别旧数据 mount 时不猜路径，输出 inspect 备份位置并停止；
 - 新镜像或 Watchtower 拉取失败时旧容器保持运行；
 - 切换后的 readiness/build 验证失败时自动恢复旧容器；
-- `POLARIS_UPDATER_TOKEN` 不写 stdout，只写 mode 600 的 `.env`；
+- `POLARIS_UPDATER_TOKEN` 不写 stdout；脚本成功生成时只写 mode 600 的 `.env`，未生成时直接使用 Compose 内部默认值；
 - 网站端点返回 HTML、JSON 字段缺失、版本/revision/digest 不一致时部署验证失败。
 
 ## 6. 测试与验收
