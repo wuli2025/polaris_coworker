@@ -72,28 +72,25 @@ docker compose up -d
 
 ## 三、更新 Docker 版
 
-### 安全默认：宿主机手动更新
+### 旧架构只迁移一次
 
 ```bash
-docker compose pull
-docker compose up -d
+curl -fsSL https://llmwiki.cloud/docker/nas-bootstrap.sh | sudo sh
 ```
 
-### 可选：Polaris 更新页一键更新
+迁移脚本会保留旧数据挂载，并把旧容器停止后改名留作恢复；验证新容器失败时会自动恢复旧容器。
+它不会询问用户访问口令或 updater token。
 
-基础 compose 只能检查版本。启用一键替换前必须：
+### 2.9.2 及后续：Polaris 更新页一键更新
 
-1. 设置 `POLARIS_AUTH_TOKEN`，或设置 `POLARIS_REQUIRE_LOGIN=1`；
-2. 公网部署通过 HTTPS 反代接入；
-3. 运行 `openssl rand -hex 32`，把输出填进 `.env` 的 `POLARIS_UPDATER_TOKEN=`；
-4. 叠加更新 overlay：
+标准 NAS 部署直接叠加更新 overlay：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
 ```
 
 该 overlay 启动固定版本 `containrrr/watchtower:1.7.1`。Polaris App 容器**没有** Docker CLI，
-也**不挂** `/var/run/docker.sock`；它只能携带 Bearer token 调用内网 sidecar 的
+也**不挂** `/var/run/docker.sock`；它只能携带内部通信密钥调用内网 sidecar 的
 `/v1/update`。Watchtower 还同时按容器名 `polaris-web` 与
 `com.centurylinklabs.watchtower.enable=true` 标签限定目标，因此不会顺手更新其他容器。
 
@@ -114,8 +111,8 @@ docker logs polaris-web
 ```
 
 > Docker socket 仍等同宿主机 root 权限，但现在只进入用途单一的 Watchtower sidecar，
-> 不再进入能够运行项目命令的通用 App 容器。不要对外发布 sidecar 的 8080 端口，也不要
-> 复用或泄露 `POLARIS_UPDATER_TOKEN`。版本检查不需要 overlay，未配置时会安全降级为手动更新。
+> 不再进入能够运行项目命令的通用 App 容器。不要对外发布 sidecar 的 8080 端口。内部通信
+> 密钥由安装脚本或 Compose 私网默认值自动处理，不展示、不询问，也不会卡住用户安装。
 
 本地定制镜像继续使用 `docker compose up -d --build`，不要叠加远程更新 overlay，以免
 Watchtower 按配置的 GHCR 标签把本地定制构建替换为官方镜像。

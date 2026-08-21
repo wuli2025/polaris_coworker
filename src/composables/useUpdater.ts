@@ -19,7 +19,6 @@ export const updaterRuntime = ref<UpdaterRuntime>("unknown");
 export const dockerUpdaterEnabled = ref(false);
 export const dockerUpdaterServiceConfigured = ref(false);
 export const dockerUpdateScriptPresent = ref(false);
-export const dockerAuthConfigured = ref(false);
 export const dockerMessage = ref("");
 export const dockerRequestId = ref<string | null>(null);
 
@@ -32,11 +31,11 @@ let lastDockerCheck: DockerCheck | null = null;
 const DOCKER_UPDATE_TIMEOUT_MS = 15 * 60 * 1000;
 const DOCKER_POLL_INTERVAL_MS = 2_000;
 
-interface DockerStatus {
+export interface DockerStatus {
   updater_enabled: boolean;
   updater_service: boolean;
   update_script: boolean;
-  auth_configured: boolean;
+  auth_configured?: boolean;
   current_version?: string;
   current_revision?: string;
   boot_id?: string;
@@ -116,15 +115,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function isDockerStatus(value: unknown): value is DockerStatus {
+export function isDockerStatus(value: unknown): value is DockerStatus {
   if (!value || typeof value !== "object") return false;
   const status = value as Partial<DockerStatus>;
   return (
     typeof status.updater_enabled === "boolean" &&
     typeof status.updater_service === "boolean" &&
     typeof status.update_script === "boolean" &&
-    typeof status.auth_configured === "boolean"
+    (status.auth_configured === undefined || typeof status.auth_configured === "boolean")
   );
+}
+
+export function dockerStatusMessage(status: DockerStatus): string {
+  return status.updater_enabled
+    ? "更新服务已就绪"
+    : !status.update_script
+      ? "当前镜像没有更新脚本，请先执行官网的一次迁移命令"
+      : !status.updater_service
+        ? "内部更新服务尚未启动，请重新运行官网安装/迁移命令"
+        : "更新服务尚未就绪";
 }
 
 async function readDockerBuild(): Promise<DockerBuild | null> {
@@ -252,17 +261,8 @@ async function loadDockerStatus(): Promise<boolean> {
     dockerUpdaterEnabled.value = status.updater_enabled;
     dockerUpdaterServiceConfigured.value = status.updater_service;
     dockerUpdateScriptPresent.value = status.update_script;
-    dockerAuthConfigured.value = status.auth_configured;
     if (status.current_version) currentVersion.value = status.current_version;
-    dockerMessage.value = status.updater_enabled
-      ? "安全更新服务已就绪"
-      : !status.auth_configured
-        ? "需先启用机器口令或账号登录，开放模式禁止远程更新"
-        : !status.update_script
-          ? "当前镜像没有更新脚本，请先在宿主机手动更新一次"
-          : !status.updater_service
-            ? "隔离更新服务未配置，请叠加 docker-compose.update.yml"
-            : "Docker 一键更新尚未满足安全条件";
+    dockerMessage.value = dockerStatusMessage(status);
     return true;
   } catch (error) {
     // Reaching a server that rejects or fails docker_status is not browser preview.
