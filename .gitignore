@@ -90,6 +90,9 @@ marketing-site/.next/
 .wrangler/
 .next/
 
+# Codex/Superpowers 隔离开发工作树（目录自身由 git worktree 管理）
+/.worktrees/
+
 # 根目录临时产物(实验脚本/日志/截图/评测中间件),一律不入库; _collabtest/ 为可重放测试例外
 /_*
 !/_collabtest/
