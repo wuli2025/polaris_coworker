@@ -1,14 +1,11 @@
-# 可选：允许 Polaris Web 的 owner 从“更新”页触发容器替换。
+# 可选：允许 Polaris Web 从“更新”页触发容器替换。
 #
 # 安全边界：docker.sock 只挂进固定版本的 Watchtower sidecar；Polaris App 容器既没有
-# socket，也没有 Docker CLI。App 只能用 Bearer token 调 Watchtower 的 /v1/update 窄接口，
+# socket，也没有 Docker CLI。App 只能用内部密钥调 Watchtower 的 /v1/update 窄接口，
 # 且 Watchtower 同时钉死目标容器名与 enable 标签，不会更新宿主机上的其他容器。
 #
-# 启用前：
-#   1. 在 .env 生成并填写 POLARIS_UPDATER_TOKEN（例如 openssl rand -hex 32）；
-#   2. 设置 POLARIS_AUTH_TOKEN，或设置 POLARIS_REQUIRE_LOGIN=1；
-#   3. 保持 HTTPS 反代，然后执行：
-#      docker compose -f docker-compose.yml -f docker-compose.update.yml up -d
+# POLARIS_UPDATER_TOKEN 只在 Compose 私有网络内部使用。安装脚本会尽量静默生成随机值；
+# 未生成时两端使用同一个非空默认值继续启动，不询问用户，也不阻断 NAS 使用。
 services:
   polaris:
     # 标签只随本 overlay 出现；基础 compose 不会误加入宿主机上已有的全局 Watchtower。
@@ -16,7 +13,7 @@ services:
       - com.centurylinklabs.watchtower.enable=true
     environment:
       - POLARIS_UPDATER_URL=http://polaris-updater:8080/v1/update
-      - POLARIS_UPDATER_TOKEN=${POLARIS_UPDATER_TOKEN:?请先在 .env 设置随机 POLARIS_UPDATER_TOKEN}
+      - POLARIS_UPDATER_TOKEN=${POLARIS_UPDATER_TOKEN:-polaris-internal-updater}
     depends_on:
       polaris-updater:
         condition: service_started
@@ -26,7 +23,7 @@ services:
     container_name: polaris-updater
     restart: unless-stopped
     environment:
-      - WATCHTOWER_HTTP_API_TOKEN=${POLARIS_UPDATER_TOKEN:?请先在 .env 设置随机 POLARIS_UPDATER_TOKEN}
+      - WATCHTOWER_HTTP_API_TOKEN=${POLARIS_UPDATER_TOKEN:-polaris-internal-updater}
       # Watchtower 1.7.1 默认协商到旧 API 1.25；Docker Engine 29 已拒绝低于 1.40 的客户端。
       - DOCKER_API_VERSION=${POLARIS_DOCKER_API_VERSION:-1.40}
     command:

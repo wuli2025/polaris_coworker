@@ -83,6 +83,10 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      - name: Validate NAS compose contract
+        shell: bash
+        run: sh docker/test-nas-compose.sh
+
       - name: Validate Docker click-update path with real Watchtower
         shell: bash
         env:
