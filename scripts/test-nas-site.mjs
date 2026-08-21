@@ -36,6 +36,7 @@ assert.match(nasSection, /已经是 2\.9\.2/);
 assert.match(nasSection, /nas-bootstrap\.sh/);
 assert.match(nasSection, /git pull --ff-only origin main/);
 assert.match(nasSection, /HostConfig\.PortBindings/);
+assert.match(nasSection, /sudo docker inspect/);
 assert.doesNotMatch(nasSection, /ghcr\.io\/wuli2025\/polaris:/);
 assert.doesNotMatch(nasSection, /polaris-image-2\.6\.2/);
 assert.doesNotMatch(nasSection, /POLARIS_(?:AUTH|UPDATER)_TOKEN|POLARIS_REQUIRE_LOGIN/);

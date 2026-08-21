@@ -34,7 +34,7 @@ sudo sh docker/nas-bootstrap.sh</pre>
   </ol>
   <div class="code">
     <div class="bar"><span class="fn">核对 {{VERSION}}</span><button class="copy">复制命令</button></div>
-<pre>POLARIS_PORT="$(docker inspect -f '{{with (index .HostConfig.PortBindings "8080/tcp")}}{{(index . 0).HostPort}}{{end}}' polaris-web)"
+<pre>POLARIS_PORT="$(sudo docker inspect -f '{{with (index .HostConfig.PortBindings "8080/tcp")}}{{(index . 0).HostPort}}{{end}}' polaris-web)"
 curl -fsS "http://127.0.0.1:${POLARIS_PORT}/api/build"</pre>
   </div>
   <div class="note info"><span class="e"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></span><div><b>没有额外口令步骤。</b>NAS 保持当前免口令体验；容器之间的更新通信由部署文件内部处理，不需要记忆、填写或复制任何密钥。Docker socket 只进入固定版本的 updater sidecar，不进入 Polaris App。</div></div>
