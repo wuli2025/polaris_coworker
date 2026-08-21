@@ -64,8 +64,9 @@ WORKDIR /build/src-tauri
 #   故 -p polaris-cli 即等价于文档里的 --no-default-features --features server。
 # 注意括号:|| true 只容忍 strip 失败,绝不能吞 cargo 的失败(踩过——binary not found 才炸)
 # --features collab-net:让 polaris-server 起 iroh host_listen 暴露 NodeId(P2P 直连 + fsface 远程盘)。
-RUN cargo build --release -p polaris-cli --bin polaris-server --features collab-net \
-    && (strip target/release/polaris-server || true)
+RUN cargo build --release -p polaris-cli --bins --features collab-net \
+    && (strip target/release/polaris-server || true) \
+    && (strip target/release/polaris-forge || true)
 
 # ── stage 3: 运行层 ────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -147,6 +148,7 @@ RUN useradd -m -u 1000 -s /bin/bash polaris \
 
 COPY --from=web        --chown=polaris:polaris /build/dist /srv/web
 COPY --from=server     --chown=polaris:polaris /build/src-tauri/target/release/polaris-server /usr/local/bin/polaris-server
+COPY --from=server     --chown=polaris:polaris /build/src-tauri/target/release/polaris-forge /usr/local/bin/polaris-forge
 COPY --from=server     --chown=polaris:polaris /build/src-tauri/resources /app/resources
 # 更新脚本只通过内网调用隔离的 Watchtower HTTP API；本镜像既不含 Docker CLI，
 # 也永不挂宿主机 docker.sock（socket 仅属于可选 updater sidecar）。

@@ -211,7 +211,7 @@ function buildPrompt(): string {
         ? "**要配图**。顺序按 SKILL.md 2.5：先把完整 spec 写盘（image 字段直接写计划路径，实时预览立刻逐页点亮、缺图显示占位框），再用 `polaris-forge image --prompt=\"…\" --out=<产物目录>/img/xx.png --ratio=16:9` 把图生到那些路径（prompt 必须写「无文字」），最后才转换。宁少勿滥，2–5 张，只给「讲不清楚才需要看」的地方配。生图失败就改用无图版式、末尾说明，别卡住。"
         : "本次**不配图**，只用文字版式（不要写 image 字段，也不要调生图）。"}`,
       "- 然后用 Polaris 自带 CLI 转换：`polaris-forge spec-pptx --spec=<产物目录>/polaris.slides.json --out=<产物目录>/演示.pptx`（CLI 在 ~/Polaris/bin/，Windows 为 polaris-forge.exe）。",
-      "- 若 CLI 不存在也不用慌：把 spec 按上述文件名存好即可，Polaris 会自动完成转换。**不要**因 CLI 缺失就改去写 HTML 或截图，那会毁掉可编辑性。",
+      "- 若 CLI 不存在：把 spec 按上述文件名存好后停止转换尝试，Polaris 会自动完成转换。不要安装浏览器/Node 包/系统依赖，不要用 apt、sudo 或从根目录和挂载盘搜索，不要创建或修改 ~/Polaris/skills 下的文件；自行写的辅助文件只能放本次产物目录。不要因 CLI 缺失额外改去写 HTML 或截图。",
     );
   } else {
     lines.push(
