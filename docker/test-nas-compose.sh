@@ -50,4 +50,15 @@ if (c.services.polaris.user !== "0:0") {
 }
 NODE
 
+POLARIS_HTTP_PORT=19092 compose --env-file "$tmp/empty.env" \
+  -f docker-compose.yml -f docker-compose.update.yml \
+  config --format json > "$tmp/custom-port.json"
+
+node - "$tmp/custom-port.json" <<'NODE'
+const fs = require("fs");
+const c = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const published = c.services.polaris.ports?.[0]?.published;
+if (String(published) !== "19092") throw new Error(`unexpected published HTTP port ${published}`);
+NODE
+
 printf '%s\n' "NAS compose contract: ok"

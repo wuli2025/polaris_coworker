@@ -96,6 +96,7 @@ download_verified() {
 }
 
 repo_root=
+repo_env_source=
 if command -v git >/dev/null 2>&1; then
   repo_root=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null || true)
 fi
@@ -108,6 +109,9 @@ if [ -n "$repo_root" ] &&
   copy_atomic "$repo_root/docker-compose.yml" "$BASE_FILE"
   copy_atomic "$repo_root/docker-compose.update.yml" "$UPDATE_FILE"
   copy_atomic "$repo_root/.env.server.example" "$ENV_EXAMPLE"
+  if [ -f "$repo_root/.env" ]; then
+    repo_env_source=$repo_root/.env
+  fi
   printf '%s\n' "使用当前 Git 目录中的 Polaris $EXPECTED_VERSION 部署文件。"
 else
   manifest=$STACK_DIR/latest.json.download.$$
@@ -133,24 +137,35 @@ else
 fi
 
 if [ ! -f "$ENV_FILE" ]; then
-  copy_atomic "$ENV_EXAMPLE" "$ENV_FILE"
+  if [ -n "$repo_env_source" ]; then
+    copy_atomic "$repo_env_source" "$ENV_FILE"
+  else
+    copy_atomic "$ENV_EXAMPLE" "$ENV_FILE"
+  fi
 fi
 
 env_set() {
   env_key=$1
   env_value=$2
   temp_file=$ENV_FILE.tmp.$$
-  awk -v key="$env_key" -v value="$env_value" '
-    BEGIN { found=0 }
-    index($0, key "=") == 1 {
-      if (!found) print key "=" value
-      found=1
-      next
-    }
+  awk -v key="$env_key" '
+    index($0, key "=") == 1 { next }
     { print }
-    END { if (!found) print key "=" value }
   ' "$ENV_FILE" > "$temp_file"
+  printf '%s=%s\n' "$env_key" "$env_value" >> "$temp_file"
   mv "$temp_file" "$ENV_FILE"
+}
+
+env_get() {
+  env_key=$1
+  awk -v key="$env_key" '
+    index($0, key "=") == 1 {
+      line=$0
+      sub("^[^=]*=", "", line)
+      value=line
+    }
+    END { print value }
+  ' "$ENV_FILE"
 }
 
 # 当前 NAS 产品约定为免口令访问；账号体系上线前不让这些开关阻断使用。
@@ -159,14 +174,26 @@ env_set POLARIS_AUTH_TOKEN ""
 env_set POLARIS_REQUIRE_LOGIN ""
 env_set POLARIS_LAN_ONLY ""
 
-# updater token 只属于 Compose 私网。能生成就静默写入，不能生成则由 overlay 的
-# 内部默认值兜底；任何一种情况都不向用户展示或索取。
+# updater token 只属于 Compose 私网。安装时静默生成独立值，不向用户展示或索取。
+# 极简 NAS 没有 openssl 时改读内核随机源；再不具备时用本机状态做一次性散列兜底。
 if ! grep -Eq '^POLARIS_UPDATER_TOKEN=.+$' "$ENV_FILE"; then
   token=
   if command -v openssl >/dev/null 2>&1; then
     token=$(openssl rand -hex 32 2>/dev/null || true)
   fi
-  [ -z "$token" ] || env_set POLARIS_UPDATER_TOKEN "$token"
+  if [ -z "$token" ] && command -v od >/dev/null 2>&1 && command -v tr >/dev/null 2>&1 && [ -r /dev/urandom ]; then
+    token=$(od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)
+  fi
+  if ! printf '%s' "$token" | grep -Eq '^[0-9a-f]{64}$'; then
+    token=$(
+      {
+        date +%s 2>/dev/null || true
+        uname -n 2>/dev/null || true
+        printf '%s\n' "$$"
+      } | sha256sum | awk '{print $1}'
+    )
+  fi
+  env_set POLARIS_UPDATER_TOKEN "$token"
 fi
 chmod 600 "$ENV_FILE" || die "无法收紧 .env 权限"
 
@@ -183,6 +210,38 @@ if docker inspect "$TARGET" >/dev/null 2>&1; then
   data_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/root/Polaris"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET")
   claude_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/root/.claude"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET")
   config_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/root/.config"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET" || true)
+  legacy_port=$(docker inspect -f '{{with (index .HostConfig.PortBindings "8080/tcp")}}{{(index . 0).HostPort}}{{end}}' "$TARGET")
+  printf '%s' "$legacy_port" | grep -Eq '^[0-9]{1,5}$' || die "未识别旧容器的 8080/tcp 宿主机端口"
+  [ "$legacy_port" -ge 1 ] && [ "$legacy_port" -le 65535 ] || die "旧容器宿主机端口无效：$legacy_port"
+  host_port=$legacy_port
+  env_set POLARIS_HTTP_PORT "$host_port"
+
+  # Git 目录会整份保留原 .env；无 Git 的旧容器则只迁移已知业务配置。
+  # 访问口令、旧 Docker socket/更新器和旧镜像变量不在白名单内。
+  legacy_env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$TARGET" || true)
+  for env_key in \
+    ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN \
+    POLARIS_SMTP_HOST POLARIS_SMTP_PORT POLARIS_SMTP_USER POLARIS_SMTP_PASS \
+    POLARIS_SMTP_FROM POLARIS_EMAIL_SIGNUP \
+    POLARIS_ACCOUNT_AUTHORITY POLARIS_ACCOUNT_AUTHORITY_URL \
+    POLARIS_ACCOUNT_OPEN_SIGNUP POLARIS_ACCOUNT_KEY POLARIS_REPO_ROOT \
+    POLARIS_IROH_PORT POLARIS_RELAYS POLARIS_TUNNEL_AUTOSTART \
+    POLARIS_TUNNEL_WORKERS POLARIS_TUNNEL_BUF_KB POLARIS_FS_ZSTD_LEVEL \
+    POLARIS_FABLE_WORKERS POLARIS_FABLE_MMAP_MB POLARIS_FABLE_CACHE_MB \
+    POLARIS_MEM_LIMIT GITEA_MEM_LIMIT GITEA_ADMIN_USER \
+    GITEA_ADMIN_PASSWORD GITEA_ADMIN_EMAIL
+  do
+    current_value=$(env_get "$env_key")
+    [ -z "$current_value" ] || continue
+    legacy_value=$(printf '%s\n' "$legacy_env" | awk -v key="$env_key" '
+      index($0, key "=") == 1 {
+        sub("^[^=]*=", "", $0)
+        print
+        exit
+      }
+    ')
+    [ -z "$legacy_value" ] || env_set "$env_key" "$legacy_value"
+  done
   [ -n "$data_mount" ] || die "未识别旧数据挂载；inspect 已保存到 $backup_dir"
   [ -n "$claude_mount" ] || die "未识别旧 Claude 挂载；inspect 已保存到 $backup_dir"
 
@@ -257,6 +316,11 @@ if docker inspect "$TARGET" >/dev/null 2>&1; then
 else
   rm -f "$LEGACY_FILE"
   env_set POLARIS_RUNTIME_USER ""
+  host_port=$(env_get POLARIS_HTTP_PORT)
+  [ -n "$host_port" ] || host_port=8080
+  printf '%s' "$host_port" | grep -Eq '^[0-9]{1,5}$' || die "POLARIS_HTTP_PORT 必须是有效端口"
+  [ "$host_port" -ge 1 ] && [ "$host_port" -le 65535 ] || die "POLARIS_HTTP_PORT 超出范围"
+  env_set POLARIS_HTTP_PORT "$host_port"
 fi
 
 cd "$STACK_DIR"
@@ -325,7 +389,7 @@ compose up -d --no-build || die "新容器启动失败"
 ready=0
 attempt=0
 while [ "$attempt" -lt "$HEALTH_ATTEMPTS" ]; do
-  if curl -fsS http://127.0.0.1:8080/api/ready >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:$host_port/api/ready" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -334,7 +398,7 @@ while [ "$attempt" -lt "$HEALTH_ATTEMPTS" ]; do
 done
 [ "$ready" -eq 1 ] || die "180 秒内服务未就绪"
 
-build_json=$(curl -fsS http://127.0.0.1:8080/api/build) || die "无法读取新容器 build 信息"
+build_json=$(curl -fsS "http://127.0.0.1:$host_port/api/build") || die "无法读取新容器 build 信息"
 build_version=$(printf '%s' "$build_json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 build_revision=$(printf '%s' "$build_json" | sed -n 's/.*"buildRevision"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 [ "$build_version" = "$EXPECTED_VERSION" ] || die "新容器版本不是 $EXPECTED_VERSION"

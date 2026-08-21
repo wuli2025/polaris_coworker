@@ -53,14 +53,6 @@ const [bootstrap, baseCompose, updateCompose, envExample] = await Promise.all([
   repoBytes(".env.server.example"),
 ]);
 
-await Promise.all([
-  atomicWrite(path.join(siteRoot, "docker/nas-bootstrap.sh"), bootstrap, 0o755),
-  atomicWrite(path.join(siteRoot, "docker/install-r2.sh"), bootstrap, 0o755),
-  atomicWrite(path.join(siteRoot, "docker/current/docker-compose.yml"), baseCompose),
-  atomicWrite(path.join(siteRoot, "docker/current/docker-compose.update.yml"), updateCompose),
-  atomicWrite(path.join(siteRoot, "docker/current/env.server.example"), envExample),
-]);
-
 const latest = {
   schemaVersion: 1,
   version,
@@ -80,10 +72,7 @@ const latest = {
     envExample: sha256(envExample),
   },
 };
-await atomicWrite(
-  path.join(siteRoot, "downloads/docker/latest.json"),
-  `${JSON.stringify(latest, null, 2)}\n`,
-);
+const latestText = `${JSON.stringify(latest, null, 2)}\n`;
 
 const nasMarker = "<!-- ══════════════ NAS（置顶 · 推荐） ══════════════ -->";
 const windowsMarker = "<!-- ══════════════ Windows ══════════════ -->";
@@ -108,7 +97,6 @@ if (/\{\{[A-Z_]+\}\}/.test(renderedSection)) die("NAS section still contains tem
 
 let renderedNas = `${nasHtml.slice(0, nasIndex)}${renderedSection}\n\n${nasHtml.slice(windowsIndex)}`;
 renderedNas = renderedNas.replace(/NAS 镜像 v\d+\.\d+\.\d+/g, `NAS 镜像 v${version}`);
-await atomicWrite(nasPath, renderedNas);
 
 const functionPath = path.join(siteRoot, "functions/downloads/[[path]].js");
 let functionSource = await readFile(functionPath, "utf8");
@@ -127,13 +115,12 @@ if (functionSource.includes(redirectStart) || functionSource.includes(redirectEn
   const insertAt = keyIndex + keyLine.length;
   functionSource = `${functionSource.slice(0, insertAt)}\n${redirectBlock}${functionSource.slice(insertAt)}`;
 }
-await atomicWrite(functionPath, functionSource);
 
 const headersPath = path.join(siteRoot, "_headers");
 let headers = await readFile(headersPath, "utf8");
 const headersStart = "# POLARIS_CURRENT_DOCKER_HEADERS_START";
 const headersEnd = "# POLARIS_CURRENT_DOCKER_HEADERS_END";
-const headersBlock = `${headersStart}\n/downloads/docker/latest.json\n  Content-Disposition: inline\n  Cache-Control: no-store\n/docker/current/*\n  Cache-Control: no-store\n/docker/nas-bootstrap.sh\n  Cache-Control: no-store\n/docker/install-r2.sh\n  Cache-Control: no-store\n${headersEnd}`;
+const headersBlock = `${headersStart}\n/downloads/docker/latest.json\n  ! Content-Disposition\n  ! Cache-Control\n  Cache-Control: no-store\n/docker/current/*\n  Cache-Control: no-store\n/docker/nas-bootstrap.sh\n  Cache-Control: no-store\n/docker/install-r2.sh\n  Cache-Control: no-store\n${headersEnd}`;
 if (headers.includes(headersStart) || headers.includes(headersEnd)) {
   const start = headers.indexOf(headersStart);
   const end = headers.indexOf(headersEnd);
@@ -142,6 +129,19 @@ if (headers.includes(headersStart) || headers.includes(headersEnd)) {
 } else {
   headers = `${headers.trimEnd()}\n\n${headersBlock}\n`;
 }
-await atomicWrite(headersPath, headers);
+
+// Validate and render every destination before the first write so a malformed
+// site tree cannot be left with a partially staged release.
+await Promise.all([
+  atomicWrite(path.join(siteRoot, "docker/nas-bootstrap.sh"), bootstrap, 0o755),
+  atomicWrite(path.join(siteRoot, "docker/install-r2.sh"), bootstrap, 0o755),
+  atomicWrite(path.join(siteRoot, "docker/current/docker-compose.yml"), baseCompose),
+  atomicWrite(path.join(siteRoot, "docker/current/docker-compose.update.yml"), updateCompose),
+  atomicWrite(path.join(siteRoot, "docker/current/env.server.example"), envExample),
+  atomicWrite(path.join(siteRoot, "downloads/docker/latest.json"), latestText),
+  atomicWrite(nasPath, renderedNas),
+  atomicWrite(functionPath, functionSource),
+  atomicWrite(headersPath, headers),
+]);
 
 console.log(`Staged NAS ${version} (${revision.slice(0, 12)}) into ${siteRoot}`);

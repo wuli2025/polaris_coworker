@@ -4,8 +4,8 @@
 # socket，也没有 Docker CLI。App 只能用内部密钥调 Watchtower 的 /v1/update 窄接口，
 # 且 Watchtower 同时钉死目标容器名与 enable 标签，不会更新宿主机上的其他容器。
 #
-# POLARIS_UPDATER_TOKEN 只在 Compose 私有网络内部使用。安装脚本会尽量静默生成随机值；
-# 未生成时两端使用同一个非空默认值继续启动，不询问用户，也不阻断 NAS 使用。
+# POLARIS_UPDATER_TOKEN 只在 Compose 私有网络内部使用。安装脚本会静默生成独立随机值；
+# 手动 Compose 启动且未生成时，两端用同一个非空默认值继续启动，也不会阻断 NAS 使用。
 services:
   polaris:
     # 标签只随本 overlay 出现；基础 compose 不会误加入宿主机上已有的全局 Watchtower。

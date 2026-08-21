@@ -56,7 +56,10 @@ assert.deepEqual(bootstrap, legacyBootstrap, "legacy install-r2 path must serve 
 
 assert.match(fn, /key === "docker"/);
 assert.match(fn, /\/downloads\/docker\/latest\.json/);
-assert.match(headers, /\/downloads\/docker\/latest\.json[\s\S]*?Cache-Control: no-store/);
+assert.match(
+  headers,
+  /\/downloads\/docker\/latest\.json\s+! Content-Disposition\s+! Cache-Control\s+Cache-Control: no-store/,
+);
 assert.match(headers, /\/docker\/current\/\*[\s\S]*?Cache-Control: no-store/);
 
 const functionModule = await import(`data:text/javascript;base64,${Buffer.from(fn).toString("base64")}`);

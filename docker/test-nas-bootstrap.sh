@@ -48,7 +48,7 @@ fi
 
 if [ "${1:-}" = inspect ]; then
   case "$POLARIS_TEST_CASE" in
-    fresh_install|git_checkout) exit 1 ;;
+    fresh_install|git_checkout|no_openssl) exit 1 ;;
   esac
   if [ "${2:-}" = -f ]; then
     format=${3:-}
@@ -68,6 +68,19 @@ if [ "${1:-}" = inspect ]; then
         fi
         ;;
       *'/root/.config'*) printf '%s\n' '' ;;
+      *'PortBindings'*)
+        if [ "$POLARIS_TEST_CASE" = custom_port ]; then
+          printf '%s\n' '19092'
+        else
+          printf '%s\n' '8080'
+        fi
+        ;;
+      *'.Config.Env'*)
+        printf '%s\n' \
+          'ANTHROPIC_AUTH_TOKEN=legacy-provider-secret' \
+          'POLARIS_AUTH_TOKEN=must-not-migrate' \
+          'POLARIS_DOCKER_SOCKET=1'
+        ;;
     esac
   else
     printf '%s\n' '{"Id":"legacy-container"}'
@@ -81,6 +94,7 @@ STUB
   cat > "$case_dir/bin/curl" <<'STUB'
 #!/bin/sh
 set -eu
+printf '%s\n' "$*" >> "$POLARIS_TEST_CURL_CALLS"
 out=
 url=
 while [ "$#" -gt 0 ]; do
@@ -141,17 +155,37 @@ run_case() {
   case_dir="$test_root/$name"
   stack="$case_dir/stack"
   calls="$case_dir/calls.log"
+  curl_calls="$case_dir/curl-calls.log"
   output="$case_dir/output.log"
   mkdir -p "$stack"
   : > "$calls"
+  : > "$curl_calls"
   make_stubs "$case_dir"
+
+  if [ "$name" = no_openssl ]; then
+    cat > "$case_dir/bin/openssl" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+    chmod +x "$case_dir/bin/openssl"
+  fi
 
   if [ "$name" = legacy_named_volume ]; then
     printf '%s\n' 'POLARIS_UPDATER_TOKEN=already-internal' > "$stack/.env"
   fi
 
   if [ "$cwd_mode" = repository ]; then
-    work_dir=$root
+    source_dir=$case_dir/source
+    mkdir -p "$source_dir"
+    cp "$root/docker-compose.yml" "$source_dir/docker-compose.yml"
+    cp "$root/docker-compose.update.yml" "$source_dir/docker-compose.update.yml"
+    cp "$root/.env.server.example" "$source_dir/.env.server.example"
+    cp "$root/package.json" "$source_dir/package.json"
+    printf '%s\n' \
+      'ANTHROPIC_API_KEY=git-provider-secret' \
+      'POLARIS_BIND_IP=127.0.0.1' > "$source_dir/.env"
+    git -C "$source_dir" init -q
+    work_dir=$source_dir
   else
     work_dir=$case_dir
   fi
@@ -165,6 +199,7 @@ run_case() {
       POLARIS_HEALTH_SLEEP=0 \
       POLARIS_TEST_CASE="$name" \
       POLARIS_TEST_CALLS="$calls" \
+      POLARIS_TEST_CURL_CALLS="$curl_calls" \
       POLARIS_TEST_ASSETS="$root" \
       sh "$root/docker/nas-bootstrap.sh"
   ) > "$output" 2>&1; then
@@ -180,16 +215,26 @@ assert_file "$stack/.env"
 assert_contains "$calls" "compose -p polaris-v292 -f $stack/docker-compose.yml -f $stack/docker-compose.update.yml pull polaris polaris-updater"
 assert_not_contains "$output" "POLARIS_UPDATER_TOKEN="
 
+run_case no_openssl
+[ "$result" -eq 0 ] || fail "install without openssl failed"
+grep -Eq '^POLARIS_UPDATER_TOKEN=[0-9a-f]{64}$' "$stack/.env" ||
+  fail "install without openssl did not generate an invisible internal token"
+assert_not_contains "$output" "POLARIS_UPDATER_TOKEN="
+
 run_case git_checkout repository
 [ "$result" -eq 0 ] || fail "git checkout install failed"
 assert_file "$stack/docker-compose.yml"
-assert_not_contains "$calls" "downloads/docker/latest.json"
+assert_contains "$stack/.env" "ANTHROPIC_API_KEY=git-provider-secret"
+assert_not_contains "$curl_calls" "downloads/docker/latest.json"
 
 run_case legacy_bind_mount
 [ "$result" -eq 0 ] || fail "legacy bind migration failed"
 assert_contains "$stack/docker-compose.legacy-data.yml" "source: '/volume1/docker/polaris/data'"
 assert_contains "$stack/docker-compose.legacy-data.yml" "target: /home/polaris/Polaris"
 assert_contains "$stack/.env" "POLARIS_RUNTIME_USER=0:0"
+assert_contains "$stack/.env" "ANTHROPIC_AUTH_TOKEN=legacy-provider-secret"
+assert_contains "$stack/.env" "POLARIS_AUTH_TOKEN="
+assert_not_contains "$stack/.env" "must-not-migrate"
 assert_contains "$calls" "stop polaris-web"
 assert_contains "$calls" "rename polaris-web polaris-web-legacy-"
 assert_not_contains "$output" "POLARIS_UPDATER_TOKEN="
@@ -200,6 +245,12 @@ assert_contains "$stack/docker-compose.legacy-data.yml" "external: true"
 assert_contains "$stack/docker-compose.legacy-data.yml" "name: 'old_polaris-data'"
 assert_contains "$stack/.env" "POLARIS_UPDATER_TOKEN=already-internal"
 assert_not_contains "$output" "already-internal"
+
+run_case custom_port
+[ "$result" -eq 0 ] || fail "custom-port migration failed"
+assert_contains "$stack/.env" "POLARIS_HTTP_PORT=19092"
+assert_contains "$curl_calls" "http://127.0.0.1:19092/api/ready"
+assert_contains "$curl_calls" "http://127.0.0.1:19092/api/build"
 
 run_case pull_failure
 [ "$result" -ne 0 ] || fail "pull failure unexpectedly succeeded"

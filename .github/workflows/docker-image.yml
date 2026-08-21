@@ -18,8 +18,53 @@ env:
   REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
+  verify:
+    name: Verify release contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify frontend and architecture contracts
+        run: |
+          npm run test:unit
+          npm run build
+          npm run check:boundaries
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Verify passwordless Docker updater server contract
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features server docker_
+
+      - name: Verify NAS scripts, Compose, site staging, and release workflow
+        run: |
+          sh docker/test-nas-compose.sh
+          sh docker/test-nas-bootstrap.sh
+          sh -n docker/test-nas-migration-e2e.sh
+          node scripts/test-stage-nas-site.mjs
+          node scripts/test-docker-workflow.mjs
+          git show --check --oneline --no-renames HEAD
+
   publish:
     name: Build and publish (${{ github.ref_name }})
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
@@ -73,7 +118,8 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          # Only an immutable staging tag is visible until every real Docker E2E passes.
+          tags: ${{ env.REGISTRY_IMAGE }}:staging-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             POLARIS_BUILD_REVISION=${{ github.sha }}
@@ -82,12 +128,6 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
-
-      - name: Validate NAS compose contract
-        shell: bash
-        run: |
-          sh docker/test-nas-compose.sh
-          sh docker/test-nas-bootstrap.sh
 
       - name: Validate Docker click-update path with real Watchtower
         shell: bash
@@ -98,3 +138,29 @@ jobs:
           sh -n docker/update.sh
           sh -n docker/test-update-e2e.sh
           sh docker/test-update-e2e.sh
+
+      - name: Validate real NAS legacy migration and rollback
+        shell: bash
+        env:
+          POLARIS_E2E: "1"
+          BASE_IMAGE_REPO: ${{ env.REGISTRY_IMAGE }}
+          BASE_IMAGE_TAG: staging-${{ github.sha }}
+        run: |
+          sh -n docker/test-nas-migration-e2e.sh
+          sh docker/test-nas-migration-e2e.sh
+
+      - name: Promote verified image tags
+        shell: bash
+        env:
+          PROMOTION_TAGS: ${{ steps.meta.outputs.tags }}
+          VERIFIED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mapfile -t tags <<< "$PROMOTION_TAGS"
+          promote_args=()
+          for tag in "${tags[@]}"; do
+            [ -z "$tag" ] || promote_args+=(--tag "$tag")
+          done
+          [ "${#promote_args[@]}" -gt 0 ]
+          docker buildx imagetools create \
+            "${promote_args[@]}" \
+            "${REGISTRY_IMAGE}@${VERIFIED_DIGEST}"
