@@ -38,6 +38,13 @@ cleanup() {
   docker volume rm "$legacy_volume" >/dev/null 2>&1 || true
   docker volume rm "$legacy_home_volume" >/dev/null 2>&1 || true
   docker network rm "$legacy_network" >/dev/null 2>&1 || true
+  # The staged Polaris container writes into these disposable bind mounts as
+  # UID 1000/root. Return only this mktemp tree to the runner before the host
+  # removes it; production legacy data is never chowned by the migration.
+  cleanup_uid=$(id -u)
+  cleanup_gid=$(id -g)
+  docker run --rm -v "$test_root:/cleanup" alpine:3.20 \
+    chown -R "$cleanup_uid:$cleanup_gid" /cleanup >/dev/null 2>&1 || true
   rm -rf "$test_root"
 }
 trap cleanup EXIT HUP INT TERM
