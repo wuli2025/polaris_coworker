@@ -13,7 +13,7 @@
 
 官网 `https://llmwiki.cloud/nas#nas`、安装脚本与机器可读清单必须指向同一套最新镜像身份，不能再出现页面写 2.6.2、R2 清单写 2.7.0、GHCR 已是 2.9.2 的分裂状态。
 
-用户明确要求 NAS 保持局域网免口令体验。因此不询问、生成或强制配置 `POLARIS_AUTH_TOKEN`。`POLARIS_UPDATER_TOKEN` 只用于 Polaris 容器到 Watchtower sidecar 的内部 Bearer 鉴权，由安装/迁移脚本静默生成并写入权限收紧的 `.env`，不向用户索取。
+用户明确要求 NAS 暂时保持完全免口令体验，后续再由账号体系接管。因此不询问、生成或强制配置 `POLARIS_AUTH_TOKEN`，也不要求 `POLARIS_REQUIRE_LOGIN` 或 `POLARIS_LAN_ONLY`。`POLARIS_UPDATER_TOKEN` 只用于 Polaris 容器到 Watchtower sidecar 的内部协议鉴权，不是用户访问口令；它由安装/迁移脚本静默生成并写入权限收紧的 `.env`，不展示、不向用户索取。
 
 ## 2. 已确认的根因
 
@@ -33,7 +33,7 @@
 1. 切回并快进更新 `main`；
 2. 保留已有 `.env`，不存在时从 `.env.server.example` 创建；
 3. 缺少 `POLARIS_UPDATER_TOKEN` 时静默生成；
-4. NAS 免口令部署默认写入 `POLARIS_LAN_ONLY=1`，不创建 `POLARIS_AUTH_TOKEN`；
+4. 保持 `POLARIS_AUTH_TOKEN`、`POLARIS_REQUIRE_LOGIN` 与 `POLARIS_LAN_ONLY` 为空，设置 `POLARIS_BIND_IP=0.0.0.0` 供 NAS 所在网络访问；
 5. 执行仓库内的迁移准备命令：记录旧容器身份并在 `.env` 写入 `POLARIS_RUNTIME_USER=0:0`，沿用旧版默认的 root 数据属主，但不再给应用容器 Docker socket；
 6. 拉取并启动 `docker-compose.yml` 与 `docker-compose.update.yml`；
 7. 轮询 `/api/ready`，再读取 `/api/build` 验证版本和 revision。
@@ -60,21 +60,17 @@ Compose 项目沿用原目录和卷名，所以命名卷不会被删除。迁移
 
 ### 3.3 路径 C：2.9.2 及后续页面更新
 
-`POLARIS_UPDATER_TOKEN` 继续保护内部 Watchtower HTTP API；该端口不发布到宿主机。应用侧远程更新能力满足下列任一安全条件时启用：
+`POLARIS_UPDATER_TOKEN` 继续保护内部 Watchtower HTTP API；该端口不发布到宿主机。只要固定的 updater 内网地址和内部 token 已配置，应用侧就启用远程更新能力，不再要求用户访问口令、账号登录或 LAN-only 开关。
 
-- 配置了 `POLARIS_AUTH_TOKEN`；
-- 配置了 `POLARIS_REQUIRE_LOGIN=1`；
-- 配置了 `POLARIS_LAN_ONLY=1`。
-
-第三种是本次新增的 NAS 免口令档。它只在现有来源闸门已把请求限定为回环、RFC1918 私网或 Tailscale CGNAT 地址时成立；公网来源、伪造转发头以及无法判定来源的请求继续被拒绝。即使局域网用户触发更新，应用仍只能请求固定内网 Watchtower 地址，Watchtower 仍只更新带 enable 标签且名为 `polaris-web` 的官方镜像，不能执行任意 Docker 操作。
+这意味着当前任何能够打开该 NAS Polaris 页面的人都可以触发一次官方镜像检查/替换，符合现阶段“NAS 本身只在可达网络内使用”的产品约定。触发方不能指定镜像、容器、命令或 Docker API：应用只能请求固定内网 Watchtower 地址，Watchtower 仍只更新带 enable 标签且名为 `polaris-web` 的官方镜像。未来账号体系上线后，再把触发入口收敛到账号 owner 权限，本次不提前加入用户口令。
 
 NAS 默认 `.env` 为：
 
 ```dotenv
 POLARIS_BIND_IP=0.0.0.0
-POLARIS_LAN_ONLY=1
 POLARIS_AUTH_TOKEN=
 POLARIS_REQUIRE_LOGIN=
+# POLARIS_LAN_ONLY 留空；网络可达范围由 NAS/路由器自身决定
 # POLARIS_UPDATER_TOKEN 由脚本静默追加 64 位十六进制随机值，不在页面展示
 POLARIS_IMAGE_REPO=ghcr.io/wuli2025/polaris_coworker
 POLARIS_IMAGE_TAG=latest
@@ -130,7 +126,7 @@ POLARIS_RUNTIME_USER=0:0
 
 ### 6.1 单元/契约测试
 
-- Rust：远程更新能力在 auth、login、LAN-only 三档分别启用；全部关闭时禁用；LAN-only 来源闸门继续拒绝公网和伪造代理头；
+- Rust：未设置用户访问口令、账号登录和 LAN-only 时，只要内部 updater 配置完整就启用远程更新；内部 URL 或 token 缺失时禁用；触发目标仍固定为官方镜像和 `polaris-web`；
 - Shell：用 stub Docker/Compose 覆盖首次安装、有 Git、旧 bind mount、旧 named volume、旧 root runtime、拉取失败、健康失败回滚、token 已存在等分支；
 - 静态站点：断言 NAS 区域只出现 2.9.2 新路径、不再出现旧 Docker 镜像说明，机器清单 schema 完整，脚本和 Compose 校验和匹配。
 
