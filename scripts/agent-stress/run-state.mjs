@@ -2,6 +2,7 @@ function parseInputTokens(text) {
   if (!text) return null;
   try {
     const value = JSON.parse(text);
+    if (Number.isFinite(value)) return value;
     return Number.isFinite(value.inputTokens) ? value.inputTokens : null;
   } catch {
     return null;

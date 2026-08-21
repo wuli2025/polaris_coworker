@@ -72,4 +72,17 @@ describe("RunState", () => {
     expect(state.checkTimeout()).toBe(true);
     expect(state.result()).toMatchObject({ terminalCount: 0, timedOut: true, finishedAt: 151 });
   });
+
+  it("reads the numeric meta payload emitted by the Polaris chat pipeline", () => {
+    const state = new RunState({
+      requestId: "r1",
+      conversationId: "c1",
+      timeoutMs: 1000,
+      now: clock(10, 20),
+    });
+
+    state.accept(frame("r1", "c1", "meta", { text: "4567" }));
+
+    expect(state.result().inputTokens).toBe(4567);
+  });
 });

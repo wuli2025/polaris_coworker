@@ -94,6 +94,7 @@ marketing-site/.next/
 /.worktrees/
 
 # 根目录临时产物(实验脚本/日志/截图/评测中间件),一律不入库; _collabtest/ 为可重放测试例外
+/_agent_stress/
 /_*
 !/_collabtest/
 /.rustpull.log
