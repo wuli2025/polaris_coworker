@@ -136,11 +136,14 @@ else
   printf '%s\n' "已下载并校验 Polaris $EXPECTED_VERSION 部署文件。"
 fi
 
+env_origin=existing
 if [ ! -f "$ENV_FILE" ]; then
   if [ -n "$repo_env_source" ]; then
     copy_atomic "$repo_env_source" "$ENV_FILE"
+    env_origin=repository
   else
     copy_atomic "$ENV_EXAMPLE" "$ENV_FILE"
+    env_origin=template
   fi
 fi
 
@@ -207,9 +210,39 @@ if docker inspect "$TARGET" >/dev/null 2>&1; then
   mkdir -p "$backup_dir" || die "无法创建恢复目录"
   docker inspect "$TARGET" > "$backup_dir/container-inspect.json" || die "无法备份旧容器信息"
 
-  data_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/root/Polaris"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET")
-  claude_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/root/.claude"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET")
-  config_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/root/.config"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET" || true)
+  root_data_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/root/Polaris"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET")
+  root_claude_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/root/.claude"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET")
+  root_config_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/root/.config"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET" || true)
+  home_data_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/home/polaris/Polaris"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET")
+  home_claude_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/home/polaris/.claude"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET")
+  home_config_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/home/polaris/.config"}}{{.Type}}|{{.Name}}|{{.Source}}{{end}}{{end}}' "$TARGET" || true)
+
+  if [ -n "$root_data_mount" ] || [ -n "$root_claude_mount" ]; then
+    [ -n "$root_data_mount" ] && [ -n "$root_claude_mount" ] ||
+      die "旧 root 数据挂载不完整；inspect 已保存到 $backup_dir"
+    [ -z "$home_data_mount" ] && [ -z "$home_claude_mount" ] ||
+      die "旧容器同时包含 root/home 数据布局，拒绝猜测"
+    data_mount=$root_data_mount
+    claude_mount=$root_claude_mount
+    config_mount=$root_config_mount
+    runtime_user=0:0
+  elif [ -n "$home_data_mount" ] || [ -n "$home_claude_mount" ]; then
+    [ -n "$home_data_mount" ] && [ -n "$home_claude_mount" ] ||
+      die "旧 home 数据挂载不完整；inspect 已保存到 $backup_dir"
+    data_mount=$home_data_mount
+    claude_mount=$home_claude_mount
+    config_mount=$home_config_mount
+    runtime_user=1000:1000
+  else
+    die "未识别旧容器的 root/home 数据挂载；inspect 已保存到 $backup_dir"
+  fi
+
+  legacy_networks=$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$TARGET" || true)
+  retained_networks=
+  for network_name in $legacy_networks; do
+    case "$network_name" in bridge|host|none) continue ;; esac
+    retained_networks="${retained_networks}${retained_networks:+ }$network_name"
+  done
   legacy_port=$(docker inspect -f '{{with (index .HostConfig.PortBindings "8080/tcp")}}{{(index . 0).HostPort}}{{end}}' "$TARGET")
   printf '%s' "$legacy_port" | grep -Eq '^[0-9]{1,5}$' || die "未识别旧容器的 8080/tcp 宿主机端口"
   [ "$legacy_port" -ge 1 ] && [ "$legacy_port" -le 65535 ] || die "旧容器宿主机端口无效：$legacy_port"
@@ -232,7 +265,9 @@ if docker inspect "$TARGET" >/dev/null 2>&1; then
     GITEA_ADMIN_PASSWORD GITEA_ADMIN_EMAIL
   do
     current_value=$(env_get "$env_key")
-    [ -z "$current_value" ] || continue
+    if [ "$env_origin" != template ] && [ -n "$current_value" ]; then
+      continue
+    fi
     legacy_value=$(printf '%s\n' "$legacy_env" | awk -v key="$env_key" '
       index($0, key "=") == 1 {
         sub("^[^=]*=", "", $0)
@@ -242,9 +277,6 @@ if docker inspect "$TARGET" >/dev/null 2>&1; then
     ')
     [ -z "$legacy_value" ] || env_set "$env_key" "$legacy_value"
   done
-  [ -n "$data_mount" ] || die "未识别旧数据挂载；inspect 已保存到 $backup_dir"
-  [ -n "$claude_mount" ] || die "未识别旧 Claude 挂载；inspect 已保存到 $backup_dir"
-
   data_type=$(printf '%s' "$data_mount" | cut -d '|' -f 1)
   data_name=$(printf '%s' "$data_mount" | cut -d '|' -f 2)
   data_source=$(printf '%s' "$data_mount" | cut -d '|' -f 3-)
@@ -296,6 +328,14 @@ if docker inspect "$TARGET" >/dev/null 2>&1; then
         *) die "旧 config 挂载类型不受支持：$config_type" ;;
       esac
     fi
+    if [ -n "$retained_networks" ]; then
+      printf '%s\n' '    networks:' '      - default'
+      network_index=0
+      for network_name in $retained_networks; do
+        network_index=$((network_index + 1))
+        printf '%s\n' "      - legacy-network-$network_index"
+      done
+    fi
     if [ "$data_type" = volume ] || [ "$claude_type" = volume ] ||
        { [ -n "$config_mount" ] && [ "${config_type:-}" = volume ]; }; then
       printf '%s\n' 'volumes:'
@@ -309,9 +349,18 @@ if docker inspect "$TARGET" >/dev/null 2>&1; then
         printf '%s\n' '  legacy-polaris-config:' '    external: true' "    name: '$config_name_q'"
       fi
     fi
+    if [ -n "$retained_networks" ]; then
+      printf '%s\n' 'networks:'
+      network_index=0
+      for network_name in $retained_networks; do
+        network_index=$((network_index + 1))
+        network_name_q=$(yaml_quote "$network_name")
+        printf '%s\n' "  legacy-network-$network_index:" '    external: true' "    name: '$network_name_q'"
+      done
+    fi
   } > "$legacy_temp"
   mv "$legacy_temp" "$LEGACY_FILE" || die "无法写入旧数据挂载配置"
-  env_set POLARIS_RUNTIME_USER 0:0
+  env_set POLARIS_RUNTIME_USER "$runtime_user"
   legacy_name=$TARGET-legacy-$timestamp-$$
 else
   rm -f "$LEGACY_FILE"
@@ -322,6 +371,18 @@ else
   [ "$host_port" -ge 1 ] && [ "$host_port" -le 65535 ] || die "POLARIS_HTTP_PORT 超出范围"
   env_set POLARIS_HTTP_PORT "$host_port"
 fi
+
+# Compose 优先读取调用者已经 export 的变量。这里把产品约定和探测结果明确导出，
+# 避免旧安装命令残留的访问口令或端口覆盖刚写入的 .env。
+POLARIS_BIND_IP=0.0.0.0
+POLARIS_AUTH_TOKEN=
+POLARIS_REQUIRE_LOGIN=
+POLARIS_LAN_ONLY=
+POLARIS_HTTP_PORT=$host_port
+POLARIS_RUNTIME_USER=$(env_get POLARIS_RUNTIME_USER)
+POLARIS_UPDATER_TOKEN=$(env_get POLARIS_UPDATER_TOKEN)
+export POLARIS_BIND_IP POLARIS_AUTH_TOKEN POLARIS_REQUIRE_LOGIN POLARIS_LAN_ONLY
+export POLARIS_HTTP_PORT POLARIS_RUNTIME_USER POLARIS_UPDATER_TOKEN
 
 cd "$STACK_DIR"
 compose() {

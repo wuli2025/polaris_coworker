@@ -35,10 +35,15 @@ assert.match(nasSection, /旧版 2\.7 \/ 2\.8/);
 assert.match(nasSection, /已经是 2\.9\.2/);
 assert.match(nasSection, /nas-bootstrap\.sh/);
 assert.match(nasSection, /git pull --ff-only origin main/);
+assert.match(nasSection, /HostConfig\.PortBindings/);
 assert.doesNotMatch(nasSection, /ghcr\.io\/wuli2025\/polaris:/);
 assert.doesNotMatch(nasSection, /polaris-image-2\.6\.2/);
 assert.doesNotMatch(nasSection, /POLARIS_(?:AUTH|UPDATER)_TOKEN|POLARIS_REQUIRE_LOGIN/);
 assert.doesNotMatch(nasHtml, /NAS 镜像 v2\.6\.2/);
+assert.doesNotMatch(nasHtml, /目前只支持 x86_64/);
+assert.doesNotMatch(nasHtml, /数据在 <code>\/volume1\/docker\/polaris\/<\/code>/);
+assert.match(nasHtml, /同时支持 x86_64（Intel\/AMD）和 ARM64/);
+assert.match(nasHtml, /polaris-stack/);
 
 assert.equal(latest.version, "2.9.2");
 assert.match(latest.buildRevision, /^[0-9a-f]{40}$/);

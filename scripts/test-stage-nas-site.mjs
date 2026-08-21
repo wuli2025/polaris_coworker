@@ -37,7 +37,7 @@ try {
   await mkdir(path.join(siteRoot, "functions/downloads"), { recursive: true });
   await writeFile(
     path.join(siteRoot, "nas.html"),
-    `<!doctype html>\n<!-- ══════════════ NAS（置顶 · 推荐） ══════════════ -->\n<section id="nas">legacy</section>\n<!-- ══════════════ Windows ══════════════ -->\n<section id="win">Windows</section>\n<footer>NAS 镜像 v2.6.2 · Windows v2.6.0</footer>\n`,
+    `<!doctype html>\n<!-- ══════════════ NAS（置顶 · 推荐） ══════════════ -->\n<section id="nas">legacy</section>\n<!-- ══════════════ Windows ══════════════ -->\n<section id="win">Windows</section>\n<div class="body">你的 NAS 是 ARM 芯片（部分入门款如 DS220j / DS223j）。北极星目前只支持 x86_64（Intel/AMD）的 NAS，电脑版不受此限。</div>\n<div class="body">数据在 <code>/volume1/docker/polaris/</code>（File Station 可见）。卸载：删掉 Container Manager 里的那个容器/项目即可；要连数据一起清，再删那个文件夹。</div>\n<footer>NAS 镜像 v2.6.2 · Windows v2.6.0</footer>\n`,
   );
   await writeFile(
     path.join(siteRoot, "functions/downloads/[[path]].js"),

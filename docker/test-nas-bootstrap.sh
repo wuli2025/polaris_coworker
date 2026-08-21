@@ -38,6 +38,7 @@ set -eu
 printf '%s\n' "$*" >> "$POLARIS_TEST_CALLS"
 
 if [ "${1:-}" = compose ]; then
+  printf '%s\n' "compose-env bind=${POLARIS_BIND_IP-<unset>} port=${POLARIS_HTTP_PORT-<unset>} auth=${POLARIS_AUTH_TOKEN-<unset>} require=${POLARIS_REQUIRE_LOGIN-<unset>} lan=${POLARIS_LAN_ONLY-<unset>} runtime=${POLARIS_RUNTIME_USER-<unset>}" >> "$POLARIS_TEST_CALLS"
   case " $* " in
     *" pull "*)
       [ "$POLARIS_TEST_CASE" != pull_failure ] || exit 44
@@ -54,20 +55,39 @@ if [ "${1:-}" = inspect ]; then
     format=${3:-}
     case "$format" in
       *'/root/Polaris'*)
-        if [ "$POLARIS_TEST_CASE" = legacy_named_volume ]; then
+        if [ "$POLARIS_TEST_CASE" = legacy_git_home ]; then
+          printf '%s\n' ''
+        elif [ "$POLARIS_TEST_CASE" = legacy_named_volume ]; then
           printf '%s\n' 'volume|old_polaris-data|/var/lib/docker/volumes/old_polaris-data/_data'
         else
           printf '%s\n' 'bind||/volume1/docker/polaris/data'
         fi
         ;;
       *'/root/.claude'*)
-        if [ "$POLARIS_TEST_CASE" = legacy_named_volume ]; then
+        if [ "$POLARIS_TEST_CASE" = legacy_git_home ]; then
+          printf '%s\n' ''
+        elif [ "$POLARIS_TEST_CASE" = legacy_named_volume ]; then
           printf '%s\n' 'volume|old_polaris-claude|/var/lib/docker/volumes/old_polaris-claude/_data'
         else
           printf '%s\n' 'bind||/volume1/docker/polaris/claude'
         fi
         ;;
       *'/root/.config'*) printf '%s\n' '' ;;
+      *'/home/polaris/Polaris'*)
+        if [ "$POLARIS_TEST_CASE" = legacy_git_home ]; then
+          printf '%s\n' 'volume|v28_polaris-data|/var/lib/docker/volumes/v28_polaris-data/_data'
+        else
+          printf '%s\n' ''
+        fi
+        ;;
+      *'/home/polaris/.claude'*)
+        if [ "$POLARIS_TEST_CASE" = legacy_git_home ]; then
+          printf '%s\n' 'volume|v28_polaris-claude|/var/lib/docker/volumes/v28_polaris-claude/_data'
+        else
+          printf '%s\n' ''
+        fi
+        ;;
+      *'/home/polaris/.config'*) printf '%s\n' '' ;;
       *'PortBindings'*)
         if [ "$POLARIS_TEST_CASE" = custom_port ]; then
           printf '%s\n' '19092'
@@ -78,8 +98,13 @@ if [ "${1:-}" = inspect ]; then
       *'.Config.Env'*)
         printf '%s\n' \
           'ANTHROPIC_AUTH_TOKEN=legacy-provider-secret' \
+          'POLARIS_SMTP_HOST=legacy.smtp.invalid' \
+          'POLARIS_FABLE_WORKERS=7' \
           'POLARIS_AUTH_TOKEN=must-not-migrate' \
           'POLARIS_DOCKER_SOCKET=1'
+        ;;
+      *'NetworkSettings.Networks'*)
+        [ "$POLARIS_TEST_CASE" != legacy_git_home ] || printf '%s\n' 'v28_default'
         ;;
     esac
   else
@@ -183,6 +208,7 @@ STUB
     cp "$root/package.json" "$source_dir/package.json"
     printf '%s\n' \
       'ANTHROPIC_API_KEY=git-provider-secret' \
+      'POLARIS_SMTP_HOST=git.smtp.invalid' \
       'POLARIS_BIND_IP=127.0.0.1' > "$source_dir/.env"
     git -C "$source_dir" init -q
     work_dir=$source_dir
@@ -201,6 +227,11 @@ STUB
       POLARIS_TEST_CALLS="$calls" \
       POLARIS_TEST_CURL_CALLS="$curl_calls" \
       POLARIS_TEST_ASSETS="$root" \
+      POLARIS_BIND_IP=127.0.0.1 \
+      POLARIS_HTTP_PORT=19999 \
+      POLARIS_AUTH_TOKEN=host-must-not-win \
+      POLARIS_REQUIRE_LOGIN=1 \
+      POLARIS_LAN_ONLY=1 \
       sh "$root/docker/nas-bootstrap.sh"
   ) > "$output" 2>&1; then
     result=0
@@ -213,6 +244,7 @@ run_case fresh_install
 [ "$result" -eq 0 ] || fail "fresh install failed"
 assert_file "$stack/.env"
 assert_contains "$calls" "compose -p polaris-v292 -f $stack/docker-compose.yml -f $stack/docker-compose.update.yml pull polaris polaris-updater"
+assert_contains "$calls" "compose-env bind=0.0.0.0 port=8080 auth= require= lan= runtime="
 assert_not_contains "$output" "POLARIS_UPDATER_TOKEN="
 
 run_case no_openssl
@@ -233,6 +265,8 @@ assert_contains "$stack/docker-compose.legacy-data.yml" "source: '/volume1/docke
 assert_contains "$stack/docker-compose.legacy-data.yml" "target: /home/polaris/Polaris"
 assert_contains "$stack/.env" "POLARIS_RUNTIME_USER=0:0"
 assert_contains "$stack/.env" "ANTHROPIC_AUTH_TOKEN=legacy-provider-secret"
+assert_contains "$stack/.env" "POLARIS_SMTP_HOST=legacy.smtp.invalid"
+assert_contains "$stack/.env" "POLARIS_FABLE_WORKERS=7"
 assert_contains "$stack/.env" "POLARIS_AUTH_TOKEN="
 assert_not_contains "$stack/.env" "must-not-migrate"
 assert_contains "$calls" "stop polaris-web"
@@ -246,11 +280,34 @@ assert_contains "$stack/docker-compose.legacy-data.yml" "name: 'old_polaris-data
 assert_contains "$stack/.env" "POLARIS_UPDATER_TOKEN=already-internal"
 assert_not_contains "$output" "already-internal"
 
+run_case legacy_git_home repository
+[ "$result" -eq 0 ] || fail "legacy Git home-layout migration failed"
+assert_contains "$stack/docker-compose.legacy-data.yml" "name: 'v28_polaris-data'"
+assert_contains "$stack/docker-compose.legacy-data.yml" "name: 'v28_polaris-claude'"
+assert_contains "$stack/docker-compose.legacy-data.yml" "name: 'v28_default'"
+assert_contains "$stack/.env" "POLARIS_RUNTIME_USER=1000:1000"
+assert_contains "$stack/.env" "POLARIS_SMTP_HOST=git.smtp.invalid"
+assert_not_contains "$stack/.env" "legacy.smtp.invalid"
+if [ -n "${POLARIS_COMPOSE_BIN:-}" ]; then
+  "$POLARIS_COMPOSE_BIN" -p polaris-v292 \
+    -f "$stack/docker-compose.yml" \
+    -f "$stack/docker-compose.update.yml" \
+    -f "$stack/docker-compose.legacy-data.yml" \
+    --env-file "$stack/.env" config >/dev/null || fail "generated home-layout overlay is invalid"
+elif docker compose version >/dev/null 2>&1; then
+  docker compose -p polaris-v292 \
+    -f "$stack/docker-compose.yml" \
+    -f "$stack/docker-compose.update.yml" \
+    -f "$stack/docker-compose.legacy-data.yml" \
+    --env-file "$stack/.env" config >/dev/null || fail "generated home-layout overlay is invalid"
+fi
+
 run_case custom_port
 [ "$result" -eq 0 ] || fail "custom-port migration failed"
 assert_contains "$stack/.env" "POLARIS_HTTP_PORT=19092"
 assert_contains "$curl_calls" "http://127.0.0.1:19092/api/ready"
 assert_contains "$curl_calls" "http://127.0.0.1:19092/api/build"
+assert_contains "$calls" "compose-env bind=0.0.0.0 port=19092 auth= require= lan= runtime=0:0"
 
 run_case pull_failure
 [ "$result" -ne 0 ] || fail "pull failure unexpectedly succeeded"

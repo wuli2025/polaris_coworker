@@ -13,6 +13,8 @@ root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 test_root=$(mktemp -d)
 project_name=polaris-migration-e2e-${GITHUB_RUN_ID:-$$}
 legacy_volume=polaris-legacy-claude-${GITHUB_RUN_ID:-$$}
+legacy_home_volume=polaris-legacy-home-claude-${GITHUB_RUN_ID:-$$}
+legacy_network=polaris-legacy-v28-${GITHUB_RUN_ID:-$$}
 
 fail() {
   printf '%s\n' "NAS migration E2E: $*" >&2
@@ -28,29 +30,39 @@ remove_matching_recovery_containers() {
 
 cleanup() {
   trap - EXIT HUP INT TERM
-  if [ -f "$test_root/stack/docker-compose.yml" ]; then
-    if [ -n "${LEGACY_OVERLAY:-}" ]; then
-      docker compose -p "$project_name" \
-        -f "$test_root/stack/docker-compose.yml" \
-        -f "$test_root/stack/docker-compose.update.yml" \
-        -f "$LEGACY_OVERLAY" down >/dev/null 2>&1 || true
-    else
-      docker compose -p "$project_name" \
-        -f "$test_root/stack/docker-compose.yml" \
-        -f "$test_root/stack/docker-compose.update.yml" \
-        down >/dev/null 2>&1 || true
-    fi
-  fi
+  down_stack "$test_root/stack" "$project_name"
+  down_stack "$test_root/stack-home" "$project_name-home"
+  down_stack "$test_root/stack-rollback" "$project_name-rollback"
   docker rm -f polaris-web polaris-updater >/dev/null 2>&1 || true
   remove_matching_recovery_containers
   docker volume rm "$legacy_volume" >/dev/null 2>&1 || true
+  docker volume rm "$legacy_home_volume" >/dev/null 2>&1 || true
+  docker network rm "$legacy_network" >/dev/null 2>&1 || true
   rm -rf "$test_root"
 }
 trap cleanup EXIT HUP INT TERM
 
+down_stack() {
+  stack_path=$1
+  stack_project=$2
+  [ -f "$stack_path/docker-compose.yml" ] || return 0
+  if [ -f "$stack_path/docker-compose.legacy-data.yml" ]; then
+    docker compose -p "$stack_project" \
+      -f "$stack_path/docker-compose.yml" \
+      -f "$stack_path/docker-compose.update.yml" \
+      -f "$stack_path/docker-compose.legacy-data.yml" down >/dev/null 2>&1 || true
+  else
+    docker compose -p "$stack_project" \
+      -f "$stack_path/docker-compose.yml" \
+      -f "$stack_path/docker-compose.update.yml" down >/dev/null 2>&1 || true
+  fi
+}
+
 mkdir -p "$test_root/legacy-data"
 printf '%s\n' 'bind-sentinel' > "$test_root/legacy-data/sentinel.txt"
 docker volume create "$legacy_volume" >/dev/null
+docker volume create "$legacy_home_volume" >/dev/null
+docker network create "$legacy_network" >/dev/null
 docker run --rm -v "$legacy_volume:/volume" alpine:3.20 \
   sh -c 'printf "%s\n" volume-sentinel > /volume/sentinel.txt'
 
@@ -58,6 +70,8 @@ docker run -d \
   --name polaris-web \
   -p 127.0.0.1:18080:8080 \
   -e ANTHROPIC_AUTH_TOKEN=e2e-provider-secret \
+  -e POLARIS_SMTP_HOST=legacy.smtp.invalid \
+  -e POLARIS_FABLE_WORKERS=7 \
   -e POLARIS_AUTH_TOKEN=must-not-migrate \
   -v "$test_root/legacy-data:/root/Polaris" \
   -v "$legacy_volume:/root/.claude" \
@@ -71,6 +85,11 @@ docker run -d \
   POLARIS_IMAGE_TAG="$BASE_IMAGE_TAG" \
   POLARIS_HEALTH_ATTEMPTS=90 \
   POLARIS_HEALTH_SLEEP=2 \
+  POLARIS_BIND_IP=127.0.0.1 \
+  POLARIS_HTTP_PORT=19999 \
+  POLARIS_AUTH_TOKEN=host-must-not-win \
+  POLARIS_REQUIRE_LOGIN=1 \
+  POLARIS_LAN_ONLY=1 \
   sh docker/nas-bootstrap.sh
 )
 
@@ -86,9 +105,13 @@ docker exec polaris-web test -f /home/polaris/.claude/sentinel.txt || fail "name
 docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' polaris-web |
   grep -F 'ANTHROPIC_AUTH_TOKEN=e2e-provider-secret' >/dev/null || fail "provider configuration was not migrated"
 if docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' polaris-web |
-   grep -F 'POLARIS_AUTH_TOKEN=must-not-migrate' >/dev/null; then
+   grep -E 'POLARIS_AUTH_TOKEN=(must-not-migrate|host-must-not-win)' >/dev/null; then
   fail "legacy access token leaked into the passwordless deployment"
 fi
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' polaris-web |
+  grep -F 'POLARIS_SMTP_HOST=legacy.smtp.invalid' >/dev/null || fail "non-empty template default hid legacy SMTP config"
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' polaris-web |
+  grep -F 'POLARIS_FABLE_WORKERS=7' >/dev/null || fail "legacy performance config was not migrated"
 
 app_mounts=$(docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' polaris-web)
 updater_mounts=$(docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' polaris-updater)
@@ -101,13 +124,60 @@ recovery=$(docker ps -a --filter 'name=^/polaris-web-legacy-' --format '{{.Names
 [ -n "$recovery" ] || fail "successful migration did not retain a recovery container"
 [ "$(docker inspect -f '{{.State.Running}}' "$recovery")" = false ] || fail "recovery container should remain stopped"
 
-LEGACY_OVERLAY=$test_root/stack/docker-compose.legacy-data.yml
 docker compose -p "$project_name" \
   -f "$test_root/stack/docker-compose.yml" \
   -f "$test_root/stack/docker-compose.update.yml" \
-  -f "$LEGACY_OVERLAY" down >/dev/null
+  -f "$test_root/stack/docker-compose.legacy-data.yml" down >/dev/null
 docker rm -f "$recovery" >/dev/null
-LEGACY_OVERLAY=
+
+# Official 2.7/2.8 Compose images already used /home/polaris, UID 1000,
+# named volumes, and a project network. All four properties must survive.
+mkdir -p "$test_root/legacy-home-data"
+docker run --rm -v "$test_root/legacy-home-data:/volume" alpine:3.20 \
+  sh -c 'printf "%s\n" home-bind-sentinel > /volume/sentinel.txt; chown -R 1000:1000 /volume'
+docker run --rm -v "$legacy_home_volume:/volume" alpine:3.20 \
+  sh -c 'printf "%s\n" home-volume-sentinel > /volume/sentinel.txt; chown -R 1000:1000 /volume'
+
+docker run -d \
+  --name polaris-web \
+  --network "$legacy_network" \
+  --user 1000:1000 \
+  -p 127.0.0.1:18082:8080 \
+  -e POLARIS_SMTP_HOST=v28.smtp.invalid \
+  -v "$test_root/legacy-home-data:/home/polaris/Polaris" \
+  -v "$legacy_home_volume:/home/polaris/.claude" \
+  alpine:3.20 sleep 600 >/dev/null
+
+(
+  cd "$root"
+  POLARIS_STACK_DIR="$test_root/stack-home" \
+  POLARIS_PROJECT_NAME="$project_name-home" \
+  POLARIS_IMAGE_REPO="$BASE_IMAGE_REPO" \
+  POLARIS_IMAGE_TAG="$BASE_IMAGE_TAG" \
+  POLARIS_HEALTH_ATTEMPTS=90 \
+  POLARIS_HEALTH_SLEEP=2 \
+  sh docker/nas-bootstrap.sh
+)
+
+curl -fsS http://127.0.0.1:18082/api/build | grep -Eq '"version"[[:space:]]*:[[:space:]]*"2\.9\.2"' ||
+  fail "home-layout migration did not start 2.9.2"
+[ "$(docker inspect -f '{{.Config.User}}' polaris-web)" = 1000:1000 ] || fail "home-layout runtime user changed"
+docker exec polaris-web test -f /home/polaris/Polaris/sentinel.txt || fail "home bind sentinel was not preserved"
+docker exec polaris-web test -f /home/polaris/.claude/sentinel.txt || fail "home named-volume sentinel was not preserved"
+docker inspect -f '{{json .NetworkSettings.Networks}}' polaris-web |
+  grep -F "\"$legacy_network\"" >/dev/null || fail "legacy Compose network was not retained"
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' polaris-web |
+  grep -F 'POLARIS_SMTP_HOST=v28.smtp.invalid' >/dev/null || fail "home-layout business config was not retained"
+[ "$(docker inspect -f '{{(index (index .HostConfig.PortBindings "8080/tcp") 0).HostPort}}' polaris-web)" = 18082 ] ||
+  fail "home-layout custom port was not retained"
+
+home_recovery=$(docker ps -a --filter 'name=^/polaris-web-legacy-' --format '{{.Names}}' | head -n 1)
+[ -n "$home_recovery" ] || fail "home-layout migration did not retain a recovery container"
+docker compose -p "$project_name-home" \
+  -f "$test_root/stack-home/docker-compose.yml" \
+  -f "$test_root/stack-home/docker-compose.update.yml" \
+  -f "$test_root/stack-home/docker-compose.legacy-data.yml" down >/dev/null
+docker rm -f "$home_recovery" >/dev/null
 
 # A broken replacement must restore the old container, its custom port, and its data.
 docker run -d \

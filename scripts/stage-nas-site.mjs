@@ -45,6 +45,15 @@ async function atomicWrite(target, value, mode) {
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const repoBytes = (relative) => readFile(path.join(repoRoot, relative));
 const siteText = (relative) => readFile(path.join(siteRoot, relative), "utf8");
+const occurrenceCount = (source, marker) => source.split(marker).length - 1;
+
+function replaceKnownBlock(source, legacy, current, label) {
+  const legacyCount = occurrenceCount(source, legacy);
+  const currentCount = occurrenceCount(source, current);
+  if (legacyCount === 1 && currentCount === 0) return source.replace(legacy, current);
+  if (legacyCount === 0 && currentCount === 1) return source;
+  die(`${label} must contain exactly one legacy or current block`);
+}
 
 const [bootstrap, baseCompose, updateCompose, envExample] = await Promise.all([
   repoBytes("docker/nas-bootstrap.sh"),
@@ -98,12 +107,22 @@ if (/\{\{[A-Z_]+\}\}/.test(renderedSection)) die("NAS section still contains tem
 let renderedNas = `${nasHtml.slice(0, nasIndex)}${renderedSection}\n\n${nasHtml.slice(windowsIndex)}`;
 renderedNas = renderedNas.replace(/NAS 镜像 v\d+\.\d+\.\d+/g, `NAS 镜像 v${version}`);
 
+const legacyArchFaq = '<div class="body">你的 NAS 是 ARM 芯片（部分入门款如 DS220j / DS223j）。北极星目前只支持 x86_64（Intel/AMD）的 NAS，电脑版不受此限。</div>';
+const currentArchFaq = '<div class="body">官方镜像同时支持 x86_64（Intel/AMD）和 ARM64。若仍出现 <code>exec format error</code>，请先在 NAS SSH 执行 <code>uname -m</code>，并确认使用的是官网 <code>latest</code> 镜像，而不是旧的本地 tar 镜像。</div>';
+const legacyStorageFaq = '<div class="body">数据在 <code>/volume1/docker/polaris/</code>（File Station 可见）。卸载：删掉 Container Manager 里的那个容器/项目即可；要连数据一起清，再删那个文件夹。</div>';
+const currentStorageFaq = '<div class="body">部署文件默认在群晖的 <code>/volume1/docker/polaris-stack/</code>，其他 NAS 默认在 <code>/opt/polaris-stack/</code>；迁移会继续使用原来的 bind 路径或命名卷。卸载时在该目录执行 Compose <code>down</code>；要保留数据就不要加 <code>-v</code>，旧恢复容器也请确认数据后再手动删除。</div>';
+renderedNas = replaceKnownBlock(renderedNas, legacyArchFaq, currentArchFaq, "NAS architecture FAQ");
+renderedNas = replaceKnownBlock(renderedNas, legacyStorageFaq, currentStorageFaq, "NAS storage FAQ");
+
 const functionPath = path.join(siteRoot, "functions/downloads/[[path]].js");
 let functionSource = await readFile(functionPath, "utf8");
 const redirectStart = "  // POLARIS_CURRENT_DOCKER_REDIRECT_START";
 const redirectEnd = "  // POLARIS_CURRENT_DOCKER_REDIRECT_END";
 const redirectBlock = `${redirectStart}\n  if (key === "docker") {\n    const target = new URL("/downloads/docker/latest.json", request.url);\n    return Response.redirect(target.toString(), 302);\n  }\n${redirectEnd}`;
 if (functionSource.includes(redirectStart) || functionSource.includes(redirectEnd)) {
+  if (occurrenceCount(functionSource, redirectStart) !== 1 || occurrenceCount(functionSource, redirectEnd) !== 1) {
+    die("download redirect staging markers must be unique");
+  }
   const start = functionSource.indexOf(redirectStart);
   const end = functionSource.indexOf(redirectEnd);
   if (start < 0 || end < start) die("download redirect staging markers are malformed");
@@ -122,6 +141,9 @@ const headersStart = "# POLARIS_CURRENT_DOCKER_HEADERS_START";
 const headersEnd = "# POLARIS_CURRENT_DOCKER_HEADERS_END";
 const headersBlock = `${headersStart}\n/downloads/docker/latest.json\n  ! Content-Disposition\n  ! Cache-Control\n  Cache-Control: no-store\n/docker/current/*\n  Cache-Control: no-store\n/docker/nas-bootstrap.sh\n  Cache-Control: no-store\n/docker/install-r2.sh\n  Cache-Control: no-store\n${headersEnd}`;
 if (headers.includes(headersStart) || headers.includes(headersEnd)) {
+  if (occurrenceCount(headers, headersStart) !== 1 || occurrenceCount(headers, headersEnd) !== 1) {
+    die("_headers staging markers must be unique");
+  }
   const start = headers.indexOf(headersStart);
   const end = headers.indexOf(headersEnd);
   if (start < 0 || end < start) die("_headers staging markers are malformed");
