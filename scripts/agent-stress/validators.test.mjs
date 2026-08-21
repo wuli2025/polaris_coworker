@@ -45,6 +45,52 @@ describe("generic validation", () => {
   it("accepts exactly one clean terminal event", () => {
     expect(validateGeneric({ terminalCount: 1, errors: [], timedOut: false }).ok).toBe(true);
   });
+
+  it("allows read-only skill inspection with stderr redirected to dev null", () => {
+    const result = validateGeneric({
+      terminalCount: 1,
+      errors: [],
+      timedOut: false,
+      tools: [
+        {
+          name: "Bash",
+          detail: "command -v polaris-forge; ls ~/Polaris/skills/polaris-deck-studio 2>/dev/null",
+        },
+      ],
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects host package installation, root-wide searches, and shared skill mutation", () => {
+    for (const detail of [
+      "apt-get install -y chromium",
+      "sudo -n apt install chromium",
+      "find / -name chrome -type f",
+      "npm install --prefix /home/polaris/Polaris/skills/polaris-deck-studio/scripts",
+    ]) {
+      const result = validateGeneric({
+        terminalCount: 1,
+        errors: [],
+        timedOut: false,
+        tools: [{ name: "Bash", detail }],
+      });
+      expect(result.ok, detail).toBe(false);
+      expect(result.checks.find((check) => check.name === "host-safety")?.detail).toContain(detail);
+    }
+
+    const writeResult = validateGeneric({
+      terminalCount: 1,
+      errors: [],
+      timedOut: false,
+      tools: [
+        {
+          name: "Write",
+          detail: "/home/polaris/Polaris/skills/polaris-deck-studio/scripts/spec-pptx.mjs",
+        },
+      ],
+    });
+    expect(writeResult.ok).toBe(false);
+  });
 });
 
 describe("browser validation", () => {

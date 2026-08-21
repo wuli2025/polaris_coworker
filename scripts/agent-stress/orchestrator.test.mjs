@@ -198,6 +198,44 @@ describe("scenario orchestration", () => {
     directFetch.mockRestore();
   });
 
+  it("retries a provider overload returned as successful terminal text", async () => {
+    const client = new FakeClient({
+      turns: [
+        {
+          text: "API Error: Request rejected (429) · The engine is currently overloaded, please try again later",
+          tools: [],
+          errors: [],
+        },
+        {
+          text: "CY-303 costs 1599",
+          tools: [{ name: "Bash", detail: "uv run cloakbrowser probe.py" }],
+          errors: [],
+        },
+      ],
+    });
+    const runRoot = await mkdtemp(path.join(tmpdir(), "polaris-text-retry-"));
+    const delays = [];
+    const record = await runScenario(
+      client,
+      { id: "stress-kimi-k3", name: "Kimi", model: "k3" },
+      browserScenario(),
+      {
+        runId: "run-text-retry",
+        runRoot,
+        fixtureBaseUrl: "http://localhost:39091",
+        maxRetries: 1,
+        sleep: async (milliseconds) => delays.push(milliseconds),
+      },
+    );
+
+    expect(record.retryCount).toBe(1);
+    expect(record.previousAttempts).toEqual([
+      { classification: "provider", validationOk: false },
+    ]);
+    expect(record.validation.ok).toBe(true);
+    expect(delays).toEqual([1_000]);
+  });
+
   it("continues a batch task with the application prompt until manifest pending reaches zero", async () => {
     const client = new FakeClient({
       manifests: [

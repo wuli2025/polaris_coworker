@@ -322,6 +322,7 @@ async function validatePptArtifacts(paths, scenario) {
 function evidenceText(turns, validation) {
   return [
     ...turns.flatMap((turn) => turn.errors || []),
+    ...turns.map((turn) => String(turn.text || "").slice(-16_000)).filter(Boolean),
     ...validation.checks.filter((check) => !check.ok).map((check) => `${check.name}: ${check.detail}`),
   ].join(" | ");
 }
