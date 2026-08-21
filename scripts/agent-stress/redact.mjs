@@ -1,5 +1,16 @@
-const CREDENTIAL_KEY = /(?:authorization|password|secret|token|api[_-]?key|auth[_-]?token)/i;
 const TOKEN_SHAPE = /\bsk-[A-Za-z0-9_-]{16,}\b/g;
+
+function isCredentialKey(key) {
+  const normalized = String(key).replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+  if (/^(?:input|output|total|max|cached|cacheread|cachecreation)tokens?$/.test(normalized)) {
+    return false;
+  }
+  return (
+    normalized === "token" ||
+    normalized.endsWith("token") ||
+    /(?:authorization|password|secret|apikey)/.test(normalized)
+  );
+}
 
 function redactString(value, secrets) {
   let output = value;
@@ -14,7 +25,7 @@ export function redact(value, secrets = []) {
     .sort((a, b) => b.length - a.length);
 
   function visit(current, key = "") {
-    if (CREDENTIAL_KEY.test(key) && current != null) return "[REDACTED]";
+    if (isCredentialKey(key) && current != null) return "[REDACTED]";
     if (typeof current === "string") return redactString(current, exact);
     if (Array.isArray(current)) return current.map((item) => visit(item));
     if (current && typeof current === "object") {

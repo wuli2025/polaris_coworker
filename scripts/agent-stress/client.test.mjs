@@ -50,6 +50,24 @@ describe("redact", () => {
       latencyMs: 42,
     });
   });
+
+  it("preserves token usage metrics while redacting credential tokens", () => {
+    expect(
+      redact({
+        inputTokens: 4567,
+        outputTokens: 890,
+        totalTokens: 5457,
+        authToken: "credential-value",
+        ANTHROPIC_AUTH_TOKEN: "provider-secret",
+      }),
+    ).toEqual({
+      inputTokens: 4567,
+      outputTokens: 890,
+      totalTokens: 5457,
+      authToken: "[REDACTED]",
+      ANTHROPIC_AUTH_TOKEN: "[REDACTED]",
+    });
+  });
 });
 
 describe("PolarisClient", () => {
