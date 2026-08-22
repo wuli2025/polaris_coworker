@@ -23,6 +23,12 @@ export const CONTINUE_PROMPT =
   "继续构建下一批。先 Read 工作目录里的 `polaris.build.json`，按清单取下一批 pending 单元构建、" +
   "回写状态、增量落盘；本批做完即停，末尾报进度。若全部 done 则做收尾并写 `BUILD COMPLETE`。";
 
+export const FINAL_AUDIT_PROMPT =
+  "执行最终交付审计（这是一次实际检查与修复，不是口头总结）。重新 Read 原始用户要求、" +
+  "`polaris.build.json` 和全部已生成产物，逐项核对必需文件格式、数量/页数、指定文字、" +
+  "HTML/源文件及可打开性。发现任何缺失、占位内容或导出过期，立即补齐并重新导出、验证；" +
+  "不要重做已经正确的单元。所有要求真实满足后，写 `DELIVERY AUDIT COMPLETE` 并报告最终产物路径。";
+
 export const PROVIDERS = [
   {
     id: "stress-minimax-m3",
@@ -63,21 +69,30 @@ function providerInput(provider, token) {
   };
 }
 
-export async function configureProviders(client, credentials) {
-  const missing = PROVIDERS.map((provider) => provider.tokenEnv).filter(
+export async function configureProviders(
+  client,
+  credentials,
+  providerIds = PROVIDERS.map((provider) => provider.id),
+) {
+  const selected = providerIds.map((id) => {
+    const provider = PROVIDERS.find((candidate) => candidate.id === id);
+    if (!provider) throw new Error(`Unknown provider: ${id}`);
+    return provider;
+  });
+  const missing = selected.map((provider) => provider.tokenEnv).filter(
     (name) => typeof credentials?.[name] !== "string" || credentials[name].length === 0,
   );
   if (missing.length > 0) {
     throw new Error(`Missing required credential environment variables: ${missing.join(", ")}`);
   }
 
-  for (const provider of PROVIDERS) {
+  for (const provider of selected) {
     await client.invoke("provider_save", {
       input: providerInput(provider, credentials[provider.tokenEnv]),
     });
   }
   await client.invoke("provider_set_link_mode", { link: false });
-  return PROVIDERS.map((provider) => ({ ...provider }));
+  return selected.map((provider) => ({ ...provider }));
 }
 
 function safeSegment(value, fallback) {
@@ -377,7 +392,7 @@ async function runAttempt(client, provider, scenario, options, attempt, batch) {
     batchBuild: Boolean(batch),
     batchSize: batch ? scenario.batchSize : null,
     agentMode: "single-agent",
-    workMode: "work",
+    workMode: options.workMode || "work",
     providerId: provider.id,
   };
   const turns = [];
@@ -409,6 +424,16 @@ async function runAttempt(client, provider, scenario, options, attempt, batch) {
         conversationId: context.conversationId,
       });
       manifests.push(manifestSnapshot(manifest, turns.length));
+    }
+    const completed = manifests.at(-1);
+    if (completed?.valid && completed.total > 0 && completed.pending === 0) {
+      turns.push(
+        await executeTurn(
+          client,
+          { ...baseChatArgs, prompt: FINAL_AUDIT_PROMPT },
+          scenario.timeoutMs,
+        ),
+      );
     }
   }
 
@@ -478,6 +503,7 @@ export function parseHarnessArgs(argv) {
     providers: PROVIDERS.map((provider) => provider.id),
     scenarioIds: [],
     concurrency: null,
+    workMode: "work",
   };
   for (let index = 0; index < rest.length; index += 1) {
     const flag = rest[index];
@@ -492,6 +518,12 @@ export function parseHarnessArgs(argv) {
     else if (flag === "--providers") result.providers = value.split(",").filter(Boolean);
     else if (flag === "--scenarios") result.scenarioIds = value.split(",").filter(Boolean);
     else if (flag === "--concurrency") result.concurrency = Number.parseInt(value, 10);
+    else if (flag === "--work-mode") {
+      if (!new Set(["fast", "work"]).has(value)) {
+        throw new Error("--work-mode must be fast or work");
+      }
+      result.workMode = value;
+    }
     else throw new Error(`Unknown option: ${flag}`);
     index += 1;
   }

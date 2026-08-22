@@ -44,8 +44,34 @@ struct ReadinessState {
     init_errors: Vec<String>,
 }
 
+/// server 壳的 Agent 子进程统一退出入口。必须同时覆盖普通 CHILDREN 表和常驻会话池；
+/// 两者分别按 req_id / conv_id 管理，互不包含。
+fn cleanup_agent_processes() {
+    crate::runtime::procs::CHILDREN.kill_all();
+    crate::chat::session_pool::kill_all();
+}
+
+/// 放在 `serve()` 最外层的 RAII 守卫，让早期初始化/bind 失败、服务任务异常和信号退出
+/// 都走同一清理路径，不把收割逻辑绑死在某个 `select!` 分支里。
+struct AgentProcessCleanup;
+
+impl Drop for AgentProcessCleanup {
+    fn drop(&mut self) {
+        cleanup_agent_processes();
+    }
+}
+
+async fn with_agent_process_cleanup<T>(future: impl std::future::Future<Output = T>) -> T {
+    let _agent_process_cleanup = AgentProcessCleanup;
+    future.await
+}
+
 /// 入口：初始化各引擎模块 + 起 axum。由 bin/polaris-server.rs 调用。
 pub async fn serve() -> anyhow::Result<()> {
+    with_agent_process_cleanup(serve_inner()).await
+}
+
+async fn serve_inner() -> anyhow::Result<()> {
     // 广播频道：所有 emit 走这里 → 全部 WS 订阅者。容量给大些，避免流式 token 丢帧。
     let (tx, _rx) = broadcast::channel::<Event>(16384);
     let app = AppHandle::new(tx.clone());
@@ -606,5 +632,55 @@ async fn spa_fallback(State(state): State<AppState>, uri: axum::http::Uri) -> Re
                 .unwrap()
         }
         Err(_) => (StatusCode::NOT_FOUND, "前端资源缺失").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn server_exit_cleanup_kills_registered_agent_children_on_early_error() {
+        let req_id = format!("server-exit-cleanup-{}", std::process::id());
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "ping -n 30 127.0.0.1 > NUL"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("30");
+            command
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        crate::runtime::procs::no_window(&mut command);
+        let child = command.spawn().expect("spawn cleanup probe");
+        let pid = child.id();
+        crate::runtime::procs::CHILDREN.insert(req_id.clone(), child);
+
+        let early_error: Result<(), &str> =
+            with_agent_process_cleanup(async { Err("bind failed") }).await;
+        assert_eq!(early_error, Err("bind failed"));
+
+        assert!(
+            crate::runtime::procs::CHILDREN
+                .lock()
+                .get(&req_id)
+                .is_none(),
+            "server cleanup must drain the unified child registry"
+        );
+        #[cfg(unix)]
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success()),
+            "registered child process must no longer exist"
+        );
     }
 }

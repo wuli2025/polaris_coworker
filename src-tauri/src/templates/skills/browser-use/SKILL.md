@@ -1,7 +1,7 @@
 ---
 id: browser-use
 name: 浏览器智能体 browser-use
-description: 给一句高层目标（如「在某网站查到 X 并把表单填好提交」「登录后导出近一个月账单」），browser-use 智能体自己跑「看页面→决定下一步→操作」的循环完成多步网页任务，不用你写一步步的 Playwright 代码。底层浏览器强制走 CloakBrowser 的隐身 Chromium（过 Cloudflare/反爬），绝不用它自带的裸浏览器。适合复杂、多步、需要随页面变化临场决策的网页自动化；简单单步（只截一张图/抓一段文本）用 CloakBrowser 直接写更省。
+description: 给一句高层目标（如「在某网站查到 X 并把表单填好提交」「登录后导出近一个月账单」），自动完成多步网页任务。底层浏览器强制走 CloakBrowser 的隐身 Chromium（过 Cloudflare/反爬），绝不用裸 Playwright。MiniMax 由当前 Agent 直接控制 CloakBrowser；其它兼容模型可用 browser-use runner。适合打开网页、抓取、填表、点击、截图和随页面变化决策的网页自动化。
 source: third-party
 author: Polaris
 created_at: 1750000000
@@ -11,9 +11,24 @@ created_at: 1750000000
 
 当任务是**高层、多步、需要临场决策**的网页自动化——「帮我在 X 网站完成某流程」「自动登录后把近一个月的订单导出来」「在这个站把表单按要求填好并提交」——用 **browser-use 智能体**：你只给目标，它自己观察页面、规划并执行一连串点击/输入/滚动/翻页，直到达成。
 
+## 先选路线（必须）
+
+| 当前对话模型 | 执行路线 |
+|---|---|
+| MiniMax（模型名含 `MiniMax`，或 `ANTHROPIC_BASE_URL` 含 `minimaxi.com`） | **当前 Agent 直接写并运行 CloakBrowser Python**，自己完成观察→操作→核验；不要启动 browser-use runner |
+| 其它已验证兼容 browser-use 工具格式的模型 | 复杂多步任务可用下方 runner；简单任务仍直接用 CloakBrowser |
+
+MiniMax 与 browser-use 0.13.8 的工具调用格式不完全兼容。嵌套 browser-use 会出现 `thinking expected string`、缺少 `action` 或“Expected tool use”错误；这不是重试能修好的瞬时故障，必须走直接路线。
+
 ## 铁律：底层必须是 CloakBrowser
 
-browser-use 默认会启自带的浏览器（Patchright）。**本项目禁止**——任何操纵浏览器都必须走 **CloakBrowser** 的源码级隐身 Chromium（过 Cloudflare Turnstile / reCAPTCHA / 指纹检测）。本技能自带的 runner 已经把这件事做好了：用 CloakBrowser 启一个带远程调试端口（CDP）的隐身 Chromium，再把 browser-use 通过 `cdp_url` 接上去。**直接用这个 runner，不要另起 browser-use 的默认浏览器。**
+browser-use 默认会启自带的浏览器（Patchright）。**本项目禁止**——任何操纵浏览器都必须走 **CloakBrowser** 的源码级隐身 Chromium（过 Cloudflare Turnstile / reCAPTCHA / 指纹检测）。本技能自带的 runner 已经把这件事做好了：用 CloakBrowser 启一个带远程调试端口（CDP）的隐身 Chromium，再把 browser-use 通过 `cdp_url` 接上去。非 MiniMax 路线直接用这个 runner，不要另起 browser-use 的默认浏览器。
+
+以下行为同样禁止：
+
+- 禁止 `find /`、`rg /`、`ls -R /` 或任何从文件系统根目录开始的递归搜索。定位依赖只查当前工作目录、`~/Polaris/skills`、`~/Polaris/plugins`，或用 Python import 自省。
+- 禁止导入 `playwright.sync_api` / `playwright.async_api` 来代替 CloakBrowser，也禁止在 runner 报错后生成裸 Playwright 兜底脚本。
+- CloakBrowser 或 runner 失败就保留错误并以失败结束；不得换成普通浏览器后声称任务完成。
 
 ## 怎么用（一条命令）
 
@@ -30,16 +45,16 @@ uv run --no-project ~/Polaris/skills/browser-use/scripts/browser_use_runner.py \
   # --model "<模型名>"      # 覆盖 LLM 模型（默认读 Polaris 当前供应商）
 ```
 
-- 优先 `uv run --no-project`（uv 由环境医生托管，三端同构，避开 Windows 上 `python` 是 Store 占位符的坑）。
+- 优先 `uv run --no-project`（runner 已用 PEP 723 钉死 `browser-use==0.13.8` / `cloakbrowser==0.5.8`，uv 自动建隔离环境并复用缓存；不要另建 pyproject/venv，也不要改 runner）。
 - 没有 uv 的环境用 `python3 browser_use_runner.py ...` 也行。
 
 ## runner 替你做了什么
 
-1. **确保依赖**：缺 `browser-use` 就 `pip install browser-use`；缺 CloakBrowser 提示 `pip install cloakbrowser`（或离线 `pip install ~/Polaris/plugins/cloakbrowser`）。
-2. **起隐身浏览器**：用 CloakBrowser 启一个带 `--remote-debugging-port` 的隐身 Chromium，等 CDP 就绪。**在异步循环之外同步启动/关闭**，规避「Sync API inside asyncio loop」崩溃。
+1. **确保依赖**：`uv run` 按 runner 顶部 PEP 723 声明自动准备固定版本；仅在没有 uv、直接用 Python 时才需要手工安装对应版本。
+2. **起隐身浏览器**：主线程用 CloakBrowser 启一个带 `--remote-debugging-port` 的隐身 Chromium并等 CDP；browser-use 的异步循环在独立工作线程运行。同步 Playwright 与 asyncio 物理隔离，规避 `Sync API inside asyncio loop` 和 `asyncio.run() cannot be called from a running event loop`。
 3. **接上智能体**：browser-use 经 `cdp_url` 连到这个端口（兼容新旧版的 `Browser(cdp_url=)` / `BrowserConfig(cdp_url=)` 入参）。
 4. **选 LLM**：从进程环境变量取 Polaris 当前供应商凭证（`ANTHROPIC_*` 或 `OPENAI_*`），无需另配 key。可用 `--model` 覆盖。
-5. **跑 + 收尾**：执行智能体循环，把最终结论写到 `<out>/browser_use_result.txt` 并打印绝对路径；结束后关闭浏览器。
+5. **跑 + 收尾**：执行智能体循环，把最终结论写到 `<out>/browser_use_result.txt` 并打印绝对路径；结束后关闭浏览器。若 browser-use 没有返回最终结论，runner 会保留诊断文件并以非零状态退出，调用方必须把它当失败。
 
 ## 版本可能不同——按需自适应
 

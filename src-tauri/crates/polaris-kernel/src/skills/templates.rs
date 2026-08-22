@@ -248,7 +248,13 @@ pub(crate) const TURBO_FLAGS_MD: &str =
 // claude agent 能直接 `uv run …/browser_use_runner.py` 跑它。
 pub(crate) const BROWSER_USE_ID: &str = "browser-use";
 // 改动 SKILL.md / browser_use_runner.py 后必须 +1,让已安装用户下次启动拿到更新。
-pub(crate) const BROWSER_USE_VERSION: &str = "1";
+// v2：CloakBrowser 同步 Playwright 会在调用线程保留运行中 event loop；browser-use 的
+// asyncio.run 改到独立工作线程，根治 `cannot be called from a running event loop`。
+// v3：runner 用 PEP 723 钉死 browser-use/cloakbrowser，让 uv 自动建可复用隔离环境，
+// 不再让 Agent 临场创建几百 MB 临时项目、改写 runner。
+// v4：MiniMax 改走当前 Agent 直控 CloakBrowser；禁止根目录递归搜索和裸 Playwright 兜底；
+// runner 没有最终结论时保留诊断并以非零状态退出。
+pub(crate) const BROWSER_USE_VERSION: &str = "4";
 pub(crate) const BROWSER_USE_SKILL_MD: &str =
     include_str!("../../../../src/templates/skills/browser-use/SKILL.md");
 pub(crate) const BROWSER_USE_RUNNER: &str =

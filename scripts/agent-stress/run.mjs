@@ -121,7 +121,7 @@ export async function runMain(argv = process.argv.slice(2), environment = proces
   const runId = createRunId();
 
   try {
-    const configured = await configureProviders(client, environment);
+    const configured = await configureProviders(client, environment, args.providers);
     const selectedProviders = args.providers.map((id) => {
       const provider = configured.find((candidate) => candidate.id === id);
       if (!provider) throw new Error(`Unknown provider: ${id}`);
@@ -137,6 +137,7 @@ export async function runMain(argv = process.argv.slice(2), environment = proces
           runRoot: WORK_ROOT,
           fixtureBaseUrl: fixture.baseUrl,
           maxRetries: 1,
+          workMode: args.workMode,
         });
       } catch (error) {
         record = harnessFailure(runId, provider, scenario, error);

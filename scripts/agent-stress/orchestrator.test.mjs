@@ -130,6 +130,23 @@ describe("provider configuration", () => {
       "POLARIS_STRESS_MINIMAX_TOKEN, POLARIS_STRESS_KIMI_TOKEN",
     );
   });
+
+  it("configures only the selected provider and requires only its credential", async () => {
+    const client = new FakeClient();
+    const providers = await configureProviders(
+      client,
+      { POLARIS_STRESS_MINIMAX_TOKEN: "minimax-only-secret" },
+      ["stress-minimax-m3"],
+    );
+
+    expect(providers.map((provider) => provider.id)).toEqual(["stress-minimax-m3"]);
+    const saves = client.calls.filter((call) => call.cmd === "provider_save");
+    expect(saves).toHaveLength(1);
+    expect(saves[0].args.input.id).toBe("stress-minimax-m3");
+    expect(saves[0].args.input.settingsConfig.env.ANTHROPIC_AUTH_TOKEN).toBe(
+      "minimax-only-secret",
+    );
+  });
 });
 
 describe("scenario orchestration", () => {
@@ -268,7 +285,12 @@ describe("scenario orchestration", () => {
     const prompts = client.calls
       .filter((call) => call.cmd === "chat_send")
       .map((call) => call.args.args.prompt);
-    expect(prompts).toEqual([expect.stringContaining("Build deck"), CONTINUE_PROMPT, CONTINUE_PROMPT]);
+    expect(prompts).toEqual([
+      expect.stringContaining("Build deck"),
+      CONTINUE_PROMPT,
+      CONTINUE_PROMPT,
+      expect.stringContaining("最终交付审计"),
+    ]);
     expect(record.manifests.map((manifest) => manifest.pending)).toEqual([2, 1, 0]);
   });
 });
@@ -280,6 +302,13 @@ describe("CLI safety", () => {
     expect(parseHarnessArgs(["matrix", "--base-url", "http://127.0.0.1:8899"])).toMatchObject({
       command: "matrix",
       baseUrl: "http://127.0.0.1:8899",
+      workMode: "work",
     });
+    expect(parseHarnessArgs(["matrix", "--work-mode", "fast"])).toMatchObject({
+      workMode: "fast",
+    });
+    expect(() => parseHarnessArgs(["matrix", "--work-mode", "turbo"])).toThrow(
+      "--work-mode",
+    );
   });
 });

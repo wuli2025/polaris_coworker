@@ -112,7 +112,9 @@ export const useChatStore = defineStore("chatRuntime", () => {
   // 最近一轮注入的估算 input token（后端 meta 事件给出）。分批编排据此自适应批量。
   const tokensByConv = ref<Record<string, number>>({});
   // 等待某对话「本轮 done」的 resolver 队列（分批编排循环逐轮 await）。
-  const doneWaiters: Record<string, Array<() => void>> = {};
+  type TurnOutcome = "success" | "error" | "cancelled";
+  const doneWaiters: Record<string, Array<(outcome: TurnOutcome) => void>> = {};
+  const outcomeByConv: Record<string, TurnOutcome | "pending"> = {};
   // 每对话一个「无声死亡」看门狗(setInterval id)。后端子进程崩溃 / done 事件丢失时,
   // done/cancel/fail 都不会触发 → await waitForDone 永久挂起 → 该对话进度条卡死。
   const watchdogs: Record<string, number> = {};
@@ -126,10 +128,13 @@ export const useChatStore = defineStore("chatRuntime", () => {
 
   /** 等到指定对话「本轮跑完(done)」。当前不在发送态则立即兑现。
    *  挂起期间启动心跳看门狗:后端无声死亡时熔断,确保 await 不会永久挂起。 */
-  function waitForDone(convId: string): Promise<void> {
-    if (!sendingByConv.value[convId]) return Promise.resolve();
+  function waitForDone(convId: string): Promise<TurnOutcome> {
+    if (!sendingByConv.value[convId]) {
+      const outcome = outcomeByConv[convId];
+      return Promise.resolve(outcome && outcome !== "pending" ? outcome : "success");
+    }
     armWatchdog(convId);
-    return new Promise<void>((resolve) => {
+    return new Promise<TurnOutcome>((resolve) => {
       (doneWaiters[convId] ??= []).push(resolve);
     });
   }
@@ -142,7 +147,9 @@ export const useChatStore = defineStore("chatRuntime", () => {
     // 这些键会逐月累积成上百条死条目。先 delete 再调用 resolver,顺带防 resolver 内重入。
     if (waiters && waiters.length) {
       delete doneWaiters[convId];
-      for (const w of waiters) w();
+      const outcome = outcomeByConv[convId];
+      const terminal = outcome && outcome !== "pending" ? outcome : "success";
+      for (const w of waiters) w(terminal);
     } else {
       delete doneWaiters[convId];
     }
@@ -210,6 +217,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
       severity: "error",
     });
     sendingByConv.value[convId] = false;
+    outcomeByConv[convId] = "error";
     delete reqByConv.value[convId];
     touchActivity(convId);
     try {
@@ -277,6 +285,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
       delete activeAtByConv.value[id];
       delete reqByConv.value[id];
       delete doneWaiters[id];
+      delete outcomeByConv[id];
     }
   }
 
@@ -404,6 +413,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
       at: Date.now(),
     });
     sendingByConv.value[convId] = true;
+    outcomeByConv[convId] = "pending";
     // 清掉上一轮可能残留的 reqId(若用户在 chat_send resolve 前就取消, send 可能晚于
     // cancel 删除条目后落地, 留下永不清理的孤儿 reqId)。新一轮开始前先抹掉, 关掉这个活锁竞态。
     delete reqByConv.value[convId];
@@ -434,6 +444,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
         severity: "error",
       });
       sendingByConv.value[convId] = false;
+      outcomeByConv[convId] = "error";
       sessions.finish(convId);
       wakeWaiters(convId); // 否则分批循环 await 永挂
     }
@@ -465,6 +476,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
       }
     }
     sendingByConv.value[convId] = false;
+    outcomeByConv[convId] = "cancelled";
     delete reqByConv.value[convId];
     touchActivity(convId);
     sessions.finish(convId);
@@ -583,9 +595,13 @@ export const useChatStore = defineStore("chatRuntime", () => {
           severity: warning ? "warning" : "error",
           at: Date.now(),
         });
+        if (!warning) outcomeByConv[cid] = "error";
       } else if (ev.kind === "done") {
         // 终态：结束运行态 + 工位会话；若用户不在看该对话则打墨蓝未读点
         sendingByConv.value[cid] = false;
+        if (!outcomeByConv[cid] || outcomeByConv[cid] === "pending") {
+          outcomeByConv[cid] = "success";
+        }
         delete reqByConv.value[cid];
         touchActivity(cid);
         // 本轮的实时气泡(含 [错误] 等未持久化的合成气泡)即为该对话的权威视图,

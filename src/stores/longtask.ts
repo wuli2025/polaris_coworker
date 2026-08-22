@@ -20,6 +20,7 @@ export interface BatchOpts {
   permissionMode: PermissionMode;
   skillIds: string[];
   useKb?: boolean;
+  workMode?: string;
   providerId?: string;
 }
 
@@ -49,6 +50,12 @@ function doneCount(m: BuildManifest | null): number {
 const CONTINUE_PROMPT =
   "继续构建下一批。先 Read 工作目录里的 `polaris.build.json`，按清单取下一批 pending 单元构建、" +
   "回写状态、增量落盘；本批做完即停，末尾报进度。若全部 done 则做收尾并写 `BUILD COMPLETE`。";
+
+const FINAL_AUDIT_PROMPT =
+  "执行最终交付审计（这是一次实际检查与修复，不是口头总结）。重新 Read 原始用户要求、" +
+  "`polaris.build.json` 和全部已生成产物，逐项核对必需文件格式、数量/页数、指定文字、" +
+  "HTML/源文件及可打开性。发现任何缺失、占位内容或导出过期，立即补齐并重新导出、验证；" +
+  "不要重做已经正确的单元。所有要求真实满足后，写 `DELIVERY AUDIT COMPLETE` 并报告最终产物路径。";
 
 // 单条长任务最多驱动多少轮，避免清单异常时无限循环（60 页 / 每批 4~8 ≈ 8~15 轮，给足余量）。
 const MAX_TURNS = 40;
@@ -96,6 +103,7 @@ export const useLongTaskStore = defineStore("longTask", () => {
       permissionMode: opts.permissionMode,
       skillIds: opts.skillIds,
       useKb: opts.useKb,
+      workMode: opts.workMode,
       providerId: opts.providerId,
       batchBuild: true,
     };
@@ -105,8 +113,13 @@ export const useLongTaskStore = defineStore("longTask", () => {
       ...baseOpts,
       batchSize: batchSizeFor(chat.inputTokens(convId)),
     });
-    await chat.waitForDone(convId);
+    const initialOutcome = await chat.waitForDone(convId);
     if (!isRunning(convId)) return; // 被用户中途停掉
+    if (initialOutcome === "error") {
+      note(convId, "首批构建失败，已停止分批；请查看上方错误后重试。");
+      stop(convId);
+      return;
+    }
 
     let manifest = await safeManifest(convId);
     // 初值设最大值: 否则续批循环第一圈用「轮0后的 manifest」自比, pending===prevPending
@@ -147,14 +160,32 @@ export const useLongTaskStore = defineStore("longTask", () => {
         ...baseOpts,
         batchSize: batchSizeFor(chat.inputTokens(convId)),
       });
-      await chat.waitForDone(convId);
+      const continuationOutcome = await chat.waitForDone(convId);
+      if (continuationOutcome === "error") {
+        note(convId, "续批执行失败，已保留清单与中间产物；重发可从断点继续。");
+        stop(convId);
+        return;
+      }
       manifest = await safeManifest(convId);
     }
 
-    // ── 收尾 ──
+    // ── 收尾：清单全 done 只代表分批单元完成，不代表用户要求里的所有交付形态都齐全。
+    // 单独再跑一轮审计，专门抓漏掉的 HTML / 指定文字 / 过期导出等跨单元缺口。
     const total = manifest?.units?.length ?? 0;
     const done = doneCount(manifest);
     if (total > 0 && done >= total) {
+      running.value[convId] = `已建 ${done}/${total}，最终交付审计中…`;
+      await chat.send(convId, FINAL_AUDIT_PROMPT, "（最终交付审计）", undefined, {
+        ...baseOpts,
+        batchSize: batchSizeFor(chat.inputTokens(convId)),
+      });
+      const auditOutcome = await chat.waitForDone(convId);
+      if (!isRunning(convId)) return;
+      if (auditOutcome === "error") {
+        note(convId, "最终交付审计失败，未标记任务完成；请查看上方错误并重试审计。");
+        stop(convId);
+        return;
+      }
       note(convId, `✅ 分批长任务完成：共 ${total} 个单元全部生成（产物在右侧「参考资料」/「项目」可预览）。`);
     } else if (total > 0) {
       note(convId, `分批已结束：${done}/${total} 个单元完成。重发可从断点继续。`);
