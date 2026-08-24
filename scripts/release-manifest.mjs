@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 
-import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
+import {
+  createHash,
+  createPublicKey,
+  verify as verifyEd25519,
+} from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -20,8 +25,121 @@ const HELP = `Usage:
     [--remote-base HTTPS_BASE_URL]
 
 Generates a deterministic Tauri latest.json from signed Windows and macOS artifacts.
---remote-base additionally verifies that the deployed installer bytes match local size and magic.
+--remote-base additionally verifies that the deployed installer bytes match local size and SHA-256.
 `;
+
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+function decodeBase64(value, label) {
+  const encoded = value.trim();
+  if (
+    encoded.length === 0 ||
+    encoded.length % 4 === 1 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)
+  ) {
+    throw new Error(`${label} is not valid base64`);
+  }
+  const decoded = Buffer.from(encoded, "base64");
+  if (decoded.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) {
+    throw new Error(`${label} is not canonical base64`);
+  }
+  return decoded;
+}
+
+function decodeUtf8(bytes, label) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`${label} is not valid UTF-8`);
+  }
+}
+
+function meaningfulLines(value) {
+  return value.replace(/\r\n/g, "\n").replace(/\n+$/, "").split("\n");
+}
+
+function decodePublicKey(encodedPublicKey) {
+  assert(
+    typeof encodedPublicKey === "string" && encodedPublicKey.trim().length > 0,
+    "Tauri updater minisign public key is missing",
+  );
+  const text = decodeUtf8(
+    decodeBase64(encodedPublicKey, "Tauri updater minisign public key"),
+    "Tauri updater minisign public key",
+  );
+  const lines = meaningfulLines(text);
+  assert(lines.length === 2, "Tauri updater minisign public key has an invalid format");
+  assert(
+    lines[0].startsWith("untrusted comment: "),
+    "Tauri updater minisign public key has no untrusted comment",
+  );
+  const payload = decodeBase64(lines[1], "Tauri updater minisign public key payload");
+  assert(payload.length === 42, "Tauri updater minisign public key payload has an invalid length");
+  assert(
+    payload.subarray(0, 2).toString("ascii") === "Ed",
+    "Tauri updater minisign public key uses an unsupported algorithm",
+  );
+  return {
+    keyId: payload.subarray(2, 10),
+    key: createPublicKey({
+      key: Buffer.concat([ED25519_SPKI_PREFIX, payload.subarray(10)]),
+      format: "der",
+      type: "spki",
+    }),
+  };
+}
+
+export function verifyMinisignSignature(bytes, encodedSignature, encodedPublicKey) {
+  assert(Buffer.isBuffer(bytes), "signed artifact bytes are missing");
+  assert(
+    typeof encodedSignature === "string" && encodedSignature.trim().length > 0,
+    "minisign signature is missing",
+  );
+  const publicKey = decodePublicKey(encodedPublicKey);
+  const text = decodeUtf8(
+    decodeBase64(encodedSignature, "minisign signature"),
+    "minisign signature",
+  );
+  const lines = meaningfulLines(text);
+  assert(lines.length === 4, "minisign signature has an invalid format");
+  assert(
+    lines[0].startsWith("untrusted comment: "),
+    "minisign signature has no untrusted comment",
+  );
+  assert(
+    lines[2].startsWith("trusted comment: "),
+    "minisign signature has no trusted comment",
+  );
+
+  const signaturePacket = decodeBase64(lines[1], "minisign signature packet");
+  assert(signaturePacket.length === 74, "minisign signature packet has an invalid length");
+  const algorithm = signaturePacket.subarray(0, 2).toString("ascii");
+  assert(algorithm === "Ed" || algorithm === "ED", "minisign signature uses an unsupported algorithm");
+  assert(
+    signaturePacket.subarray(2, 10).equals(publicKey.keyId),
+    "minisign signature key ID does not match the updater public key",
+  );
+
+  const rawSignature = signaturePacket.subarray(10);
+  const message = algorithm === "ED" ? createHash("blake2b512").update(bytes).digest() : bytes;
+  assert(
+    verifyEd25519(null, message, publicKey.key, rawSignature),
+    "minisign artifact signature verification failed",
+  );
+
+  const globalSignature = decodeBase64(lines[3], "minisign global signature");
+  assert(globalSignature.length === 64, "minisign global signature has an invalid length");
+  const trustedComment = Buffer.from(lines[2].slice("trusted comment: ".length), "utf8");
+  assert(
+    verifyEd25519(
+      null,
+      Buffer.concat([rawSignature, trustedComment]),
+      publicKey.key,
+      globalSignature,
+    ),
+    "minisign trusted-comment signature verification failed",
+  );
+}
 
 async function filesUnder(root) {
   const files = [];
@@ -43,13 +161,14 @@ async function releaseInput(path, signaturePath, label) {
   const signature = (await readFile(signaturePath, "utf8")).trim();
   if (!signature) throw new Error(`${label} signature is empty`);
   const bytes = await readFile(path);
-  const metadata = await stat(path);
   return {
     filename: basename(path),
     path,
     signature,
-    size: metadata.size,
+    size: bytes.length,
     magic: bytes.subarray(0, 8),
+    bytes,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
   };
 }
 
@@ -105,7 +224,7 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-export function validateReleaseManifest(manifest, { version, repo, pubDate, inputs }) {
+export function validateReleaseManifest(manifest, { version, repo, pubDate, inputs, publicKey }) {
   assert(manifest && typeof manifest === "object", "manifest must be an object");
   assert(manifest.version === version, `manifest version must be ${version}`);
   assert(
@@ -153,6 +272,17 @@ export function validateReleaseManifest(manifest, { version, repo, pubDate, inpu
       `${platform} signature does not match the universal macOS artifact`,
     );
   }
+  for (const [label, input] of [
+    ["Windows updater", inputs.windows],
+    ["macOS updater", inputs.mac],
+  ]) {
+    try {
+      verifyMinisignSignature(input.bytes, input.signature, publicKey);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${label} minisign verification failed: ${message}`);
+    }
+  }
 }
 
 function remoteBaseAllowed(url) {
@@ -177,7 +307,22 @@ export async function verifyRemoteAssets(inputs, remoteBase) {
     if (!bytes.subarray(0, 8).equals(input.magic)) {
       throw new Error(`${input.filename} magic bytes do not match the signed local artifact`);
     }
+    const remoteSha256 = createHash("sha256").update(bytes).digest("hex");
+    if (remoteSha256 !== input.sha256) {
+      throw new Error(`${input.filename} SHA-256 does not match the signed local artifact`);
+    }
   }
+}
+
+async function configuredUpdaterPublicKey() {
+  const configUrl = new URL("../src-tauri/tauri.conf.json", import.meta.url);
+  const config = JSON.parse(await readFile(configUrl, "utf8"));
+  const publicKey = config?.plugins?.updater?.pubkey;
+  assert(
+    typeof publicKey === "string" && publicKey.trim().length > 0,
+    "plugins.updater.pubkey is missing from src-tauri/tauri.conf.json",
+  );
+  return publicKey;
 }
 
 function parseArguments(argv) {
@@ -209,6 +354,7 @@ async function main(argv) {
     repo: options.repo,
     pubDate: options["pub-date"],
     inputs,
+    publicKey: await configuredUpdaterPublicKey(),
   };
   const manifest = buildReleaseManifest(manifestOptions);
   validateReleaseManifest(manifest, manifestOptions);

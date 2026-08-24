@@ -1,10 +1,11 @@
 # ─────────────────────────────────────────────────────────────
 # 发版 + 自动更新产物发布（跨平台：Windows + macOS）
 # 打一个 v* 标签（如 v0.2.10）推上来，会在 Windows 与 macOS 两个 runner 上并行
-# 构建、用更新私钥签名，并把各自的安装包 + .sig + latest.json 上传到同一个 GitHub Release。
+# 构建、用更新私钥签名，并把各自的安装包 + .sig 上传为 Actions artifacts。
 #   · Windows → NSIS 安装包（.exe）
 #   · macOS   → universal（Intel + Apple Silicon 通用）.dmg / .app
-# tauri-action 会把两端的平台条目合并进同一份 latest.json，应用端据此自动升级。
+# assemble-update-manifest job 会校验签名并生成唯一 latest.json，再上传 release-ready artifact；
+# 仓库 owner 按 docs/release-manual.md 手动创建 GitHub Release。
 #
 # 需要在仓库 Settings → Secrets and variables → Actions 配置：
 #   TAURI_SIGNING_PRIVATE_KEY           = 更新私钥文件全文（单行无换行）
@@ -50,7 +51,7 @@ jobs:
   release:
     needs: verify
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -122,9 +123,9 @@ jobs:
           prefix-key: v2-rust
 
       - name: Install frontend deps
-        run: npm install
+        run: npm ci
 
-      - name: Build, sign & publish release
+      - name: Build and sign release bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -138,7 +139,8 @@ jobs:
           # 权限为 write、job 也声明 contents:write, 调 create-a-release 仍返回
           # "Resource not accessible by integration"(账号级限制, 非 fork/权限位问题)。
           # 故只构建 + 用更新私钥签名, 产物随 if:always() 上传为 artifact, 由仓库 owner
-          # 本机用 `gh` 建 Release 并附带手工合并的 latest.json(见 docs/release-manual.md)。
+          # 本机用 `gh` 建 Release，并附带 assemble job 自动生成/验签的 latest.json
+          # (见 docs/release-manual.md)。
           args: ${{ matrix.args }}
 
       - name: Upload bundles as artifacts

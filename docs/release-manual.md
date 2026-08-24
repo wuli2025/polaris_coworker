@@ -14,9 +14,9 @@ git tag -a v0.2.12 -m "..."
 git push origin v0.2.12     # 触发 release.yml: Windows + macOS 并行构建并签名
 ```
 
-构建从 **tag 指向的提交树**出包。注意本仓库 local `main`（含 macOS 支持）与
-`origin/main` 是**无共同祖先的两条历史**，但内容上 local `main` = origin 内容 + mac 支持，
-所以从 local `main` 打 tag 出的是内容超集，不会回退功能。
+构建从 **tag 指向的提交树**出包。只能给已经合并并验证过的当前 `origin/main` 提交打 tag；
+操作前先 `git fetch origin`，确认本地 `main` 可以快进到且最终与 `origin/main` 一致。
+不要从未合并或落后的本地分支创建生产 tag。
 
 ## 2. 下载经过校验的 release-ready 产物
 
@@ -66,8 +66,8 @@ Copy-Item "$dir\...\Polaris_0.2.12_universal.dmg" "D:\polaris\polaris-site\downl
 wrangler pages deploy "D:\polaris\polaris-site" --project-name polaris --commit-dirty=true
 ```
 
-部署后必须让脚本验证远端字节长度与魔数；这样 Pages 的 HTTP 200 HTML fallback 不会被误判
-为安装包：
+部署后必须让脚本验证远端字节长度、魔数和完整 SHA-256；这样 Pages 的 HTTP 200 HTML fallback
+或任何同长度的损坏文件都不会被误判为安装包：
 
 ```powershell
 node scripts/release-manifest.mjs `
