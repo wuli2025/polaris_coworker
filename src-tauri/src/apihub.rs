@@ -168,6 +168,26 @@ impl OriginGate {
     }
 }
 
+fn is_update_management_command(command: &str) -> bool {
+    matches!(
+        command,
+        "docker_status" | "docker_check_update" | "docker_update" | "docker_update_status"
+    )
+}
+
+fn is_synthetic_local_owner(ctx: &AuthCtx) -> bool {
+    ctx.user_id == 0
+        && ctx.username == "local"
+        && ctx.role == "owner"
+        && ctx.device_id.is_empty()
+}
+
+fn update_origin_allowed(command: &str, ctx: &AuthCtx, private_origin: OriginGate) -> bool {
+    !is_update_management_command(command)
+        || !is_synthetic_local_owner(ctx)
+        || private_origin.allows()
+}
+
 impl OriginGate {
     /// 关死:显式设过口令的部署、exec 这类高危端点、以及一切拿不准来源的地方走它。
     pub(crate) fn closed() -> Self {
@@ -258,6 +278,43 @@ mod origin_gate_tests {
         assert!(origin_gate_with(true, true, lan, &h).is_open());
         assert!(!origin_gate_with(true, true, wan, &h).is_open());
         assert!(!origin_gate_with(true, true, None, &h).is_open());
+    }
+
+    #[test]
+    fn public_update_requires_real_owner_credentials_but_lan_stays_passwordless() {
+        let synthetic = AuthCtx {
+            user_id: 0,
+            username: "local".into(),
+            role: "owner".into(),
+            device_id: String::new(),
+        };
+        let authenticated = AuthCtx {
+            user_id: 0,
+            username: "admin".into(),
+            role: "owner".into(),
+            device_id: String::new(),
+        };
+        let lan = OriginGate {
+            enabled: true,
+            origin_ok: true,
+        };
+        let wan = OriginGate {
+            enabled: true,
+            origin_ok: false,
+        };
+
+        for command in [
+            "docker_status",
+            "docker_check_update",
+            "docker_update",
+            "docker_update_status",
+        ] {
+            assert!(is_update_management_command(command));
+        }
+        assert!(update_origin_allowed("docker_update", &synthetic, lan));
+        assert!(!update_origin_allowed("docker_update", &synthetic, wan));
+        assert!(update_origin_allowed("docker_update", &authenticated, wan));
+        assert!(update_origin_allowed("kb_root", &synthetic, wan));
     }
 
     #[test]
@@ -903,6 +960,7 @@ async fn invoke(
     headers: HeaderMap,
     Json(req): Json<InvokeRequest>,
 ) -> Response {
+    let peer_addr = peer.as_ref().map(|connect| connect.0);
     let gate = gate_of(&state, peer, &headers);
     let Some(ctx) = app_ctx(&state, &headers, gate).await else {
         return (
@@ -916,6 +974,22 @@ async fn invoke(
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": format!("权限不足:命令 {} 需要更高角色", req.cmd)})),
+        )
+            .into_response();
+    }
+    let private_origin = origin_gate_with(true, true, peer_addr, &headers);
+    if !update_origin_allowed(&req.cmd, &ctx, private_origin) {
+        crate::collab::db::audit(
+            &ctx.username,
+            "invoke.denied",
+            &req.cmd,
+            "公网远程更新需要真实 owner 凭据",
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "公网管理更新需要 owner 登录或 POLARIS_AUTH_TOKEN；LAN/Tailscale 可继续免密使用"
+            })),
         )
             .into_response();
     }

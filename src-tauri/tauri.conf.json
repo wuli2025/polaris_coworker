@@ -33,6 +33,7 @@
     "updater": {
       "endpoints": [
         "https://llmwiki.cloud/downloads/latest.json",
+        "https://polaris-2us.pages.dev/downloads/latest.json",
         "https://gh-proxy.com/https://github.com/wuli2025/polaris_coworker/releases/latest/download/latest.json",
         "https://github.com/wuli2025/polaris_coworker/releases/latest/download/latest.json"
       ],

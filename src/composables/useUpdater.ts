@@ -115,10 +115,22 @@ interface DockerUpdateAccepted {
   note?: string;
 }
 
-interface DockerBuild {
+export interface DockerBuild {
   bootId?: string;
   version?: string;
   buildRevision?: string;
+}
+
+export function replacementMatches(
+  build: DockerBuild | null,
+  sourceBootId: string,
+  targetRevision: string,
+): boolean {
+  return Boolean(
+    build?.bootId &&
+      build.bootId !== sourceBootId &&
+      build.buildRevision === targetRevision,
+  );
 }
 
 interface DockerTriggerResult {
@@ -236,11 +248,7 @@ async function waitForDockerReplacement(target: DockerWaitTarget): Promise<void>
     updateProgress.value = Math.min(92, 8 + Math.round((elapsed / (deadlineMs - startedAt)) * 84));
 
     const build = await readDockerBuild();
-    if (
-      build?.bootId &&
-      build.bootId !== target.sourceBootId &&
-      build.buildRevision === target.targetRevision
-    ) {
+    if (replacementMatches(build, target.sourceBootId, target.targetRevision)) {
       dockerMessage.value = "目标容器已启动，正在等待服务就绪…";
       if (await dockerReady()) {
         updateProgress.value = 100;

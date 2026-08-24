@@ -4,6 +4,7 @@ import {
   currentVersion,
   dockerStatusMessage,
   isDockerStatus,
+  replacementMatches,
   updateError,
   updateNotes,
   updateProgress,
@@ -50,6 +51,31 @@ describe("desktop updater protocol", () => {
 });
 
 describe("Docker updater setup state", () => {
+  it("accepts replacement only for a new boot running the exact target revision", () => {
+    expect(replacementMatches(null, "old-boot", "target-rev")).toBe(false);
+    expect(
+      replacementMatches(
+        { bootId: "old-boot", buildRevision: "target-rev" },
+        "old-boot",
+        "target-rev",
+      ),
+    ).toBe(false);
+    expect(
+      replacementMatches(
+        { bootId: "new-boot", buildRevision: "wrong-rev" },
+        "old-boot",
+        "target-rev",
+      ),
+    ).toBe(false);
+    expect(
+      replacementMatches(
+        { bootId: "new-boot", buildRevision: "target-rev" },
+        "old-boot",
+        "target-rev",
+      ),
+    ).toBe(true);
+  });
+
   it("accepts old and new server status payloads without requiring access-auth telemetry", () => {
     expect(
       isDockerStatus({

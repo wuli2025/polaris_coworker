@@ -151,3 +151,35 @@ jobs:
           path: |
             src-tauri/target/release/bundle/**
             src-tauri/target/universal-apple-darwin/release/bundle/**
+
+  assemble-update-manifest:
+    name: Assemble signed update manifest
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundles-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Generate and validate latest.json
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          pub_date="$(git show -s --format=%cI "$GITHUB_SHA")"
+          node scripts/release-manifest.mjs \
+            --artifacts release-artifacts \
+            --version "$version" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pub-date "$pub_date" \
+            --out release-artifacts/latest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-ready-${{ github.ref_name }}
+          if-no-files-found: error
+          retention-days: 30
+          path: release-artifacts/**
