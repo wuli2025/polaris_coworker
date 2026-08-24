@@ -125,7 +125,7 @@ export function replacementMatches(
   build: DockerBuild | null,
   sourceBootId: string,
   targetRevision: string,
-): boolean {
+): build is DockerBuild & { bootId: string; buildRevision: string } {
   return Boolean(
     build?.bootId &&
       build.bootId !== sourceBootId &&
