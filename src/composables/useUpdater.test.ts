@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyDesktopUpdaterState,
   currentVersion,
+  dockerUpdateRequest,
   dockerStatusMessage,
   isDockerStatus,
   replacementMatches,
@@ -51,6 +52,13 @@ describe("desktop updater protocol", () => {
 });
 
 describe("Docker updater setup state", () => {
+  it("binds an update request to the exact revision shown to the user", () => {
+    expect(dockerUpdateRequest("sha256:approved")).toEqual({
+      confirm: true,
+      expectedRevision: "sha256:approved",
+    });
+  });
+
   it("accepts replacement only for a new boot running the exact target revision", () => {
     expect(replacementMatches(null, "old-boot", "target-rev")).toBe(false);
     expect(

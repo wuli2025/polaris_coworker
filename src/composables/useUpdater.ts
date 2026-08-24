@@ -115,6 +115,13 @@ interface DockerUpdateAccepted {
   note?: string;
 }
 
+export function dockerUpdateRequest(targetRevision: string) {
+  return {
+    confirm: true,
+    expectedRevision: targetRevision,
+  };
+}
+
 export interface DockerBuild {
   bootId?: string;
   version?: string;
@@ -471,7 +478,10 @@ export async function applyUpdate(): Promise<void> {
       dockerMessage.value = "正在把更新请求交给隔离更新服务…";
       let accepted: DockerUpdateAccepted | null = null;
       try {
-        accepted = await invoke<DockerUpdateAccepted>("docker_update", { confirm: true });
+        accepted = await invoke<DockerUpdateAccepted>(
+          "docker_update",
+          dockerUpdateRequest(targetRevision),
+        );
       } catch (error) {
         // A structured HTTP failure means the server rejected the request before handoff.
         // Only a transport disconnect is ambiguous (the old container may have just exited).

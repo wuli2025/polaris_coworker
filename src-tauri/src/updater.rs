@@ -188,6 +188,10 @@ fn candidate_is_newer(current: &str, candidate: &str) -> bool {
     }
 }
 
+fn apply_candidate_is_approved(approved: &str, candidate: &str) -> bool {
+    approved == candidate
+}
+
 pub fn resolve_check(current: &str, found: Option<(String, String)>) -> UpdaterState {
     match found {
         Some((version, notes)) if candidate_is_newer(current, &version) => {
@@ -292,6 +296,24 @@ async fn run_apply(app: &AppHandle, version: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("校验更新失败: {e}"))?
         .ok_or_else(|| "更新已不可用".to_string())?;
+
+    // 用户批准的是弹窗里展示的精确版本。下载前二次检查若发现发布方已经切到
+    // 另一个版本，必须停下重新确认，不能把“确认 A”悄悄变成“安装 B”。
+    if !apply_candidate_is_approved(version, &update.version) {
+        let candidate = update.version.clone();
+        let notes = update.body.clone().unwrap_or_default();
+        persist_available(&candidate, &notes);
+        transition(
+            app,
+            UpdaterState::Available {
+                version: candidate.clone(),
+                notes,
+            },
+        );
+        return Err(format!(
+            "可用版本已从 {version} 变为 {candidate}，请重新确认后安装"
+        ));
+    }
 
     transition(
         app,
@@ -602,6 +624,13 @@ mod tests {
         assert!(candidate_is_newer("2.9.2", "2.10.0"));
         assert!(candidate_is_newer("3.0.0-beta.1", "3.0.0"));
         assert!(!candidate_is_newer("3.0.0", "3.0.0-beta.1"));
+    }
+
+    #[test]
+    fn apply_requires_the_remote_candidate_the_user_approved() {
+        assert!(apply_candidate_is_approved("2.10.0", "2.10.0"));
+        assert!(!apply_candidate_is_approved("2.10.0", "2.11.0"));
+        assert!(!apply_candidate_is_approved("2.10.0", "2.9.0"));
     }
 
     #[test]
