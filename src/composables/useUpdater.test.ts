@@ -1,5 +1,53 @@
 import { describe, expect, it } from "vitest";
-import { dockerStatusMessage, isDockerStatus } from "./useUpdater";
+import {
+  applyDesktopUpdaterState,
+  currentVersion,
+  dockerStatusMessage,
+  isDockerStatus,
+  updateError,
+  updateNotes,
+  updateProgress,
+  updateVersion,
+  updating,
+  upToDate,
+} from "./useUpdater";
+
+describe("desktop updater protocol", () => {
+  it("maps every backend state used by the update dialog", () => {
+    applyDesktopUpdaterState({
+      current_version: "2.9.2",
+      status: "available",
+      version: "2.10.0",
+      notes: "remote update",
+    });
+    expect(currentVersion.value).toBe("2.9.2");
+    expect(updateVersion.value).toBe("2.10.0");
+    expect(updateNotes.value).toBe("remote update");
+    expect(upToDate.value).toBe(false);
+
+    applyDesktopUpdaterState({
+      current_version: "2.9.2",
+      status: "downloading",
+      version: "2.10.0",
+      percent: 41,
+    });
+    expect(updating.value).toBe(true);
+    expect(updateProgress.value).toBe(41);
+
+    applyDesktopUpdaterState({ current_version: "2.10.0", status: "up-to-date" });
+    expect(updateVersion.value).toBeNull();
+    expect(updating.value).toBe(false);
+    expect(upToDate.value).toBe(true);
+
+    applyDesktopUpdaterState({
+      current_version: "2.10.0",
+      status: "error",
+      message: "signature rejected",
+    });
+    expect(updateError.value).toBe("signature rejected");
+    expect(updating.value).toBe(false);
+  });
+});
 
 describe("Docker updater setup state", () => {
   it("accepts old and new server status payloads without requiring access-auth telemetry", () => {

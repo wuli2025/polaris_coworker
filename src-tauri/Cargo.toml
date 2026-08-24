@@ -49,6 +49,7 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+semver = "1"
 # 自动更新「防卡死」用：停滞看门狗(time::sleep) + 与下载 future 竞速(select!)。
 # tokio 本就随 tauri 编进来了，这里只是显式开 time/macros 两个 feature；与 Codex 那条
 # 「无 tokio 的 ureq 同步流」互不影响。

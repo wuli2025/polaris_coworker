@@ -3,6 +3,15 @@ import { invoke, listen, isTauri, BackendHttpError } from "../tauri";
 
 export type UpdaterRuntime = "unknown" | "desktop" | "docker" | "browser";
 
+export const DESKTOP_UPDATER_EVENT = "updater://state";
+
+export type DesktopUpdaterSnapshot =
+  | { current_version: string; status: "disabled" | "idle" | "checking" | "up-to-date" }
+  | { current_version: string; status: "available"; version: string; notes: string }
+  | { current_version: string; status: "downloading"; version: string; percent: number }
+  | { current_version: string; status: "ready" | "installing"; version: string }
+  | { current_version: string; status: "error"; message: string };
+
 export const currentVersion = ref("");
 export const updateVersion = ref<string | null>(null);
 export const updateNotes = ref("");
@@ -30,6 +39,44 @@ let lastDockerCheck: DockerCheck | null = null;
 
 const DOCKER_UPDATE_TIMEOUT_MS = 15 * 60 * 1000;
 const DOCKER_POLL_INTERVAL_MS = 2_000;
+
+export function applyDesktopUpdaterState(snapshot: DesktopUpdaterSnapshot): void {
+  if (snapshot.current_version) currentVersion.value = snapshot.current_version;
+
+  if (snapshot.status === "available") {
+    updateVersion.value = snapshot.version;
+    updateNotes.value = snapshot.notes;
+    updateProgress.value = 0;
+    updateError.value = "";
+    updating.value = false;
+    upToDate.value = false;
+  } else if (snapshot.status === "downloading") {
+    updateVersion.value = snapshot.version;
+    updateProgress.value = snapshot.percent;
+    updateError.value = "";
+    updating.value = true;
+    upToDate.value = false;
+  } else if (snapshot.status === "installing" || snapshot.status === "ready") {
+    updateVersion.value = snapshot.version;
+    updateProgress.value = snapshot.status === "ready" ? 100 : updateProgress.value;
+    updateError.value = "";
+    updating.value = true;
+    upToDate.value = false;
+  } else if (snapshot.status === "up-to-date") {
+    updateVersion.value = null;
+    updateNotes.value = "";
+    updateProgress.value = 0;
+    updateError.value = "";
+    updating.value = false;
+    upToDate.value = true;
+  } else if (snapshot.status === "error") {
+    updateError.value = snapshot.message;
+    updating.value = false;
+    upToDate.value = false;
+  } else {
+    updating.value = false;
+  }
+}
 
 export interface DockerStatus {
   updater_enabled: boolean;
@@ -325,8 +372,8 @@ export async function loadUpdaterVersion(): Promise<void> {
 
   updaterRuntime.value = "desktop";
   try {
-    const state = await invoke<{ current_version?: string }>("updater_get_state");
-    if (state?.current_version) currentVersion.value = state.current_version;
+    const state = await invoke<DesktopUpdaterSnapshot>("updater_get_state");
+    applyDesktopUpdaterState(state);
   } catch {
     // updater state is optional on unsupported desktop builds
   }
@@ -335,23 +382,9 @@ export async function loadUpdaterVersion(): Promise<void> {
 async function ensureListener(): Promise<void> {
   if (listenerReady || !isTauri) return;
   listenerReady = true;
-  await listen<{ phase: string; progress: number; note: string; version: string }>(
-    "updater-event",
-    (p) => {
-      if (!p) return;
-      if (p.version) updateVersion.value = p.version;
-      updateProgress.value = p.progress ?? 0;
-      if (p.phase === "downloading" || p.phase === "installing") updating.value = true;
-      if (p.phase === "done") {
-        updating.value = false;
-        updateProgress.value = 100;
-      }
-      if (p.phase === "error") {
-        updating.value = false;
-        updateError.value = p.note || "更新失败";
-      }
-    },
-  );
+  await listen<DesktopUpdaterSnapshot>(DESKTOP_UPDATER_EVENT, (snapshot) => {
+    if (snapshot) applyDesktopUpdaterState(snapshot);
+  });
 }
 
 export async function autoCheck(): Promise<void> {
@@ -367,16 +400,8 @@ export async function autoCheck(): Promise<void> {
     if (!isTauri) {
       await checkDocker();
     } else {
-      const info = await invoke<{ available: boolean; version: string; notes: string }>(
-        "updater_check",
-      );
-      if (info?.available) {
-        updateVersion.value = info.version;
-        updateNotes.value = info.notes || "";
-        upToDate.value = false;
-      } else {
-        upToDate.value = true;
-      }
+      const snapshot = await invoke<DesktopUpdaterSnapshot>("updater_check");
+      applyDesktopUpdaterState(snapshot);
     }
   } catch (error) {
     checkFailed.value = true;
@@ -403,17 +428,8 @@ export async function manualCheck(): Promise<void> {
     if (!isTauri) {
       await checkDocker();
     } else {
-      const info = await invoke<{ available: boolean; version: string; notes: string }>(
-        "updater_check",
-      );
-      if (info?.available) {
-        updateVersion.value = info.version;
-        updateNotes.value = info.notes || "";
-      } else {
-        updateVersion.value = null;
-        updateNotes.value = "";
-        upToDate.value = true;
-      }
+      const snapshot = await invoke<DesktopUpdaterSnapshot>("updater_check");
+      applyDesktopUpdaterState(snapshot);
     }
   } catch (error) {
     checkFailed.value = true;
@@ -484,7 +500,7 @@ export async function applyUpdate(): Promise<void> {
     }
 
     await ensureListener();
-    await invoke("updater_apply", { confirm: true });
+    await invoke("updater_apply");
   } catch (error) {
     dockerPollGeneration += 1;
     updateError.value = errorText(error);
