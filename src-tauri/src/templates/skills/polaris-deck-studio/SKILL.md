@@ -320,7 +320,12 @@ polaris-forge spec-pptx --spec=<产物目录>/polaris.slides.json --out=<产物�
 ```
 CLI 在 `~/Polaris/bin/`（Windows 为 `%USERPROFILE%\Polaris\bin\polaris-forge.exe`），Docker 镜像已内置在 PATH。
 
-**CLI 不存在也不用慌**：把 spec 按上述文件名存好即可，Polaris 桌面端会自动调内置引擎完成转换。**不要**因为 CLI 缺失就改去写 HTML 或截图——那会毁掉可编辑性。
+**CLI 不存在也不用慌**：把 spec 按上述文件名存好即可，Polaris 桌面端会自动调内置引擎完成转换。此时到 spec 为止：
+
+- 不要安装 Chromium、Node 包或任何系统依赖，不要调用 `apt` / `apt-get` / `yum` / `dnf` / `apk` / `sudo`。
+- 不要从 `/`、用户主目录或挂载盘递归搜索浏览器/转换器；只允许 `command -v polaris-forge` 和上面列出的固定 CLI 路径。
+- 不要在 `~/Polaris/skills` 内创建、编辑或安装任何文件；技能目录是共享运行时，只读。自行编写的辅助文件只能放在本次产物目录。
+- 不要因为 CLI 缺失而额外改走 HTML 或截图；用户原本明确要求 HTML 时仍照常交付 HTML，但 PPTX 主路线保持原生 spec。
 
 ### 5. 回答末尾用**绝对路径**列出产物文件。
 

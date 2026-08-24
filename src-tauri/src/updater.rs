@@ -57,6 +57,14 @@ pub enum UpdaterState {
     Error { message: String },
 }
 
+/// 前端命令和事件共享的完整快照。当前版本与状态一起传输，避免前端分别猜测。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UpdaterSnapshot {
+    pub current_version: String,
+    #[serde(flatten)]
+    pub state: UpdaterState,
+}
+
 // ───────────────────────── 持久化 ─────────────────────────
 
 /// 落盘的「可装版本」标记（只存这点轻量事实，可跨重启存活）。
@@ -104,10 +112,10 @@ pub fn init(app: &AppHandle) -> Result<()> {
     g.current_version = current.clone();
     g.persist_path = path.clone();
 
-    // 重启续提示：上次发现的版本若仍 ≠ 当前 → 直接摆成 available（离线可见）；
-    // 若已 == 当前（已装上）→ 清标记。
+    // 重启续提示：只恢复严格更新的语义版本。相同、旧版或坏标记一律清除，
+    // 避免离线启动时把过期清单误报成可安装更新。
     if let Some(p) = load_persisted(&path) {
-        if p.version != current {
+        if candidate_is_newer(&current, &p.version) {
             g.state = UpdaterState::Available {
                 version: p.version,
                 notes: p.notes,
@@ -149,18 +157,46 @@ fn clear_persisted() {
 
 /// 写入新状态并广播给前端。锁只在写状态时短暂持有，emit 在锁外（避免跨 await 持锁）。
 fn transition(app: &AppHandle, next: UpdaterState) -> UpdaterState {
-    {
+    let snapshot = {
         let mut g = UPDATER.lock();
         g.state = next.clone();
-    }
-    let _ = app.emit(EVENT, &next);
+        UpdaterSnapshot {
+            current_version: g.current_version.clone(),
+            state: next.clone(),
+        }
+    };
+    let _ = app.emit(EVENT, &snapshot);
     next
 }
 
+fn updater_snapshot() -> UpdaterSnapshot {
+    let g = UPDATER.lock();
+    UpdaterSnapshot {
+        current_version: g.current_version.clone(),
+        state: g.state.clone(),
+    }
+}
+
 /// 纯函数：根据「当前版本」与「检查结果」决定落点状态。抽出来便于单测（对标 OpenCode 的注入式可测性）。
+fn candidate_is_newer(current: &str, candidate: &str) -> bool {
+    match (
+        semver::Version::parse(current),
+        semver::Version::parse(candidate),
+    ) {
+        (Ok(current), Ok(candidate)) => candidate > current,
+        _ => false,
+    }
+}
+
+fn apply_candidate_is_approved(approved: &str, candidate: &str) -> bool {
+    approved == candidate
+}
+
 pub fn resolve_check(current: &str, found: Option<(String, String)>) -> UpdaterState {
     match found {
-        Some((version, notes)) if version != current => UpdaterState::Available { version, notes },
+        Some((version, notes)) if candidate_is_newer(current, &version) => {
+            UpdaterState::Available { version, notes }
+        }
         _ => UpdaterState::UpToDate,
     }
 }
@@ -175,7 +211,9 @@ pub fn resolve_check_error(
     message: String,
 ) -> UpdaterState {
     match persisted {
-        Some((version, notes)) if version != current => UpdaterState::Available { version, notes },
+        Some((version, notes)) if candidate_is_newer(current, &version) => {
+            UpdaterState::Available { version, notes }
+        }
         _ => UpdaterState::Error { message },
     }
 }
@@ -258,6 +296,24 @@ async fn run_apply(app: &AppHandle, version: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("校验更新失败: {e}"))?
         .ok_or_else(|| "更新已不可用".to_string())?;
+
+    // 用户批准的是弹窗里展示的精确版本。下载前二次检查若发现发布方已经切到
+    // 另一个版本，必须停下重新确认，不能把“确认 A”悄悄变成“安装 B”。
+    if !apply_candidate_is_approved(version, &update.version) {
+        let candidate = update.version.clone();
+        let notes = update.body.clone().unwrap_or_default();
+        persist_available(&candidate, &notes);
+        transition(
+            app,
+            UpdaterState::Available {
+                version: candidate.clone(),
+                notes,
+            },
+        );
+        return Err(format!(
+            "可用版本已从 {version} 变为 {candidate}，请重新确认后安装"
+        ));
+    }
 
     transition(
         app,
@@ -411,17 +467,20 @@ async fn run_apply(app: &AppHandle, version: &str) -> Result<(), String> {
 
 /// 前端挂载时取一次当前态（事件之外的同步快照，避免错过 init 阶段设好的状态）。
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn updater_get_state() -> UpdaterState {
-    UPDATER.lock().state.clone()
+pub fn updater_get_state() -> UpdaterSnapshot {
+    updater_snapshot()
 }
 
 /// 检查更新（自动 / 手动共用）。单飞：进行中 / 正在下载安装时直接返回当前态。
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub async fn updater_check(app: AppHandle) -> Result<UpdaterState, String> {
+pub async fn updater_check(app: AppHandle) -> Result<UpdaterSnapshot, String> {
     {
         let mut g = UPDATER.lock();
         if !g.enabled {
-            return Ok(g.state.clone());
+            return Ok(UpdaterSnapshot {
+                current_version: g.current_version.clone(),
+                state: g.state.clone(),
+            });
         }
         if g.in_flight
             || matches!(
@@ -429,13 +488,16 @@ pub async fn updater_check(app: AppHandle) -> Result<UpdaterState, String> {
                 UpdaterState::Downloading { .. } | UpdaterState::Installing { .. }
             )
         {
-            return Ok(g.state.clone());
+            return Ok(UpdaterSnapshot {
+                current_version: g.current_version.clone(),
+                state: g.state.clone(),
+            });
         }
         g.in_flight = true;
     }
-    let result = run_check(&app).await;
+    run_check(&app).await;
     UPDATER.lock().in_flight = false;
-    Ok(result)
+    Ok(updater_snapshot())
 }
 
 /// 用户点「立即更新」：下载 + 安装 + 自重启。需当前处于 available / ready。单飞防重入。
@@ -533,6 +595,45 @@ mod tests {
     }
 
     #[test]
+    fn check_never_offers_an_older_or_invalid_version() {
+        assert_eq!(
+            resolve_check("2.9.2", Some(("2.9.0".into(), "旧版".into()))),
+            UpdaterState::UpToDate,
+        );
+        assert_eq!(
+            resolve_check(
+                "2.9.2",
+                Some(("not-a-version".into(), "坏清单".into())),
+            ),
+            UpdaterState::UpToDate,
+        );
+    }
+
+    #[test]
+    fn check_error_does_not_restore_an_older_persisted_version() {
+        let state = resolve_check_error(
+            "2.9.2",
+            Some(("2.9.0".into(), "旧版".into())),
+            "检查更新失败: 网络超时".into(),
+        );
+        assert!(matches!(state, UpdaterState::Error { .. }));
+    }
+
+    #[test]
+    fn semantic_version_comparison_handles_minor_and_prerelease_order() {
+        assert!(candidate_is_newer("2.9.2", "2.10.0"));
+        assert!(candidate_is_newer("3.0.0-beta.1", "3.0.0"));
+        assert!(!candidate_is_newer("3.0.0", "3.0.0-beta.1"));
+    }
+
+    #[test]
+    fn apply_requires_the_remote_candidate_the_user_approved() {
+        assert!(apply_candidate_is_approved("2.10.0", "2.10.0"));
+        assert!(!apply_candidate_is_approved("2.10.0", "2.11.0"));
+        assert!(!apply_candidate_is_approved("2.10.0", "2.9.0"));
+    }
+
+    #[test]
     fn mirror_candidates_wraps_bare_github_url() {
         let c = mirror_candidates(
             "https://github.com/wuli2025/polaris_coworker/releases/download/v0.2.18/Polaris_0.2.18_x64-setup.exe",
@@ -592,5 +693,21 @@ mod tests {
         .unwrap();
         assert!(json.contains("\"status\":\"downloading\""));
         assert!(json.contains("\"percent\":42"));
+    }
+
+    #[test]
+    fn snapshot_flattens_state_next_to_current_version() {
+        let json = serde_json::to_value(UpdaterSnapshot {
+            current_version: "2.9.2".into(),
+            state: UpdaterState::Available {
+                version: "2.10.0".into(),
+                notes: "remote update".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(json["current_version"], "2.9.2");
+        assert_eq!(json["status"], "available");
+        assert_eq!(json["version"], "2.10.0");
+        assert_eq!(json["notes"], "remote update");
     }
 }

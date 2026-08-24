@@ -8,8 +8,9 @@ use crate::host::AppHandle;
 use crate::skills;
 use parking_lot::Mutex;
 use serde_json::Value;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -121,6 +122,80 @@ const CREATIVE_SKILL_IDS: &[&str] = &[
     "pptx",
     "image-gen",
 ];
+
+/// 宿主机单轮所用的执行器。工作模式始终是 Claude；快速模式只有在用户显式配置且
+/// 二进制真实存在时才启用 i-agent。许可证尚未明确前 Polaris 不复制或随包分发它。
+#[derive(Debug)]
+enum HostAgent {
+    IAgent(PathBuf),
+    Claude { warning: Option<String> },
+}
+
+fn select_host_agent(work_full: bool, configured: Option<&OsStr>) -> HostAgent {
+    if work_full {
+        return HostAgent::Claude { warning: None };
+    }
+    let Some(raw) = configured.filter(|v| !v.is_empty()) else {
+        return HostAgent::Claude {
+            warning: Some(
+                "快速模式未配置 POLARIS_FAST_AGENT_BIN，已回退 Claude。".to_string(),
+            ),
+        };
+    };
+    let path = PathBuf::from(raw);
+    if path.is_file() {
+        HostAgent::IAgent(path)
+    } else {
+        HostAgent::Claude {
+            warning: Some(format!(
+                "POLARIS_FAST_AGENT_BIN 指向的 i-agent 不存在（{}），已回退 Claude。",
+                path.display()
+            )),
+        }
+    }
+}
+
+fn build_i_agent_command(bin: &Path, cwd: &Path, provider_id: Option<&str>) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.arg("--polaris-stdio")
+        .arg("-C")
+        .arg(cwd)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::doctor::harden_child_env(&mut cmd);
+    // i-agent 把 I_AGENT_* custom provider 放在 ANTHROPIC_* 之前。Polaris 自身若带着
+    // 这些父进程变量，逐对话注入即使正确也会被静默抢占，导致并发对话串到另一供应商。
+    for key in [
+        "I_AGENT_API_KEY",
+        "I_AGENT_BASE_URL",
+        "I_AGENT_MODEL",
+        "I_AGENT_PROTOCOL",
+    ] {
+        cmd.env_remove(key);
+    }
+    // i-agent 兼容 Anthropic provider env；沿用每对话 provider 注入，避免供应商配置串线。
+    crate::provider::scope_child_claude_by_id(&mut cmd, provider_id);
+    no_window(&mut cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd
+}
+
+fn spawn_i_agent(
+    bin: &Path,
+    provider_id: Option<&str>,
+    work_dir: Option<&Path>,
+) -> Result<Child, String> {
+    let cwd = effective_cwd(work_dir);
+    build_i_agent_command(bin, &cwd, provider_id)
+        .spawn()
+        .map_err(|e| format!("调起快速模式 i-agent 失败（{}）: {e}", bin.display()))
+}
 
 // ───────────────────────── State ─────────────────────────
 
@@ -236,6 +311,17 @@ pub fn chat_prewarm(app: AppHandle, args: ChatPrewarmArgs) -> Result<(), String>
         return Ok(());
     }
     let work_full = args.work_mode.as_deref() == Some("work");
+    // 快速模式由每轮无状态 i-agent 执行，不要在后台白起一个永远用不到的 Claude 常驻进程。
+    // i-agent 未配置/失效时仍会选中 Claude fallback，保留原预热收益。
+    if matches!(
+        select_host_agent(
+            work_full,
+            std::env::var_os("POLARIS_FAST_AGENT_BIN").as_deref(),
+        ),
+        HostAgent::IAgent(_)
+    ) {
+        return Ok(());
+    }
     // 权限档位没传(触发点拿不到输入区状态)时, 套前端 applyModeDefaults 同款默认:
     // work=手动(default) / fast=自动批准(acceptEdits) —— 指纹与随后真发送对齐。
     let perm = match &args.permission_mode {
@@ -696,11 +782,36 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
         return Ok(());
     }
 
+    // 快速模式优先走 i-agent 的无状态 stdio 协议；工作模式始终留在 Claude Code。
+    // 未配置 / 路径失效时明确给一条过程告警，再沿用原 Claude 路径，不让请求直接失败。
+    let host_agent = select_host_agent(
+        work_full,
+        std::env::var_os("POLARIS_FAST_AGENT_BIN").as_deref(),
+    );
+    if let HostAgent::Claude {
+        warning: Some(warning),
+    } = &host_agent
+    {
+        emit_event(
+            app,
+            ChatStreamEvent {
+                req_id: req_id.to_string(),
+                kind: "error".into(),
+                text: Some(format!("[stderr] {warning}")),
+                tool: None,
+                conversation_id: conv_id_opt.clone(),
+            },
+        );
+    }
+
     // ── 常驻 agent 路径(默认开, POLARIS_PERSISTENT_AGENT=0 回落) ──
     // claude CLI 自举 ~6.4s(bun 解包)是每消息 spawn 的硬成本; 常驻进程 + stream-json
     // 输入把续轮首事件降到 1.4-2.6s。仅宿主机 + 有 conv_id 的对话走此路(沙箱路径不动;
     // 无 conv_id 没有池 key, 也没有续轮语义)。
-    if session_pool::persistent_enabled() && !args.use_sandbox {
+    if matches!(&host_agent, HostAgent::Claude { .. })
+        && session_pool::persistent_enabled()
+        && !args.use_sandbox
+    {
         if let Some(cid) = conv_id_opt.clone() {
             return session_pool::run_persistent_turn(session_pool::TurnParams {
                 app: app.clone(),
@@ -723,18 +834,55 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     // ── 旧路径(每消息 spawn): 逻辑保持不变, prompt 取分段计划的全量拼接 ──
     let mut final_prompt = full_prompt;
 
-    // 默认走宿主机执行（沙箱可选，但默认关闭）；动态编排时放行 Task 子代理；
-    // work_full 决定快速模式是否禁用冗余工具(disallowedTools)、是否传按模式的 --model。
-    let mut child = spawn_on_host(
-        &final_prompt,
-        perm,
-        &art_dir,
-        args.dynamic_workflow,
-        work_full,
-        args.provider_id.as_deref(),
-        false, // 一次性进程: stdin 只当 prompt 通道, 不进 stream-json 输入模式
-        project_work_dir.as_deref().map(Path::new),
-    )?;
+    // i-agent 与 Claude 共享下面完整的一次性进程生命周期：stdin、大输出读取、CHILDREN
+    // 注册/取消、看门狗、进程树回收和最终 TurnStream 收尾都只保留一套实现。
+    let (mut child, backend_label) = match host_agent {
+        HostAgent::IAgent(bin) => match spawn_i_agent(
+            &bin,
+            args.provider_id.as_deref(),
+            project_work_dir.as_deref().map(Path::new),
+        ) {
+            Ok(child) => (child, "i-agent"),
+            Err(error) => {
+                emit_event(
+                    app,
+                    ChatStreamEvent {
+                        req_id: req_id.to_string(),
+                        kind: "error".into(),
+                        text: Some(format!("[stderr] {error}；已回退 Claude。")),
+                        tool: None,
+                        conversation_id: conv_id_opt.clone(),
+                    },
+                );
+                (
+                    spawn_on_host(
+                        &final_prompt,
+                        perm,
+                        &art_dir,
+                        args.dynamic_workflow,
+                        work_full,
+                        args.provider_id.as_deref(),
+                        false,
+                        project_work_dir.as_deref().map(Path::new),
+                    )?,
+                    "claude",
+                )
+            }
+        },
+        HostAgent::Claude { .. } => (
+            spawn_on_host(
+                &final_prompt,
+                perm,
+                &art_dir,
+                args.dynamic_workflow,
+                work_full,
+                args.provider_id.as_deref(),
+                false, // 一次性进程: stdin 只当 prompt 通道, 不进 stream-json 输入模式
+                project_work_dir.as_deref().map(Path::new),
+            )?,
+            "claude",
+        ),
+    };
 
     // prompt 经 stdin 喂给 claude (而非命令行参数): 大 prompt 不会撞 Windows 命令行
     // 长度上限, 也不会因 prompt 以 `-` 开头被当成 flag。spawn 后立刻写 + drop, claude 读到 EOF 就开始处理。
@@ -752,11 +900,11 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "claude 子进程没有 stdout".to_string())?;
+        .ok_or_else(|| format!("{backend_label} 子进程没有 stdout"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "claude 子进程没有 stderr".to_string())?;
+        .ok_or_else(|| format!("{backend_label} 子进程没有 stderr"))?;
 
     CHILDREN.insert(req_id.to_string(), child);
 
@@ -793,6 +941,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
         let wd = watchdog.clone();
         let wd_app = app.clone();
         let wd_conv = conv_id_opt.clone();
+        let wd_backend = backend_label;
         std::thread::spawn(move || {
             // 检查节拍: 常态每 5s 看一次空闲; 进入「静默但在干活」延期区后放缓到 30s,
             // 深检(进程快照)只在延期区跑, 常态零开销。轻量线程 + sleep 轮询,
@@ -873,6 +1022,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                     if matches!(c.try_wait(), Ok(Some(_))) {
                         let _ = c.wait();
                     } else {
+                        CHILDREN.mark_cancel(wd_req.clone());
                         // 先杀干净**再**告知前端:反过来的话, 管道里已缓冲的 delta 会在
                         // error 之后继续上屏, 而移动端把 error 当终态立即放行下一问,
                         // 旧进程的尾巴会混进新一轮气泡。
@@ -885,7 +1035,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                             format!("任务超硬顶时限: 本轮总时长超过 {hard_cap}s, 已被看门狗强制终止")
                         } else {
                             format!(
-                                "空闲超时, 进程疑似卡死已终止: claude 进程连续 {}s 无任何输出且进程树静止",
+                                "空闲超时, 进程疑似卡死已终止: {wd_backend} 进程连续 {}s 无任何输出且进程树静止",
                                 idle.as_secs()
                             )
                         };
@@ -949,6 +1099,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     let stderr_buf_for_done = stderr_buf.clone();
     let art_dir_thread = art_dir.clone();
     let act_out = watchdog.clone();
+    let out_backend = backend_label;
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         // 单轮事件流状态机(解析/合批/记账/产物)抽到 TurnStream: 与常驻 agent 路径
@@ -969,6 +1120,9 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
         }
         // 流结束必 flush: 缓冲里最后一撮 delta 要先于 error/artifact/done 事件落地。
         ts.flush();
+        // 主动取消/看门狗会先从 CHILDREN 摘出并杀进程，stdout 因而没有 result。
+        // 这不是协议错误；终止原因由取消 UI 或看门狗自己的 error 事件负责表达。
+        let externally_terminated = CHILDREN.take_cancel(&req_out);
 
         // 等子进程退出, 检查 exit code (不能持锁 wait, 否则 chat_cancel 死锁)
         let child_opt = CHILDREN.remove(&req_out);
@@ -983,6 +1137,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                     Ok(Some(status)) => break Ok(Some(status)),
                     Ok(None) => {
                         if std::time::Instant::now() >= wait_deadline {
+                            kill_tree(child.id());
                             let _ = child.kill(); // 强杀回收: 关掉管道, 不让本线程泄漏
                             let _ = child.wait(); // 杀后做一次简短最终 reap
                                                   // 拿不到真实状态就当超时异常 (走下方 None 分支 → 同款错误事件)
@@ -998,7 +1153,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                     if !status.success() {
                         let stderr_txt = stderr_buf_for_done.lock().clone();
                         Some(format!(
-                            "claude 进程异常退出 (exit code={:?})\n--- stderr ---\n{}",
+                            "{out_backend} 进程异常退出 (exit code={:?})\n--- stderr ---\n{}",
                             status.code(),
                             if stderr_txt.is_empty() {
                                 "(stderr 为空)".to_string()
@@ -1013,7 +1168,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                 Ok(None) => {
                     let stderr_txt = stderr_buf_for_done.lock().clone();
                     Some(format!(
-                        "claude 进程等待超时, 已强制回收\n--- stderr ---\n{}",
+                        "{out_backend} 进程等待超时, 已强制回收\n--- stderr ---\n{}",
                         if stderr_txt.is_empty() {
                             "(stderr 为空)".to_string()
                         } else {
@@ -1021,13 +1176,34 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
                         }
                     ))
                 }
-                Err(e) => Some(format!("等待 claude 进程失败: {}", e)),
+                Err(e) => Some(format!("等待 {out_backend} 进程失败: {e}")),
             }
         } else {
             None
         };
 
+        let protocol_msg = if out_backend == "i-agent" {
+            i_agent_protocol_error_at_eof(
+                &ts,
+                externally_terminated || exit_msg.is_some(),
+            )
+        } else {
+            None
+        };
+
         if let Some(msg) = exit_msg {
+            emit_event(
+                &app_out,
+                ChatStreamEvent {
+                    req_id: req_out.clone(),
+                    kind: "error".into(),
+                    text: Some(msg),
+                    tool: None,
+                    conversation_id: conv_id_thread.clone(),
+                },
+            );
+        }
+        if let Some(msg) = protocol_msg {
             emit_event(
                 &app_out,
                 ChatStreamEvent {
@@ -1049,6 +1225,7 @@ fn chat_send_pipeline(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Resu
     // 有标记就按正常取消路径杀掉; stdout 随之关闭, reader 线程照常发 done 收尾,
     // 且 child 已先从 CHILDREN 摘除 → 不会发「异常退出」error(与 chat_cancel 同款语义)。
     if CHILDREN.take_cancel(req_id) {
+        CHILDREN.mark_cancel(req_id.to_string());
         if let Some(mut c) = CHILDREN.remove(req_id) {
             kill_tree(c.id());
             let _ = c.kill();
@@ -1066,6 +1243,9 @@ pub fn chat_cancel(req_id: String) -> Result<(), String> {
     if session_pool::cancel_by_req(&req_id) {
         return Ok(());
     }
+    // 先留下外部终止标记，再摘进程；stdout EOF 线程据此不会把主动取消误报成
+    // “i-agent 没有 result”。标记必须早于 kill，避免 EOF 与 mark 的竞态。
+    CHILDREN.mark_cancel(req_id.clone());
     if let Some(mut child) = CHILDREN.remove(&req_id) {
         kill_tree(child.id()); // 先杀整树: claude 扇出的 python/node/dev server 等子孙
         let _ = child.kill(); // 再杀 claude 本体 (taskkill /T 通常已带走它, 这步兜底)
@@ -1074,7 +1254,7 @@ pub fn chat_cancel(req_id: String) -> Result<(), String> {
         // chat_send 已改为后台线程拼 prompt + spawn: stop 可能在 child 注册进 CHILDREN
         // 之前到达。打「取消挂起」标记, 后台管线在 spawn 前 / reader 挂接后各查一次,
         // 有标记即放弃 spawn 或立刻杀掉刚起的 child(见 chat_send_pipeline)。
-        CHILDREN.mark_cancel(req_id);
+        // 上面已经标记；spawn 管线会在注册前后消费它。
     }
     Ok(())
 }
@@ -1347,6 +1527,8 @@ pub(super) struct TurnStream {
     artifacts: Vec<String>,
     partial: PartialStreamState,
     batcher: DeltaBatcher,
+    result_count: u8,
+    result_has_boolean_ok: bool,
 }
 
 impl TurnStream {
@@ -1366,6 +1548,8 @@ impl TurnStream {
             artifacts: Vec::new(),
             partial: PartialStreamState::default(),
             batcher: DeltaBatcher::new(),
+            result_count: 0,
+            result_has_boolean_ok: false,
         };
         // 生图不支持时: 后端确定性地把中文说明作为**第一段**发出去并计入正文,
         // 不依赖模型遵守「开头摊牌」指令 → 用户一定先看到「当前模型不支持生图」。
@@ -1397,6 +1581,10 @@ impl TurnStream {
         match serde_json::from_str::<Value>(line) {
             Ok(v) => {
                 is_result = v.get("type").and_then(|x| x.as_str()) == Some("result");
+                if is_result {
+                    self.result_count = self.result_count.saturating_add(1);
+                    self.result_has_boolean_ok = v.get("ok").and_then(|x| x.as_bool()).is_some();
+                }
                 handle_stream_event(
                     &self.app,
                     &self.req_id,
@@ -1440,6 +1628,19 @@ impl TurnStream {
             self.capped = true;
         }
         is_result
+    }
+
+    fn i_agent_terminal_error(&self) -> Option<String> {
+        match self.result_count {
+            0 => Some("i-agent 协议错误：stdout 结束前没有 result 终态事件".into()),
+            1 if !self.result_has_boolean_ok => {
+                Some("i-agent 协议错误：result 必须包含 ok=true/false".into())
+            }
+            1 => None,
+            count => Some(format!(
+                "i-agent 协议错误：单轮收到 {count} 个 result 终态事件，必须恰好一个"
+            )),
+        }
     }
 
     /// 把挂起的合批 delta 冲出去(流结束/本轮收尾时必调, 保证正文先于终态事件落地)。
@@ -1532,6 +1733,17 @@ impl TurnStream {
     }
 }
 
+fn i_agent_protocol_error_at_eof(
+    stream: &TurnStream,
+    externally_terminated: bool,
+) -> Option<String> {
+    if externally_terminated {
+        None
+    } else {
+        stream.i_agent_terminal_error()
+    }
+}
+
 fn handle_stream_event(
     app: &AppHandle,
     req_id: &str,
@@ -1544,6 +1756,38 @@ fn handle_stream_event(
 ) {
     let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
     match t {
+        // i-agent --polaris-stdio：文本本身就是可持久化的增量，不会再补一条 Claude
+        // assistant 整块事件。边收边记账，并标记 result 只作终态、不重复正文。
+        "delta" => {
+            if let Some(txt) = v.get("text").and_then(|x| x.as_str()) {
+                if !txt.is_empty() {
+                    accum.push_str(txt);
+                    ps.saw_assistant_text = true;
+                    ps.ever_streamed = true;
+                    batcher.push(app, req_id, conv_id, txt);
+                }
+            }
+        }
+        // i-agent 的工具事件已是面向 UI 的精简摘要，无需再解析 Claude content block。
+        "tool" => {
+            batcher.flush(app, req_id, conv_id);
+            let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("unknown");
+            let detail = v
+                .get("detail")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string);
+            emit_event(
+                app,
+                ChatStreamEvent {
+                    req_id: req_id.into(),
+                    kind: "tool".into(),
+                    text: detail,
+                    tool: Some(name.to_string()),
+                    conversation_id: conv_id.map(|s| s.to_string()),
+                },
+            );
+        }
         // --include-partial-messages 打开后 CLI 吐的 token 级增量:钻进 content_block_delta 的
         // text_delta 逐字上屏(豆包/ChatGPT 式)。**不进 accum** —— 完整文本稍后随整块 assistant
         // 事件到达并记账,这里只管显示;若整块事件缺席(进程中途崩),result 兜底仍按 accum 口径落库。
@@ -1665,6 +1909,24 @@ fn handle_stream_event(
         "result" => {
             // 收尾事件: 先 flush 挂起的合批 delta。
             batcher.flush(app, req_id, conv_id);
+            // i-agent 用 ok=false + error 表达供应商/工具链失败；进程也会非零退出，
+            // 这里先把最具体的模型错误送到 UI，后续退出码诊断作为补充。
+            if v.get("ok").and_then(|x| x.as_bool()) == Some(false) {
+                let msg = v
+                    .get("error")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("i-agent 未返回错误详情");
+                emit_event(
+                    app,
+                    ChatStreamEvent {
+                        req_id: req_id.into(),
+                        kind: "error".into(),
+                        text: Some(msg.to_string()),
+                        tool: None,
+                        conversation_id: conv_id.map(|s| s.to_string()),
+                    },
+                );
+            }
             // result 事件: claude --print 模式收尾, result 字段是最终文本
             if let Some(txt) = v.get("result").and_then(|x| x.as_str()) {
                 // 若前面已经有整块 assistant text, result 通常是同一内容的最终版, 不重复记账。
@@ -2001,6 +2263,152 @@ fn tool_input_summary(input: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_mode_uses_configured_i_agent_but_work_mode_stays_on_claude() {
+        let temp = std::env::temp_dir().join(format!(
+            "polaris-fast-agent-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).expect("create tempdir");
+        let bin = temp.join(if cfg!(windows) { "i-agent.exe" } else { "i-agent" });
+        std::fs::write(&bin, b"test executable placeholder").expect("write fake binary");
+
+        match select_host_agent(false, Some(bin.as_os_str())) {
+            HostAgent::IAgent(selected) => assert_eq!(selected, bin),
+            other => panic!("fast mode should select i-agent, got {other:?}"),
+        }
+        assert!(matches!(
+            select_host_agent(true, Some(bin.as_os_str())),
+            HostAgent::Claude { warning: None }
+        ));
+        std::fs::remove_dir_all(temp).expect("remove tempdir");
+    }
+
+    #[test]
+    fn fast_mode_missing_i_agent_warns_and_falls_back_to_claude() {
+        let missing = std::path::PathBuf::from("definitely-missing-polaris-fast-agent");
+        match select_host_agent(false, Some(missing.as_os_str())) {
+            HostAgent::Claude {
+                warning: Some(warning),
+            } => {
+                assert!(warning.contains("POLARIS_FAST_AGENT_BIN"));
+                assert!(warning.contains("Claude"));
+            }
+            other => panic!("missing i-agent should fall back to Claude, got {other:?}"),
+        }
+
+        match select_host_agent(false, None) {
+            HostAgent::Claude {
+                warning: Some(warning),
+            } => assert!(warning.contains("POLARIS_FAST_AGENT_BIN")),
+            other => panic!("unset i-agent should fall back to Claude, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn i_agent_command_uses_stdio_protocol_and_workspace() {
+        let bin = std::path::Path::new("/tmp/i-agent-test-bin");
+        let cwd = std::path::Path::new("/tmp/i-agent-test-workspace");
+        let cmd = build_i_agent_command(bin, cwd, None);
+        assert_eq!(cmd.get_program(), bin.as_os_str());
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                std::ffi::OsStr::new("--polaris-stdio"),
+                std::ffi::OsStr::new("-C"),
+                cwd.as_os_str(),
+            ]
+        );
+        let env: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for key in [
+            "I_AGENT_API_KEY",
+            "I_AGENT_BASE_URL",
+            "I_AGENT_MODEL",
+            "I_AGENT_PROTOCOL",
+        ] {
+            assert_eq!(env.get(key), Some(&None), "must clear inherited {key}");
+        }
+    }
+
+    #[test]
+    fn i_agent_ndjson_maps_delta_tool_and_failed_result() {
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let app = AppHandle::new(tx);
+        let mut rx = app.subscribe();
+        let mut stream = TurnStream::new(app, "req-fast".into(), None, None);
+
+        assert!(!stream.feed_line(r#"{"type":"delta","text":"hello"}"#));
+        stream.flush();
+        assert!(!stream.feed_line(
+            r#"{"type":"tool","name":"read","detail":"note.txt"}"#,
+        ));
+        assert!(stream.feed_line(
+            r#"{"type":"result","ok":false,"error":"provider failed","usage":{"requests":1}}"#,
+        ));
+        assert_eq!(stream.i_agent_terminal_error(), None);
+
+        let first = rx.try_recv().expect("delta event");
+        assert_eq!(first.payload["kind"], "delta");
+        assert_eq!(first.payload["text"], "hello");
+        let second = rx.try_recv().expect("tool event");
+        assert_eq!(second.payload["kind"], "tool");
+        assert_eq!(second.payload["tool"], "read");
+        assert_eq!(second.payload["text"], "note.txt");
+        let third = rx.try_recv().expect("result error event");
+        assert_eq!(third.payload["kind"], "error");
+        assert_eq!(third.payload["text"], "provider failed");
+    }
+
+    #[test]
+    fn i_agent_requires_exactly_one_valid_terminal_result() {
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+        let app = AppHandle::new(tx);
+        let mut missing = TurnStream::new(app.clone(), "missing".into(), None, None);
+        missing.feed_line(r#"{"type":"delta","text":"not terminal"}"#);
+        assert!(missing
+            .i_agent_terminal_error()
+            .expect("missing result must fail")
+            .contains("没有 result"));
+
+        let mut duplicate = TurnStream::new(app.clone(), "duplicate".into(), None, None);
+        duplicate.feed_line(r#"{"type":"result","ok":true}"#);
+        duplicate.feed_line(r#"{"type":"result","ok":true}"#);
+        assert!(duplicate
+            .i_agent_terminal_error()
+            .expect("duplicate result must fail")
+            .contains("2 个 result"));
+
+        let mut malformed = TurnStream::new(app, "malformed".into(), None, None);
+        malformed.feed_line(r#"{"type":"result","result":"missing ok"}"#);
+        assert!(malformed
+            .i_agent_terminal_error()
+            .expect("result without ok must fail")
+            .contains("ok=true/false"));
+    }
+
+    #[test]
+    fn externally_terminated_i_agent_skips_terminal_protocol_failure() {
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+        let app = AppHandle::new(tx);
+        let mut stream = TurnStream::new(app, "cancelled".into(), None, None);
+        stream.feed_line(r#"{"type":"delta","text":"partial"}"#);
+        assert!(i_agent_protocol_error_at_eof(&stream, false).is_some());
+        assert_eq!(i_agent_protocol_error_at_eof(&stream, true), None);
+    }
 
     /// 本源模式的**取值语义**闸: 只有显式非空非 "0" 才算开。
     /// 不在测试里 set_var —— 那会污染同进程其它测试(cargo 默认多线程跑), 这里改测纯谓词,

@@ -1,5 +1,20 @@
 use super::*;
 
+/// 把所有需要真实运行时文件的内置技能统一落盘。
+///
+/// 桌面与 server 必须只调用这个入口，避免两套启动清单漂移后出现“catalog 里可选、
+/// Agent 却找不到脚本”的半安装状态。
+pub fn seed_all_builtin_skills() {
+    seed_video_studio_skill();
+    seed_deck_studio_skill();
+    seed_web_studio_skill();
+    seed_turbo_download_skill();
+    seed_browser_use_skill();
+    seed_wechat_typesetter_skill();
+    seed_wechat_tasks_skill();
+    seed_project_check_skill();
+}
+
 /// 启动时确保「课件视频工坊」技能在 ~/Polaris/skills 落盘（多文件，含可执行脚本）。
 ///
 /// 这是支撑「生成课件类视频」UI 的基础设施技能，所以是「确保存在」而非「尊重删除」：

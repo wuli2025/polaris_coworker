@@ -168,6 +168,68 @@ impl OriginGate {
     }
 }
 
+fn is_update_management_command(command: &str) -> bool {
+    matches!(
+        command,
+        "docker_status" | "docker_check_update" | "docker_update" | "docker_update_status"
+    )
+}
+
+fn is_synthetic_local_owner(ctx: &AuthCtx) -> bool {
+    ctx.user_id == 0 && ctx.username == "local" && ctx.role == "owner" && ctx.device_id.is_empty()
+}
+
+fn same_origin_request(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        // Native clients and curl do not send Origin; browser cross-origin writes do.
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    if origin.eq_ignore_ascii_case("null") {
+        return false;
+    }
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str() else {
+        return false;
+    };
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+    let Some(origin_authority) = uri.authority() else {
+        return false;
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(host_authority) = host.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    origin_authority
+        .host()
+        .eq_ignore_ascii_case(host_authority.host())
+        && origin_authority.port_u16().unwrap_or(default_port)
+            == host_authority.port_u16().unwrap_or(default_port)
+}
+
+fn update_origin_allowed(
+    command: &str,
+    ctx: &AuthCtx,
+    private_origin: OriginGate,
+    same_origin: bool,
+) -> bool {
+    !is_update_management_command(command)
+        || !is_synthetic_local_owner(ctx)
+        || (private_origin.allows() && same_origin)
+}
+
 impl OriginGate {
     /// 关死:显式设过口令的部署、exec 这类高危端点、以及一切拿不准来源的地方走它。
     pub(crate) fn closed() -> Self {
@@ -258,6 +320,97 @@ mod origin_gate_tests {
         assert!(origin_gate_with(true, true, lan, &h).is_open());
         assert!(!origin_gate_with(true, true, wan, &h).is_open());
         assert!(!origin_gate_with(true, true, None, &h).is_open());
+    }
+
+    #[test]
+    fn public_update_requires_real_owner_credentials_but_lan_stays_passwordless() {
+        let synthetic = AuthCtx {
+            user_id: 0,
+            username: "local".into(),
+            role: "owner".into(),
+            device_id: String::new(),
+        };
+        let authenticated = AuthCtx {
+            user_id: 0,
+            username: "admin".into(),
+            role: "owner".into(),
+            device_id: String::new(),
+        };
+        let lan = OriginGate {
+            enabled: true,
+            origin_ok: true,
+        };
+        let wan = OriginGate {
+            enabled: true,
+            origin_ok: false,
+        };
+
+        for command in [
+            "docker_status",
+            "docker_check_update",
+            "docker_update",
+            "docker_update_status",
+        ] {
+            assert!(is_update_management_command(command));
+        }
+        assert!(update_origin_allowed(
+            "docker_update",
+            &synthetic,
+            lan,
+            true
+        ));
+        assert!(!update_origin_allowed(
+            "docker_update",
+            &synthetic,
+            wan,
+            true
+        ));
+        assert!(update_origin_allowed(
+            "docker_update",
+            &authenticated,
+            wan,
+            false,
+        ));
+        assert!(update_origin_allowed("kb_root", &synthetic, wan, false));
+    }
+
+    #[test]
+    fn synthetic_lan_update_rejects_cross_origin_browser_requests() {
+        let synthetic = AuthCtx {
+            user_id: 0,
+            username: "local".into(),
+            role: "owner".into(),
+            device_id: String::new(),
+        };
+        let lan = OriginGate {
+            enabled: true,
+            origin_ok: true,
+        };
+        assert!(update_origin_allowed(
+            "docker_update",
+            &synthetic,
+            lan,
+            true
+        ));
+        assert!(!update_origin_allowed(
+            "docker_update",
+            &synthetic,
+            lan,
+            false
+        ));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "nas.local:8484".parse().unwrap());
+        assert!(
+            same_origin_request(&headers),
+            "non-browser clients omit Origin"
+        );
+        headers.insert("origin", "http://nas.local:8484".parse().unwrap());
+        assert!(same_origin_request(&headers));
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        assert!(!same_origin_request(&headers));
+        headers.insert("origin", "null".parse().unwrap());
+        assert!(!same_origin_request(&headers));
     }
 
     #[test]
@@ -440,6 +593,20 @@ mod origin_gate_tests {
             Some("http://polaris-updater:8080/v1/update"),
             Some("secret")
         ));
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn docker_更新只能安装用户确认的精确_revision() {
+        assert!(docker_target_revision_is_approved(
+            "sha256:approved",
+            "sha256:approved"
+        ));
+        assert!(!docker_target_revision_is_approved(
+            "sha256:approved",
+            "sha256:moved"
+        ));
+        assert!(!docker_target_revision_is_approved("", "sha256:moved"));
     }
 
     #[cfg(not(feature = "desktop"))]
@@ -903,6 +1070,7 @@ async fn invoke(
     headers: HeaderMap,
     Json(req): Json<InvokeRequest>,
 ) -> Response {
+    let peer_addr = peer.as_ref().map(|connect| connect.0);
     let gate = gate_of(&state, peer, &headers);
     let Some(ctx) = app_ctx(&state, &headers, gate).await else {
         return (
@@ -916,6 +1084,27 @@ async fn invoke(
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": format!("权限不足:命令 {} 需要更高角色", req.cmd)})),
+        )
+            .into_response();
+    }
+    let private_origin = origin_gate_with(true, true, peer_addr, &headers);
+    if !update_origin_allowed(
+        &req.cmd,
+        &ctx,
+        private_origin,
+        same_origin_request(&headers),
+    ) {
+        crate::collab::db::audit(
+            &ctx.username,
+            "invoke.denied",
+            &req.cmd,
+            "公网远程更新需要真实 owner 凭据",
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "远程更新需要同源 LAN/Tailscale 访问，或 owner 登录/POLARIS_AUTH_TOKEN"
+            })),
         )
             .into_response();
     }
@@ -1837,6 +2026,11 @@ fn docker_update_enabled_with(service: bool, script: bool) -> bool {
     service && script
 }
 
+#[cfg(not(feature = "desktop"))]
+fn docker_target_revision_is_approved(expected: &str, actual: &str) -> bool {
+    !expected.is_empty() && expected == actual
+}
+
 /// 返回 `(enabled, updater_service_configured, script_present)`。
 #[cfg(not(feature = "desktop"))]
 pub(crate) fn docker_updater_bits() -> (bool, bool, bool) {
@@ -2508,6 +2702,7 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
             if !bool_def(a, "confirm", false) {
                 return Err("更新需要确认 (confirm: true)".to_string());
             }
+            let expected_revision = req_str(a, "expectedRevision")?;
             let (enabled, service, script) = docker_updater_bits();
             if !script {
                 return Err("/usr/local/bin/update.sh 不存在(镜像未含更新脚本,旧版镜像请先手动装一次新的)。".to_string());
@@ -2519,6 +2714,12 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
                 return Err("容器一键更新未就绪，请检查 updater 内部服务与更新脚本。".to_string());
             }
             let target = docker_registry_target()?;
+            if !docker_target_revision_is_approved(&expected_revision, &target.revision) {
+                return Err(format!(
+                    "目标镜像已从 {expected_revision} 变为 {}，请重新检查并确认更新。",
+                    target.revision
+                ));
+            }
             if current_build_revision() == target.revision {
                 return ok(json!({
                     "accepted": false,

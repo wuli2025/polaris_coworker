@@ -879,6 +879,7 @@ async function send() {
       permissionMode: permMode.value,
       skillIds: Array.from(skillsStore.enabledSkills),
       useKb: kbMode.value || undefined,
+      workMode: workMode.value,
       providerId: sendProviderId,
     });
     return;

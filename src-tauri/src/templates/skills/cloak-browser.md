@@ -4,6 +4,8 @@ Polaris 的**默认浏览器**是 **CloakBrowser** —— 一个源码级改造�
 
 凡是需要「打开网页 / 抓取 / 填表 / 点击 / 截图 / 网页自动化」的任务，**优先用 CloakBrowser**，而不是普通 `requests` 或原生 `playwright`。
 
+当前模型是 MiniMax（模型名含 `MiniMax`，或 `ANTHROPIC_BASE_URL` 含 `minimaxi.com`）时，直接由当前 Agent 编写并运行 CloakBrowser 脚本；不要再嵌套 browser-use 0.13.8，它的工具格式与 MiniMax 不完全兼容。
+
 ## 启用方式（Python，drop-in 替换）
 1. 安装（首次运行会自动下载隐身 Chromium 二进制 ~200MB，本地缓存）：
    - 在线：`pip install cloakbrowser`
@@ -25,6 +27,8 @@ Polaris 的**默认浏览器**是 **CloakBrowser** —— 一个源码级改造�
 - 默认无头；需要观察过程时 `launch(headless=False)`（参数是 `headless=`，不是 `headed=`）
 - 抓取结果存到工作目录并回报绝对路径
 - 反爬 / 风控场景务必带 `humanize=True`
+- 禁止 `find /`、`rg /`、`ls -R /` 等从根目录递归搜索；只查工作目录、`~/Polaris/skills`、`~/Polaris/plugins` 或用 Python import 自省
+- 禁止用原生 `playwright.sync_api` / `playwright.async_api` 兜底；CloakBrowser 失败时应原样报告失败
 
 ## 随时移除
-本插件可随时拿掉：在「技能中心」把「CloakBrowser 浏览器」开关关掉即可，Agent 会自动回退到普通浏览方式；删除 `~/Polaris/plugins/cloakbrowser` 可一并清除离线源码副本。
+本插件可随时拿掉：在「技能中心」把「CloakBrowser 浏览器」开关关掉即可；关闭后需要浏览器的任务应明确报告能力不可用，不得静默回退到裸 Playwright。删除 `~/Polaris/plugins/cloakbrowser` 可一并清除离线源码副本。

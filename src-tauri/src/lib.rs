@@ -184,14 +184,7 @@ pub fn run() {
             // 首帧前的 setup 主线程」移除：稳态只是几次版本比对、极快，但慢速机械盘 + 版本升级
             // 那次的多文件写不再计入首帧延迟。各 seed_* 自身仍幂等、不覆盖用户改动。
             std::thread::spawn(|| {
-                skills::seed_video_studio_skill();
-                skills::seed_deck_studio_skill();
-                skills::seed_web_studio_skill();
-                skills::seed_turbo_download_skill();
-                skills::seed_browser_use_skill();
-                skills::seed_wechat_typesetter_skill();
-                skills::seed_wechat_tasks_skill();
-                skills::seed_project_check_skill();
+                skills::seed_all_builtin_skills();
             });
             // 注：此前这里会为「早期播种过毛主席资料库」的老用户补装 consult-mao 技能。
             // 现「请教毛主席」默认隐藏 —— 只在用户主动安装「毛主席」名人资料包时才装该技能，

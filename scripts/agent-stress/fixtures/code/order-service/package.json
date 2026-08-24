@@ -1,0 +1,8 @@
+{
+  "name": "polaris-agent-order-service-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}
