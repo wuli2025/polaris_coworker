@@ -58,12 +58,10 @@ impl Client {
         let timeout = self.config.request_timeout_ms.saturating_mul(2)
             .saturating_add(self.config.supervisor_tick_ms.saturating_mul(2));
         rx.recv_timeout(Duration::from_millis(timeout)).map_err(|error| {
-            let status = self.status.lock();
-            let message = if !status.healthy { status.last_error.clone() } else { None };
-            anyhow::anyhow!(message.unwrap_or_else(|| match error {
-                mpsc::RecvTimeoutError::Disconnected => "AgentdSupervisorStopped".into(),
-                mpsc::RecvTimeoutError::Timeout => "AgentdRequestTimeout".into(),
-            }))
+            anyhow::anyhow!(match error {
+                mpsc::RecvTimeoutError::Disconnected => super::routes::SUPERVISOR_EXITED,
+                mpsc::RecvTimeoutError::Timeout => "AgentdRequestTimeout",
+            })
         })?.map_err(anyhow::Error::msg)
     }
     pub fn cancel(&self, req: &str) -> anyhow::Result<()> {
@@ -74,3 +72,33 @@ impl Client {
     pub fn stop(&self) { let _ = self.send(Control::Stop); }
 }
 impl Drop for Client { fn drop(&mut self) { let _ = self.tx.try_send(Control::Stop); } }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_disconnect_and_timeout_have_distinct_errors() -> anyhow::Result<()> {
+        let mut config = super::super::tests::config();
+        config.request_timeout_ms = 1;
+        config.supervisor_tick_ms = 1;
+        let (tx, _control) = tokio::sync::mpsc::channel(1);
+        let client = Client { config, tx,
+            status: Arc::new(Mutex::new(BackendStatus::new("pi"))),
+            active: Arc::new(Mutex::new(Default::default())) };
+        // A stale actor failure must not mask why recv_timeout returned.
+        client.status.lock().last_error = Some("AgentdRestarting".into());
+        let (reply, rx) = mpsc::sync_channel(1);
+        drop(reply);
+        let error = client.wait(rx).err().ok_or_else(|| anyhow::anyhow!("expected exit"))?;
+        assert_eq!(error.to_string(), super::super::routes::SUPERVISOR_EXITED);
+        let (_reply, rx) = mpsc::sync_channel(1);
+        let error = client.wait(rx).err().ok_or_else(|| anyhow::anyhow!("expected timeout"))?;
+        assert_eq!(error.to_string(), "AgentdRequestTimeout");
+        let (reply, rx) = mpsc::sync_channel(1);
+        reply.send(Err("AgentdWriterBackpressure".into()))?;
+        let error = client.wait(rx).err().ok_or_else(|| anyhow::anyhow!("expected actor error"))?;
+        assert_eq!(error.to_string(), "AgentdWriterBackpressure");
+        Ok(())
+    }
+}

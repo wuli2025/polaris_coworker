@@ -221,7 +221,11 @@ fn config_apply_is_not_busy_after_circuit_or_thread_exit() {
         }
         let error = b.apply_config(None, None).unwrap_err().to_string();
         assert!(!error.contains("AgentdConfigBusy"), "{error}");
-        assert!(error.contains(if shutdown { "AgentdSupervisorStopped" } else { "AgentdCircuitOpen" }), "{error}");
+        // Shutdown may close the control queue before send, or the reply after send.
+        let expected = if shutdown {
+            error.contains("AgentdSupervisorStopped") || error.contains(routes::SUPERVISOR_EXITED)
+        } else { error.contains("AgentdCircuitOpen") };
+        assert!(expected, "{error}");
     }
 }
 

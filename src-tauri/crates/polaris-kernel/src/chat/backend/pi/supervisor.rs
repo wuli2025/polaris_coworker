@@ -4,6 +4,9 @@ use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
 use tokio::sync::mpsc;
 use serde_json::{Value, json};
+#[cfg(test)]
+#[path = "supervisor_tests.rs"]
+mod tests;
 struct Pending { reply: Option<Reply>, since: Instant, ping: bool }
 struct State {
     config: Agentd,
@@ -202,6 +205,14 @@ impl Drop for State {
         // Publish failure before waking stream consumers and control callers.
         self.routes.clear();
         self.active.lock().clear();
+        for (_, reply, _) in self.deferred.drain(..) {
+            let _ = reply.send(Err(super::routes::SUPERVISOR_EXITED.into()));
+        }
+        for (_, pending) in self.pending.drain() {
+            if let Some(reply) = pending.reply {
+                let _ = reply.send(Err(super::routes::SUPERVISOR_EXITED.into()));
+            }
+        }
     }
 }
 pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mutex<BackendStatus>>,

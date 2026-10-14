@@ -218,6 +218,9 @@ P2.5 当时缺失的 ChatSendArgs 图片/思考档位入口由下述 P2.5b 接�
 `K/chat/types.rs::ChatSendArgs` 增加 serde 默认的 image_paths/thinking_level；没有现成档位选择器，不新增 UI。
 `backend/bridge.rs` 经 `attach::uploads_dir` 定位当前会话 uploads，再调用公开 `backend/chat_input.rs::prepare`。
 该接口复用 `images.rs::load`，拒绝相对路径、`..`、规范化越界及符号链接逃逸，验证普通文件、数量、字节和 MIME 后编码。
+已知限制（R2 / 审查 #2）：规范化后、打开前，上级目录仍可能被替换为符号链接；攻击者须有会话 uploads 目录的本地写权限。
+远程协作者只能提交路径字符串，不能写本机文件系统，此情形不在当前威胁模型内；fd 的 `file.metadata()` 本身使用 fstat。
+若将来 uploads 对他人可写，应改用 Linux `openat2(RESOLVE_BENEATH)`；本轮仅记录限制，不修改附件代码。
 `TurnRequest.attachments` 现为 `Vec<protocol::Attachment>`；Pi 直接下发内容，不再重新打开路径。
 `thinking_level` 校验为 off/minimal/low/medium/high/xhigh，非法字符串报 THINKING_LEVEL_INVALID；Pi 每轮 open/configure 下发。
 缺省沿用 daemon 默认/当前档位；Claude CLI 保留 prompt/Read 路径行为，不增加思考档位映射。
@@ -243,6 +246,18 @@ Pi 安装版 read 工具支持图片内容块，可为仅有路径的 prompt 提
 
 Rust 入口路径以 `src-tauri/crates/polaris-kernel/src/chat/` 为前缀。
 实际命令、结果、基线/TCP 失败列表与边界阻塞见 [R1 执行报告](pi-migration/r1-review-fixes.md)；R1 不声明完整验收通过。
+
+## R2 审查修复（执行报告，完整验证 BLOCKED）
+
+仅实现 [审查处置](reviews/P25-round1-triage.md) 的 #3/#4；#2 限制见上方附件节点，驳回项未改代码。
+
+| 入口 | 行为与依赖 | 配置、迁移与验证 |
+| --- | --- | --- |
+| `K/chat/backend/pi/supervisor.rs`、`client.rs` | State Drop 显式回复全部 deferred/pending；回复通道关闭报 AgentdSupervisorExited，真实等待超时报 AgentdRequestTimeout；保留 actor 显式错误 | 依赖既有 mpsc；requestTimeoutMs=15000、supervisorTickMs=10、channelCapacity=64，均为正整数；无新增配置；`supervisor_tests.rs`、client 内单测及既有 Pi 回归 |
+| `agentd/src/sessions/options.ts`、`registry.ts` | configure 预检字段类型/思考枚举、模型、工具档及模型输入能力；失败按原模型→思考→工具回滚；toolProfile 仍只在成功后更新 | 依赖既有 SDK/TypeBox；沿用 defaultModel/thinkingLevel/defaultToolProfile/toolProfiles，缺省保持原行为；无需配置/协议迁移；`agentd/test/configure-transaction.test.ts` 与 `protocol-extension.test.ts` |
+
+配置切换示例、回滚边界、实际命令、失败清单及未运行项见 [R2 执行报告](pi-migration/r2-review-fixes.md)。
+无新依赖、未提交；最终完成状态由 Claude 复核决定。
 
 ## 后续边界与待确认
 
