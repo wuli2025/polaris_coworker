@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-14T05:17:12.166082+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "386d643437ae27c98661c0fbeba7cb61488c8388faf0d9b74db45010b3b8007b",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": "?? docs/execution/R1c-1/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M docs/feature-tree.md\n M src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/mod.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/process.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/lifecycle.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/mod.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs\n?? docs/execution/R1c-1/\n?? docs/pi-migration/r1c-drop-completion.md\n?? src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/completion.rs\n?? src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader_tests.rs\n",
+    "diff_stat": " docs/feature-tree.md                               |  1 +\n .../src/chat/backend/claude_cli/mod.rs             |  8 +++--\n .../chat/backend/claude_cli/pipeline/process.rs    |  2 ++\n .../src/chat/backend/claude_cli/pool/lifecycle.rs  |  4 ++-\n .../src/chat/backend/claude_cli/pool/mod.rs        |  1 +\n .../src/chat/backend/claude_cli/pool/reader.rs     | 20 ++++++++++-\n .../polaris-kernel/src/chat/backend/pi/client.rs   |  4 +++\n .../polaris-kernel/src/chat/backend/pi/routes.rs   | 35 ++++++++++++++++++\n .../src/chat/backend/pi/supervisor.rs              | 25 +++++++++++--\n .../polaris-kernel/src/chat/backend/pi/tests.rs    | 42 ++++++++++++++++++++++\n 10 files changed, 136 insertions(+), 6 deletions(-)\n"
+  },
+  "finished_at": "2026-10-14T05:23:37.576711+00:00"
+}

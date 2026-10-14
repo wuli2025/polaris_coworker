@@ -2,6 +2,7 @@ use super::{translate::Translator, protocol::{Event, TurnStatus}};
 use super::super::stream::Mailbox;
 use crate::chat::ChatStreamEvent;
 use std::{collections::VecDeque, sync::Arc, time::{Duration, Instant}};
+pub(super) const SUPERVISOR_EXITED: &str = "AgentdSupervisorExited";
 pub struct Route {
     pub req: String,
     pub session: String,
@@ -108,6 +109,13 @@ impl Drop for Route {
     fn drop(&mut self) {
         self.reservation.0.lock().remove(&self.reservation.1);
         self.active.lock().remove(&self.req);
+        // Reserved terminal slots bypass backpressure, even during unwinding.
+        if !self.stream.is_finished() {
+            self.stream.finish(
+                Some(self.translator.make("error", Some(SUPERVISOR_EXITED.into()))),
+                self.translator.make("done", None),
+            );
+        }
     }
 }
 
@@ -134,6 +142,33 @@ mod tests {
         drop(route);
         assert!(active.lock().is_empty());
         assert!(reservations.lock().is_empty());
+    }
+    #[test]
+    fn drop_finishes_full_unacknowledged_mailbox_and_preserves_finished_stream() -> anyhow::Result<()> {
+        for finished in [false, true] {
+            let (mut route, receiver) = route();
+            route.acknowledged = false;
+            for _ in 0..4 {
+                assert!(route.stream.try_push(route.translator.make("tool", None)).is_ok());
+            }
+            if finished {
+                route.stream.finish(None, route.translator.make("done", None));
+            } else {
+                route.fail("undrained failure");
+            }
+            drop(route);
+            let wait = Duration::from_secs(1);
+            for _ in 0..4 { assert_eq!(receiver.recv_timeout(wait)?.kind, "tool"); }
+            if !finished {
+                let error = receiver.recv_timeout(wait)?;
+                assert_eq!(error.kind, "error");
+                assert_eq!(error.text.as_deref(), Some(SUPERVISOR_EXITED));
+            }
+            assert_eq!(receiver.recv_timeout(wait)?.kind, "done");
+            let closed = receiver.recv_timeout(wait).err().ok_or_else(|| anyhow::anyhow!("duplicate terminal"))?;
+            assert!(matches!(closed.downcast_ref(), Some(super::super::super::stream::StreamError::Closed)));
+        }
+        Ok(())
     }
     #[test]
     fn first_failure_survives_abort_timeout() {

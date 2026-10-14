@@ -258,6 +258,48 @@ fn supervisor_exit_clears_orphan_active_entries() {
     assert!(!b.apply_config(None, None).unwrap_err().to_string().contains("AgentdConfigBusy"));
 }
 
+#[test]
+fn supervisor_exit_panic_and_channel_close_finish_inflight_turns() -> anyhow::Result<()> {
+    for control in [Control::TestExit(false), Control::TestExit(true), Control::TestClose] {
+        let mut c = config();
+        c.turn_idle_timeout_ms = 60_000;
+        let b = PiBackend::new(c)?;
+        b.models()?;
+        let client = b.client()?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !b.status().healthy {
+            anyhow::ensure!(Instant::now() < deadline, "supervisor never healthy");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let streams = [b.start(input("exit-a", "hang"))?, b.start(input("exit-b", "hang"))?];
+        while client.active.lock().len() != 2
+            || b.preparing.lock().contains("exit-a") || b.preparing.lock().contains("exit-b") {
+            anyhow::ensure!(Instant::now() < deadline, "turns never bound");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        client.send(control)?;
+        for (index, stream) in streams.into_iter().enumerate() {
+            let wait = Duration::from_secs(2);
+            assert_eq!(stream.recv_timeout(wait)?.kind, "meta");
+            let error = stream.recv_timeout(wait)?;
+            assert_eq!(error.kind, "error");
+            assert_eq!(error.text.as_deref(), Some(routes::SUPERVISOR_EXITED));
+            assert_eq!(error.req_id, if index == 0 { "exit-a" } else { "exit-b" });
+            assert_eq!(stream.recv_timeout(wait)?.kind, "done");
+            let closed = stream.recv_timeout(wait).err().ok_or_else(|| anyhow::anyhow!("duplicate terminal"))?;
+            assert!(matches!(closed.downcast_ref(), Some(stream::StreamError::Closed)));
+        }
+        // agent_backend_status delegates directly to this backend status method.
+        let status = b.status();
+        assert!(!status.healthy);
+        assert!(status.pid.is_none());
+        assert_eq!(status.last_error.as_deref(), Some(routes::SUPERVISOR_EXITED));
+        assert!(client.active.lock().is_empty());
+        assert!(b.preparing.lock().is_empty());
+    }
+    Ok(())
+}
+
 // Dedicated timed wire fixture stays inside this task's allowed Rust test file.
 // Reasoning and usage deliberately produce no frontend events.
 fn timed_config() -> config::Agentd {

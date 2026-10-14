@@ -75,6 +75,8 @@ impl State {
         self.last_used = Instant::now();
         match command {
             Control::Stop => { self.stopping = true; }
+            #[cfg(test)]
+            Control::TestExit(_) | Control::TestClose => unreachable!("handled by run"),
             Control::Fail(req, message) => {
                 for route in self.routes.values_mut().filter(|r| r.req == req) { route.fail(&message); }
             }
@@ -168,7 +170,19 @@ impl State {
 }
 // Also runs when the supervisor future is dropped or its thread unwinds.
 impl Drop for State {
-    fn drop(&mut self) { self.active.lock().clear(); }
+    fn drop(&mut self) {
+        {
+            let mut status = self.status.lock();
+            status.healthy = false;
+            status.pid = None;
+            if !self.stopping || !self.routes.is_empty() {
+                status.last_error = Some(super::routes::SUPERVISOR_EXITED.into());
+            }
+        }
+        // Publish failure before waking stream consumers and control callers.
+        self.routes.clear();
+        self.active.lock().clear();
+    }
 }
 pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mutex<BackendStatus>>,
     active: Arc<Mutex<HashMap<String, String>>>) {
@@ -197,6 +211,13 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
         let outcome: anyhow::Result<()> = tokio::select! {
             command = rx.recv() => {
                 match command {
+                    #[cfg(test)]
+                    Some(Control::TestExit(panic)) => {
+                        assert!(!panic, "injected supervisor panic");
+                        return;
+                    }
+                    #[cfg(test)]
+                    Some(Control::TestClose) => { rx.close(); Ok(()) }
                     Some(command) => {
                         if idle {
                             idle = false;
@@ -213,7 +234,7 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
                         }
                         s.control(command, process.as_ref())
                     }
-                    None => { s.stopping = true; Ok(()) }
+                    None => break,
                 }
             }
             frame = async { match &mut process { Some(p) => p.incoming.recv().await, None => std::future::pending().await } }, if ready => {

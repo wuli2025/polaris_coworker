@@ -1,7 +1,21 @@
 use super::*;
 
 pub(crate) fn reader_loop(stdout: ChildStdout, rx: mpsc::Receiver<TurnJob>, shared: Arc<SessionShared>) {
-    let mut lines = BufReader::new(stdout).lines();
+    read_jobs(BufReader::new(stdout).lines(), rx, shared);
+}
+
+struct ReaderGuard(Arc<SessionShared>);
+impl Drop for ReaderGuard {
+    fn drop(&mut self) {
+        self.0.alive.store(false, Ordering::SeqCst);
+        *self.0.active_req.lock() = None;
+        *self.0.watchdog.lock() = None;
+    }
+}
+
+fn read_jobs(mut lines: impl Iterator<Item = std::io::Result<String>>,
+    rx: mpsc::Receiver<TurnJob>, shared: Arc<SessionShared>) {
+    let _reader = ReaderGuard(shared.clone());
     while let Ok(job) = rx.recv() {
         let mut ts = pipeline::TurnStream::new(
             job.app.clone(),
@@ -197,4 +211,8 @@ pub(crate) fn spawn_turn_watchdog(
 }
 
 // ───────────────────────── 单测 (纯记账, 时钟注入) ─────────────────────────
+
+#[cfg(all(test, not(feature = "desktop")))]
+#[path = "reader_tests.rs"]
+mod tests;
 

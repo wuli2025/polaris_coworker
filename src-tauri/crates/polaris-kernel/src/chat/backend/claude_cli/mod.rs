@@ -2,6 +2,7 @@
 pub mod pool;
 pub(crate) mod pipeline;
 mod headless;
+mod completion;
 use super::*;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -58,7 +59,10 @@ impl AgentBackend for ClaudeCliBackend {
             let error = match outcome {
                 Ok(Ok(())) => None,
                 Ok(Err(e)) => Some(e),
-                Err(_) => Some("ClaudeCliBackend: background preparation panicked".into()),
+                Err(_) => {
+                    completion::record_failure(completion::WORKER_EXITED);
+                    Some(completion::WORKER_EXITED.into())
+                }
             };
             if let Some(error) = error {
                 sender.finish(Some(event(&req, conv.as_deref(), "error", Some(error))), event(&req, conv.as_deref(), "done", None));
@@ -92,7 +96,7 @@ impl AgentBackend for ClaudeCliBackend {
         }
         Ok(serde_json::json!({"models": models, "source": "configured-cli-models"}))
     }
-    fn status(&self) -> BackendStatus { let mut s = BackendStatus::new("claude-cli"); s.healthy = crate::doctor::resolve_claude_exe().is_some(); s }
+    fn status(&self) -> BackendStatus { completion::status() }
     fn is_running(&self, req: &str) -> bool {
         STREAMS.lock().contains_key(req) || pool::is_active_req(req) || CHILDREN.lock().contains_key(req)
     }

@@ -11,6 +11,10 @@ pub enum Control {
     Bind(String, String, Reply),
     Fail(String, String),
     Stop,
+    #[cfg(test)]
+    TestExit(bool),
+    #[cfg(test)]
+    TestClose,
 }
 pub struct Client {
     pub config: Agentd,

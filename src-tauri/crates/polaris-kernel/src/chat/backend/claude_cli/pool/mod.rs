@@ -151,6 +151,7 @@ pub fn kill_all() {
 /// 发给会话 reader 线程的「一轮」上下文: reader 常驻在 stdout 上, 每收到一个 job
 /// 就以该轮的 req_id/产物快照/看门狗处理事件流, 直到 result 事件收尾。
 struct TurnJob {
+    completion: super::completion::TurnGuard,
     req_id: String,
     conv_id: String,
     app: AppHandle,

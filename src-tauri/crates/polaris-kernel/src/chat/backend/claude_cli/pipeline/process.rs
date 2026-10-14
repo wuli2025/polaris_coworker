@@ -262,7 +262,9 @@ pub(crate) fn run_process(
     let stderr_buf_for_done = stderr_buf.clone();
     let art_dir_thread = art_dir.clone();
     let act_out = watchdog.clone();
+    let completion = super::super::completion::TurnGuard::new(req_id, conv_id_opt.as_deref());
     std::thread::spawn(move || {
+        let _completion = completion;
         let reader = BufReader::new(stdout);
         // 单轮事件流状态机(解析/合批/记账/产物)抽到 TurnStream: 与常驻 agent 路径
         // (session_pool::reader_loop)共用同一实现, 事件契约只此一份。

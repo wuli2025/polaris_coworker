@@ -214,6 +214,7 @@ pub(crate) fn run_persistent_turn(p: TurnParams) -> Result<(), String> {
         *shared.active_req.lock() = Some(p.req_id.clone());
         *shared.watchdog.lock() = Some(wd.clone());
         let job = TurnJob {
+            completion: super::super::completion::TurnGuard::new(&p.req_id, Some(&p.conv_id)),
             req_id: p.req_id.clone(),
             conv_id: p.conv_id.clone(),
             app: p.app.clone(),
@@ -222,7 +223,8 @@ pub(crate) fn run_persistent_turn(p: TurnParams) -> Result<(), String> {
             image_notice: p.image_notice.clone(),
             watchdog: wd.clone(),
         };
-        if job_tx.send(job).is_err() {
+        if let Err(mut error) = job_tx.send(job) {
+            error.0.completion.disarm();
             // reader 线程已死(进程 EOF) → 同 stdin 失败: 杀掉重来
             *shared.active_req.lock() = None;
             last_err = "常驻进程 reader 已退出".into();
