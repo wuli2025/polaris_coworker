@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-14T11:08:26.999115+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "b46a7fee22eace7454e2f759a693c3cb0d4e03bb23a0a674073a590c46e77796",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": "?? docs/execution/R7-1/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M docs/feature-tree.md\n M src-tauri/crates/polaris-wiki/src/wiki/compile/tests.rs\n M src/components/EnvDoctor.vue\n M src/components/ProviderDock.vue\n M src/stores/providers.ts\n M src/tauri.ts\n?? docs/execution/R7-1/\n?? docs/pi-migration/r7-result.md\n?? src/features/runtime/\n?? src/types/agentRuntime.ts\n",
+    "diff_stat": " docs/feature-tree.md                               |  8 ++++\n .../crates/polaris-wiki/src/wiki/compile/tests.rs  | 20 ++++++++++\n src/components/EnvDoctor.vue                       | 44 ++++++++++++----------\n src/components/ProviderDock.vue                    | 35 +++++++----------\n src/stores/providers.ts                            | 12 ++++++\n src/tauri.ts                                       | 15 +++++---\n 6 files changed, 88 insertions(+), 46 deletions(-)\n"
+  },
+  "finished_at": "2026-10-14T11:10:00.857819+00:00"
+}
