@@ -1,6 +1,7 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
 import App from "./App.vue";
+import PermissionDialog from "./features/permissions/PermissionDialog.vue";
 import "./style.css";
 import { toast } from "./composables/useToast";
 import { humanizeError } from "./lib/humanizeError";
@@ -27,3 +28,7 @@ window.addEventListener("error", (e) => {
 
 app.use(createPinia());
 app.mount("#app");
+
+const permissionRoot = document.createElement("div");
+document.body.appendChild(permissionRoot);
+createApp(PermissionDialog).mount(permissionRoot);

@@ -22,6 +22,9 @@ const error = (id, code) => send({ type: 'response', id, ok: false, error: { cod
 const event = (s, name, fields = {}) => send({ type: 'event', sessionId: s.id, turnId: s.turn, event: name, ...fields });
 async function turn(s, text) {
   await event(s, 'turn.started');
+  if (text === 'permission') return event(s, 'permission.request', {
+    targetSessionId: s.id, callId: 'approve-call', tool: 'bash', summary: 'pwd', parentCallId: 'parent-call'
+  });
   if (text === 'crash') return process.exit(9);
   if (text === 'malformed') return process.stdout.write('not-json\n');
   if (text === 'oversized') return process.stdout.write('x'.repeat(65536) + '\n');
@@ -40,10 +43,17 @@ async function turn(s, text) {
 async function dispatch({ id, method, params: p }) {
   if (record) appendFileSync(record, JSON.stringify({id,method,params:p}) + '\n');
   switch (method) {
+    case 'permission.respond': {
+      const s = sessions.get(p.sessionId);
+      if (!s || p.callId !== 'approve-call') return error(id, 'APPROVAL_NOT_FOUND');
+      await response(id, {accepted:true});
+      await event(s, 'text.delta', {text:p.decision});
+      return event(s, 'turn.completed', {status:'completed'});
+    }
     case 'ping':
       if (process.argv.includes('--ping-hang')) return;
       return response(id, { status: 'ok', sessions: sessions.size, version: '0.1.0', piVersion: '1.0.4',
-        protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 2 });
+        protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 3 });
     case 'models.list': return response(id, { models: [{ provider: 'fixture', id: 'test' }] });
     case 'session.open': {
       if (p.sessionId && sessions.has(p.sessionId)) return error(id, 'SESSION_ALREADY_OPEN');

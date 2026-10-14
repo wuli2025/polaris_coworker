@@ -175,6 +175,7 @@ pub(crate) fn send(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Result<
     emit_event(
         app,
         ChatStreamEvent {
+            call_id: None, parent_call_id: None,
             req_id: req_id.to_string(),
             kind: "meta".into(),
             text: Some(est_tokens.to_string()),

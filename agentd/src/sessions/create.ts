@@ -7,11 +7,12 @@ import {
 import type { Config } from "../config/schema.ts";
 import type { Models } from "../models/runtime.ts";
 import type { SessionOptions } from "../protocol/schema.ts";
+import { contextFiles, expandPath } from "../extensions/resources.ts";
 import { activateTools, profileTools } from "./options.ts";
 import { DaemonError } from "../protocol/errors.ts";
 
 export async function createSession(
-  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string, options: SessionOptions = {},
+  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string, options: SessionOptions = {}, mandatoryFactories: (cwd: string) => ExtensionFactory[] = () => [],
 ) {
   const runtime = models.runtime;
   const tools = profileTools(config, options.toolProfile ?? config.defaultToolProfile);
@@ -40,7 +41,9 @@ export async function createSession(
     cwd: manager.getCwd(), agentDir, settingsManager,
     // Only host-assembled executable extensions. Standard AGENTS.md/skills still load.
     noExtensions: true, noThemes: true,
-    extensionFactories: config.extensions.enabled ? factories : [],
+    extensionFactories: [...(config.extensions.enabled ? factories : []), ...mandatoryFactories(manager.getCwd())],
+    additionalSkillPaths: config.skills.paths.map(expandPath),
+    agentsFilesOverride: (base) => contextFiles(manager.getCwd(), base),
   });
   await resourceLoader.reload();
   const { session } = await createAgentSession({

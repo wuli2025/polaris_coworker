@@ -26,8 +26,8 @@ export function activateTools(session: AgentSession, tools: string[]): void {
 }
 export async function configureSession(session: AgentSession, config: Config, options: SessionOptions): Promise<void> {
   // The registry also accepts direct callers; validate before any SDK mutation.
-  const { model: requestedModel, thinkingLevel, toolProfile } = options;
-  if (!Value.Check(SessionOptionsSchema, { model: requestedModel, thinkingLevel, toolProfile })) {
+  const { model: requestedModel, thinkingLevel, toolProfile, permissionMode, sandbox, expertPrompt } = options;
+  if (!Value.Check(SessionOptionsSchema, { model: requestedModel, thinkingLevel, toolProfile, permissionMode, sandbox, expertPrompt })) {
     throw new DaemonError("INVALID_REQUEST", "Session options do not match schema");
   }
   const tools = options.toolProfile === undefined ? undefined : profileTools(config, options.toolProfile);

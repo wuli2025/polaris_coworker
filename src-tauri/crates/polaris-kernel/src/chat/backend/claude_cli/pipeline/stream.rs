@@ -60,6 +60,7 @@ impl DeltaBatcher {
         emit_event(
             app,
             ChatStreamEvent {
+                call_id: None, parent_call_id: None,
                 req_id: req_id.into(),
                 kind: "delta".into(),
                 text: Some(text),
@@ -113,6 +114,7 @@ impl TurnStream {
             emit_event(
                 &ts.app,
                 ChatStreamEvent {
+                    call_id: None, parent_call_id: None,
                     req_id: ts.req_id.clone(),
                     kind: "delta".into(),
                     text: Some(notice),
@@ -177,6 +179,7 @@ impl TurnStream {
                 emit_event(
                     &self.app,
                     ChatStreamEvent {
+                        call_id: None, parent_call_id: None,
                         req_id: self.req_id.clone(),
                         kind: "delta".into(),
                         text: Some(line.to_string()),

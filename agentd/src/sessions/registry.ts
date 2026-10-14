@@ -1,3 +1,7 @@
+import { Permissions, type Decision } from "../extensions/permissions.ts";
+import { Sandbox } from "../extensions/sandbox.ts";
+import { webFactory } from "../extensions/web.ts";
+import { subagentFactory } from "../extensions/subagent.ts";
 import { randomUUID } from "node:crypto";
 import type { AgentSession, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { Config } from "../config/schema.ts";
@@ -18,7 +22,14 @@ interface Run {
 }
 interface Entry {
   session: AgentSession;
+  permissions: Permissions;
+  sandbox: Sandbox;
+  options: SessionOptions;
+  parent?: { id: string; callId: string };
+  depth: number;
+  children: Set<string>;
   run?: Run;
+  lastStatus?: TurnStatus;
   configuring?: Promise<void>;
   toolProfile: string;
   closing?: Promise<void>;
@@ -31,6 +42,7 @@ export class SessionRegistry {
   private readonly entries = new Map<string, Entry>();
   private readonly opening = new Set<string>();
   private pendingOpens = 0;
+  private runningChildren = 0;
   private stopped = false;
   constructor(
     private readonly config: () => Config,
@@ -39,7 +51,7 @@ export class SessionRegistry {
     private readonly emit: (event: ProtocolEvent) => void,
   ) {}
   get size(): number { return this.entries.size; }
-  async open(sessionId?: string, cwd?: string, options: SessionOptions = {}) {
+  async open(sessionId?: string, cwd?: string, options: SessionOptions = {}, parent?: { id: string; callId: string }) {
     if (this.stopped) throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
     if (sessionId && (this.entries.has(sessionId) || this.opening.has(sessionId))) {
       throw new DaemonError("SESSION_ALREADY_OPEN", "Session is already open");
@@ -51,14 +63,40 @@ export class SessionRegistry {
     if (sessionId) this.opening.add(sessionId);
     try {
       const config = this.config();
-      const session = await createSession(config, this.models, this.factories, sessionId, cwd, options);
+      const state = { id: "" };
+      let permissions!: Permissions;
+      let sandbox!: Sandbox;
+      const assemble = (actualCwd: string): ExtensionFactory[] => {
+        permissions = new Permissions(options.permissionMode ?? config.permissions.defaultMode,
+          actualCwd, config.permissions.timeoutMs, config.permissions.summaryChars,
+          (approval) => this.extensionEvent(state.id, { event: "permission.request", targetSessionId: state.id, ...approval }));
+        sandbox = new Sandbox(options.sandbox ?? false, actualCwd, config.sandbox,
+          (request) => this.extensionEvent(state.id, { event: "sandbox.request", targetSessionId: state.id, ...request }));
+        const factories: ExtensionFactory[] = [sandbox.factory(), webFactory(config.web, this.models.credentials),
+          subagentFactory((callId, task, signal) => this.subagent(state.id, callId, task, signal)),
+          (pi) => { pi.on("before_agent_start", (event) => {
+            const prompt = this.entries.get(state.id)?.options.expertPrompt ?? options.expertPrompt;
+            if (config.experts.enabled) return { systemPrompt: [event.systemPrompt, config.experts.prompt, prompt].filter(Boolean).join("\n\n") };
+          }); }, permissions.factory()];
+        return factories;
+      };
+      const session = await createSession(config, this.models, this.factories, sessionId, cwd, options, assemble);
+      state.id = session.sessionId;
       if (this.stopped) {
         session.dispose();
         throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
       }
+      const parentEntry = parent ? this.entries.get(parent.id) : undefined;
+      if (parent && (!parentEntry?.run || parentEntry.run.stopped || parentEntry.closing)) {
+        session.dispose();
+        throw new DaemonError("TURN_CANCELLED", "Parent stopped while opening child");
+      }
       const id = session.sessionId;
-      const entry: Entry = { session, toolProfile: options.toolProfile ?? config.defaultToolProfile, lastUsed: Date.now(), queueReservations: 0 };
+      const entry: Entry = { session, permissions, sandbox, options: { ...options }, parent,
+        depth: parentEntry ? parentEntry.depth + 1 : 0, children: new Set(),
+        toolProfile: options.toolProfile ?? config.defaultToolProfile, lastUsed: Date.now(), queueReservations: 0 };
       this.entries.set(id, entry);
+      if (parent) this.get(parent.id).children.add(id);
       this.armIdle(id, entry);
       return { sessionId: id, resumed: !!sessionId, messageCount: session.messages.length,
         model: { provider: session.model!.provider, id: session.model!.id },
@@ -83,6 +121,9 @@ export class SessionRegistry {
     try {
       await entry.configuring;
       entry.toolProfile = options.toolProfile ?? entry.toolProfile;
+      entry.options = { ...entry.options, ...options };
+      if (options.permissionMode !== undefined) entry.permissions.configure(options.permissionMode);
+      if (options.sandbox !== undefined) entry.sandbox.enabled = options.sandbox;
       return { sessionId: id, model: entry.session.model && {
         provider: entry.session.model.provider, id: entry.session.model.id },
         thinkingLevel: entry.session.thinkingLevel, toolProfile: entry.toolProfile,
@@ -101,7 +142,7 @@ export class SessionRegistry {
       throw new DaemonError("MODEL_IMAGES_UNSUPPORTED", "Selected model does not accept images");
     }
     clearTimeout(entry.idle);
-    const mapper = new EventMapper(id, randomUUID(), this.emit);
+    const mapper = new EventMapper(id, randomUUID(), (event) => this.emitEvent(id, event));
     const run: Run = { id: mapper.turnId, mapper, done: Promise.resolve() };
     entry.run = run;
     // Reserve synchronously; start after the command returns to permit immediate abort.
@@ -120,6 +161,8 @@ export class SessionRegistry {
       clearTimeout(idleTimer);
       clearTimeout(maxTimer);
       run.mapper.error(code, code === "TURN_IDLE_TIMEOUT" ? "本轮长时间未收到事件，已取消。" : "本轮超过最长运行时间，已取消。");
+      this.cancelTools(entry);
+      void this.stopChildren(entry);
       session.clearQueue();
       void session.abort().catch(() => undefined);
     };
@@ -152,7 +195,10 @@ export class SessionRegistry {
       clearTimeout(idleTimer!);
       clearTimeout(maxTimer);
       unsubscribe();
+      this.cancelTools(entry);
+      await this.stopChildren(entry);
       session.clearQueue();
+      entry.lastStatus = run.stopped ?? run.mapper.status;
       entry.run = undefined;
       entry.lastUsed = Date.now();
       run.mapper.emit({ event: "turn.completed", status: run.stopped ?? run.mapper.status });
@@ -181,6 +227,8 @@ export class SessionRegistry {
     const run = entry.run;
     if (!run) return { aborted: false };
     run.stopped ??= "aborted";
+    this.cancelTools(entry);
+    await this.stopChildren(entry);
     entry.session.clearQueue();
     await entry.session.abort();
     await run.done;
@@ -192,18 +240,20 @@ export class SessionRegistry {
     if (!entry) throw new DaemonError("SESSION_NOT_FOUND", "Session is not open");
     if (entry.closing) return entry.closing;
     clearTimeout(entry.idle);
+    if (entry.run) entry.run.stopped ??= "aborted";
+    this.cancelTools(entry);
     entry.closing = (async () => {
       try {
         await entry.configuring?.catch(() => undefined);
-        if (entry.run) {
-          entry.run.stopped ??= "aborted";
-          entry.session.clearQueue();
-          await entry.session.abort();
-          await entry.run?.done;
-        }
+        entry.session.clearQueue();
+        const aborted = entry.session.abort();
+        await Promise.all([...entry.children].map((child) => this.close(child)));
+        await aborted;
+        await entry.run?.done;
       } finally {
         entry.session.dispose();
         this.entries.delete(id);
+        if (entry.parent) this.entries.get(entry.parent.id)?.children.delete(id);
       }
     })();
     return entry.closing;
@@ -213,6 +263,70 @@ export class SessionRegistry {
     const remaining = Math.max(1, this.config().idleTimeoutMs - (Date.now() - entry.lastUsed));
     entry.idle = setTimeout(() => { void this.close(id).catch(() => undefined); }, remaining);
     entry.idle.unref();
+  }
+  private cancelTools(entry: Entry): void {
+    entry.permissions.cancel();
+    entry.sandbox.cancel();
+  }
+  private async stopChildren(entry: Entry): Promise<void> {
+    await Promise.all([...entry.children].map((child) => this.abort(child).catch(() => undefined)));
+  }
+  private extensionEvent(id: string, payload: Parameters<EventMapper["emit"]>[0]): void {
+    const run = this.get(id).run;
+    if (!run || run.stopped) throw new DaemonError("TURN_CANCELLED", "No active turn");
+    run.mapper.emit(payload);
+  }
+  private emitEvent(id: string, event: ProtocolEvent): void {
+    const parent = this.entries.get(id)?.parent;
+    if (parent) {
+      if (!["tool.started", "tool.completed", "permission.request", "sandbox.request"].includes(event.event)) return;
+      const run = this.entries.get(parent.id)?.run;
+      if (run) this.emitEvent(parent.id, { ...event, sessionId: parent.id,
+        turnId: run.id, parentCallId: event.parentCallId ?? parent.callId });
+    } else this.emit(event);
+  }
+  respondPermission(id: string, callId: string, decision: Decision) {
+    if (!this.get(id).permissions.respond(callId, decision)) throw new DaemonError("APPROVAL_NOT_FOUND", "Approval expired or does not belong to this session");
+    return { accepted: true };
+  }
+  respondSandbox(id: string, callId: string, output: string, error?: string) {
+    if (!this.get(id).sandbox.respond(callId, output, error)) throw new DaemonError("SANDBOX_REQUEST_NOT_FOUND", "Sandbox request expired");
+    return { accepted: true };
+  }
+  async subagent(id: string, callId: string, task: string, signal?: AbortSignal): Promise<string> {
+    const entry = this.get(id);
+    const limits = this.config().subagents;
+    if (entry.depth >= limits.maxDepth) throw new DaemonError("SUBAGENT_DEPTH_LIMIT", "Maximum subagent depth reached");
+    if (this.runningChildren >= limits.maxConcurrent) throw new DaemonError("SUBAGENT_CONCURRENCY_LIMIT", "Maximum concurrent subagents reached");
+    if (signal?.aborted || !entry.run || entry.run.stopped) throw new DaemonError("TURN_CANCELLED", "Parent turn is not active");
+    this.runningChildren++;
+    let childId: string | undefined;
+    const abort = () => { if (childId) void this.abort(childId).catch(() => undefined); };
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const child = await this.open(undefined, entry.session.sessionManager.getCwd(), {
+        ...entry.options, toolProfile: entry.toolProfile,
+        model: entry.session.model && { provider: entry.session.model.provider, id: entry.session.model.id },
+        thinkingLevel: entry.options.thinkingLevel, permissionMode: entry.permissions.mode, sandbox: entry.sandbox.enabled,
+      }, { id, callId });
+      childId = child.sessionId;
+      if (signal?.aborted || entry.run?.stopped || entry.closing) throw new DaemonError("TURN_CANCELLED", "Parent cancelled while opening child");
+      this.prompt(childId, task);
+      await this.wait(childId);
+      if (signal?.aborted || entry.run?.stopped) throw new DaemonError("TURN_CANCELLED", "Parent cancelled");
+      const childEntry = this.get(childId);
+      if (childEntry.lastStatus !== "completed") throw new DaemonError("SUBAGENT_FAILED", "Child did not complete successfully");
+      const messages = childEntry.session.messages;
+      const last = [...messages].reverse().find((message) => message.role === "assistant");
+      if (!last || last.role !== "assistant" || last.stopReason === "error" || last.stopReason === "aborted") {
+        throw new DaemonError("SUBAGENT_FAILED", "Child did not complete successfully");
+      }
+      return last.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").slice(0, limits.summaryChars);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      if (childId) await this.close(childId).catch(() => undefined);
+      this.runningChildren--;
+    }
   }
   reopenRequired(): string[] {
     return [...this.entries].filter(([, entry]) => entry.session.modelRuntime !== this.models.runtime)

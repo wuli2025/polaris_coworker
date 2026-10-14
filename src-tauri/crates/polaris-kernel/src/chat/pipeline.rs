@@ -82,6 +82,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
             emit_event(
                 &bg_app,
                 ChatStreamEvent {
+                    call_id: None, parent_call_id: None,
                     req_id: bg_req.clone(),
                     kind: "error".into(),
                     text: Some(msg),
@@ -92,6 +93,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
             emit_event(
                 &bg_app,
                 ChatStreamEvent {
+                    call_id: None, parent_call_id: None,
                     req_id: bg_req.clone(),
                     kind: "done".into(),
                     text: None,

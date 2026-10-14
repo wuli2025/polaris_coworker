@@ -1,52 +1,5 @@
 use super::*;
 
-// Docker-in-Docker 沙箱仅桌面构建可用 (依赖 polaris_sandbox crate)；
-// server(容器内)本期降级，不编译此路径。
-#[cfg(feature = "desktop")]
-#[allow(dead_code)]
-fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
-    let perm_flag = format!("--permission-mode={}", perm);
-    // 联网 + (非只读档位)本地读写执行, 让成品能真正产出
-    let allowed = allowed_tools_for(perm, false);
-    // 沙箱内 KB 永远挂在 /kb (sandbox_start 时挂载),
-    // 这里让 claude 把 /kb 也加进可读目录,并以 /workspace 为 cwd
-    let mut cmd = Command::new("docker");
-    cmd.args([
-        "exec",
-        "-i",
-        "-w",
-        "/workspace",
-        // 与 polaris_sandbox::CONTAINER_NAME 同值。字面内联以斩断 kernel→sandbox 的
-        // 向上依赖(红线 R3);本函数是 dead_code 保留路径,真启用时应经壳层桥接注入。
-        "polaris-sandbox",
-        "claude",
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-    ]);
-    // token 级部分流(同 spawn_on_host);flag 必须在 prompt 位置参数之前。
-    if partial_stream_enabled() {
-        cmd.arg("--include-partial-messages");
-    }
-    cmd.args([
-        "--add-dir",
-        "/kb",
-        "--allowedTools",
-        &allowed,
-        &perm_flag,
-        prompt,
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-    no_window(&mut cmd); // 隐藏式: 不弹控制台窗口
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("在沙箱内调起 claude 失败: {}", e))?;
-    Ok(child)
-}
-
 /// 本轮 claude CLI 的实际工作目录(cwd)。优先用项目绑定的工作目录(用户选定的真实文件夹,
 /// 等同终端 `cd <dir> && claude`), 否则回落编译期仓库根(开发)/进程当前目录(装机)。
 /// 抽出来让 spawn、extra_claude_dirs、常驻会话指纹三处对 cwd 的口径**完全一致** —— 否则

@@ -205,6 +205,7 @@ pub(crate) fn run_process(
                         emit_event(
                             &wd_app,
                             ChatStreamEvent {
+                                call_id: None, parent_call_id: None,
                                 req_id: wd_req.clone(),
                                 kind: "error".into(),
                                 text: Some(reason),
@@ -245,6 +246,7 @@ pub(crate) fn run_process(
             emit_event(
                 &app_err,
                 ChatStreamEvent {
+                    call_id: None, parent_call_id: None,
                     req_id: req_err.clone(),
                     kind: "error".into(),
                     text: Some(format!("[stderr] {}", line)),
@@ -346,6 +348,7 @@ pub(crate) fn run_process(
             emit_event(
                 &app_out,
                 ChatStreamEvent {
+                    call_id: None, parent_call_id: None,
                     req_id: req_out.clone(),
                     kind: "error".into(),
                     text: Some(msg),

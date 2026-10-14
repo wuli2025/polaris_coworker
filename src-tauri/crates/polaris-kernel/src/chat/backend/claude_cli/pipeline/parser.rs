@@ -65,6 +65,7 @@ pub(crate) fn handle_stream_event(
                                     emit_event(
                                         app,
                                         ChatStreamEvent {
+                                            call_id: None, parent_call_id: None,
                                             req_id: req_id.into(),
                                             kind: "delta".into(),
                                             text: Some(txt.to_string()),
@@ -85,6 +86,7 @@ pub(crate) fn handle_stream_event(
                             emit_event(
                                 app,
                                 ChatStreamEvent {
+                                    call_id: None, parent_call_id: None,
                                     req_id: req_id.into(),
                                     kind: "tool".into(),
                                     text: summary,
@@ -112,6 +114,7 @@ pub(crate) fn handle_stream_event(
                                         emit_event(
                                             app,
                                             ChatStreamEvent {
+                                                call_id: None, parent_call_id: None,
                                                 req_id: req_id.into(),
                                                 kind: "artifact".into(),
                                                 text: Some(norm),
@@ -145,6 +148,7 @@ pub(crate) fn handle_stream_event(
                         emit_event(
                             app,
                             ChatStreamEvent {
+                                call_id: None, parent_call_id: None,
                                 req_id: req_id.into(),
                                 kind: "delta".into(),
                                 text: Some(txt.to_string()),
@@ -166,6 +170,7 @@ pub(crate) fn handle_stream_event(
                     emit_event(
                         app,
                         ChatStreamEvent {
+                            call_id: None, parent_call_id: None,
                             req_id: req_id.into(),
                             kind: "error".into(),
                             text: Some(format!("[result error: {}] {}", subtype, msg)),

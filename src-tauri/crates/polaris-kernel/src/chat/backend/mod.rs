@@ -8,6 +8,8 @@ pub mod claude_cli;
 pub mod pi;
 pub mod stream;
 mod bridge;
+pub mod host_tools;
+pub mod docker_tools;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use serde::Serialize;
 use crate::chat::{ChatSendArgs, PermissionMode};
@@ -39,6 +41,11 @@ impl std::fmt::Display for BackendError {
 }
 impl std::error::Error for BackendError {}
 
+#[derive(Default)]
+pub struct ToolOptions {
+    pub sandbox: bool,
+    pub expert_prompt: Option<String>,
+}
 pub struct TurnRequest {
     pub req_id: String,
     /// Polaris session key; the Pi adapter maps it to the daemon's UUID.
@@ -73,7 +80,17 @@ impl BackendStatus {
     }
 }
 pub trait AgentBackend: Send + Sync {
+    fn permission_respond(&self, _response: pi::protocol::PermissionResponse) -> anyhow::Result<()> {
+        anyhow::bail!("PermissionResponseUnsupported")
+    }
+    fn sandbox_respond(&self, _response: pi::protocol::SandboxResponse) -> anyhow::Result<()> {
+        anyhow::bail!("SandboxResponseUnsupported")
+    }
     fn start(&self, input: TurnRequest) -> anyhow::Result<EventStream>;
+    fn start_with_tools(&self, input: TurnRequest, options: ToolOptions) -> anyhow::Result<EventStream> {
+        anyhow::ensure!(!options.sandbox && options.expert_prompt.is_none(), "BackendToolOptionsUnsupported");
+        self.start(input)
+    }
     fn cancel(&self, req_id: &str) -> anyhow::Result<()>;
     fn close(&self, session_id: &str) -> anyhow::Result<()>;
     fn models(&self) -> anyhow::Result<serde_json::Value>;
@@ -120,6 +137,7 @@ pub fn collect<F: FnMut(&str, &str)>(
                 && deadline.is_none_or(|d| std::time::Instant::now() < d) => continue,
             Err(e) => { let _ = backend.cancel(&req); return Err(e); }
         };
+        if host_tools::handle_sandbox(backend, &event)? { continue; }
         match event.kind.as_str() {
             "delta" => { let text = event.text.as_deref().unwrap_or_default(); result.push_str(text); on_event("delta", text); }
             "tool" => on_event("tool", event.tool.as_deref().unwrap_or_default()),
@@ -130,5 +148,5 @@ pub fn collect<F: FnMut(&str, &str)>(
     }
 }
 pub(crate) fn event(req: &str, conv: Option<&str>, kind: &str, text: Option<String>) -> crate::chat::ChatStreamEvent {
-    crate::chat::ChatStreamEvent { req_id: req.into(), conversation_id: conv.map(str::to_owned), kind: kind.into(), text, tool: None }
+    crate::chat::ChatStreamEvent { call_id: None, parent_call_id: None, req_id: req.into(), conversation_id: conv.map(str::to_owned), kind: kind.into(), text, tool: None }
 }

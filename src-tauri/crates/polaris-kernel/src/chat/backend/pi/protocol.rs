@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 /// Mirror of agentd/src/protocol/schema.ts; fingerprint test gates changes.
-pub const PROTOCOL_VERSION: u64 = 2;
+pub const PROTOCOL_VERSION: u64 = 3;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum Id { Text(String), Number(i64) }
@@ -12,6 +12,8 @@ pub struct Request { pub id: Id, #[serde(flatten)] pub command: Command }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Command {
+    #[serde(rename = "permission.respond")] PermissionRespond(PermissionResponse),
+    #[serde(rename = "sandbox.respond")] SandboxRespond(SandboxResponse),
     #[serde(rename = "ping")] Ping(Empty),
     #[serde(rename = "models.list")] Models(Empty),
     #[serde(rename = "session.open")] Open(Open),
@@ -22,6 +24,21 @@ pub enum Command {
     #[serde(rename = "abort")] Abort(Session),
     #[serde(rename = "close")] Close(Session),
     #[serde(rename = "config.apply")] Apply(Apply),
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionMode { Deny, Manual, AutoCurrent, AutoAll }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Decision { Allow, Deny, AllowAlways }
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PermissionResponse { pub session_id: String, pub call_id: String, pub decision: Decision }
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxResponse {
+    pub session_id: String, pub call_id: String, pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")] pub error: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +62,9 @@ pub struct SessionOptions {
     #[serde(skip_serializing_if = "Option::is_none")] pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")] pub thinking_level: Option<ThinkingLevel>,
     #[serde(skip_serializing_if = "Option::is_none")] pub tool_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub permission_mode: Option<PermissionMode>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub sandbox: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub expert_prompt: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -99,6 +119,10 @@ pub enum Frame {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
+    #[serde(rename = "permission.request", rename_all = "camelCase")]
+    PermissionRequest { target_session_id: String, call_id: String, tool: String, summary: String, parent_call_id: Option<String> },
+    #[serde(rename = "sandbox.request", rename_all = "camelCase")]
+    SandboxRequest { target_session_id: String, call_id: String, operation: String, args: Value },
     #[serde(rename = "turn.started")] Started,
     #[serde(rename = "text.delta")] Text { text: String },
     #[serde(rename = "reasoning.delta")] Reasoning { text: String },

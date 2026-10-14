@@ -13,15 +13,18 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
         &crate::chat::attach::uploads_dir(conv.as_deref()),
         claude_cli::pipeline::effective_cwd(None), &config.agentd.attachments)
         .map_err(|e| e.to_string())?;
+    let mut tool_options = ToolOptions::default();
     let mut snapshot = None;
     let mut notice = None;
-    if legacy { input.legacy = Some((app.clone(), args)); }
-    else {
-        if args.use_sandbox { return Err(BackendError::UnsupportedInput("sandbox requires P3 tool routing").to_string()); }
+    if legacy {
+        if args.use_sandbox { return Err("SANDBOX_UNAVAILABLE: legacy backend has no tool routing".into()); }
+        input.legacy = Some((app.clone(), args));
+    } else {
         if args.provider_id.as_deref().is_some_and(|p| !p.is_empty() && p != "auto") {
             return Err(BackendError::UnsupportedInput("provider selection requires P4 mapping").to_string());
         }
-        let prepared = claude_cli::pipeline::prepare(args);
+        tool_options = ToolOptions { sandbox: args.use_sandbox, expert_prompt: host_tools::expert_prompt(&args) };
+        let prepared = claude_cli::pipeline::prepare_pi(args);
         input.model = claude_cli::pipeline::model_for_mode(prepared.work_full).map(serde_json::Value::String);
         input.prompt = prepared.plan.full_text();
         input.cwd = claude_cli::pipeline::effective_cwd(prepared.project_work_dir.as_deref().map(std::path::Path::new));
@@ -32,7 +35,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
         emit(app, event(req, conv.as_deref(), "done", None));
         return Ok(());
     }
-    let stream = backend.start(input).map_err(|e| e.to_string())?;
+    let stream = backend.start_with_tools(input, tool_options).map_err(|e| e.to_string())?;
     let mut finalizer = None;
     let timeout = Duration::from_millis(config.agentd.request_timeout_ms);
     loop {
@@ -43,6 +46,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
             Err(error) if matches!(error.downcast_ref(), Some(stream::StreamError::Timeout)) => continue,
             Err(error) => { let _ = backend.cancel(req); return Err(error.to_string()); }
         };
+        if host_tools::handle_sandbox(backend.as_ref(), &ev).map_err(|e| e.to_string())? { continue; }
         if ev.kind == "done" {
             if let (Some(finalizer), Some((artifacts, before))) = (finalizer.take(), snapshot.take()) {
                 let finalizer: claude_cli::pipeline::TurnStream = finalizer;

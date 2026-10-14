@@ -45,6 +45,11 @@ async fn dispatch_desktop(cmd: &str, a: &Args, _app: AppHandle) -> Result<Value,
         "app_open" => ok(crate::appproxy::app_open(req_str(a, "slug")?)?),
 
         // ── 对话辅助(chat_send 在 invoke 里单独特判) ──
+        "chat_permission_respond" => {
+            let response = serde_json::from_value(a.get("response").cloned()
+                .ok_or("缺少参数 response")?).map_err(|e| format!("授权参数解析失败: {e}"))?;
+            ok(chat::backend::host_tools::chat_permission_respond(response)?)
+        }
         "chat_cancel" => ok(chat::chat_cancel(req_str(a, "reqId")?)?),
         "chat_is_running" => ok(chat::chat_is_running(req_str(a, "reqId")?)),
         // 附件路径必须过闸(见 gate_attach_paths 的大注释):它会把给定路径的文件

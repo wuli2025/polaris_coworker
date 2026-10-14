@@ -7,7 +7,7 @@
 {"id":"abort","method":"abort","params":{"sessionId":"s"}}
 {"id":"close","method":"close","params":{"sessionId":"s"}}
 {"id":"config.apply","method":"config.apply","params":{"config":{"tools":["read"]},"credentials":{"fixture":"test"}}}
-{"type":"response","id":1,"ok":true,"result":{"status":"ok","sessions":0,"version":"0.1.0","piVersion":"1.0.4","protocolVersion":2}}
+{"type":"response","id":1,"ok":true,"result":{"status":"ok","sessions":0,"version":"0.1.0","piVersion":"1.0.4","protocolVersion":3}}
 {"type":"response","id":null,"ok":false,"error":{"code":"INVALID_REQUEST","message":"invalid","paths":["a"]}}
 {"type":"event","sessionId":"s","turnId":"t","event":"turn.started"}
 {"type":"event","sessionId":"s","turnId":"t","event":"text.delta","text":"hi"}
@@ -23,4 +23,9 @@
 {"id":"open-v2","method":"session.open","params":{"model":{"provider":"fixture","id":"test"},"thinkingLevel":"high","toolProfile":"workspace"}}
 {"id":"configure-v2","method":"session.configure","params":{"sessionId":"s","model":{"provider":"fixture","id":"test"},"thinkingLevel":"off","toolProfile":"readonly"}}
 {"id":"image-v2","method":"prompt","params":{"sessionId":"s","text":"look","attachments":[{"type":"image","mimeType":"image/png","data":"iVBORw0KGgo="}]}}
-{"type":"response","id":"ping-v2","ok":true,"result":{"status":"ok","sessions":0,"version":"0.1.0","piVersion":"1.0.4","protocolVersion":2}}
+{"type":"response","id":"ping-v3","ok":true,"result":{"status":"ok","sessions":0,"version":"0.1.0","piVersion":"1.0.4","protocolVersion":3}}
+{"id":"permission","method":"permission.respond","params":{"sessionId":"s","callId":"c","decision":"allowAlways"}}
+{"id":"sandbox","method":"sandbox.respond","params":{"sessionId":"s","callId":"c","output":"ok"}}
+{"type":"event","event":"permission.request","sessionId":"s","turnId":"t","targetSessionId":"s","callId":"c","tool":"bash","summary":"ls"}
+{"type":"event","event":"sandbox.request","sessionId":"s","turnId":"t","targetSessionId":"s","callId":"c","operation":"bash","args":{"command":"ls"}}
+{"id":"policy","method":"session.configure","params":{"sessionId":"s","permissionMode":"auto-current","sandbox":true,"expertPrompt":"Expert section","toolProfile":"workspace"}}

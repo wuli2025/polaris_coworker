@@ -56,6 +56,7 @@ fn read_jobs(mut lines: impl Iterator<Item = std::io::Result<String>>,
                 pipeline::emit_event(
                     &job.app,
                     ChatStreamEvent {
+                        call_id: None, parent_call_id: None,
                         req_id: job.req_id.clone(),
                         kind: "error".into(),
                         text: Some(format!(
@@ -99,6 +100,7 @@ pub(crate) fn stderr_loop(stderr: ChildStderr, shared: Arc<SessionShared>, app: 
             pipeline::emit_event(
                 &app,
                 ChatStreamEvent {
+                    call_id: None, parent_call_id: None,
                     req_id: req,
                     kind: "error".into(),
                     text: Some(format!("[stderr] {line}")),
@@ -197,6 +199,7 @@ pub(crate) fn spawn_turn_watchdog(
                 pipeline::emit_event(
                     &app,
                     ChatStreamEvent {
+                        call_id: None, parent_call_id: None,
                         req_id: req_id.clone(),
                         kind: "error".into(),
                         text: Some(reason),

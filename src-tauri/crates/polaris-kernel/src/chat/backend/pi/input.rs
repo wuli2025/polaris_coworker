@@ -24,5 +24,11 @@ pub fn options(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionOp
         anyhow::ensure!(!model.provider.is_empty() && !model.id.is_empty(), "AgentdInvalidModel");
     }
     Ok(SessionOptions { model, thinking_level: input.thinking_level.clone(),
+        permission_mode: Some(match input.permission {
+            PermissionMode::Deny => super::protocol::PermissionMode::Deny,
+            PermissionMode::Manual => super::protocol::PermissionMode::Manual,
+            PermissionMode::AutoCurrent => super::protocol::PermissionMode::AutoCurrent,
+            PermissionMode::AutoAll => super::protocol::PermissionMode::AutoAll,
+        }), sandbox: None, expert_prompt: None,
         tool_profile: Some(match input.permission { PermissionMode::Deny => "readonly", _ => "workspace" }.into()) })
 }

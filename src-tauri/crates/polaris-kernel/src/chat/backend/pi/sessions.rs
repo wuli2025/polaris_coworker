@@ -10,8 +10,10 @@ pub struct SessionInfo { pub id: String, pub cwd: PathBuf, pub model: Value, pub
 fn path(client: &Client, key: &str) -> PathBuf {
     client.config.session_map.join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
 }
-pub fn open(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionInfo> {
-    let options = super::input::options(client, input)?;
+pub fn open(client: &Client, input: &TurnRequest, tools: super::super::ToolOptions) -> anyhow::Result<SessionInfo> {
+    let mut options = super::input::options(client, input)?;
+    options.sandbox = Some(tools.sandbox);
+    options.expert_prompt = Some(tools.expert_prompt.unwrap_or_default());
     let file = path(client, &input.session_id);
     let previous: Option<SessionInfo> = match std::fs::read(&file) {
         Ok(bytes) => Some(serde_json::from_slice(&bytes)?),

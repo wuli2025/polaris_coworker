@@ -36,6 +36,7 @@ impl TurnStream {
                 emit_event(
                     &app,
                     ChatStreamEvent {
+                        call_id: None, parent_call_id: None,
                         req_id: req_id.clone(),
                         kind: "artifact".into(),
                         text: Some(s),
@@ -72,6 +73,7 @@ impl TurnStream {
         emit_event(
             &app,
             ChatStreamEvent {
+                call_id: None, parent_call_id: None,
                 req_id: req_id.clone(),
                 kind: "done".into(),
                 text: None,

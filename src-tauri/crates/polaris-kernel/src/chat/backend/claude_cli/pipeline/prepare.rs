@@ -1,6 +1,8 @@
 use super::*;
 
-pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
+pub(crate) fn prepare(args: ChatSendArgs) -> Prepared { prepare_impl(args, false) }
+pub(crate) fn prepare_pi(args: ChatSendArgs) -> Prepared { prepare_impl(args, true) }
+fn prepare_impl(args: ChatSendArgs, pi: bool) -> Prepared {
     // 产物目录 (每个会话一份): claude 把成品文件写到这里 → 侧边栏可预览
     let art_dir = artifacts_dir(args.conversation_id.as_deref());
     let _ = std::fs::create_dir_all(&art_dir);
@@ -21,7 +23,7 @@ pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
     // CLAUDE.md 渲染(读盘 + wiki 地图)与下面的 KB 召回(SQLite 检索, 可能还带 AI 扩写),
     // 否则算完再在末尾丢弃, 白付一次延迟。
     let raw = raw_mode();
-    let cm_ctx = if raw {
+    let cm_ctx = if raw || pi {
         String::new()
     } else {
         claude_md::render_for_project(current_project_id.as_deref(), &args.prompt, args.use_kb)
@@ -229,7 +231,9 @@ pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
         // with_task 已入常驻指纹(工具面不同), 该段在会话内稳定; 仍用门控 key 表达。
         plan.keyed(
             "conv:dynwf",
-            format!("{}\n\n---\n\n", dynamic_workflow_directive()),
+            format!("{}\n\n---\n\n", if pi {
+                dynamic_workflow_directive().replace("Task", "subagent")
+            } else { dynamic_workflow_directive().to_string() }),
         );
     }
 
@@ -241,7 +245,7 @@ pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
     //   此前专家块排在第 6 段, 与用户问题之间隔着 KB 概览/召回/记忆地图/对话历史数千 token,
     //   专家准则在注意力上被淹没; 约束贴着问题放才最有效。
     // 专家团一律走内核桥(引擎未拼装时 expert_bridge()=None → 不注入, 语义同无命中)。
-    let expert_block: Option<String> = match args.agent_mode.as_deref() {
+    let expert_block: Option<String> = if pi { None } else { match args.agent_mode.as_deref() {
         Some("expert-team") => crate::chat::bridges::expert_bridge().and_then(|eb| {
             if eb.detect_multi_expert_task(&args.prompt) {
                 current_project_id.clone().and_then(|project_id| {
@@ -258,7 +262,7 @@ pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
             crate::chat::bridges::expert_bridge().and_then(|eb| eb.route_block(&args.prompt))
         }
         _ => None,
-    };
+    } };
 
     // 2.7 生图能力检测: 用户想生成图片, 但供应商坞里全是文本/代码大模型, 没有一个能真生图。
     //     注入「当前供应商 + 能否真生图」的事实, 让 image-gen 技能据此决定:

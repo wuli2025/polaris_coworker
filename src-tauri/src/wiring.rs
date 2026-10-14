@@ -98,4 +98,15 @@ impl ExpertBridge for ShellExpertBridge {
 pub fn wire_engine_bridges() {
     bridges::set_kb_bridge(Arc::new(ShellKbBridge));
     bridges::set_expert_bridge(Arc::new(ShellExpertBridge));
+    if let (Some(dirs), Ok(config)) = (directories::UserDirs::new(), crate::chat::backend::config::Config::load()) {
+        crate::chat::backend::host_tools::set_sandbox_executor(Arc::new(
+            crate::chat::backend::docker_tools::ManagedSandbox {
+                container: config.agentd.sandbox_container,
+                protected_paths: vec![dirs.home_dir().join("Polaris/data"),
+                    dirs.home_dir().join(".polaris"), dirs.home_dir().join(".pi"),
+                    dirs.home_dir().join(".claude"), dirs.home_dir().join(".codex"),
+                    dirs.home_dir().join(".ssh"), dirs.home_dir().join(".aws")],
+            },
+        ));
+    }
 }

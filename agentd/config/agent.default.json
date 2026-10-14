@@ -37,13 +37,19 @@
       "read",
       "grep",
       "find",
-      "ls"
+      "ls",
+      "web_fetch",
+      "web_search",
+      "subagent"
     ],
     "readonly": [
       "read",
       "grep",
       "find",
-      "ls"
+      "ls",
+      "web_fetch",
+      "web_search",
+      "subagent"
     ],
     "workspace": [
       "read",
@@ -51,7 +57,11 @@
       "find",
       "ls",
       "edit",
-      "write"
+      "write",
+      "web_fetch",
+      "web_search",
+      "subagent",
+      "bash"
     ],
     "full": [
       "read",
@@ -60,7 +70,10 @@
       "ls",
       "edit",
       "write",
-      "bash"
+      "bash",
+      "web_fetch",
+      "web_search",
+      "subagent"
     ]
   },
   "attachments": {
@@ -73,5 +86,39 @@
       "image/gif",
       "image/webp"
     ]
+  },
+  "permissions": {
+    "defaultMode": "manual",
+    "timeoutMs": 60000,
+    "summaryChars": 2000
+  },
+  "sandbox": {
+    "timeoutMs": 120000,
+    "shell": "sh",
+    "maxOutputBytes": 262144
+  },
+  "subagents": {
+    "maxConcurrent": 2,
+    "maxDepth": 2,
+    "summaryChars": 16000
+  },
+  "skills": {
+    "paths": [
+      "~/Polaris/skills"
+    ]
+  },
+  "experts": {
+    "enabled": false,
+    "prompt": ""
+  },
+  "web": {
+    "timeoutMs": 15000,
+    "maxBytes": 1048576,
+    "maxRedirects": 3,
+    "search": {
+      "endpoint": "https://api.search.brave.com/res/v1/web/search",
+      "credential": "web-search",
+      "maxResults": 5
+    }
   }
 }

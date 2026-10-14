@@ -175,6 +175,7 @@ tauri::generate_handler![
             integrations::nas::nas_disconnect,
             // Chat
             chat::chat_send,
+            chat::backend::host_tools::chat_permission_respond,
             chat::agent_backend_status,
             chat::chat_prewarm, // 打字期预热常驻 claude 进程(best-effort)
             chat::chat_cancel,

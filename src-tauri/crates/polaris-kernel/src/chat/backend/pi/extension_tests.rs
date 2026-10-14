@@ -41,7 +41,7 @@ fn model_profile_image_and_idle_reconfiguration_are_on_the_wire() -> anyhow::Res
     std::fs::remove_file(&image)?;
     collect(&b, first, |_, _| {})?;
     b.configure_session("wire", SessionOptions { model: None,
-        thinking_level: Some(ThinkingLevel::High), tool_profile: Some("full".into()) })?;
+        thinking_level: Some(ThinkingLevel::High), tool_profile: Some("full".into()), ..Default::default() })?;
     let mut second = super::tests::input("wire", "normal");
     second.model = Some(Value::String("test".into()));
     second.permission = PermissionMode::Manual;
@@ -82,4 +82,54 @@ fn missing_or_noninteger_protocol_version_is_a_named_mismatch() {
         let result = protocol::check_ping(json!({"status":"ok","protocolVersion":version}));
         assert!(result.err().is_some_and(|e| e.to_string().contains("AgentdProtocolMismatch")));
     }
+}
+
+#[test]
+fn permission_confirmation_round_trip_preserves_call_and_parent() -> anyhow::Result<()> {
+    for decision in [protocol::Decision::Allow, protocol::Decision::Deny, protocol::Decision::AllowAlways] {
+        let backend = PiBackend::new(super::tests::config())?;
+        let stream = backend.start(super::tests::input("approval", "permission"))?;
+        let approval = loop {
+            let event = stream.recv_timeout(Duration::from_secs(3))?;
+            if event.kind == "permission.request" { break event; }
+            anyhow::ensure!(event.kind != "done" && event.kind != "error", "unexpected terminal");
+        };
+        let payload: Value = serde_json::from_str(approval.text.as_deref().ok_or_else(|| anyhow::anyhow!("missing approval"))?)?;
+        assert_eq!(payload["callId"], "approve-call");
+        assert_eq!(payload["parentCallId"], "parent-call");
+        backend.permission_respond(protocol::PermissionResponse {
+            session_id: payload["sessionId"].as_str().ok_or_else(|| anyhow::anyhow!("missing session"))?.into(),
+            call_id: "approve-call".into(), decision: decision.clone(),
+        })?;
+        let mut text = String::new();
+        loop {
+            let event = stream.recv_timeout(Duration::from_secs(3))?;
+            if event.kind == "delta" { text.push_str(event.text.as_deref().unwrap_or_default()); }
+            if event.kind == "done" { break; }
+        }
+        assert_eq!(Value::String(text), serde_json::to_value(decision)?);
+        backend.shutdown();
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_tool_options_reach_session_open_without_legacy_context() -> anyhow::Result<()> {
+    let mut config = super::tests::config();
+    let record = config.session_map.with_extension("tools.jsonl");
+    config.args = vec!["--record".into(), record.to_string_lossy().into()];
+    let backend = PiBackend::new(config)?;
+    let stream = backend.start_with_tools(super::tests::input("tools", "normal"), ToolOptions {
+        sandbox: true, expert_prompt: Some("expert-section".into()),
+    })?;
+    while stream.recv_timeout(Duration::from_secs(3))?.kind != "done" {}
+    let sent: Vec<Value> = std::fs::read_to_string(&record)?.lines()
+        .map(serde_json::from_str).collect::<Result<_, _>>()?;
+    let open = sent.iter().find(|r| r["method"] == "session.open").ok_or_else(|| anyhow::anyhow!("missing open"))?;
+    assert_eq!(open["params"]["sandbox"], true);
+    assert_eq!(open["params"]["expertPrompt"], "expert-section");
+    assert_eq!(open["params"]["permissionMode"], "deny");
+    backend.shutdown();
+    std::fs::remove_file(record)?;
+    Ok(())
 }

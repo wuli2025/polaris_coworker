@@ -56,6 +56,8 @@ pub struct Agentd {
     pub delta_batch_ms: u64,
     pub write_tools: Vec<String>,
     pub readonly_tools: Vec<String>,
+    /// Existing container managed by polaris-sandbox (or the server operator).
+    pub sandbox_container: String,
     pub supervisor_tick_ms: u64,
     pub shutdown_timeout_ms: u64,
     pub control_poll_ms: u64,
@@ -74,7 +76,8 @@ impl Default for Agentd {
             failure_threshold: 5, stable_reset_ms: 60_000, channel_capacity: 64,
             max_line_bytes: 1_048_576, delta_batch_ms: 30,
             write_tools: vec!["write".into(), "edit".into()],
-            readonly_tools: vec!["read".into(), "grep".into(), "find".into(), "ls".into()],
+            readonly_tools: vec!["read".into(), "grep".into(), "find".into(), "ls".into(), "web_fetch".into(), "web_search".into(), "subagent".into()],
+            sandbox_container: "polaris-sandbox".into(),
             supervisor_tick_ms: 10, shutdown_timeout_ms: 1000, control_poll_ms: 1,
             session_map: crate::runtime::paths::data_dir().join("agent-session-map"),
             attachments: super::images::ImageLimits::default(),
@@ -105,6 +108,9 @@ impl Config {
         BackendKind::parse(&self.agent.backend)?;
         let c = &self.agentd;
         c.attachments.validate()?;
+        anyhow::ensure!(!c.sandbox_container.is_empty() && !c.sandbox_container.starts_with('-')
+            && c.sandbox_container.chars().all(|ch| ch.is_ascii_alphanumeric() || "_.-".contains(ch)),
+            "InvalidAgentConfig: sandboxContainer must be a Docker container name");
         anyhow::ensure!(matches!(c.isolation.as_str(), "shared" | "per-account"), "InvalidIsolation: {}", c.isolation);
         anyhow::ensure!(c.channel_capacity > 0 && c.max_line_bytes > 0 && c.max_processes > 0,
             "InvalidAgentConfig: capacities must be positive");

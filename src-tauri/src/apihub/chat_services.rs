@@ -3,6 +3,11 @@ fn dispatch_chat_and_services(cmd: &str, a: &Args, app: AppHandle) -> Result<Val
     use crate::*;
     match cmd {
         // ── Chat (sync 部分) ──
+        "chat_permission_respond" => {
+            let response = serde_json::from_value(a.get("response").cloned()
+                .ok_or("缺少参数 response")?).map_err(|e| format!("授权参数解析失败: {e}"))?;
+            ok(chat::backend::host_tools::chat_permission_respond(response)?)
+        }
         "chat_cancel" => ok(chat::chat_cancel(req_str(a, "reqId")?)?),
         "chat_is_running" => ok(chat::chat_is_running(req_str(a, "reqId")?)),
         "chat_build_manifest" => ok(chat::chat_build_manifest(opt_str(a, "conversationId"))),

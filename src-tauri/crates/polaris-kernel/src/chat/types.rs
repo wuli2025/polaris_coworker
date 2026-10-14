@@ -112,6 +112,10 @@ pub struct ChatPrewarmArgs {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatStreamEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_call_id: Option<String>,
     pub req_id: String,
     pub kind: String, // delta | tool | error | done
     #[serde(skip_serializing_if = "Option::is_none")]

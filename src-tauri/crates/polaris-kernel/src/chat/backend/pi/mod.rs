@@ -52,7 +52,16 @@ impl PiBackend {
     }
 }
 impl AgentBackend for PiBackend {
+    fn permission_respond(&self, response: protocol::PermissionResponse) -> anyhow::Result<()> {
+        self.client()?.call(Command::PermissionRespond(response)).map(|_| ())
+    }
+    fn sandbox_respond(&self, response: protocol::SandboxResponse) -> anyhow::Result<()> {
+        self.client()?.call(Command::SandboxRespond(response)).map(|_| ())
+    }
     fn start(&self, input: TurnRequest) -> anyhow::Result<EventStream> {
+        self.start_with_tools(input, ToolOptions::default())
+    }
+    fn start_with_tools(&self, input: TurnRequest, options: ToolOptions) -> anyhow::Result<EventStream> {
         if self.config.isolation == "per-account" {
             return Err(if input.account_id.is_some() { BackendError::UnsupportedIsolation } else { BackendError::AccountContextRequired }.into());
         }
@@ -76,7 +85,7 @@ impl AgentBackend for PiBackend {
                 sender.push_blocking(event(&req, conv.as_deref(), "meta",
                     Some(crate::chat::prompt::estimate_tokens(&input.prompt).to_string())));
                 if cancelled.lock().remove(&req) { sender.finish(None, event(&req, conv.as_deref(), "done", None)); return Ok(()); }
-                let info = sessions::open(&client, &input)?;
+                let info = sessions::open(&client, &input, options)?;
                 if matches!(input.permission, PermissionMode::Deny) {
                     anyhow::ensure!(info.tools.iter().all(|t| client.config.readonly_tools.contains(t)),
                         BackendError::UnsupportedInput("read-only/manual request cannot use a daemon with write or execution tools"));

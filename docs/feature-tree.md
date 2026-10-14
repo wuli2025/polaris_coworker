@@ -1,4 +1,4 @@
-# Polaris 功能树（P1 + P2 接线进展）
+# Polaris 功能树（P1–P3 接线进展）
 
 2026-10-14 · `refactor/pi-agent`。未迁移节点的行号沿用 `0be46d7` 静态基线；P2 节点以当前文件为准。
 原静态基线保留；P2 更新了 chat/headless/壳注册路径，实际检查与未完成项见 [P2 记录](pi-migration/p2-result.md)。
@@ -34,7 +34,7 @@
 
 实际 crate 依赖应以 manifest 为准：kernel→runtime/watchdog/failover（`src-tauri/crates/polaris-kernel/Cargo.toml:17`），collab→kernel/runtime（`src-tauri/crates/polaris-collab/Cargo.toml:16`）。
 fable→kernel/runtime（`F/lib.rs:13`），wiki→fable/kernel/runtime（`W/lib.rs:9`），sandbox→core/Tauri（`src-tauri/crates/polaris-sandbox/Cargo.toml:8`）。
-kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启用它；实际保留函数内联容器名（`K/chat/backend/claude_cli/pipeline/spawn.rs`）。
+kernel 没有 sandbox 编译依赖；P3 通过壳注入 SandboxExecutor，使用既有受控容器，原 spawn_in_sandbox 死代码已删除。
 
 ## polaris-kernel → chat
 
@@ -56,7 +56,7 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 
 配置入口：`ChatSendArgs` 包含 permissionMode/useSandbox/skillIds/conversationId/goal/dynamicWorkflow/useKb/batchBuild/batchSize/agentMode/workMode/providerId（`K/chat/types.rs:33`）。
 旧后端环境入口移至 `backend/claude_cli/pipeline/{mod,stream,spawn}.rs` 和 `pool/plan.rs`，语义保留。
-Pi `useSandbox` 明确报 UnsupportedInput，等待 P3；旧后端原宿主行为保留。Pi 沿用原提示拼装及收尾；默认 daemon 工具面仍只读。
+Pi `useSandbox` 在 P3 路由 bash/write/edit 到宿主容器桥；不可用或挂载暴露凭据时拒绝。legacy 的沙箱请求明确拒绝。默认权限 manual，工具可见性和逐次授权独立。
 
 ## polaris-kernel → provider
 
@@ -157,7 +157,7 @@ Pi `useSandbox` 明确报 UnsupportedInput，等待 P3；旧后端原宿主行�
 | Docker → `S/commands.rs:32,61,136,178,259,277` | init/status/build_image/start/stop/exec，封装 docker CLI | 固定 image/container（`:27`），材料写 `~/Polaris/sandbox/Dockerfile`（`:33`）；工作目录/KB 挂载（`:205`） |
 | 镜像 → `S/templates/Dockerfile.sandbox:23` | Alpine 安装 Claude 原生包；不是 Node agentd 镜像 | P3 调整工具环境；旧 Claude 镜像可配置保留 |
 | E2B/Cube → `S/e2b.rs:23,59,75,80,89` | CubeConfig、配置读写、curl 状态探测 | `~/Polaris/sandbox/cube-sandbox.json`，backend/endpoint/apiKey；无 Agent exec 路由实现（`:13,130`） |
-| 对话连接点 → `K/chat/backend/claude_cli/pipeline/{process,spawn}.rs` | useSandbox 跳过池后仍在宿主执行；容器启动函数未调用 | P3 需新工具执行桥；不得把已有 UI 状态当作隔离成立 |
+| 对话连接点 → `K/chat/backend/{host_tools,docker_tools}.rs`、`H/wiring.rs` | Pi 工具经协议进入容器；检查实际挂载，禁止宿主回退 | 旧整目录挂载含 Key，拒绝使用，需手工准备项目级挂载；见 P3 记录 |
 | UI → `src/features/sandbox/components/SandboxStatus.vue:1` | 构建、启动、状态及后端配置面板 | →sandbox/cube 命令；UI；与真实 chat 路由一起验收 |
 
 ## 其他引擎与工作台功能
@@ -191,7 +191,7 @@ Pi `useSandbox` 明确报 UnsupportedInput，等待 P3；旧后端原宿主行�
 | 会话设置 → `agentd/src/sessions/create.ts` | 默认启用重试与压缩；重试次数和退避传给 SettingsManager | retry.maxRetries/baseDelayMs/maxAgentDelayMs；`config-review.test.ts` |
 | 错误 → `agentd/src/events/model-error.ts`、`config/validate.ts` | 模型错误按 SDK diagnostics 分类，固定中文模板；配置错误仅返回字段路径 | `model-errors.test.ts`、`config-review.test.ts` |
 | 运行时 → `agentd/src/models/runtime.ts` | config.apply 重建运行时，响应 reopenRequired 列出需关闭重开的已有会话 | SDK 无公开运行时替换接口；`runtime.test.ts`；详见 [R1 实现说明](agentd-review-r1.md) |
-| 工具 → `agentd/config/agent.default.json` | 默认档与 readonly 为 read/grep/find/ls；workspace 加 edit/write，full 再加 bash；按会话选择配置中的名单 | P2.5：Deny→readonly，其余→workspace；这是工具选择，P3 细化权限；`config-review.test.ts`、`protocol-extension.test.ts` |
+| 工具 → `agentd/config/agent.default.json` | 默认档/readonly 为只读及联网/子任务；workspace/full 加 edit/write/bash | P3：Deny→readonly，其余→workspace，另发完整权限档逐次检查；`permissions.test.ts`、`protocol-extension.test.ts` |
 
 验证命令：`cd agentd && npm run typecheck && npm test`；逐项证据与环境限制见 [R1 实现说明](agentd-review-r1.md)。
 
@@ -204,7 +204,7 @@ Pi `useSandbox` 明确报 UnsupportedInput，等待 P3；旧后端原宿主行�
 | --- | --- | --- |
 | `agentd/src/sessions/create.ts`、`options.ts`、`registry.ts` | session.open 可选 model/thinkingLevel/toolProfile；session.configure 仅空闲可用，SDK setModel/setThinkingLevel/setActiveToolsByName | defaultModel/thinkingLevel/defaultToolProfile；toolProfiles 名单由配置管理，旧 tools 只映射 default 档；`agentd/test/protocol-extension.test.ts` |
 | `agentd/src/sessions/attachments.ts` | prompt.attachments 图片 base64 校验，经 SDK prompt.images 传入模型 | attachments.maxCount=4、maxBytes=262144、maxTotalBytes=524288，PNG/JPEG/GIF/WebP；faux 模型验证真实消息 |
-| `agentd/src/protocol/version.ts`、`backend/pi/supervisor.rs` | ping 返回 agentd/npm 实际版本、Pi SDK VERSION、protocolVersion=2；握手成功前阻止业务请求 | 沿用 requestTimeoutMs/channelCapacity；版本错误立即熔断；`pi/extension_tests.rs` 验证仅发出 ping |
+| `agentd/src/protocol/version.ts`、`backend/pi/supervisor.rs` | ping 返回 agentd/npm 实际版本、Pi SDK VERSION、protocolVersion=3（P3 升级）；握手成功前阻止业务请求 | 沿用 requestTimeoutMs/channelCapacity；版本错误立即熔断；`pi/extension_tests.rs` 验证仅发出 ping |
 | `backend/bridge.rs`、`pi/input.rs`、`pi/sessions.rs` | 每轮模型、权限及思考档位进 open/configure；已有会话每轮重新配置；TurnRequest 携带已校验图片内容；公开 PiBackend.configure_session 支持思考档位 | 复用 POLARIS_WORK_MODEL/POLARIS_FAST_MODEL，通过 models.list 唯一匹配 provider，歧义具名拒绝；Deny→readonly，其余→workspace |
 | `tests/fixtures/protocol-samples.jsonl`、`protocol-schema.sha256` | 双端样例与 TS schema 哈希锁定，新增 configure/图片/版本样例 | TS 校验请求，Rust 逐条解析及往返；backend 定向测试含 R1c 回归 |
 
@@ -266,3 +266,19 @@ Rust 入口路径以 `src-tauri/crates/polaris-kernel/src/chat/` 为前缀。
 - U5–U7：取消终态、手机 error 语义、新事件承载，详见 [事件待确认](pi-migration/agent-events.md#后续契约测试清单与待确认)。
 - U8（待确认）：P6 登录后 relay 自动下发需要核对桌面与手机接线；已有 apply_relay_config 只证明接收能力（`C/collab/tunnel.rs:256`）；找到的生产调用是 owner HTTP 配置路由（`C/collab/http.rs:3460`），登录流程没有直接调用它，自动下发与 Endpoint 更新策略留 P6。
 - [baseline.md](pi-migration/baseline.md) 保留原 4 项失败；P2 实测单独记录，不扩大基线豁免范围。
+
+
+## P3 权限、工具与资源（实现待验收）
+
+| 入口 | 公开接口及依赖 | 配置、迁移、验证 |
+| --- | --- | --- |
+| `agentd/src/extensions/permissions.ts` | Pi tool_call 强制闸；permission.request/respond→Rust→授权弹窗 | permissions 默认 manual/60000ms；四档×四类矩阵、allowAlways、超时、取消 |
+| `agentd/src/extensions/sandbox.ts`、`K/chat/backend/{host_tools,docker_tools}.rs` | Pi operations→sandbox.request/respond→SandboxExecutor；复用已管理 Docker 容器 | sandbox 超时/输出/shell；Rust sandboxContainer；拒绝宽挂载暴露 Key；假执行后端验证 |
+| `agentd/src/extensions/web.ts` | web_fetch、SearchAdapter、BraveSearch、HttpAdapter；已有内存凭据 | web 大小/超时/重定向、search endpoint/credential；SSRF/契约测试，TCP 假服务器受环境限制 |
+| `agentd/src/extensions/subagent.ts`、`sessions/registry.ts` | 子会话继承权限/沙箱；全局并发及深度限制；父取消级联 | subagents 默认 2/2/16000；parentCallId 归组；并发/递归/继承/取消测试 |
+| `agentd/src/extensions/resources.ts`、`sessions/create.ts` | DefaultResourceLoader；AGENTS 优先、CLAUDE 兼容；专家附加系统提示 | skills.paths 默认 ~/Polaris/skills；experts.enabled=false；上下文/技能/专家开关测试 |
+| `src/features/permissions/`、`src/main.ts` | 独立 Vue 确认弹窗、队列，调用 chat_permission_respond | Tauri/HTTP 装配；HTTP owner 角色沿用；队列单测及 vue-tsc，无浏览器点击验收 |
+
+协议 v3、所有默认值/切换示例、旧容器挂载风险、手工上下文迁移与命令结果见 [P3 执行报告](pi-migration/p3-result.md)。
+新增资源配置需重开会话；不自动改名用户文件、不新增依赖、不修改图片/思考档位协议。
+基线豁免仍仅 4 项；端口测试与真实安全容器验证未通过前，P3 整体验收为 BLOCKED。

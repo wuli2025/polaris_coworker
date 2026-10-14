@@ -16,6 +16,18 @@ export const ProviderSchema = Type.Object({
   }, { additionalProperties: false }), { minItems: 1 }),
 }, { additionalProperties: false });
 export const ConfigSchema = Type.Object({
+  permissions: Type.Object({ defaultMode: Type.Union([
+    Type.Literal("deny"), Type.Literal("manual"), Type.Literal("auto-current"), Type.Literal("auto-all"),
+  ]), timeoutMs: positive, summaryChars: positive }, { additionalProperties: false }),
+  sandbox: Type.Object({ timeoutMs: positive, maxOutputBytes: Type.Integer({ minimum: 1, maximum: 1048576 }),
+    shell: Type.Union([Type.Literal("sh"), Type.Literal("bash")]) }, { additionalProperties: false }),
+  subagents: Type.Object({ maxConcurrent: positive, maxDepth: Type.Integer({ minimum: 0 }),
+    summaryChars: positive }, { additionalProperties: false }),
+  skills: Type.Object({ paths: Type.Array(text) }, { additionalProperties: false }),
+  experts: Type.Object({ enabled: Type.Boolean(), prompt: Type.String() }, { additionalProperties: false }),
+  web: Type.Object({ timeoutMs: positive, maxBytes: positive, maxRedirects: Type.Integer({ minimum: 0 }),
+    search: Type.Object({ endpoint: text, credential: text, maxResults: positive }, { additionalProperties: false }),
+  }, { additionalProperties: false }),
   sessionDir: text,
   maxSessions: positive,
   maxQueuedMessages: Type.Integer({ minimum: 0 }),

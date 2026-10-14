@@ -36,12 +36,25 @@ impl Translator {
         }
         let mut out = self.flush();
         match input {
-            Event::ToolStarted { call_id, tool, args, .. } => {
+            Event::PermissionRequest { target_session_id, call_id, tool, summary, parent_call_id } => {
+                out.push(self.make("permission.request", Some(serde_json::json!({
+                    "sessionId": target_session_id, "callId": call_id, "tool": tool,
+                    "summary": summary, "parentCallId": parent_call_id,
+                }).to_string())));
+            }
+            Event::SandboxRequest { target_session_id, call_id, operation, args } => {
+                out.push(self.make("sandbox.request", Some(serde_json::json!({
+                    "sessionId": target_session_id, "callId": call_id, "operation": operation, "args": args,
+                }).to_string())));
+            }
+            Event::ToolStarted { call_id, tool, args, parent_call_id } => {
                 let path = args.get("path").and_then(|v| v.as_str());
                 let summary = path.or_else(|| args.get("command").and_then(|v| v.as_str()))
                     .or_else(|| args.get("pattern").and_then(|v| v.as_str())).map(str::to_owned);
                 let mut ev = self.make("tool", summary);
                 ev.tool = Some(tool.clone());
+                ev.call_id = Some(call_id.clone());
+                ev.parent_call_id = parent_call_id;
                 out.push(ev);
                 if self.write_tools.contains(&tool) {
                     if let Some(path) = path {

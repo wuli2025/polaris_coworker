@@ -24,7 +24,9 @@ export async function harness(steps: Steps = [], patch: ConfigPatch = {}, factor
   const model = faux.getModel();
   const config = mergeConfig(loadConfig(), {
     sessionDir: join(dir, "sessions"), defaultModel: { provider: model.provider, id: model.id },
-    providers: [providerConfig(model)], tools: [], ...patch,
+    providers: [providerConfig(model)], tools: [],
+    // SDK behavior tests opt into execution; permission tests explicitly choose their mode.
+    permissions: { ...loadConfig().permissions, defaultMode: "auto-all" }, ...patch,
   });
   const events: ProtocolEvent[] = [];
   const logs: string[] = [];

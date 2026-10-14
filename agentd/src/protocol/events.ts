@@ -2,7 +2,7 @@ import { Type, type Static, type TSchema } from "typebox";
 const text = Type.String();
 function event<N extends string, P extends Record<string, TSchema>>(name: N, properties: P) {
   return Type.Object({ type: Type.Literal("event"), event: Type.Literal(name),
-    sessionId: text, turnId: text, ...properties });
+    sessionId: text, turnId: text, parentCallId: Type.Optional(text), ...properties });
 }
 const tokens = Type.Number({ minimum: 0 });
 export const UsageSchema = Type.Object({
@@ -10,6 +10,8 @@ export const UsageSchema = Type.Object({
   cost: Type.Object({ input: tokens, output: tokens, cacheRead: tokens, cacheWrite: tokens, total: tokens }),
 });
 export const EventSchema = Type.Union([
+  event("permission.request", { targetSessionId: text, callId: text, tool: text, summary: text }),
+  event("sandbox.request", { targetSessionId: text, callId: text, operation: text, args: Type.Record(text, Type.Unknown()) }),
   event("turn.started", {}), event("text.delta", { text }), event("reasoning.delta", { text }),
   event("tool.started", { callId: text, tool: text, args: Type.Unknown(), parentCallId: Type.Optional(text) }),
   event("tool.completed", { callId: text, tool: text, result: Type.Unknown(),

@@ -5,15 +5,21 @@ const id = Type.Union([text, Type.Integer()]);
 const request = <M extends string, P extends Record<string, TSchema>>(method: M, params: P) =>
   Type.Object({ id, method: Type.Literal(method), params: Type.Object(params, { additionalProperties: false }) },
     { additionalProperties: false });
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const ModelSchema = Type.Object({ provider: text, id: text }, { additionalProperties: false });
 export const ThinkingLevelSchema = Type.Union([
   Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"),
   Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"),
 ]);
+export const PermissionModeSchema = Type.Union([
+  Type.Literal("deny"), Type.Literal("manual"), Type.Literal("auto-current"), Type.Literal("auto-all"),
+]);
+export type PermissionMode = Static<typeof PermissionModeSchema>;
+export const DecisionSchema = Type.Union([Type.Literal("allow"), Type.Literal("deny"), Type.Literal("allowAlways")]);
 export const SessionOptionsSchema = Type.Object({
   model: Type.Optional(ModelSchema), thinkingLevel: Type.Optional(ThinkingLevelSchema),
-  toolProfile: Type.Optional(text),
+  toolProfile: Type.Optional(text), permissionMode: Type.Optional(PermissionModeSchema),
+  sandbox: Type.Optional(Type.Boolean()), expertPrompt: Type.Optional(Type.String()),
 }, { additionalProperties: false });
 export const ImageSchema = Type.Object({ type: Type.Literal("image"), mimeType: text, data: text },
   { additionalProperties: false });
@@ -23,6 +29,8 @@ export const PingSchema = Type.Object({ status: Type.Literal("ok"), sessions: Ty
   version: text, piVersion: text, protocolVersion: Type.Literal(PROTOCOL_VERSION) });
 // Keep every command explicit so unknown fields/methods cannot reach SDK APIs.
 export const RequestSchema = Type.Union([
+  request("permission.respond", { sessionId: text, callId: text, decision: DecisionSchema }),
+  request("sandbox.respond", { sessionId: text, callId: text, output: Type.String(), error: Type.Optional(text) }),
   request("ping", {}), request("models.list", {}),
   request("session.open", { sessionId: Type.Optional(text), cwd: Type.Optional(text), ...SessionOptionsSchema.properties }),
   request("session.configure", { sessionId: text, ...SessionOptionsSchema.properties }),
