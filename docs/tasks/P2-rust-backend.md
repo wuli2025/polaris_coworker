@@ -37,3 +37,11 @@
 - 新写/改动的文件 ≤500 行、每行 ≤500 字符；可变值进配置，不写死。
 - 更新 `docs/feature-tree.md`。
 - 结束时输出：改动文件及行数、命令结果原文摘要、与旧行为的差异清单、未完成/疑问。不要声称做了没做的事。
+
+## 最佳实践要求（追加）
+- **沿用现有风格**：错误用 `anyhow`（对外边界用具名错误枚举 + `Display`）；并发沿用现有 `std::thread` + 通道模式，或 tokio（已是依赖，如需 `process` 特性可开），二选一并在模块注释说明理由；**不新增 crate**。
+- 新代码禁止 `unwrap()`/`expect()`（测试除外）；锁不跨 I/O 持有；所有阻塞读写有超时或可取消。
+- 进程守护：子进程随父退出（Windows 用 Job Object 或现有 `polaris-runtime` 的进程工具，先查 `polaris-runtime/src/procs.rs` 能否复用）；重启退避有上限与抖动；连续失败超过阈值进入"熔断"并给前端明确错误，而不是无限重启。
+- 背压：事件通道有界；前端消费慢时合批 delta，不丢 `error`/`done`。
+- 可观测：每轮带 reqId/conversationId/sessionId 的结构化日志（沿用仓库现有日志方式）；提供 `agent_backend_status` 查询（后端类型、agentd 版本、进程 pid、重启次数、熔断状态）。
+- 契约测试：从 `agentd/src/protocol` 生成或手写一份 JSON 样例集放 `agentd/test/fixtures/protocol-samples.jsonl`（若不存在则在 Rust 侧 `tests/fixtures/` 建），Rust 解析测试必须逐条通过——两端协议漂移时测试立即失败。
