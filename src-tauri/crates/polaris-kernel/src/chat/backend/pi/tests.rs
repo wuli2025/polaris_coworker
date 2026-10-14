@@ -201,3 +201,63 @@ fn usage_and_all_completion_statuses_have_expected_sequences() {
         assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), expected);
     }
 }
+
+#[test]
+fn config_apply_is_not_busy_after_circuit_or_thread_exit() {
+    for shutdown in [false, true] {
+        let mut c = config(); c.failure_threshold = 1;
+        let b = PiBackend::new(c).unwrap(); ready(&b);
+        let stream = b.start(input("release", if shutdown { "hang" } else { "crash" })).unwrap();
+        if shutdown {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while b.client.get().unwrap().active.lock().is_empty() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            b.shutdown();
+        }
+        let events = collect_events(stream);
+        assert_eq!(events.last().unwrap().kind, "done");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !b.client.get().unwrap().active.lock().is_empty() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let error = b.apply_config(None, None).unwrap_err().to_string();
+        assert!(!error.contains("AgentdConfigBusy"), "{error}");
+        assert!(error.contains(if shutdown { "AgentdSupervisorStopped" } else { "AgentdCircuitOpen" }), "{error}");
+    }
+}
+
+#[test]
+fn stalled_stdin_reports_backpressure_to_caller_and_status() {
+    let mut c = config();
+    c.node_args = vec!["-e".into(), "setInterval(() => {}, 1000)".into()];
+    c.request_timeout_ms = 300;
+    c.max_line_bytes = 2_000_000;
+    c.failure_threshold = 1;
+    let b = PiBackend::new(c).unwrap();
+    let client = b.client().unwrap();
+    let error = client.call(Command::Prompt(Text { session_id: "s".into(), text: "x".repeat(1_000_000) })).unwrap_err().to_string();
+    assert!(error.contains("AgentdWriterBackpressure"), "{error}");
+    assert!(!error.contains("RequestTimeout"), "{error}");
+    let status = b.status();
+    assert!(status.circuit_open);
+    assert!(status.last_error.unwrap().contains("AgentdWriterBackpressure"));
+}
+
+#[test]
+fn supervisor_exit_clears_orphan_active_entries() {
+    let b = PiBackend::new(config()).unwrap(); ready(&b);
+    let client = b.client.get().unwrap();
+    // Simulate an orphan not owned by a Route; only supervisor exit can clear it.
+    client.active.lock().insert("orphan".into(), "session".into());
+    assert!(b.apply_config(None, None).unwrap_err().to_string().contains("AgentdConfigBusy"));
+    b.shutdown();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !client.active.lock().is_empty() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!b.apply_config(None, None).unwrap_err().to_string().contains("AgentdConfigBusy"));
+}

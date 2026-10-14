@@ -68,7 +68,10 @@ impl Translator {
                 self.done = true;
                 out.push(self.make("done", None));
             }
-            Event::Started | Event::Reasoning { .. } | Event::Usage { .. } => {}
+            // The current frontend contract has no reasoning/usage event. Future
+            // support should extend it with optional fields, preserving existing consumers.
+            Event::Reasoning { .. } | Event::Usage { .. } => {}
+            Event::Started => {}
             Event::Text { .. } => {}
         }
         out

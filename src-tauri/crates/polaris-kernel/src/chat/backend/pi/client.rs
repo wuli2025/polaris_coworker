@@ -49,8 +49,18 @@ impl Client {
         self.wait(rx)
     }
     pub fn wait(&self, rx: mpsc::Receiver<Result<Value, String>>) -> anyhow::Result<Value> {
-        rx.recv_timeout(Duration::from_millis(self.config.request_timeout_ms))
-            .map_err(|_| anyhow::anyhow!("AgentdRequestTimeout"))?.map_err(anyhow::Error::msg)
+        // Budget queue/serialization separately from the actor's request deadline,
+        // so its specific write/response error wins over the caller's fallback.
+        let timeout = self.config.request_timeout_ms.saturating_mul(2)
+            .saturating_add(self.config.supervisor_tick_ms.saturating_mul(2));
+        rx.recv_timeout(Duration::from_millis(timeout)).map_err(|error| {
+            let status = self.status.lock();
+            let message = if !status.healthy { status.last_error.clone() } else { None };
+            anyhow::anyhow!(message.unwrap_or_else(|| match error {
+                mpsc::RecvTimeoutError::Disconnected => "AgentdSupervisorStopped".into(),
+                mpsc::RecvTimeoutError::Timeout => "AgentdRequestTimeout".into(),
+            }))
+        })?.map_err(anyhow::Error::msg)
     }
     pub fn cancel(&self, req: &str) -> anyhow::Result<()> {
         let (tx, rx) = mpsc::sync_channel(1);

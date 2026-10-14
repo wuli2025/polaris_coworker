@@ -11,13 +11,12 @@ export class Models {
   ) {}
 
   static async create(config: Config, credentials: CredentialStore, redactor: Redactor): Promise<Models> {
-    const runtime = await Models.build(config, credentials);
-    const result = new Models(runtime, credentials, redactor);
     for (const info of await credentials.list()) {
       const credential = await credentials.read(info.providerId);
       if (credential?.type === "api_key" && credential.key) redactor.add(credential.key);
     }
-    return result;
+    const runtime = await Models.build(config, credentials);
+    return new Models(runtime, credentials, redactor);
   }
 
   private static async build(config: Config, credentials: CredentialStore): Promise<ModelRuntime> {

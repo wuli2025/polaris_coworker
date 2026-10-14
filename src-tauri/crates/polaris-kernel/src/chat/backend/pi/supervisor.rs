@@ -32,14 +32,16 @@ impl State {
         let circuit = self.failures >= self.config.failure_threshold;
         let error = if circuit { format!("{}: {error}", BackendError::CircuitOpen) } else { error };
         for route in self.routes.values_mut() { route.fail(&error); }
-        for (_, pending) in self.pending.drain() {
-            if let Some(reply) = pending.reply { let _ = reply.send(Err(error.clone())); }
-        }
         let mut status = self.status.lock();
         status.healthy = false;
         status.pid = None;
         status.circuit_open = circuit;
-        status.last_error = Some(if circuit { BackendError::CircuitOpen.to_string() } else { error });
+        eprintln!("{}", json!({"component":"agent.backend", "backend":"pi", "phase":"failure", "error":error}));
+        status.last_error = Some(error.clone());
+        drop(status);
+        for (_, pending) in self.pending.drain() {
+            if let Some(reply) = pending.reply { let _ = reply.send(Err(error.clone())); }
+        }
         let backoff = self.config.restart_base_ms.saturating_mul(1_u64 << self.failures.saturating_sub(1).min(30))
             .min(self.config.restart_max_ms);
         let mut bytes = [0_u8; 8];
@@ -85,7 +87,7 @@ impl State {
                     self.active.lock().insert(req.clone(), session.clone());
                     self.routes.insert(session.clone(), Route { req, session, active: self.active.clone(), acknowledged: false, started: false, reservation, turn: None, translator, stream,
                         deadline: Instant::now() + timeout, abort_deadline: None,
-                        pending: Default::default(), terminal: None });
+                        pending: Default::default(), terminal: None, first_error: None });
                     let _ = reply.send(Ok(json!({})));
                 }
             }
@@ -142,7 +144,8 @@ impl State {
         });
         ready
     }
-    fn deadlines(&mut self) -> anyhow::Result<()> {
+    fn deadlines(&mut self, process: Option<&Process>) -> anyhow::Result<()> {
+        if let Some(error) = process.and_then(Process::write_error) { anyhow::bail!(error); }
         for route in self.routes.values_mut() {
             if route.abort_deadline.is_some_and(|d| Instant::now() >= d) {
                 route.aborted();
@@ -153,9 +156,16 @@ impl State {
                 anyhow::bail!("AgentdTurnTimeout");
             }
         }
-        anyhow::ensure!(!self.pending.values().any(|p| p.since.elapsed().as_millis() >= self.config.request_timeout_ms as u128), "AgentdRequestTimeout");
+        if self.pending.values().any(|p| p.since.elapsed().as_millis() >= self.config.request_timeout_ms as u128) {
+            if process.is_some_and(Process::writes_pending) { anyhow::bail!(super::process::WRITER_BACKPRESSURE); }
+            anyhow::bail!("AgentdRequestTimeout");
+        }
         Ok(())
     }
+}
+// Also runs when the supervisor future is dropped or its thread unwinds.
+impl Drop for State {
+    fn drop(&mut self) { self.active.lock().clear(); }
 }
 pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mutex<BackendStatus>>,
     active: Arc<Mutex<HashMap<String, String>>>) {
@@ -207,7 +217,7 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
                 match frame { Some(Ok(frame)) => s.frame(frame), Some(Err(e)) => Err(e), None => Err(anyhow::anyhow!("AgentdEof")) }
             }
             _ = ticker.tick() => {
-                let deadlines = s.deadlines();
+                let deadlines = s.deadlines(process.as_ref());
                 if let Some(p) = &mut process {
                     if p.exited().unwrap_or(true) { Err(anyhow::anyhow!("AgentdExited")) }
                     else if deadlines.is_err() { deadlines }
@@ -222,8 +232,8 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
             }
         };
         if let Err(error) = outcome {
-            if let Some(mut p) = process.take() { p.stop().await; }
             s.fail(error.to_string());
+            if let Some(mut p) = process.take() { p.stop().await; }
         }
         if s.stopping {
             for route in s.routes.values_mut() { route.fail("AgentdShutdown"); }

@@ -3,7 +3,9 @@
 use super::{protocol::{Frame, Request}, super::config::Agentd};
 use anyhow::{Context, Result};
 use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{Child, Command}, sync::mpsc};
-use std::{process::Stdio, time::Duration};
+use std::{process::Stdio, time::Duration, sync::{Arc, atomic::{AtomicUsize, Ordering}}};
+
+pub const WRITER_BACKPRESSURE: &str = "AgentdWriterBackpressure";
 
 pub struct Process {
     child: Child,
@@ -11,6 +13,8 @@ pub struct Process {
     pub writer: mpsc::Sender<Vec<u8>>,
     pub incoming: mpsc::Receiver<Result<Frame>>,
     pub pid: u32,
+    write_failure: Arc<parking_lot::Mutex<Option<String>>>,
+    outstanding_writes: Arc<AtomicUsize>,
     shutdown_timeout: Duration,
     #[cfg(windows)]
     _job: super::windows_job::Job,
@@ -63,21 +67,42 @@ impl Process {
             }
         });
         let (writer, mut rx) = mpsc::channel::<Vec<u8>>(config.channel_capacity);
+        let write_failure = Arc::new(parking_lot::Mutex::new(None));
+        let failure = write_failure.clone();
+        let outstanding_writes = Arc::new(AtomicUsize::new(0));
+        let outstanding = outstanding_writes.clone();
         let timeout = Duration::from_millis(config.request_timeout_ms);
         let writing = tokio::spawn(async move {
             while let Some(line) = rx.recv().await {
-                if !matches!(tokio::time::timeout(timeout, stdin.write_all(&line)).await, Ok(Ok(()))) { break; }
+                let error = match tokio::time::timeout(timeout, stdin.write_all(&line)).await {
+                    Ok(Ok(())) => { outstanding.fetch_sub(1, Ordering::SeqCst); continue; }
+                    Ok(Err(error)) => format!("AgentdWriterClosed: {error}"),
+                    Err(_) => WRITER_BACKPRESSURE.into(),
+                };
+                *failure.lock() = Some(error);
+                break;
             }
         });
-        Ok(Self { child, tasks: vec![output, logging, writing], writer, incoming, pid, shutdown_timeout: Duration::from_millis(config.shutdown_timeout_ms),
+        Ok(Self { child, tasks: vec![output, logging, writing], writer, incoming, pid,
+            write_failure, outstanding_writes, shutdown_timeout: Duration::from_millis(config.shutdown_timeout_ms),
             #[cfg(windows)] _job: job })
     }
     pub fn write(&self, request: &Request, max: usize) -> Result<()> {
+        if let Some(error) = self.write_error() { anyhow::bail!(error); }
         let mut bytes = serde_json::to_vec(request)?;
         anyhow::ensure!(bytes.len() <= max, "AgentdLineTooLong: outgoing request");
         bytes.push(b'\n');
-        self.writer.try_send(bytes).map_err(|_| anyhow::anyhow!("AgentdWriterBackpressure"))
+        self.outstanding_writes.fetch_add(1, Ordering::SeqCst);
+        self.writer.try_send(bytes).map_err(|error| {
+            self.outstanding_writes.fetch_sub(1, Ordering::SeqCst);
+            anyhow::anyhow!(match error {
+                mpsc::error::TrySendError::Full(_) => WRITER_BACKPRESSURE,
+                mpsc::error::TrySendError::Closed(_) => "AgentdWriterClosed",
+            })
+        })
     }
+    pub fn write_error(&self) -> Option<String> { self.write_failure.lock().clone() }
+    pub fn writes_pending(&self) -> bool { self.outstanding_writes.load(Ordering::SeqCst) > 0 }
     pub fn exited(&mut self) -> Result<bool> { Ok(self.child.try_wait()?.is_some()) }
     pub async fn stop(&mut self) {
         for task in &self.tasks { task.abort(); }
@@ -106,5 +131,28 @@ async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R, max: usiz
         line.extend_from_slice(&bytes[..count]);
         reader.consume(count);
         if end.is_some() { line.pop(); return Ok(line); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::protocol::{Command, Empty, Id};
+    #[test]
+    fn full_and_closed_writer_have_distinct_errors() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut config = Agentd::default();
+            config.entry = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agentd.mjs");
+            config.channel_capacity = 1;
+            let mut process = Process::spawn(&config).unwrap();
+            let request = Request { id: Id::Text("test".into()), command: Command::Ping(Empty {}) };
+            // No await: the writer cannot drain the first queued request yet.
+            process.write(&request, config.max_line_bytes).unwrap();
+            assert_eq!(process.write(&request, config.max_line_bytes).unwrap_err().to_string(), WRITER_BACKPRESSURE);
+            process.stop().await;
+            tokio::task::yield_now().await;
+            assert_eq!(process.write(&request, config.max_line_bytes).unwrap_err().to_string(), "AgentdWriterClosed");
+        });
     }
 }

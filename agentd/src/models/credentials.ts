@@ -10,7 +10,12 @@ export function memoryCredentials(): CredentialStore {
 export class Redactor {
   private readonly secrets = new Set<string>();
   add(secret: string): void {
-    if (secret) this.secrets.add(secret);
+    if (!secret) return;
+    // Register representations before any logger/event sink sees the credential.
+    for (const variant of [secret, encodeURIComponent(secret),
+      Buffer.from(secret, "utf8").toString("base64"), JSON.stringify(secret).slice(1, -1)]) {
+      this.secrets.add(variant);
+    }
   }
   text(value: string): string {
     for (const secret of [...this.secrets].sort((a, b) => b.length - a.length)) {
