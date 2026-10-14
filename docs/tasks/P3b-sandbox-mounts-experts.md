@@ -26,3 +26,11 @@
 - P3b-2：受保护路径名单从 `src-tauri/src/wiring.rs` 写死改为"配置 + 代码兜底名单"（兜底名单至少含 `~/Polaris/data`、`~/.polaris`、`~/.pi`、`~/.claude`、`~/.codex`、`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.kube`），配置只能追加不能移除兜底项。
 - P3b-4：路由前校验容器挂载的 `Destination` 与读写属性：`/workspace` 必须是目标项目目录且可写，`/kb` 必须只读，不允许其他宿主路径挂载。
 - P3b-5：容器创建时按配置设置内存/CPU 上限、`--cap-drop=ALL`（按需最小加回）、`--security-opt no-new-privileges`；路由前校验这些安全基线，不满足报 `SANDBOX_UNSAFE_CONTAINER` 并提示重建。
+
+## 范围例外批复（第 2 次运行，Claude）
+已批准以下文件，完成剩余部分（工具路由接线、路由前强制校验、专家请求传递、项目选择与一键重建 UI）：
+- `src-tauri/src/wiring.rs`：通过公开接口把沙箱策略（受保护名单、挂载与安全基线）注入 kernel，不增加 crate 依赖、不跨 crate 引源码。
+- `src/features/sandbox/api.ts`（46 行）：随意修改，仍 ≤500 行。
+- `src/features/sandbox/components/SandboxStatus.vue`（已 517 行，既有超长）：新增 UI 逻辑放进新组件/新文件，该文件只允许净增 ≤15 行（引用新组件与传参）。
+- `src-tauri/crates/polaris-kernel/src/integrations/feishu.rs`（既有超长）：仅为新增可选字段补兼容默认值，净增 ≤2 行。
+必须消除"旧 UI 启动报 `SANDBOX_PROJECT_REQUIRED`"：UI 要让用户选择/确认项目目录（默认当前会话工作目录），并对旧宽挂载容器给出迁移提示与一键重建入口。其余要求与验收命令不变。已完成的创建侧实现保留复用。
