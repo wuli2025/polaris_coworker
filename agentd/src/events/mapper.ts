@@ -1,4 +1,5 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { modelError } from "./model-error.ts";
 import type { ProtocolEvent, TurnStatus } from "../protocol/events.ts";
 
 type Payload = ProtocolEvent extends infer E
@@ -20,7 +21,7 @@ export class EventMapper {
   error(code: string, message: string): void {
     this.emit({ event: "error", code, message });
   }
-  accept(event: AgentSessionEvent): void {
+  accept(event: AgentSessionEvent, suppressModelErrors = false): void {
     if (event.type === "message_start" && event.message.role === "assistant") {
       this.textStreamed = false;
       this.thinkingStreamed = false;
@@ -52,7 +53,8 @@ export class EventMapper {
       // Provider error strings can include headers. Never forward them.
       if (message.stopReason === "error") {
         this.status = "error";
-        this.error("MODEL_ERROR", "Model request failed");
+        const failure = modelError(message);
+        if (!suppressModelErrors) this.error(failure.code, failure.message);
       } else if (message.stopReason === "aborted") this.status = "aborted";
       else this.status = "completed"; // A successful automatic retry supersedes its failed attempt.
     }

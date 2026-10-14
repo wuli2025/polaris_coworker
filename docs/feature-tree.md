@@ -176,9 +176,24 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 | watchdog / failover → `src-tauri/crates/polaris-watchdog/src/lib.rs:1`、`src-tauri/crates/polaris-failover/src/lib.rs:1` | 超时状态机、供应商失败窗口 | kernel 编译依赖见 `src-tauri/crates/polaris-kernel/Cargo.toml:19`；分别 `cargo test -p polaris-watchdog` / `-p polaris-failover` |
 | forge-codec → `src-tauri/crates/forge-codec/src/lib.rs:1` | 原生编解码能力 | app 可选 native-codec；默认未开（`src-tauri/Cargo.toml:203`）；独立 `cargo test -p polaris-forge-codec` |
 
+## agentd（P1 / P1-R1）
+
+入口 `agentd/src/main.ts`；JSONL 协议 `agentd/src/protocol/schema.ts` / `events.ts`；配置入口 `agentd/config/agent.default.json`、`--config`、`config.apply`。
+
+| 分支 → 入口 | 职责与行为 | 配置与验证 |
+| --- | --- | --- |
+| 调度 → `agentd/src/daemon.ts` | 按 sessionId 串行、跨会话并发；ping/models.list 不排队；退出等待在途命令 | `agentd/test/concurrency.test.ts` |
+| 轮次 → `agentd/src/sessions/registry.ts` | 任意 SDK 事件重置空闲计时；硬上限独立计时 | turnIdleTimeoutMs 默认 180000；turnMaxMs 默认 0（不限）；`timeouts.test.ts` |
+| 会话设置 → `agentd/src/sessions/create.ts` | 默认启用重试与压缩；重试次数和退避传给 SettingsManager | retry.maxRetries/baseDelayMs/maxAgentDelayMs；`config-review.test.ts` |
+| 错误 → `agentd/src/events/model-error.ts`、`config/validate.ts` | 模型错误按 SDK diagnostics 分类，固定中文模板；配置错误仅返回字段路径 | `model-errors.test.ts`、`config-review.test.ts` |
+| 运行时 → `agentd/src/models/runtime.ts` | config.apply 重建运行时，响应 reopenRequired 列出需关闭重开的已有会话 | SDK 无公开运行时替换接口；`runtime.test.ts`；详见 [R1 实现说明](agentd-review-r1.md) |
+| 工具 → `agentd/config/agent.default.json` | 默认只读 read/grep/find/ls；写入和执行须由宿主显式配置 | **未接权限扩展前不得开放写/执行工具**；`config-review.test.ts` |
+
+验证命令：`cd agentd && npm run typecheck && npm test`；逐项证据与环境限制见 [R1 实现说明](agentd-review-r1.md)。
+
 ## 后续边界与待确认
 
-- Pi Backend/agentd/config/prompts 的目录、协议、默认值属于目标架构，不是本次已发现的现成模块（`docs/plans/2026-10-14-pi-refactor.md:35,36,37`）。
+- Pi Backend/config/prompts 仍属目标架构；agentd 已实现 P1 与 R1，宿主接线留待 P2。原目标目录记录（`docs/plans/2026-10-14-pi-refactor.md:35,36,37`）。
 - U1–U4：OAuth/账本合并/上下文优先级/真实沙箱范围，详见 [调用点待确认](pi-migration/call-sites.md#待确认)。
 - U5–U7：取消终态、手机 error 语义、新事件承载，详见 [事件待确认](pi-migration/agent-events.md#后续契约测试清单与待确认)。
 - U8（待确认）：P6 登录后 relay 自动下发需要核对桌面与手机接线；已有 apply_relay_config 只证明接收能力（`C/collab/tunnel.rs:256`）；找到的生产调用是 owner HTTP 配置路由（`C/collab/http.rs:3460`），登录流程没有直接调用它，自动下发与 Endpoint 更新策略留 P6。

@@ -8,7 +8,7 @@ export class Logger {
     private readonly write: (line: string) => void,
   ) {}
   log(level: Exclude<Config["logLevel"], "silent">, message: string,
-    context: { requestId?: string | number; sessionId?: string; code?: string } = {}): void {
+    context: { requestId?: string | number; sessionId?: string; code?: string; paths?: string[] } = {}): void {
     if (levels[level] < levels[this.level()]) return;
     this.write(JSON.stringify(this.redactor.clean({ time: new Date().toISOString(), level, message, ...context })) + "\n");
   }

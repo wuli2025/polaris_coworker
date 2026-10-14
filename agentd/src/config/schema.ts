@@ -20,7 +20,8 @@ export const ConfigSchema = Type.Object({
   maxSessions: positive,
   maxQueuedMessages: Type.Integer({ minimum: 0 }),
   idleTimeoutMs: positive,
-  turnTimeoutMs: positive,
+  turnIdleTimeoutMs: positive,
+  turnMaxMs: Type.Integer({ minimum: 0, maximum: 2147483647 }),
   maxLineBytes: positive,
   tools: Type.Array(text, { uniqueItems: true }),
   defaultModel: Type.Object({ provider: text, id: text }, { additionalProperties: false }),
@@ -28,10 +29,15 @@ export const ConfigSchema = Type.Object({
   logLevel: Type.Union([Type.Literal("debug"), Type.Literal("info"), Type.Literal("warn"), Type.Literal("error"), Type.Literal("silent")]),
   extensions: toggle,
   providers: Type.Array(ProviderSchema),
-  retry: toggle,
+  retry: Type.Object({
+    enabled: Type.Boolean(),
+    maxRetries: Type.Optional(Type.Integer({ minimum: 0 })),
+    baseDelayMs: Type.Optional(positive),
+    maxAgentDelayMs: Type.Optional(positive),
+  }, { additionalProperties: false }),
   compaction: toggle,
 }, { additionalProperties: false });
-export const ConfigPatchSchema = Type.Partial(ConfigSchema);
+export const ConfigPatchSchema = Type.Partial(ConfigSchema, { additionalProperties: false });
 export const CredentialsSchema = Type.Record(Type.String({ minLength: 1 }), Type.Union([text, Type.Null()]));
 export type Config = Static<typeof ConfigSchema>;
 export type ConfigPatch = Static<typeof ConfigPatchSchema>;

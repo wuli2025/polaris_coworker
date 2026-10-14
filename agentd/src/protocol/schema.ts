@@ -17,7 +17,7 @@ export const RequestSchema = Type.Union([
     config: Type.Optional(ConfigPatchSchema), credentials: Type.Optional(CredentialsSchema),
   }, { additionalProperties: false }) }, { additionalProperties: false }),
 ]);
-export const ErrorSchema = Type.Object({ code: text, message: Type.String() });
+export const ErrorSchema = Type.Object({ code: text, message: Type.String(), paths: Type.Optional(Type.Array(Type.String())) });
 export const ResponseSchema = Type.Union([
   Type.Object({ type: Type.Literal("response"), id, ok: Type.Literal(true), result: Type.Unknown() }),
   Type.Object({ type: Type.Literal("response"), id: Type.Union([id, Type.Null()]),

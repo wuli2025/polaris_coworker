@@ -4,16 +4,16 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Value } from "typebox/value";
 import { ConfigSchema, ConfigPatchSchema, type Config } from "./schema.ts";
+import { validateConfig } from "./validate.ts";
 import { DaemonError } from "../protocol/errors.ts";
 
 export function mergeConfig(base: Config, patch: unknown): Config {
-  if (!Value.Check(ConfigPatchSchema, patch)) {
-    throw new DaemonError("INVALID_CONFIG", "Configuration does not match schema");
-  }
+  validateConfig(ConfigPatchSchema, patch);
+  if (!Value.Check(ConfigPatchSchema, patch)) throw new Error("Unreachable invalid config");
   const result = { ...base, ...patch };
-  if (!Value.Check(ConfigSchema, result)) throw new DaemonError("INVALID_CONFIG", "Invalid configuration");
+  validateConfig(ConfigSchema, result);
   if (new Set(result.providers.map((p) => p.id)).size !== result.providers.length) {
-    throw new DaemonError("INVALID_CONFIG", "Duplicate provider id");
+    throw new DaemonError("INVALID_CONFIG", "提供商标识重复。", ["/providers"]);
   }
   const dir = result.sessionDir;
   result.sessionDir = resolve(dir.startsWith("~/") ? resolve(homedir(), dir.slice(2)) : dir);
@@ -27,9 +27,11 @@ export function loadConfig(path?: string): Config {
   try {
     if (!defaults) throw new Error("Missing defaults");
     const base: unknown = JSON.parse(readFileSync(defaults, "utf8"));
-    if (!Value.Check(ConfigSchema, base)) throw new Error("Invalid defaults");
+    validateConfig(ConfigSchema, base);
+    if (!Value.Check(ConfigSchema, base)) throw new Error("Unreachable invalid defaults");
     return mergeConfig(base, path ? JSON.parse(readFileSync(path, "utf8")) : {});
-  } catch {
-    throw new DaemonError("INVALID_CONFIG", "Cannot load configuration file");
+  } catch (error) {
+    if (error instanceof DaemonError) throw error;
+    throw new DaemonError("INVALID_CONFIG", error instanceof SyntaxError ? "配置文件不是有效的 JSON。" : "无法读取配置文件。", ["/"]);
   }
 }

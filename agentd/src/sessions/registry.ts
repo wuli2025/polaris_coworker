@@ -56,7 +56,8 @@ export class SessionRegistry {
       this.armIdle(id, entry);
       return { sessionId: id, resumed: !!sessionId, messageCount: session.messages.length,
         model: { provider: session.model!.provider, id: session.model!.id },
-        thinkingLevel: session.thinkingLevel, tools: session.getActiveToolNames() };
+        thinkingLevel: session.thinkingLevel, tools: session.getActiveToolNames(),
+        reopenRequired: session.modelRuntime !== this.models.runtime };
     } finally {
       this.pendingOpens--;
       if (sessionId) this.opening.delete(sessionId);
@@ -82,13 +83,28 @@ export class SessionRegistry {
   private async execute(id: string, entry: Entry, run: Run, text: string): Promise<void> {
     const { session } = entry;
     run.mapper.emit({ event: "turn.started" });
-    const unsubscribe = session.subscribe((event) => run.mapper.accept(event));
-    const timer = setTimeout(() => {
+    const { turnIdleTimeoutMs, turnMaxMs } = this.config();
+    let idleTimer: NodeJS.Timeout;
+    let maxTimer: NodeJS.Timeout | undefined;
+    const expire = (code: "TURN_IDLE_TIMEOUT" | "TURN_MAX_TIMEOUT") => {
+      if (run.stopped) return;
       run.stopped = "timeout";
-      run.mapper.error("TURN_TIMEOUT", "Turn exceeded turnTimeoutMs");
+      clearTimeout(idleTimer);
+      clearTimeout(maxTimer);
+      run.mapper.error(code, code === "TURN_IDLE_TIMEOUT" ? "本轮长时间未收到事件，已取消。" : "本轮超过最长运行时间，已取消。");
       session.clearQueue();
       void session.abort().catch(() => undefined);
-    }, this.config().turnTimeoutMs);
+    };
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      if (!run.stopped) idleTimer = setTimeout(() => expire("TURN_IDLE_TIMEOUT"), turnIdleTimeoutMs);
+    };
+    const unsubscribe = session.subscribe((event) => {
+      armIdle(); // All SDK events count, including tool progress and retry/compaction events.
+      run.mapper.accept(event, !!run.stopped);
+    });
+    armIdle();
+    if (turnMaxMs > 0) maxTimer = setTimeout(() => expire("TURN_MAX_TIMEOUT"), turnMaxMs);
     try {
       if (!run.stopped) {
         await session.prompt(text, {
@@ -105,7 +121,8 @@ export class SessionRegistry {
         run.mapper.error(safe.code, safe.message);
       }
     } finally {
-      clearTimeout(timer);
+      clearTimeout(idleTimer!);
+      clearTimeout(maxTimer);
       unsubscribe();
       session.clearQueue();
       entry.run = undefined;
@@ -167,6 +184,10 @@ export class SessionRegistry {
     const remaining = Math.max(1, this.config().idleTimeoutMs - (Date.now() - entry.lastUsed));
     entry.idle = setTimeout(() => { void this.close(id).catch(() => undefined); }, remaining);
     entry.idle.unref();
+  }
+  reopenRequired(): string[] {
+    return [...this.entries].filter(([, entry]) => entry.session.modelRuntime !== this.models.runtime)
+      .map(([id]) => id);
   }
   refreshConfig(): void {
     for (const [id, entry] of this.entries) if (!entry.run && !entry.closing) this.armIdle(id, entry);

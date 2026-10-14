@@ -3,14 +3,15 @@
   "maxSessions": 8,
   "maxQueuedMessages": 8,
   "idleTimeoutMs": 600000,
-  "turnTimeoutMs": 300000,
+  "turnIdleTimeoutMs": 180000,
+  "turnMaxMs": 0,
   "maxLineBytes": 1048576,
-  "tools": ["read", "bash", "edit", "write"],
+  "tools": ["read", "grep", "find", "ls"],
   "defaultModel": { "provider": "anthropic", "id": "claude-sonnet-4-5" },
   "thinkingLevel": "medium",
   "logLevel": "info",
   "extensions": { "enabled": false },
   "providers": [],
-  "retry": { "enabled": false },
-  "compaction": { "enabled": false }
+  "retry": { "enabled": true, "maxRetries": 3, "baseDelayMs": 2000, "maxAgentDelayMs": 60000 },
+  "compaction": { "enabled": true }
 }

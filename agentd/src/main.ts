@@ -29,10 +29,9 @@ async function main(): Promise<void> {
   const daemon = await Daemon.create(loadConfig(args[1] ?? process.env.POLARIS_AGENTD_CONFIG),
     (value) => output.send(value), writeLog, { redactor });
   logger = daemon.logger;
-  let commands = Promise.resolve();
   let shutdown: Promise<void> | undefined;
   const reader = new JsonlReader(() => daemon.config.maxLineBytes, (value) => {
-    commands = commands.then(async () => { output.send(await daemon.handle(value)); });
+    void daemon.handle(value).then((response) => output.send(response));
   }, (error) => output.send({ type: "response", id: null, ok: false, error: publicError(error) }));
   const onData = (chunk: Buffer) => reader.push(chunk);
   const stop = () => {
@@ -41,7 +40,6 @@ async function main(): Promise<void> {
     process.stdin.pause();
     reader.end();
     shutdown = (async () => {
-      await commands;
       await daemon.shutdown();
       logger.log("info", "Daemon stopped");
       await output.flush();
@@ -62,7 +60,8 @@ async function main(): Promise<void> {
 try {
   await main();
 } catch (error) {
-  logger.log("error", "Daemon failed", { code: publicError(error).code });
+  const safe = publicError(error);
+  logger.log("error", safe.message, { code: safe.code, paths: safe.paths });
   process.exitCode = 1;
   await logs.flush().catch(() => undefined);
 }

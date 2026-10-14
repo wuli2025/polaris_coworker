@@ -83,7 +83,7 @@ test("steer and followUp share bounded queue and are delivered inside one host t
 });
 test("abort and timeout emit exactly one terminal status and allow another prompt", async () => {
   for (const timeout of [false, true]) {
-    const h = await harness([slow, fauxAssistantMessage("recovered")], { turnTimeoutMs: timeout ? 40 : 5000 });
+    const h = await harness([slow, fauxAssistantMessage("recovered")], { turnIdleTimeoutMs: timeout ? 40 : 5000 });
     try {
       const id = await open(h);
       await h.request("prompt", { sessionId: id, text: "wait" });
@@ -91,7 +91,7 @@ test("abort and timeout emit exactly one terminal status and allow another promp
       if (!timeout) await h.request("abort", { sessionId: id });
       await h.daemon.sessions.wait(id);
       assert.deepEqual(h.events.filter((e) => e.event === "turn.completed").map((e) => e.status), [timeout ? "timeout" : "aborted"]);
-      assert.equal(h.events.some((e) => e.event === "error" && e.code === "TURN_TIMEOUT"), timeout);
+      assert.equal(h.events.some((e) => e.event === "error" && e.code === "TURN_IDLE_TIMEOUT"), timeout);
       await h.request("prompt", { sessionId: id, text: "again" });
       await h.daemon.sessions.wait(id);
       assert.ok(h.events.some((e) => e.event === "text.delta" && e.text === "recovered"));

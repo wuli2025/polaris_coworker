@@ -11,6 +11,7 @@ import { DaemonError } from "../protocol/errors.ts";
 export async function createSession(
   config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string,
 ) {
+  const runtime = models.runtime;
   mkdirSync(config.sessionDir, { recursive: true });
   const cwd = resolve(requestedCwd ?? process.cwd());
   let manager: SessionManager;
@@ -26,7 +27,7 @@ export async function createSession(
   } catch {
     throw new DaemonError("INVALID_CWD", "Working directory does not exist");
   }
-  const model = models.runtime.getModel(config.defaultModel.provider, config.defaultModel.id);
+  const model = runtime.getModel(config.defaultModel.provider, config.defaultModel.id);
   if (!model) throw new DaemonError("MODEL_NOT_FOUND", "Configured default model does not exist");
   const settingsManager = SettingsManager.inMemory({
     compaction: config.compaction, retry: config.retry, cacheWarming: "off",
@@ -40,7 +41,7 @@ export async function createSession(
   });
   await resourceLoader.reload();
   const { session } = await createAgentSession({
-    cwd: manager.getCwd(), agentDir, model, modelRuntime: models.runtime,
+    cwd: manager.getCwd(), agentDir, model, modelRuntime: runtime,
     thinkingLevel: config.thinkingLevel, tools: config.tools,
     settingsManager, sessionManager: manager, resourceLoader,
   });

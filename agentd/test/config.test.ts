@@ -20,9 +20,9 @@ test("defaults ← file ← runtime overrides; two configurations change session
     assert.equal(fromFile.maxSessions, 1);
     assert.equal(mergeConfig(fromFile, { maxSessions: 2 }).maxSessions, 2);
     for (const [index, settings] of [
-      { maxSessions: 1, maxQueuedMessages: 0, idleTimeoutMs: 10000, turnTimeoutMs: 2000,
+      { maxSessions: 1, maxQueuedMessages: 0, idleTimeoutMs: 10000, turnIdleTimeoutMs: 2000,
         maxLineBytes: 128, tools: ["read"], thinkingLevel: "off", logLevel: "error", extensions: { enabled: false } },
-      { maxSessions: 3, maxQueuedMessages: 5, idleTimeoutMs: 20000, turnTimeoutMs: 4000,
+      { maxSessions: 3, maxQueuedMessages: 5, idleTimeoutMs: 20000, turnIdleTimeoutMs: 4000,
         maxLineBytes: 2048, tools: ["probe"], thinkingLevel: "high", logLevel: "debug", extensions: { enabled: true } },
     ].entries()) {
       const sessionDir = join(h.dir, `sessions-${index}`);

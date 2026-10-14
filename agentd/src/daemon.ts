@@ -1,7 +1,8 @@
 import { Value } from "typebox/value";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { mergeConfig } from "./config/load.ts";
-import type { Config } from "./config/schema.ts";
+import { ConfigPatchSchema, type Config } from "./config/schema.ts";
+import { validateConfig } from "./config/validate.ts";
 import { extensionFactories } from "./extensions/index.ts";
 import { Logger } from "./log.ts";
 import { memoryCredentials, Redactor, type CredentialStore } from "./models/credentials.ts";
@@ -13,6 +14,10 @@ import { SessionRegistry } from "./sessions/registry.ts";
 
 export class Daemon {
   readonly sessions: SessionRegistry;
+  private readonly queues = new Map<string, Promise<void>>();
+  private readonly pending = new Set<Promise<void>>();
+  private stopping = false;
+  private shutdownTask?: Promise<void>;
   private constructor(
     public config: Config,
     readonly models: Models,
@@ -40,6 +45,9 @@ export class Daemon {
       ? raw.id as string | number : null;
     let sessionId: string | undefined;
     try {
+      if (raw.method === "config.apply" && raw.params && typeof raw.params === "object" && "config" in raw.params) {
+        validateConfig(ConfigPatchSchema, raw.params.config);
+      }
       if (!Value.Check(RequestSchema, value)) {
         throw new DaemonError(raw.method === "config.apply" ? "INVALID_CONFIG" : "INVALID_REQUEST",
           "Request does not match schema");
@@ -47,7 +55,9 @@ export class Daemon {
       const request: Request = value;
       sessionId = "sessionId" in request.params ? request.params.sessionId : undefined;
       this.logger.log("debug", "Request received", { requestId: request.id, sessionId });
-      const result = await this.dispatch(request);
+      if (this.stopping) throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
+      const key = sessionId ? `session:${sessionId}` : request.method === "config.apply" ? "config" : undefined;
+      const result = await this.schedule(key, () => this.dispatch(request));
       this.logger.log("info", "Request completed", { requestId: request.id, sessionId });
       return { type: "response", id: request.id, ok: true, result };
     } catch (error) {
@@ -55,6 +65,18 @@ export class Daemon {
       this.logger.log("warn", "Request failed", { requestId: id ?? undefined, sessionId, code: safe.code });
       return { type: "response", id, ok: false, error: safe };
     }
+  }
+  private schedule(key: string | undefined, work: () => Promise<unknown>): Promise<unknown> {
+    const previous = key ? this.queues.get(key) : undefined;
+    const task = previous ? previous.then(work) : work();
+    const settled = task.then(() => undefined, () => undefined);
+    this.pending.add(settled);
+    if (key) this.queues.set(key, settled);
+    void settled.then(() => {
+      this.pending.delete(settled);
+      if (key && this.queues.get(key) === settled) this.queues.delete(key);
+    });
+    return task;
   }
   private async dispatch(request: Request): Promise<unknown> {
     switch (request.method) {
@@ -74,9 +96,15 @@ export class Daemon {
         this.config = config;
         this.sessions.refreshConfig();
         // No config echo: credentials can also be embedded in endpoint URLs.
-        return { applied: true };
+        return { applied: true, reopenRequired: this.sessions.reopenRequired() };
       }
     }
   }
-  async shutdown(): Promise<void> { await this.sessions.shutdown(); }
+  shutdown(): Promise<void> {
+    this.stopping = true;
+    return this.shutdownTask ??= (async () => {
+      await Promise.all(this.pending);
+      await this.sessions.shutdown();
+    })();
+  }
 }
