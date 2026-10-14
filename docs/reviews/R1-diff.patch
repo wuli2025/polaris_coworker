@@ -1,0 +1,702 @@
+diff --git a/agentd/src/models/credentials.ts b/agentd/src/models/credentials.ts
+index 48638dc..d39e183 100644
+--- a/agentd/src/models/credentials.ts
++++ b/agentd/src/models/credentials.ts
+@@ -10,7 +10,12 @@ export function memoryCredentials(): CredentialStore {
+ export class Redactor {
+   private readonly secrets = new Set<string>();
+   add(secret: string): void {
+-    if (secret) this.secrets.add(secret);
++    if (!secret) return;
++    // Register representations before any logger/event sink sees the credential.
++    for (const variant of [secret, encodeURIComponent(secret),
++      Buffer.from(secret, "utf8").toString("base64"), JSON.stringify(secret).slice(1, -1)]) {
++      this.secrets.add(variant);
++    }
+   }
+   text(value: string): string {
+     for (const secret of [...this.secrets].sort((a, b) => b.length - a.length)) {
+diff --git a/agentd/src/models/runtime.ts b/agentd/src/models/runtime.ts
+index 6fbc7c1..11883df 100644
+--- a/agentd/src/models/runtime.ts
++++ b/agentd/src/models/runtime.ts
+@@ -11,13 +11,12 @@ export class Models {
+   ) {}
+ 
+   static async create(config: Config, credentials: CredentialStore, redactor: Redactor): Promise<Models> {
+-    const runtime = await Models.build(config, credentials);
+-    const result = new Models(runtime, credentials, redactor);
+     for (const info of await credentials.list()) {
+       const credential = await credentials.read(info.providerId);
+       if (credential?.type === "api_key" && credential.key) redactor.add(credential.key);
+     }
+-    return result;
++    const runtime = await Models.build(config, credentials);
++    return new Models(runtime, credentials, redactor);
+   }
+ 
+   private static async build(config: Config, credentials: CredentialStore): Promise<ModelRuntime> {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+index c11b331..c1b3b71 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+@@ -38,11 +38,13 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
+     }
+     let stream = backend.start(input).map_err(|e| e.to_string())?;
+     let mut finalizer = None;
+-    let timeout = Duration::from_millis(config::Config::load().map_err(|e| e.to_string())?.agentd.turn_timeout_ms);
++    let timeout = Duration::from_millis(config::Config::load().map_err(|e| e.to_string())?.agentd.request_timeout_ms);
+     loop {
+         let ev = match stream.recv_timeout(timeout) {
+             Ok(event) => event,
+-            Err(error) if legacy && matches!(error.downcast_ref(), Some(stream::StreamError::Timeout)) => continue,
++            // Only the supervisor sees all agentd events (including hidden reasoning/usage).
++            // Let it own turn deadlines and deliver the specific error followed by done.
++            Err(error) if matches!(error.downcast_ref(), Some(stream::StreamError::Timeout)) => continue,
+             Err(error) => { let _ = backend.cancel(req); return Err(error.to_string()); }
+         };
+         if ev.kind == "done" {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+index ba5c513..52969c4 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+@@ -38,7 +38,12 @@ pub struct Agentd {
+     pub max_processes: usize,
+     pub idle_ms: u64,
+     pub request_timeout_ms: u64,
+-    pub turn_timeout_ms: u64,
++    /// Lost-daemon fallback: 240000 > agentd's 180000 so agentd can finish first.
++    pub turn_idle_timeout_ms: u64,
++    /// Hard turn limit in milliseconds; zero disables it.
++    pub turn_max_ms: u64,
++    #[serde(rename = "turnTimeoutMs", deserialize_with = "reject_turn_timeout", skip_serializing)]
++    _legacy_turn_timeout: (),
+     pub abort_timeout_ms: u64,
+     pub ping_interval_ms: u64,
+     pub restart_base_ms: u64,
+@@ -62,7 +67,8 @@ impl Default for Agentd {
+             node: "node".into(), entry: PathBuf::new(), node_args: vec![], args: vec![],
+             isolation: if cfg!(feature = "desktop") { "shared" } else { "per-account" }.into(),
+             max_processes: 8, idle_ms: 600_000, request_timeout_ms: 15_000,
+-            turn_timeout_ms: 600_000, abort_timeout_ms: 5_000, ping_interval_ms: 30_000,
++            turn_idle_timeout_ms: 240_000, turn_max_ms: 0, _legacy_turn_timeout: (),
++            abort_timeout_ms: 5_000, ping_interval_ms: 30_000,
+             restart_base_ms: 200, restart_max_ms: 30_000, restart_jitter_ms: 100,
+             failure_threshold: 5, stable_reset_ms: 60_000, channel_capacity: 64,
+             max_line_bytes: 1_048_576, delta_batch_ms: 30,
+@@ -73,6 +79,11 @@ impl Default for Agentd {
+         }
+     }
+ }
++fn reject_turn_timeout<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
++    Err(serde::de::Error::custom(
++        "InvalidAgentConfig: agentd.turnTimeoutMs was removed; use turnIdleTimeoutMs and turnMaxMs",
++    ))
++}
+ impl Config {
+     pub fn load() -> anyhow::Result<Self> {
+         let mut config: Self = match std::env::var_os("POLARIS_AGENT_CONFIG") {
+@@ -94,7 +105,8 @@ impl Config {
+         anyhow::ensure!(matches!(c.isolation.as_str(), "shared" | "per-account"), "InvalidIsolation: {}", c.isolation);
+         anyhow::ensure!(c.channel_capacity > 0 && c.max_line_bytes > 0 && c.max_processes > 0,
+             "InvalidAgentConfig: capacities must be positive");
+-        anyhow::ensure!(c.request_timeout_ms > 0 && c.turn_timeout_ms > 0 && c.abort_timeout_ms > 0
++        anyhow::ensure!(c.turn_idle_timeout_ms > 0, "InvalidAgentConfig: agentd.turnIdleTimeoutMs must be positive");
++        anyhow::ensure!(c.request_timeout_ms > 0 && c.abort_timeout_ms > 0
+             && c.ping_interval_ms > 0 && c.idle_ms > 0 && c.delta_batch_ms > 0
+             && c.supervisor_tick_ms > 0 && c.control_poll_ms > 0 && c.shutdown_timeout_ms > 0
+             && c.stable_reset_ms > 0 && c.failure_threshold > 0 && c.restart_base_ms > 0 && c.restart_max_ms >= c.restart_base_ms,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
+index 6285de5..0b9885f 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
+@@ -49,8 +49,18 @@ impl Client {
+         self.wait(rx)
+     }
+     pub fn wait(&self, rx: mpsc::Receiver<Result<Value, String>>) -> anyhow::Result<Value> {
+-        rx.recv_timeout(Duration::from_millis(self.config.request_timeout_ms))
+-            .map_err(|_| anyhow::anyhow!("AgentdRequestTimeout"))?.map_err(anyhow::Error::msg)
++        // Budget queue/serialization separately from the actor's request deadline,
++        // so its specific write/response error wins over the caller's fallback.
++        let timeout = self.config.request_timeout_ms.saturating_mul(2)
++            .saturating_add(self.config.supervisor_tick_ms.saturating_mul(2));
++        rx.recv_timeout(Duration::from_millis(timeout)).map_err(|error| {
++            let status = self.status.lock();
++            let message = if !status.healthy { status.last_error.clone() } else { None };
++            anyhow::anyhow!(message.unwrap_or_else(|| match error {
++                mpsc::RecvTimeoutError::Disconnected => "AgentdSupervisorStopped".into(),
++                mpsc::RecvTimeoutError::Timeout => "AgentdRequestTimeout".into(),
++            }))
++        })?.map_err(anyhow::Error::msg)
+     }
+     pub fn cancel(&self, req: &str) -> anyhow::Result<()> {
+         let (tx, rx) = mpsc::sync_channel(1);
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+index c580c7a..49b662a 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+@@ -80,9 +80,18 @@ impl AgentBackend for PiBackend {
+                     anyhow::ensure!(model == &info.model, BackendError::UnsupportedInput("model selection is process-wide; apply config before opening sessions"));
+                 }
+                 let (tx, rx) = mpsc::sync_channel(1);
++                // Control::Register.timeout is the hard limit; zero means unlimited.
++                let configured_max = Duration::from_millis(client.config.turn_max_ms);
++                // Preserve an explicit zero request budget as immediate expiry,
++                // rather than confusing it with the configured unlimited sentinel.
++                let timeout = match input.timeout.map(|limit| limit.max(Duration::from_nanos(1))) {
++                    Some(limit) if !configured_max.is_zero() => limit.min(configured_max),
++                    Some(limit) => limit,
++                    None => configured_max,
++                };
+                 client.send(Control::Register { session: info.id.clone(), req: req.clone(),
+                     translator: translate::Translator::new(req.clone(), conv.clone(), input.cwd.clone(), &client.config),
+-                    stream: sender.clone(), timeout: input.timeout.unwrap_or(Duration::from_millis(client.config.turn_timeout_ms)), reservation: (preparing.clone(), key.clone()), reply: tx })?;
++                    stream: sender.clone(), timeout, reservation: (preparing.clone(), key.clone()), reply: tx })?;
+                 client.wait(rx)?;
+                 registered = true;
+                 let result = client.call(Command::Prompt(Text { session_id: info.id.clone(), text: input.prompt }));
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
+index 8a37767..4df10c8 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
+@@ -3,7 +3,9 @@
+ use super::{protocol::{Frame, Request}, super::config::Agentd};
+ use anyhow::{Context, Result};
+ use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{Child, Command}, sync::mpsc};
+-use std::{process::Stdio, time::Duration};
++use std::{process::Stdio, time::Duration, sync::{Arc, atomic::{AtomicUsize, Ordering}}};
++
++pub const WRITER_BACKPRESSURE: &str = "AgentdWriterBackpressure";
+ 
+ pub struct Process {
+     child: Child,
+@@ -11,6 +13,8 @@ pub struct Process {
+     pub writer: mpsc::Sender<Vec<u8>>,
+     pub incoming: mpsc::Receiver<Result<Frame>>,
+     pub pid: u32,
++    write_failure: Arc<parking_lot::Mutex<Option<String>>>,
++    outstanding_writes: Arc<AtomicUsize>,
+     shutdown_timeout: Duration,
+     #[cfg(windows)]
+     _job: super::windows_job::Job,
+@@ -63,21 +67,42 @@ impl Process {
+             }
+         });
+         let (writer, mut rx) = mpsc::channel::<Vec<u8>>(config.channel_capacity);
++        let write_failure = Arc::new(parking_lot::Mutex::new(None));
++        let failure = write_failure.clone();
++        let outstanding_writes = Arc::new(AtomicUsize::new(0));
++        let outstanding = outstanding_writes.clone();
+         let timeout = Duration::from_millis(config.request_timeout_ms);
+         let writing = tokio::spawn(async move {
+             while let Some(line) = rx.recv().await {
+-                if !matches!(tokio::time::timeout(timeout, stdin.write_all(&line)).await, Ok(Ok(()))) { break; }
++                let error = match tokio::time::timeout(timeout, stdin.write_all(&line)).await {
++                    Ok(Ok(())) => { outstanding.fetch_sub(1, Ordering::SeqCst); continue; }
++                    Ok(Err(error)) => format!("AgentdWriterClosed: {error}"),
++                    Err(_) => WRITER_BACKPRESSURE.into(),
++                };
++                *failure.lock() = Some(error);
++                break;
+             }
+         });
+-        Ok(Self { child, tasks: vec![output, logging, writing], writer, incoming, pid, shutdown_timeout: Duration::from_millis(config.shutdown_timeout_ms),
++        Ok(Self { child, tasks: vec![output, logging, writing], writer, incoming, pid,
++            write_failure, outstanding_writes, shutdown_timeout: Duration::from_millis(config.shutdown_timeout_ms),
+             #[cfg(windows)] _job: job })
+     }
+     pub fn write(&self, request: &Request, max: usize) -> Result<()> {
++        if let Some(error) = self.write_error() { anyhow::bail!(error); }
+         let mut bytes = serde_json::to_vec(request)?;
+         anyhow::ensure!(bytes.len() <= max, "AgentdLineTooLong: outgoing request");
+         bytes.push(b'\n');
+-        self.writer.try_send(bytes).map_err(|_| anyhow::anyhow!("AgentdWriterBackpressure"))
++        self.outstanding_writes.fetch_add(1, Ordering::SeqCst);
++        self.writer.try_send(bytes).map_err(|error| {
++            self.outstanding_writes.fetch_sub(1, Ordering::SeqCst);
++            anyhow::anyhow!(match error {
++                mpsc::error::TrySendError::Full(_) => WRITER_BACKPRESSURE,
++                mpsc::error::TrySendError::Closed(_) => "AgentdWriterClosed",
++            })
++        })
+     }
++    pub fn write_error(&self) -> Option<String> { self.write_failure.lock().clone() }
++    pub fn writes_pending(&self) -> bool { self.outstanding_writes.load(Ordering::SeqCst) > 0 }
+     pub fn exited(&mut self) -> Result<bool> { Ok(self.child.try_wait()?.is_some()) }
+     pub async fn stop(&mut self) {
+         for task in &self.tasks { task.abort(); }
+@@ -108,3 +133,26 @@ async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R, max: usiz
+         if end.is_some() { line.pop(); return Ok(line); }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use super::super::protocol::{Command, Empty, Id};
++    #[test]
++    fn full_and_closed_writer_have_distinct_errors() {
++        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
++        runtime.block_on(async {
++            let mut config = Agentd::default();
++            config.entry = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agentd.mjs");
++            config.channel_capacity = 1;
++            let mut process = Process::spawn(&config).unwrap();
++            let request = Request { id: Id::Text("test".into()), command: Command::Ping(Empty {}) };
++            // No await: the writer cannot drain the first queued request yet.
++            process.write(&request, config.max_line_bytes).unwrap();
++            assert_eq!(process.write(&request, config.max_line_bytes).unwrap_err().to_string(), WRITER_BACKPRESSURE);
++            process.stop().await;
++            tokio::task::yield_now().await;
++            assert_eq!(process.write(&request, config.max_line_bytes).unwrap_err().to_string(), "AgentdWriterClosed");
++        });
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs
+index 1d18b49..70d4de3 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs
+@@ -1,7 +1,7 @@
+ use super::{translate::Translator, protocol::{Event, TurnStatus}};
+ use super::super::stream::Mailbox;
+ use crate::chat::ChatStreamEvent;
+-use std::{collections::VecDeque, sync::Arc, time::Instant};
++use std::{collections::VecDeque, sync::Arc, time::{Duration, Instant}};
+ pub struct Route {
+     pub req: String,
+     pub session: String,
+@@ -12,10 +12,14 @@ pub struct Route {
+     pub turn: Option<String>,
+     pub translator: Translator,
+     pub stream: Arc<Mailbox>,
+-    pub deadline: Instant,
++    pub registered_at: Instant,
++    pub last_event_at: Instant,
++    pub idle_timeout: Duration,
++    pub max_duration: Duration,
+     pub abort_deadline: Option<Instant>,
+     pub pending: VecDeque<ChatStreamEvent>,
+     pub terminal: Option<(Option<ChatStreamEvent>, ChatStreamEvent)>,
++    pub first_error: Option<String>,
+ }
+ impl Route {
+     pub fn accept(&mut self, turn: String, event: Event) -> anyhow::Result<()> {
+@@ -26,10 +30,25 @@ impl Route {
+             if self.turn.is_none() { self.turn = Some(turn.clone()); }
+         }
+         anyhow::ensure!(self.turn.as_deref() == Some(&turn), "AgentdTurnMismatch");
++        self.last_event_at = Instant::now();
++        let fatal = matches!(event, Event::Error { .. } | Event::Completed { .. });
+         let events = self.translator.accept(event);
++        if fatal && self.first_error.is_none() {
++            self.first_error = events.iter().find(|e| e.kind == "error").and_then(|e| e.text.clone());
++        }
+         self.enqueue(events);
+         Ok(())
+     }
++    pub fn timeout_error(&self, now: Instant) -> Option<&'static str> {
++        if self.terminal.is_some() || self.stream.is_finished() { return None; }
++        if !self.max_duration.is_zero() && now.duration_since(self.registered_at) >= self.max_duration {
++            return Some("AgentdTurnMaxTimeout");
++        }
++        if now.duration_since(self.last_event_at) >= self.idle_timeout {
++            return Some("AgentdTurnIdleTimeout");
++        }
++        None
++    }
+     pub fn tick(&mut self) {
+         if self.terminal.is_none() { let events = self.translator.tick(); self.enqueue(events); }
+     }
+@@ -42,13 +61,21 @@ impl Route {
+     pub fn fail(&mut self, message: &str) {
+         if self.stream.is_finished() { return; }
+         self.acknowledged = true;
+-        if let Some((error, _)) = &mut self.terminal {
+-            *error = Some(self.translator.make("error", Some(message.into())));
++        let error = if self.first_error.is_some() {
++            eprintln!("{}", serde_json::json!({"component":"agent.backend", "backend":"pi",
++                "reqId":self.req, "phase":"secondary-error", "error":message, "firstError":self.first_error}));
++            None
++        } else {
++            self.first_error = Some(message.into());
++            Some(self.translator.make("error", Some(message.into())))
++        };
++        if let Some((existing, _)) = &mut self.terminal {
++            if existing.is_none() { *existing = error; }
+             return;
+         }
+         let events = self.translator.flush();
+         self.enqueue(events);
+-        self.terminal = Some((Some(self.translator.make("error", Some(message.into()))), self.translator.make("done", None)));
++        self.terminal = Some((error, self.translator.make("done", None)));
+     }
+     pub fn aborted(&mut self) {
+         if self.terminal.is_none() {
+@@ -78,5 +105,72 @@ impl Route {
+ }
+ 
+ impl Drop for Route {
+-    fn drop(&mut self) { self.reservation.0.lock().remove(&self.reservation.1); }
++    fn drop(&mut self) {
++        self.reservation.0.lock().remove(&self.reservation.1);
++        self.active.lock().remove(&self.req);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use super::super::super::config::Agentd;
++    fn route() -> (Route, super::super::super::EventStream) {
++        let (stream, receiver) = Mailbox::channel(4, 4096);
++        let active = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::from([("r".into(), "s".into())])));
++        let reservations = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::from(["s".into()])));
++        (Route { req: "r".into(), session: "s".into(), active, acknowledged: true, started: false,
++            reservation: (reservations, "s".into()), turn: None,
++            translator: Translator::new("r".into(), None, "/tmp".into(), &Agentd::default()), stream,
++            registered_at: Instant::now(), last_event_at: Instant::now(),
++            idle_timeout: Duration::from_secs(240), max_duration: Duration::ZERO,
++            abort_deadline: None, pending: VecDeque::new(), terminal: None, first_error: None }, receiver)
++    }
++    #[test]
++    fn dropping_undrained_route_releases_active_and_reservation() {
++        let (route, _receiver) = route();
++        let active = route.active.clone();
++        let reservations = route.reservation.0.clone();
++        drop(route);
++        assert!(active.lock().is_empty());
++        assert!(reservations.lock().is_empty());
++    }
++    #[test]
++    fn first_failure_survives_abort_timeout() {
++        for daemon_event in [false, true] {
++            let (mut route, receiver) = route();
++            if daemon_event {
++                route.accept("t".into(), Event::Started).unwrap();
++                route.accept("t".into(), Event::Error { code: "MODEL_ERROR".into(), message: "original".into() }).unwrap();
++                route.accept("t".into(), Event::Completed { status: TurnStatus::Error }).unwrap();
++            } else { route.fail("MODEL_ERROR: original"); }
++            route.aborted();
++            route.fail("AgentdAbortTimeout");
++            assert!(route.drain());
++            let error = receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
++            assert_eq!(error.kind, "error");
++            assert_eq!(error.text.as_deref(), Some("MODEL_ERROR: original"));
++            assert_eq!(receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap().kind, "done");
++        }
++    }
++    #[test]
++    fn idle_budget_starts_at_registration_and_resets_on_hidden_events() -> anyhow::Result<()> {
++        let (mut route, _receiver) = route();
++        let idle = Duration::from_millis(300);
++        route.idle_timeout = idle;
++        let before_event = Instant::now() - idle * 5;
++        route.registered_at = before_event;
++        route.last_event_at = before_event;
++        assert_eq!(route.timeout_error(Instant::now()), Some("AgentdTurnIdleTimeout"));
++        route.accept("t".into(), Event::Started)?;
++        route.accept("t".into(), Event::Reasoning { text: "working".into() })?;
++        let last_event = route.last_event_at;
++        assert_eq!(route.timeout_error(last_event + idle - Duration::from_millis(1)), None);
++        assert_eq!(route.timeout_error(last_event + idle), Some("AgentdTurnIdleTimeout"));
++        route.max_duration = idle * 2;
++        assert_eq!(route.timeout_error(last_event), Some("AgentdTurnMaxTimeout"));
++        route.accept("t".into(), Event::Completed { status: TurnStatus::Completed })?;
++        assert_eq!(route.timeout_error(last_event + idle * 10), None);
++        Ok(())
++    }
+ }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+index 3a117a8..ef01488 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+@@ -32,14 +32,16 @@ impl State {
+         let circuit = self.failures >= self.config.failure_threshold;
+         let error = if circuit { format!("{}: {error}", BackendError::CircuitOpen) } else { error };
+         for route in self.routes.values_mut() { route.fail(&error); }
+-        for (_, pending) in self.pending.drain() {
+-            if let Some(reply) = pending.reply { let _ = reply.send(Err(error.clone())); }
+-        }
+         let mut status = self.status.lock();
+         status.healthy = false;
+         status.pid = None;
+         status.circuit_open = circuit;
+-        status.last_error = Some(if circuit { BackendError::CircuitOpen.to_string() } else { error });
++        eprintln!("{}", json!({"component":"agent.backend", "backend":"pi", "phase":"failure", "error":error}));
++        status.last_error = Some(error.clone());
++        drop(status);
++        for (_, pending) in self.pending.drain() {
++            if let Some(reply) = pending.reply { let _ = reply.send(Err(error.clone())); }
++        }
+         let backoff = self.config.restart_base_ms.saturating_mul(1_u64 << self.failures.saturating_sub(1).min(30))
+             .min(self.config.restart_max_ms);
+         let mut bytes = [0_u8; 8];
+@@ -83,9 +85,12 @@ impl State {
+                     let _ = reply.send(Err(self.unavailable()));
+                 } else {
+                     self.active.lock().insert(req.clone(), session.clone());
++                    let now = Instant::now();
+                     self.routes.insert(session.clone(), Route { req, session, active: self.active.clone(), acknowledged: false, started: false, reservation, turn: None, translator, stream,
+-                        deadline: Instant::now() + timeout, abort_deadline: None,
+-                        pending: Default::default(), terminal: None });
++                        registered_at: now, last_event_at: now,
++                        idle_timeout: Duration::from_millis(self.config.turn_idle_timeout_ms),
++                        max_duration: timeout, abort_deadline: None,
++                        pending: Default::default(), terminal: None, first_error: None });
+                     let _ = reply.send(Ok(json!({})));
+                 }
+             }
+@@ -142,21 +147,29 @@ impl State {
+         });
+         ready
+     }
+-    fn deadlines(&mut self) -> anyhow::Result<()> {
++    fn deadlines(&mut self, process: Option<&Process>) -> anyhow::Result<()> {
++        if let Some(error) = process.and_then(Process::write_error) { anyhow::bail!(error); }
+         for route in self.routes.values_mut() {
+             if route.abort_deadline.is_some_and(|d| Instant::now() >= d) {
+                 route.aborted();
+                 anyhow::bail!("AgentdAbortTimeout: daemon restarted to stop the cancelled turn");
+             }
+-            if Instant::now() >= route.deadline && route.terminal.is_none() {
+-                route.fail("AgentdTurnTimeout");
+-                anyhow::bail!("AgentdTurnTimeout");
++            if let Some(error) = route.timeout_error(Instant::now()) {
++                route.fail(error);
++                anyhow::bail!(error);
+             }
+         }
+-        anyhow::ensure!(!self.pending.values().any(|p| p.since.elapsed().as_millis() >= self.config.request_timeout_ms as u128), "AgentdRequestTimeout");
++        if self.pending.values().any(|p| p.since.elapsed().as_millis() >= self.config.request_timeout_ms as u128) {
++            if process.is_some_and(Process::writes_pending) { anyhow::bail!(super::process::WRITER_BACKPRESSURE); }
++            anyhow::bail!("AgentdRequestTimeout");
++        }
+         Ok(())
+     }
+ }
++// Also runs when the supervisor future is dropped or its thread unwinds.
++impl Drop for State {
++    fn drop(&mut self) { self.active.lock().clear(); }
++}
+ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mutex<BackendStatus>>,
+     active: Arc<Mutex<HashMap<String, String>>>) {
+     let now = Instant::now();
+@@ -207,7 +220,7 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
+                 match frame { Some(Ok(frame)) => s.frame(frame), Some(Err(e)) => Err(e), None => Err(anyhow::anyhow!("AgentdEof")) }
+             }
+             _ = ticker.tick() => {
+-                let deadlines = s.deadlines();
++                let deadlines = s.deadlines(process.as_ref());
+                 if let Some(p) = &mut process {
+                     if p.exited().unwrap_or(true) { Err(anyhow::anyhow!("AgentdExited")) }
+                     else if deadlines.is_err() { deadlines }
+@@ -222,8 +235,8 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
+             }
+         };
+         if let Err(error) = outcome {
+-            if let Some(mut p) = process.take() { p.stop().await; }
+             s.fail(error.to_string());
++            if let Some(mut p) = process.take() { p.stop().await; }
+         }
+         if s.stopping {
+             for route in s.routes.values_mut() { route.fail("AgentdShutdown"); }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs
+index b666dea..1d3dfd2 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs
+@@ -7,7 +7,7 @@ fn config() -> config::Agentd {
+     c.entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agentd.mjs");
+     c.isolation = "shared".into();
+     c.request_timeout_ms = 1500;
+-    c.turn_timeout_ms = 3000;
++    c.turn_idle_timeout_ms = 3000;
+     c.abort_timeout_ms = 100;
+     c.restart_base_ms = 20;
+     c.restart_max_ms = 80;
+@@ -157,11 +157,7 @@ fn isolation_never_silently_shares() {
+ }
+ 
+ #[test]
+-fn turn_and_ping_timeouts_are_bounded() {
+-    let mut c = config(); c.turn_timeout_ms = 80;
+-    let b = PiBackend::new(c).unwrap(); ready(&b);
+-    let events = collect_events(b.start(input("timeout", "hang")).unwrap());
+-    assert!(events.iter().any(|e| e.text.as_deref().is_some_and(|s| s.contains("Timeout"))));
++fn ping_timeout_is_bounded() {
+     let mut c = config(); c.args = vec!["--ping-hang".into()]; c.request_timeout_ms = 80;
+     let b = PiBackend::new(c).unwrap(); let _ = b.models();
+     let deadline = Instant::now() + Duration::from_secs(3);
+@@ -201,3 +197,157 @@ fn usage_and_all_completion_statuses_have_expected_sequences() {
+         assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), expected);
+     }
+ }
++
++#[test]
++fn config_apply_is_not_busy_after_circuit_or_thread_exit() {
++    for shutdown in [false, true] {
++        let mut c = config(); c.failure_threshold = 1;
++        let b = PiBackend::new(c).unwrap(); ready(&b);
++        let stream = b.start(input("release", if shutdown { "hang" } else { "crash" })).unwrap();
++        if shutdown {
++            let deadline = Instant::now() + Duration::from_secs(2);
++            while b.client.get().unwrap().active.lock().is_empty() {
++                assert!(Instant::now() < deadline);
++                std::thread::sleep(Duration::from_millis(5));
++            }
++            b.shutdown();
++        }
++        let events = collect_events(stream);
++        assert_eq!(events.last().unwrap().kind, "done");
++        let deadline = Instant::now() + Duration::from_secs(2);
++        while !b.client.get().unwrap().active.lock().is_empty() {
++            assert!(Instant::now() < deadline);
++            std::thread::sleep(Duration::from_millis(5));
++        }
++        let error = b.apply_config(None, None).unwrap_err().to_string();
++        assert!(!error.contains("AgentdConfigBusy"), "{error}");
++        assert!(error.contains(if shutdown { "AgentdSupervisorStopped" } else { "AgentdCircuitOpen" }), "{error}");
++    }
++}
++
++#[test]
++fn stalled_stdin_reports_backpressure_to_caller_and_status() {
++    let mut c = config();
++    c.node_args = vec!["-e".into(), "setInterval(() => {}, 1000)".into()];
++    c.request_timeout_ms = 300;
++    c.max_line_bytes = 2_000_000;
++    c.failure_threshold = 1;
++    let b = PiBackend::new(c).unwrap();
++    let client = b.client().unwrap();
++    let error = client.call(Command::Prompt(Text { session_id: "s".into(), text: "x".repeat(1_000_000) })).unwrap_err().to_string();
++    assert!(error.contains("AgentdWriterBackpressure"), "{error}");
++    assert!(!error.contains("RequestTimeout"), "{error}");
++    let status = b.status();
++    assert!(status.circuit_open);
++    assert!(status.last_error.unwrap().contains("AgentdWriterBackpressure"));
++}
++
++#[test]
++fn supervisor_exit_clears_orphan_active_entries() {
++    let b = PiBackend::new(config()).unwrap(); ready(&b);
++    let client = b.client.get().unwrap();
++    // Simulate an orphan not owned by a Route; only supervisor exit can clear it.
++    client.active.lock().insert("orphan".into(), "session".into());
++    assert!(b.apply_config(None, None).unwrap_err().to_string().contains("AgentdConfigBusy"));
++    b.shutdown();
++    let deadline = Instant::now() + Duration::from_secs(2);
++    while !client.active.lock().is_empty() {
++        assert!(Instant::now() < deadline);
++        std::thread::sleep(Duration::from_millis(5));
++    }
++    assert!(!b.apply_config(None, None).unwrap_err().to_string().contains("AgentdConfigBusy"));
++}
++
++// Dedicated timed wire fixture stays inside this task's allowed Rust test file.
++// Reasoning and usage deliberately produce no frontend events.
++fn timed_config() -> config::Agentd {
++    let mut c = config();
++    c.turn_idle_timeout_ms = 300;
++    c.ping_interval_ms = 40;
++    c.node_args = vec!["-e".into(), r#"
++const rl = require('node:readline').createInterface({ input: process.stdin });
++const send = value => process.stdout.write(JSON.stringify(value) + '\n');
++const reply = (id, result) => send({type:'response', id, ok:true, result});
++rl.on('line', line => {
++  const {id, method, params:p} = JSON.parse(line);
++  if (method === 'ping') return reply(id, {status:'ok'});
++  if (method === 'models.list') return reply(id, {models:[]});
++  if (method === 'session.open') return reply(id, {
++    sessionId:p.sessionId || 'timed', model:{provider:'fixture', id:'test'}, tools:['read']
++  });
++  if (method !== 'prompt') return reply(id, {});
++  const event = (name, fields={}) => send({
++    type:'event', sessionId:p.sessionId, turnId:'t', event:name, ...fields
++  });
++  reply(id, {turnId:'t'});
++  if (p.text === 'silent') return;
++  event('turn.started');
++  let ticks = 0;
++  const timer = setInterval(() => {
++    if (++ticks === 60) {
++      clearInterval(timer);
++      return event('turn.completed', {status:'completed'});
++    }
++    if (ticks % 2) event('reasoning.delta', {text:'still working'});
++    else event('usage', {usage:{input:1, output:1, cacheRead:0, cacheWrite:0, totalTokens:2,
++      cost:{input:0, output:0, cacheRead:0, cacheWrite:0, total:0}}});
++  }, 25);
++});
++"#.into()];
++    c
++}
++fn timed_events(c: config::Agentd, request: TurnRequest) -> anyhow::Result<Vec<crate::chat::ChatStreamEvent>> {
++    let b = PiBackend::new(c)?;
++    b.models()?;
++    let stream = b.start(request)?;
++    let mut events = Vec::new();
++    loop {
++        let event = stream.recv_timeout(Duration::from_secs(5))?;
++        let done = event.kind == "done";
++        events.push(event);
++        if done { break; }
++    }
++    assert!(stream.recv_timeout(Duration::from_millis(50)).is_err(), "duplicate terminal");
++    Ok(events)
++}
++#[test]
++fn hidden_agentd_events_keep_long_turn_alive() -> anyhow::Result<()> {
++    let now = Instant::now();
++    let events = timed_events(timed_config(), input("long", "active"))?;
++    assert!(now.elapsed() >= Duration::from_millis(1500));
++    assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["meta", "done"]);
++    Ok(())
++}
++#[test]
++fn idle_turn_times_out_even_while_ping_responses_arrive() -> anyhow::Result<()> {
++    let now = Instant::now();
++    let events = timed_events(timed_config(), input("silent", "silent"))?;
++    assert!(now.elapsed() >= Duration::from_millis(300));
++    assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["meta", "error", "done"]);
++    assert_eq!(events[1].text.as_deref(), Some("AgentdTurnIdleTimeout"));
++    Ok(())
++}
++#[test]
++fn hard_limit_stops_active_turn_and_caps_request_override() -> anyhow::Result<()> {
++    for request_limit in [None, Some(Duration::from_secs(5))] {
++        let mut c = timed_config();
++        c.turn_max_ms = 650;
++        let mut request = input("max", "active");
++        request.timeout = request_limit;
++        let now = Instant::now();
++        let events = timed_events(c, request)?;
++        assert!(now.elapsed() >= Duration::from_millis(650));
++        assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["meta", "error", "done"]);
++        assert_eq!(events[1].text.as_deref(), Some("AgentdTurnMaxTimeout"));
++    }
++    Ok(())
++}
++#[test]
++fn explicit_request_limit_remains_a_hard_limit() -> anyhow::Result<()> {
++    let mut request = input("request-max", "active");
++    request.timeout = Some(Duration::from_millis(650));
++    let events = timed_events(timed_config(), request)?;
++    assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["meta", "error", "done"]);
++    assert_eq!(events[1].text.as_deref(), Some("AgentdTurnMaxTimeout"));
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
+index 4b2aa97..8e3a8a7 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
+@@ -68,7 +68,10 @@ impl Translator {
+                 self.done = true;
+                 out.push(self.make("done", None));
+             }
+-            Event::Started | Event::Reasoning { .. } | Event::Usage { .. } => {}
++            // The current frontend contract has no reasoning/usage event. Future
++            // support should extend it with optional fields, preserving existing consumers.
++            Event::Reasoning { .. } | Event::Usage { .. } => {}
++            Event::Started => {}
+             Event::Text { .. } => {}
+         }
+         out
