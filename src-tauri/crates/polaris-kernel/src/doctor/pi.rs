@@ -1,5 +1,6 @@
 //! Pi diagnostics never install software or disclose credential values.
 use super::types::*;
+use super::pi_shell::ResolvedShell;
 use crate::chat::backend::{config::{Config, Agentd}, pi::protocol::{check_ping, Ping}};
 use serde::Serialize;
 use serde_json::Value;
@@ -123,6 +124,9 @@ pub(crate) fn inspect(config: &Agentd, credentials: bool) -> (ToolStatus, AgentR
     (node, runtime)
 }
 pub fn report() -> EnvReport {
+    report_with_shell().0
+}
+fn report_with_shell() -> (EnvReport, Option<ResolvedShell>) {
     let mut runtime = AgentRuntimeReport { backend: "pi".into(), ..Default::default() };
     let mut node = absent("node");
     node.required = true;
@@ -137,8 +141,11 @@ pub fn report() -> EnvReport {
             }
         }
     }
+    (finish_report(node, runtime, shell.as_ref()), shell)
+}
+fn finish_report(node: ToolStatus, mut runtime: AgentRuntimeReport, shell: Option<&ResolvedShell>) -> EnvReport {
     let shell_ready = shell.is_some();
-    let shell_bundled = shell.as_deref().is_some_and(super::bundled::is_bundled);
+    let shell_bundled = shell.is_some_and(|s| super::bundled::is_bundled(&s.path));
     if !shell_ready && runtime.error.is_none() { runtime.error = Some("AgentShellMissing".into()); }
     let ready = runtime.ready() && shell_ready;
     let uv = super::probe::detect("uv", "uv", "uv", &["--version"], &super::probe::uv_candidates(), false, "可选组件未配置");
@@ -149,19 +156,26 @@ pub fn report() -> EnvReport {
         image_managed: !cfg!(feature = "desktop"), agent_runtime: runtime }
 }
 pub fn verify() -> VerifyReport {
-    let report = report();
+    let (report, shell) = report_with_shell();
+    verify_report(report, shell.as_ref())
+}
+fn verify_report(report: EnvReport, shell: Option<&ResolvedShell>) -> VerifyReport {
     let r = &report.agent_runtime;
     let steps = [("node", r.node_ready), ("agentd-entry", r.entry_exists), ("ping", r.handshake),
         ("credentials", r.credentials_configured), ("shell", report.shell_ready)].into_iter().map(|(key, ok)| VerifyStep {
             key: key.into(), name: key.into(), status: if ok { "ok" } else { "fail" }.into(),
             detail: if key == "shell" {
-                if !ok { "未找到 shell；请配置 shellPath、安装 Git Bash 或将 bash 加入 PATH" }
-                else if report.shell_bundled { "使用随包 MinGit Bash" }
-                else { "使用显式配置或系统 shell（Windows：Program Files Git Bash → PATH）" }
-            } else if ok { "已配置" } else { "未配置" }.into(), command: None, output: None, ms: 0,
+                shell_detail(shell)
+            } else if ok { "已配置".into() } else { "未配置".into() }, command: None, output: None, ms: 0,
         }).collect();
     VerifyReport { os: report.os, ok: report.ready, app_runnable: r.handshake, terminal_runnable: r.node_ready,
         deep: false, steps, conflicts: vec![], summary: if report.ready { "Agent 运行时已就绪" } else { "Agent 运行时未就绪" }.into() }
+}
+fn shell_detail(shell: Option<&ResolvedShell>) -> String {
+    match shell {
+        Some(shell) => format!("source={}; shell={}", shell.source.as_str(), shell.path.display()),
+        None => "未找到可用 shell；Windows PATH 已排除 SystemRoot 下的 bash（含 System32/SysWOW64/Sysnative）及 WindowsApps 别名；请配置 shellPath 或安装 Git Bash".into(),
+    }
 }
 #[cfg(test)]
 #[path = "pi_tests.rs"]

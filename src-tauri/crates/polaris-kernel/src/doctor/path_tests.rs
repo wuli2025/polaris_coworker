@@ -1,5 +1,22 @@
 use super::*;
 
+#[test]
+#[cfg(not(windows))]
+fn path_contains_dir_uses_colon_separated_complete_entries() {
+    let path = "/usr/local/bin:/usr/bin:/opt/Tools With Spaces/bin/:/opt/a;b/bin";
+    assert!(path_contains_dir(path, "/usr/local/bin"));
+    assert!(path_contains_dir(path, "/usr/bin/"));
+    assert!(path_contains_dir(path, "/opt/Tools With Spaces/bin"));
+    assert!(path_contains_dir(path, "/opt/a;b/bin"));
+    assert!(!path_contains_dir(path, "/usr"));
+    assert!(!path_contains_dir(path, "/bin"));
+    assert!(!path_contains_dir(path, "/opt/a"));
+    assert!(!path_contains_dir(path, "/missing"));
+    assert!(!path_contains_dir(path, ""));
+    assert!(!path_contains_dir("", "/usr/bin"));
+}
+
+
     #[test]
     #[cfg(windows)]
     fn path_contains_dir_is_case_and_slash_insensitive() {

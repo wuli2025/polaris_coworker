@@ -1,4 +1,34 @@
 use super::*;
+
+#[test]
+fn shell_verification_reports_each_source_and_missing_shell_is_not_ready() -> Result<(), String> {
+    use super::super::pi_shell::ShellSource;
+    let runtime = AgentRuntimeReport { node_ready: true, entry_exists: true, handshake: true,
+        credentials_configured: true, ..Default::default() };
+    for (source, label) in [(ShellSource::Bundled, "bundled"), (ShellSource::ProgramFiles, "program_files"),
+        (ShellSource::Path, "path"), (ShellSource::Explicit, "explicit")] {
+        let shell = ResolvedShell { path: "C:/Tools/Git/bin/bash.exe".into(), source };
+        let report = finish_report(absent("node"), runtime.clone(), Some(&shell));
+        assert!(report.shell_ready && report.ready);
+        let verification = verify_report(report, Some(&shell));
+        let step = verification.steps.iter().find(|step| step.key == "shell").ok_or("missing shell step")?;
+        assert_eq!(step.status, "ok");
+        assert_eq!(step.detail, format!("source={label}; shell=C:/Tools/Git/bin/bash.exe"));
+    }
+    let report = finish_report(absent("node"), runtime, None);
+    assert!(!report.shell_ready && !report.ready);
+    assert_eq!(report.agent_runtime.error.as_deref(), Some("AgentShellMissing"));
+    let verification = verify_report(report, None);
+    assert!(!verification.ok);
+    let step = verification.steps.iter().find(|step| step.key == "shell").ok_or("missing shell step")?;
+    assert_eq!(step.status, "fail");
+    assert!(step.detail.contains("未找到可用 shell"));
+    for excluded in ["System32", "SysWOW64", "Sysnative", "WindowsApps"] {
+        assert!(step.detail.contains(excluded));
+    }
+    Ok(())
+
+}
 #[test]
 fn credential_report_is_boolean_and_rejects_incomplete_entries() {
     for credential in [serde_json::json!({"type":"api_key","key":"private-key"}),
