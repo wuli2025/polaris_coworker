@@ -48,3 +48,8 @@ Pi 不内置子代理。在 agentd 实现 `subagent` 工具：在会话注册表
 - 每文件 ≤500 行、每行 ≤500 字符；可变值进配置；新 Rust 代码无 `unwrap/expect`（测试除外）。
 - 必须通过：`cd agentd && npm run typecheck && npm test`（沙箱内 e2e 失败可说明）；`cargo check -p polaris-app --offline`、`cargo check -p polaris-cli --bin polaris-server --features collab-net --offline`、`cargo test -p polaris-kernel --lib --tests --offline`（只允许 baseline.md 的 4 个已知失败）；`npx vue-tsc --noEmit`；行数检查 `python3 "/mnt/c/Users/mi/Desktop/项目skill/scripts/check_lines.py" <改动目录> --limit 500`。
 - 更新 `docs/feature-tree.md`。结束时输出：五个部分各自完成情况、改动文件与行数、命令结果摘要、需要前端配合或仍有疑问的点。不要声称做了没做的事。
+
+## 与 P2.5 的衔接（Claude 补充）
+- P2.5 已提供 `toolProfile`（档位名→工具清单在 agentd 配置映射）与 `session.configure`，目前映射是最小版本（Deny→readonly，其余→workspace）。本任务在此基础上实现完整四档：`toolProfile` 决定**哪些工具可见**，权限扩展决定**每次调用是否放行**，两者都要有，不能只靠隐藏工具。
+- 协议版本：新增 `permission.request` 事件、`permission.respond` 请求等属于协议变更，`protocolVersion` 升到 3，同步样例集、schema 哈希与 Rust 握手。
+- 图片与思考档位已在 P2.5b 接通，本任务不要改动它们。
