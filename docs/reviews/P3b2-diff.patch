@@ -1,0 +1,1640 @@
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+index 634013e..4ee63b7 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+@@ -23,7 +23,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
+         if args.provider_id.as_deref().is_some_and(|p| !p.is_empty() && p != "auto") {
+             return Err(BackendError::UnsupportedInput("provider selection requires P4 mapping").to_string());
+         }
+-        tool_options = ToolOptions { sandbox: args.use_sandbox, expert_prompt: host_tools::expert_prompt(&args) };
++        tool_options = ToolOptions { sandbox: args.use_sandbox, expert_prompt: host_tools::expert_prompt(&args).map_err(|e| e.to_string())? };
+         let prepared = claude_cli::pipeline::prepare_pi(args);
+         input.model = claude_cli::pipeline::model_for_mode(prepared.work_full).map(serde_json::Value::String);
+         input.prompt = prepared.plan.full_text();
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs
+index c4185d9..b5e5b7b 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs
+@@ -1,5 +1,5 @@
+ //! Tool-only execution in an already managed container. Never spawns a host shell.
+-use super::{host_tools::{SandboxExecutor, SandboxOutput}, sandbox_process};
++use super::{host_tools::{SandboxExecutor, SandboxOutput, SandboxPolicy}, sandbox_process};
+ use std::time::{Duration, Instant};
+ use serde_json::Value;
+ use std::{path::{Path, PathBuf}, process::Command};
+@@ -13,32 +13,12 @@ pub struct DockerTools {
+ /// Old containers mounting all of ~/Polaris are rejected because they expose keys.
+ pub struct ManagedSandbox {
+     pub container: String,
+-    pub protected_paths: Vec<PathBuf>,
++    pub policy: std::sync::Arc<dyn SandboxPolicy>,
+ }
+ impl ManagedSandbox {
+-    pub fn route(&self, mounts: &Value, cwd: &Path) -> anyhow::Result<DockerTools> {
+-        let mounts = mounts.as_array().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_MOUNTS"))?;
+-        let cwd = std::fs::canonicalize(cwd)?;
+-        let mut selected: Option<(PathBuf, String)> = None;
+-        for mount in mounts {
+-            anyhow::ensure!(mount["Type"] == "bind", "SANDBOX_UNVERIFIED_VOLUME");
+-            let source = std::fs::canonicalize(text(mount, "Source")?)?;
+-            let destination = text(mount, "Destination")?;
+-            for protected in &self.protected_paths {
+-                let protected = std::fs::canonicalize(protected).unwrap_or_else(|_| protected.clone());
+-                anyhow::ensure!(!protected.starts_with(&source) && !source.starts_with(&protected),
+-                    "SANDBOX_UNSAFE_MOUNT: container exposes protected host data");
+-            }
+-            anyhow::ensure!(!source.starts_with("/var/run") && !source.starts_with("/run")
+-                && !source.starts_with("/proc") && !source.starts_with("/sys") && !source.starts_with("/dev"),
+-                "SANDBOX_UNSAFE_MOUNT: host control endpoint");
+-            if cwd.starts_with(&source) && mount["RW"] == true
+-                && selected.as_ref().is_none_or(|(previous, _)| source.components().count() > previous.components().count()) {
+-                selected = Some((source, destination.into()));
+-            }
+-        }
+-        let (host_root, guest_root) = selected.ok_or_else(|| anyhow::anyhow!("SANDBOX_PATH_UNMOUNTED"))?;
+-        Ok(DockerTools { container: self.container.clone(), host_root, guest_root })
++    pub fn route(&self, info: &Value, cwd: &Path) -> anyhow::Result<DockerTools> {
++        let host_root = self.policy.validate(info, cwd)?;
++        Ok(DockerTools { container: self.container.clone(), host_root, guest_root: "/workspace".into() })
+     }
+ }
+ impl SandboxExecutor for ManagedSandbox {
+@@ -50,14 +30,12 @@ impl SandboxExecutor for ManagedSandbox {
+         let info: Vec<Value> = serde_json::from_str(&output.output)?;
+         let info = info.first().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_CONTAINER"))?;
+         anyhow::ensure!(info["State"]["Running"] == true, "SANDBOX_UNAVAILABLE: container is stopped");
+-        anyhow::ensure!(info["HostConfig"]["Privileged"] != true
+-            && info["HostConfig"]["PidMode"] != "host"
+-            && info["HostConfig"]["NetworkMode"] != "host", "SANDBOX_UNSAFE_CONTAINER");
++        let route = self.route(info, Path::new(text(args, "cwd")?))?;
+         let mut remaining = args.clone();
+         let left = budget.saturating_sub(start.elapsed()).as_millis();
+         anyhow::ensure!(left > 0, "SANDBOX_UNAVAILABLE: probe budget exhausted");
+         remaining["timeoutMs"] = serde_json::json!(left);
+-        self.route(&info["Mounts"], Path::new(text(args, "cwd")?))?.execute(operation, &remaining)
++        route.execute(operation, &remaining)
+     }
+ }
+ fn quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
+@@ -157,27 +135,6 @@ mod tests {
+     }
+ }
+ 
+-#[cfg(test)]
+-mod mount_tests {
+-    use super::*;
+-    #[test]
+-    fn old_whole_app_mount_is_rejected_and_project_mount_is_routed() -> anyhow::Result<()> {
+-        let base = std::env::temp_dir().join(format!("sandbox-mount-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
+-        let project = base.join("project");
+-        std::fs::create_dir_all(&project)?;
+-        let root = std::fs::canonicalize(&base)?;
+-        let managed = ManagedSandbox { container: "managed".into(), protected_paths: vec![root.join("data/providers.json")] };
+-        let old = serde_json::json!([{"Type":"bind","Source":root,"Destination":"/workspace","RW":true}]);
+-        assert!(managed.route(&old, &project).err().is_some_and(|e| e.to_string().contains("SANDBOX_UNSAFE_MOUNT")));
+-        let safe = serde_json::json!([{"Type":"bind","Source":project,"Destination":"/workspace","RW":true}]);
+-        let route = managed.route(&safe, &project)?;
+-        assert_eq!(route.host_root, std::fs::canonicalize(&project)?);
+-        assert_eq!(route.guest_root, "/workspace");
+-        std::fs::remove_dir_all(base)?;
+-        Ok(())
+-    }
+-}
+-
+ #[cfg(all(test, unix))]
+ mod status_tests {
+     use super::*;
+@@ -228,3 +185,30 @@ mod status_tests {
+         Ok(())
+     }
+ }
++
++#[cfg(test)]
++mod policy_port_tests {
++    use super::*;
++    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
++    struct Reject(AtomicUsize);
++    impl SandboxPolicy for Reject {
++        fn validate(&self, info: &Value, project: &Path) -> anyhow::Result<PathBuf> {
++            assert_eq!(info["HostConfig"]["Memory"], 0);
++            assert!(info["Mounts"].is_array());
++            assert_eq!(project, Path::new("project"));
++            self.0.fetch_add(1, Ordering::SeqCst);
++            anyhow::bail!("SANDBOX_UNSAFE_CONTAINER: rebuild required")
++        }
++    }
++    #[test]
++    fn every_route_passes_full_inspection_to_policy_and_propagates_rejection() {
++        let policy = Arc::new(Reject(AtomicUsize::new(0)));
++        let managed = ManagedSandbox { container: "managed".into(), policy: policy.clone() };
++        let info = serde_json::json!({"Mounts":[],"HostConfig":{"Memory":0}});
++        for _ in 0..2 {
++            assert!(managed.route(&info, Path::new("project")).err()
++                .is_some_and(|e| e.to_string().starts_with("SANDBOX_UNSAFE_CONTAINER")));
++        }
++        assert_eq!(policy.0.load(Ordering::SeqCst), 2);
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/expert_selection.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/expert_selection.rs
+new file mode 100644
+index 0000000..9dccf0c
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/expert_selection.rs
+@@ -0,0 +1,44 @@
++//! Request-scoped expert selection. Loading must be read-only; errors fail the turn.
++use super::host_tools::ExpertLoader;
++use serde::Deserialize;
++
++#[derive(Debug, Deserialize)]
++#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
++pub enum ExpertSelection {
++    Expert { id: String },
++    Team { id: String },
++}
++
++pub fn load(selection: &ExpertSelection, loader: Option<&dyn ExpertLoader>) -> anyhow::Result<String> {
++    let id = match selection { ExpertSelection::Expert { id } | ExpertSelection::Team { id } => id };
++    anyhow::ensure!(!id.trim().is_empty(), "EXPERT_INVALID_SELECTION: id required");
++    loader.ok_or_else(|| anyhow::anyhow!("EXPERT_LOADER_UNAVAILABLE"))?.load(selection)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn explicit_selection_loads_exact_id_and_rejects_invalid_input() -> anyhow::Result<()> {
++        struct ReadOnly;
++        impl ExpertLoader for ReadOnly {
++            fn load(&self, selected: &ExpertSelection) -> anyhow::Result<String> {
++                match selected {
++                    ExpertSelection::Expert { id } if id == "qa" => Ok("QA prompt".into()),
++                    ExpertSelection::Team { id } if id == "review" => Ok("Review team prompt".into()),
++                    _ => anyhow::bail!("unknown expert"),
++                }
++            }
++        }
++        for (kind, id, expected) in [("expert", "qa", "QA prompt"), ("team", "review", "Review team prompt")] {
++            let selection = serde_json::from_value(serde_json::json!({"kind":kind,"id":id}))?;
++            assert_eq!(load(&selection, Some(&ReadOnly))?, expected);
++            assert!(load(&selection, None).is_err());
++        }
++        assert!(load(&ExpertSelection::Expert { id: "unknown".into() }, Some(&ReadOnly)).is_err());
++        for value in [serde_json::json!({"kind":"wrong","id":"qa"}), serde_json::json!({"kind":"expert","id":2})] {
++            assert!(serde_json::from_value::<ExpertSelection>(value).is_err());
++        }
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs
+index 448a2af..70c072b 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs
+@@ -9,6 +9,10 @@ use std::sync::{Arc, OnceLock};
+ pub struct SandboxOutput {
+     pub output: String, pub exit_code: Option<i32>, pub signal: Option<i32>, pub timed_out: bool,
+ }
++/// Host-owned policy validates every mount and the container security baseline.
++pub trait SandboxPolicy: Send + Sync {
++    fn validate(&self, info: &Value, project: &std::path::Path) -> anyhow::Result<std::path::PathBuf>;
++}
+ pub trait SandboxExecutor: Send + Sync {
+     fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<SandboxOutput>;
+ }
+@@ -47,7 +51,23 @@ pub fn handle_sandbox(backend: &dyn AgentBackend, event: &ChatStreamEvent) -> an
+ pub fn chat_permission_respond(response: PermissionResponse) -> Result<(), String> {
+     super::selected().and_then(|backend| backend.permission_respond(response)).map_err(|error| error.to_string())
+ }
+-pub fn expert_prompt(args: &ChatSendArgs) -> Option<String> {
++pub trait ExpertLoader: Send + Sync {
++    fn load(&self, selection: &super::expert_selection::ExpertSelection) -> anyhow::Result<String>;
++}
++static EXPERT_LOADER: OnceLock<Arc<dyn ExpertLoader>> = OnceLock::new();
++pub fn set_expert_loader(loader: Arc<dyn ExpertLoader>) {
++    let _ = EXPERT_LOADER.set(loader);
++}
++pub fn expert_prompt(args: &ChatSendArgs) -> anyhow::Result<Option<String>> {
++    expert_prompt_with(args, EXPERT_LOADER.get().map(|l| l.as_ref()))
++}
++pub(crate) fn expert_prompt_with(args: &ChatSendArgs, loader: Option<&dyn ExpertLoader>) -> anyhow::Result<Option<String>> {
++    if let Some(selection) = &args.expert_selection {
++        return super::expert_selection::load(selection, loader).map(Some);
++    }
++    Ok(automatic_expert_prompt(args))
++}
++fn automatic_expert_prompt(args: &ChatSendArgs) -> Option<String> {
+     let bridge = crate::chat::bridges::expert_bridge()?;
+     match args.agent_mode.as_deref() {
+         Some("single-agent") | Some("single-expert") => None,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+index 8f5c7a9..0823e72 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+@@ -9,6 +9,7 @@ pub mod pi;
+ pub mod stream;
+ mod bridge;
+ pub mod host_tools;
++pub mod expert_selection;
+ pub mod docker_tools;
+ mod sandbox_process;
+ use std::{path::PathBuf, sync::Arc, time::Duration};
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/types.rs b/src-tauri/crates/polaris-kernel/src/chat/types.rs
+index 3dc30a6..7d22366 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/types.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/types.rs
+@@ -70,6 +70,8 @@ pub struct ChatSendArgs {
+     /// 专家团模式下自动检测任务复杂度，必要时注入多专家召集信息。
+     #[serde(default)]
+     pub agent_mode: Option<String>,
++    #[serde(default)]
++    pub expert_selection: Option<super::backend::expert_selection::ExpertSelection>,
+     /// 工作模式: "fast"(默认·快速) | "work"(工作·纯 Claude Code)。
+     /// - 快速模式: 强制快速调用知识库(快档召回, 跳重排 ~1.8s→~0.25s)+ 快速回答; 工具精简
+     ///   (弃 Task/NotebookEdit)、提示词瘦身(跳「可运行项目」「长任务」约定)、上下文预算调小、
+diff --git a/src-tauri/crates/polaris-kernel/src/integrations/feishu.rs b/src-tauri/crates/polaris-kernel/src/integrations/feishu.rs
+index 7ac904d..9649108 100644
+--- a/src-tauri/crates/polaris-kernel/src/integrations/feishu.rs
++++ b/src-tauri/crates/polaris-kernel/src/integrations/feishu.rs
+@@ -850,6 +850,7 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
+                 use_kb: false,
+                 batch_build: false,
+                 batch_size: None,
++                expert_selection: None,
+                 agent_mode: None,
+                 work_mode: Some(if unsafe_host_tools { "work" } else { "fast" }.into()),
+                 // 飞书走应用全局当前供应商(Auto 档), 不按对话钉死
+diff --git a/src-tauri/crates/polaris-sandbox/sandbox.schema.json b/src-tauri/crates/polaris-sandbox/sandbox.schema.json
+new file mode 100644
+index 0000000..020393e
+--- /dev/null
++++ b/src-tauri/crates/polaris-sandbox/sandbox.schema.json
+@@ -0,0 +1,46 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "title": "Polaris Docker sandbox policy",
++  "type": "object",
++  "additionalProperties": false,
++  "properties": {
++    "mounts": {
++      "type": "array",
++      "minItems": 2,
++      "maxItems": 2,
++      "default": [
++        {"source": "${project}", "destination": "/workspace", "readOnly": false},
++        {"source": "${kb}", "destination": "/kb", "readOnly": true}
++      ],
++      "items": {
++        "type": "object",
++        "additionalProperties": false,
++        "required": ["source", "destination", "readOnly"],
++        "properties": {
++          "source": {"type": "string", "minLength": 1},
++          "destination": {"enum": ["/workspace", "/kb"]},
++          "readOnly": {"type": "boolean"}
++        },
++        "allOf": [
++          {"if": {"properties": {"destination": {"const": "/workspace"}}},
++           "then": {"properties": {"readOnly": {"const": false}}}},
++          {"if": {"properties": {"destination": {"const": "/kb"}}},
++           "then": {"properties": {"readOnly": {"const": true}}}}
++        ]
++      },
++      "allOf": [
++        {"contains": {"properties": {"destination": {"const": "/workspace"}}}, "minContains": 1, "maxContains": 1},
++        {"contains": {"properties": {"destination": {"const": "/kb"}}}, "minContains": 1, "maxContains": 1}
++      ]
++    },
++    "protectedPaths": {"type": "array", "items": {"type": "string", "minLength": 1}, "default": []},
++    "memoryBytes": {"type": "integer", "minimum": 6291456, "maximum": 9223372036854775807, "default": 4294967296},
++    "cpus": {"type": "number", "minimum": 0.01, "maximum": 1024, "default": 2.0},
++    "capAdd": {
++      "type": "array",
++      "items": {"enum": ["CHOWN", "FOWNER", "DAC_OVERRIDE", "NET_BIND_SERVICE"]},
++      "default": []
++    },
++    "workdirChange": {"enum": ["reject", "rebuild"], "default": "reject"}
++  }
++}
+diff --git a/src-tauri/crates/polaris-sandbox/src/commands.rs b/src-tauri/crates/polaris-sandbox/src/commands.rs
+index f9a6e2d..a55da1d 100644
+--- a/src-tauri/crates/polaris-sandbox/src/commands.rs
++++ b/src-tauri/crates/polaris-sandbox/src/commands.rs
+@@ -4,7 +4,7 @@
+ //! - 镜像基于 alpine:3.20, 仅装 node + claude-code
+ //! - 容器名固定 polaris-sandbox, 长驻 sleep infinity, exec 调起 claude
+ //! - 资源限制: memory=4g cpus=2
+-//! - 用户家目录的 Polaris/ 整体挂载 /workspace (读写) + PolarisKB 挂载 /kb (只读)
++//! - 仅目标项目挂载 /workspace (读写)，知识库挂载 /kb (只读)
+ //!
+ //! ## 板块边界 (架构重构 Phase 1)
+ //! 本板块已抽离为独立 crate。它**不再** `use crate::kb` —— 挂载 KB 时所需的
+@@ -114,8 +114,12 @@ pub fn sandbox_status() -> SandboxStatus {
+         ));
+     } else if !container_running {
+         notes.push("镜像已就绪。点击 \"启动容器\" 拉起长驻沙箱(sleep infinity)。".into());
+-    } else {
+-        notes.push("沙箱就绪。对话页输入消息时会自动 docker exec 调起 claude CLI。".into());
++    }
++    if docker_running && crate::lifecycle::inspect(CONTAINER_NAME).is_ok_and(|info| info.is_some()) {
++        match validate_current_container() {
++            Ok(()) => notes.push("沙箱挂载与安全基线检查通过。工具路由仍需校验本轮目标项目。".into()),
++            Err(error) => notes.push(error),
++        }
+     }
+ 
+     SandboxStatus {
+@@ -175,83 +179,15 @@ pub fn sandbox_build_image() -> Result<String, String> {
+ /// 仅作为命令被前端调用，故可安全接收注入的 `AppHandle`。
+ /// `command(async)`：docker ps/start/run 阻塞调用不进主线程(见 sandbox_status 注)。
+ #[tauri::command(async)]
+-pub fn sandbox_start(app: tauri::AppHandle) -> Result<String, String> {
+-    // 如果已存在(无论 running)先尝试 start
+-    let exists = Command::new("docker")
+-        .args([
+-            "ps",
+-            "-a",
+-            "--filter",
+-            &format!("name=^{}$", CONTAINER_NAME),
+-            "--format",
+-            "{{.Names}}",
+-        ])
+-        .output()
+-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().eq(CONTAINER_NAME))
+-        .unwrap_or(false);
+-
+-    if exists {
+-        let out = Command::new("docker")
+-            .args(["start", CONTAINER_NAME])
+-            .output()
+-            .map_err(|e| e.to_string())?;
+-        if out.status.success() {
+-            return Ok(format!("[start ok] 已启动已存在的容器 {}", CONTAINER_NAME));
+-        } else {
+-            return Err(String::from_utf8_lossy(&out.stderr).to_string());
+-        }
+-    }
+-
+-    let mount_workspace = data_dir().map_err(|e| e.to_string())?;
+-    // KB 挂载点跟 host 注入的 KbLocator 走 (可能已被用户改到 polaris-app 内或别处),
+-    // 不再写死成 ~/Polaris/PolarisKB
+-    let mount_kb = {
+-        let locator = app.state::<Arc<dyn KbLocator>>();
+-        let raw = locator.kb_root();
+-        if raw.as_os_str().is_empty() || !raw.exists() {
+-            mount_workspace.join("PolarisKB")
+-        } else {
+-            raw
+-        }
+-    };
+-    std::fs::create_dir_all(&mount_workspace).map_err(|e| e.to_string())?;
+-    std::fs::create_dir_all(&mount_kb).map_err(|e| e.to_string())?;
+-
+-    let out = Command::new("docker")
+-        .args([
+-            "run",
+-            "-d",
+-            "--name",
+-            CONTAINER_NAME,
+-            "--memory=4g",
+-            "--cpus=2",
+-            "--security-opt=no-new-privileges",
+-            "-v",
+-            &format!("{}:/workspace", path_for_docker(&mount_workspace)),
+-            "-v",
+-            &format!("{}:/kb:ro", path_for_docker(&mount_kb)),
+-            IMAGE_NAME,
+-            "sleep",
+-            "infinity",
+-        ])
+-        .output()
+-        .map_err(|e| format!("docker run 启动失败: {}", e))?;
+-    if out.status.success() {
+-        Ok(format!(
+-            "[run ok] 容器 {} 已启动 (id={})",
+-            CONTAINER_NAME,
+-            String::from_utf8_lossy(&out.stdout)
+-                .trim()
+-                .chars()
+-                .take(12)
+-                .collect::<String>()
+-        ))
+-    } else {
+-        Err(format!(
+-            "docker run 失败: {}",
+-            String::from_utf8_lossy(&out.stderr)
+-        ))
+-    }
++pub fn sandbox_start(app: tauri::AppHandle, project_dir: Option<String>, rebuild: Option<bool>) -> Result<String, String> {
++    let user = UserDirs::new().ok_or_else(|| "no user dir".to_string())?;
++    let project_dir = project_dir.filter(|p| !p.trim().is_empty())
++        .ok_or_else(|| "SANDBOX_PROJECT_REQUIRED: 请指定目标项目目录 (projectDir)，禁止挂载整个 Polaris。".to_string())?;
++    let kb = app.state::<Arc<dyn KbLocator>>().kb_root();
++    let config = crate::config::Config::load().map_err(|e| e.to_string())?;
++    crate::lifecycle::start(&config, CONTAINER_NAME, IMAGE_NAME,
++        std::path::Path::new(&project_dir), &kb, user.home_dir(), rebuild == Some(true))
++        .map_err(|e| e.to_string())
+ }
+ 
+ /// `command(async)`：docker stop -t 5 + rm 可阻塞 5s+,同款不进主线程(见 sandbox_status 注)。
+@@ -275,6 +211,7 @@ pub fn sandbox_stop() -> Result<String, String> {
+ /// `command(async)`：docker exec 跑任意容器内命令,时长不可控,不进主线程(见 sandbox_status 注)。
+ #[tauri::command(async)]
+ pub fn sandbox_exec(cmd: String) -> Result<String, String> {
++    validate_current_container()?;
+     let parts = shell_split(&cmd);
+     if parts.is_empty() {
+         return Err("empty command".into());
+@@ -302,6 +239,22 @@ pub fn sandbox_exec(cmd: String) -> Result<String, String> {
+ 
+ // ───────────────────────── helpers ───────────────────────
+ 
++fn validate_current_container() -> Result<(), String> {
++    let user = UserDirs::new().ok_or_else(|| "no user dir".to_string())?;
++    let info = crate::lifecycle::inspect(CONTAINER_NAME).map_err(|e| e.to_string())?
++        .ok_or_else(|| "SANDBOX_UNAVAILABLE".to_string())?;
++    let config = crate::config::Config::load().map_err(|e| e.to_string())?;
++    let mounts = info["Mounts"].as_array().ok_or_else(|| format!("SANDBOX_UNSAFE_MOUNT: missing required mount; {}", crate::policy::REBUILD_HINT))?;
++    let root = |target: &str| -> Result<PathBuf, String> {
++        mounts.iter().find(|m| m["Destination"] == target)
++            .and_then(|m| m["Source"].as_str()).map(PathBuf::from)
++            .ok_or_else(|| format!("SANDBOX_UNSAFE_MOUNT: missing required mount; {}", crate::policy::REBUILD_HINT))
++    };
++    config.validate_container(&info, &root("/workspace")?, &root("/kb")?, user.home_dir())
++        .map_err(|e| e.to_string())?;
++    Ok(())
++}
++
+ fn tail(s: &str, n: usize) -> String {
+     if s.len() <= n {
+         s.to_string()
+@@ -315,17 +268,6 @@ fn tail(s: &str, n: usize) -> String {
+     }
+ }
+ 
+-/// Windows 路径 -> Docker 兼容路径 (D:\polaris -> D:/polaris in Docker Desktop)
+-fn path_for_docker(p: &std::path::Path) -> String {
+-    let s = p.to_string_lossy().to_string();
+-    if cfg!(windows) {
+-        // Docker Desktop 接受 D:\... 也接受 D:/...; 这里规范化反斜杠为正斜杠
+-        s.replace('\\', "/")
+-    } else {
+-        s
+-    }
+-}
+-
+ fn shell_split(s: &str) -> Vec<String> {
+     // 极简 split (空格分隔, 不支持 quoting); MVP 够用, 后续接 shlex
+     s.split_whitespace().map(|w| w.to_string()).collect()
+@@ -352,7 +294,7 @@ mod tests {
+     #[test]
+     fn path_for_docker_normalizes_on_windows() {
+         let p = std::path::Path::new("D:\\polaris\\PolarisKB");
+-        let out = path_for_docker(p);
++        let out = crate::policy::path_for_docker(p);
+         if cfg!(windows) {
+             assert_eq!(out, "D:/polaris/PolarisKB");
+         }
+diff --git a/src-tauri/crates/polaris-sandbox/src/config.rs b/src-tauri/crates/polaris-sandbox/src/config.rs
+new file mode 100644
+index 0000000..125c741
+--- /dev/null
++++ b/src-tauri/crates/polaris-sandbox/src/config.rs
+@@ -0,0 +1,73 @@
++//! Docker policy. Configuration may add protected paths, never remove the baseline.
++use anyhow::{ensure, Result};
++use serde::{Deserialize, Serialize};
++use std::path::{Path, PathBuf};
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
++pub struct Config {
++    pub mounts: Vec<Mount>,
++    pub protected_paths: Vec<PathBuf>,
++    pub memory_bytes: u64,
++    pub cpus: f64,
++    pub cap_add: Vec<String>,
++    pub workdir_change: WorkdirChange,
++}
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++pub struct Mount {
++    /// ${project}, ${kb}, or an absolute path matching the requested root.
++    pub source: String,
++    pub destination: String,
++    pub read_only: bool,
++}
++#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
++#[serde(rename_all = "kebab-case")]
++pub enum WorkdirChange { Reject, Rebuild }
++impl Default for Config {
++    fn default() -> Self {
++        Self {
++            mounts: vec![
++                Mount { source: "${project}".into(), destination: "/workspace".into(), read_only: false },
++                Mount { source: "${kb}".into(), destination: "/kb".into(), read_only: true },
++            ],
++            protected_paths: Vec::new(), memory_bytes: 4 * 1024 * 1024 * 1024,
++            cpus: 2.0, cap_add: Vec::new(), workdir_change: WorkdirChange::Reject,
++        }
++    }
++}
++impl Config {
++    pub fn load() -> Result<Self> {
++        let config = match std::env::var_os("POLARIS_SANDBOX_CONFIG") {
++            Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
++            None => Self::default(),
++        };
++        config.validate()?;
++        Ok(config)
++    }
++    pub fn validate(&self) -> Result<()> {
++        ensure!(self.memory_bytes >= 6 * 1024 * 1024 && self.memory_bytes <= i64::MAX as u64,
++            "SANDBOX_INVALID_CONFIG: memoryBytes must be 6 MiB..i64::MAX");
++        ensure!(self.cpus.is_finite() && self.cpus >= 0.01 && self.cpus <= 1024.0,
++            "SANDBOX_INVALID_CONFIG: cpus must be 0.01..1024");
++        // Only narrowly scoped additions; administrative capabilities are never configurable.
++        ensure!(self.cap_add.iter().all(|c| ["CHOWN", "FOWNER", "DAC_OVERRIDE", "NET_BIND_SERVICE"].contains(&c.as_str())),
++            "SANDBOX_INVALID_CONFIG: unsupported capAdd");
++        ensure!(self.mounts.len() == 2, "SANDBOX_INVALID_CONFIG: exactly /workspace and /kb required");
++        for (destination, read_only) in [("/workspace", false), ("/kb", true)] {
++            ensure!(self.mounts.iter().filter(|m| m.destination == destination && m.read_only == read_only).count() == 1,
++                "SANDBOX_INVALID_CONFIG: /workspace must be writable and /kb read-only");
++        }
++        ensure!(self.protected_paths.iter().all(|p| p.is_absolute()),
++            "SANDBOX_INVALID_CONFIG: protectedPaths must be absolute");
++        Ok(())
++    }
++    pub fn protected(&self, home: &Path) -> Vec<PathBuf> {
++        let mut paths: Vec<_> = ["Polaris/data", "Polaris/claude-home", "Polaris/sessions", "Polaris/conversations",
++            ".polaris", ".pi", ".claude", ".codex", ".ssh", ".aws", ".gnupg", ".kube"]
++            .iter().map(|p| home.join(p)).collect();
++        paths.extend(self.protected_paths.iter().cloned());
++        paths.extend(["/var/run", "/run", "/proc", "/sys", "/dev"].iter().map(PathBuf::from));
++        paths
++    }
++}
+diff --git a/src-tauri/crates/polaris-sandbox/src/lib.rs b/src-tauri/crates/polaris-sandbox/src/lib.rs
+index 458a359..2cf0d0b 100644
+--- a/src-tauri/crates/polaris-sandbox/src/lib.rs
++++ b/src-tauri/crates/polaris-sandbox/src/lib.rs
+@@ -14,6 +14,11 @@
+ //! host 端用 `polaris_sandbox::commands::<cmd>` 注册命令 (宏需按定义模块路径解析)。
+ 
+ pub mod commands;
++pub mod config;
++pub mod policy;
++pub mod lifecycle;
++#[cfg(test)]
++mod policy_tests;
+ /// CubeSandbox (E2B 兼容) 后端 —— 「替换 Docker」的可选后端 (additive)。
+ pub mod e2b;
+ 
+diff --git a/src-tauri/crates/polaris-sandbox/src/lifecycle.rs b/src-tauri/crates/polaris-sandbox/src/lifecycle.rs
+new file mode 100644
+index 0000000..03f74eb
+--- /dev/null
++++ b/src-tauri/crates/polaris-sandbox/src/lifecycle.rs
+@@ -0,0 +1,93 @@
++//! Rebuild preserves the old container by renaming it; never deletes user containers.
++use crate::{config::{Config, WorkdirChange}, policy::REBUILD_HINT};
++use anyhow::{ensure, Result};
++use serde_json::Value;
++use std::{path::Path, process::Command, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
++static LIFECYCLE: Mutex<()> = Mutex::new(());
++
++pub fn docker(args: &[String]) -> Result<String> {
++    let out = Command::new("docker").args(args).output()?;
++    ensure!(out.status.success(), "SANDBOX_DOCKER_FAILED: {}", String::from_utf8_lossy(&out.stderr));
++    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
++}
++pub fn inspect(name: &str) -> Result<Option<Value>> {
++    inspect_with(name, &mut docker)
++}
++fn inspect_with(name: &str, run: &mut impl FnMut(&[String]) -> Result<String>) -> Result<Option<Value>> {
++    // A failed inspect is not proof of absence (daemon/permissions may be broken).
++    let names = run(&["ps".into(), "-a".into(), "--format".into(), "{{.Names}}".into()])?;
++    if !names.lines().any(|n| n == name) { return Ok(None); }
++    let values: Vec<Value> = serde_json::from_str(&run(&["inspect".into(), name.into()])?)?;
++    Ok(Some(values.into_iter().next().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_CONTAINER"))?))
++}
++#[derive(Debug, PartialEq)]
++pub enum Action { Create, Reuse, PreserveAndRebuild }
++pub fn decide(validation: Option<Result<std::path::PathBuf>>, config: &Config, rebuild: bool) -> Result<Action> {
++    match validation {
++        None => Ok(Action::Create),
++        Some(Ok(_)) => Ok(Action::Reuse),
++        Some(Err(error)) if rebuild || (config.workdir_change == WorkdirChange::Rebuild
++            && error.to_string().starts_with("SANDBOX_PATH_UNMOUNTED:")) => Ok(Action::PreserveAndRebuild),
++        Some(Err(error)) => Err(error),
++    }
++}
++pub fn start(config: &Config, name: &str, image: &str, project: &Path, kb: &Path, home: &Path, rebuild: bool) -> Result<String> {
++    let _lock = LIFECYCLE.lock().map_err(|_| anyhow::anyhow!("SANDBOX_LOCK_FAILED"))?;
++    start_with(config, name, image, project, kb, home, rebuild, &mut docker)
++}
++fn start_with(config: &Config, name: &str, image: &str, project: &Path, kb: &Path, home: &Path,
++    rebuild: bool, run: &mut impl FnMut(&[String]) -> Result<String>) -> Result<String> {
++    let args = config.run_args(name, image, project, kb, home)?;
++    let existing = inspect_with(name, run)?;
++    let action = decide(existing.as_ref().map(|i| config.validate_container(i, project, kb, home)), config, rebuild)?;
++    if action == Action::Reuse {
++        run(&["start".into(), name.into()])?;
++        return Ok(format!("[start ok] 已复用项目容器 {name}"));
++    }
++    let mut backup = None;
++    if action == Action::PreserveAndRebuild {
++        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
++        let saved = format!("{name}-previous-{stamp}");
++        run(&["stop".into(), "-t".into(), "5".into(), name.into()])?;
++        run(&["rename".into(), name.into(), saved.clone()])?;
++        backup = Some(saved);
++    }
++    match run(&args) {
++        Ok(id) => Ok(format!("[run ok] {name} ({id}); 旧容器保留为 {}", backup.as_deref().unwrap_or("无"))),
++        Err(error) => Err(anyhow::anyhow!("{error}; 旧容器保留为 {}; {REBUILD_HINT}", backup.as_deref().unwrap_or("无"))),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn migration_retains_old_container_and_never_deletes_it() -> Result<()> {
++        let root = std::env::temp_dir().join(format!("p3b-lifecycle-{}", SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()));
++        let home = root.join("home");
++        let project = root.join("project");
++        let kb = root.join("kb");
++        for path in [&home, &project, &kb, &home.join("Polaris")] { std::fs::create_dir_all(path)?; }
++        let mut calls = Vec::<Vec<String>>::new();
++        let old = serde_json::json!([{"Mounts":[
++            {"Type":"bind","Source":home.join("Polaris"),"Destination":"/workspace","RW":true}]}]);
++        let mut fake = |args: &[String]| -> Result<String> {
++            calls.push(args.to_vec());
++            Ok(match args[0].as_str() { "ps" => "managed".into(), "inspect" => old.to_string(), _ => "ok".into() })
++        };
++        let c = Config::default();
++        assert!(start_with(&c, "managed", "image", &project, &kb, &home, false, &mut fake).is_err());
++        assert!(calls.iter().all(|a| ["ps", "inspect"].contains(&a[0].as_str())));
++        calls.clear();
++        let mut fake = |args: &[String]| -> Result<String> {
++            calls.push(args.to_vec());
++            Ok(match args[0].as_str() { "ps" => "managed".into(), "inspect" => old.to_string(), _ => "ok".into() })
++        };
++        let message = start_with(&c, "managed", "image", &project, &kb, &home, true, &mut fake)?;
++        assert!(message.contains("managed-previous-"));
++        assert_eq!(calls.iter().map(|a| a[0].as_str()).collect::<Vec<_>>(), ["ps", "inspect", "stop", "rename", "run"]);
++        assert!(!calls.iter().any(|a| a[0] == "rm"));
++        std::fs::remove_dir_all(root)?;
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-sandbox/src/policy.rs b/src-tauri/crates/polaris-sandbox/src/policy.rs
+new file mode 100644
+index 0000000..ea139ed
+--- /dev/null
++++ b/src-tauri/crates/polaris-sandbox/src/policy.rs
+@@ -0,0 +1,132 @@
++//! Public policy used both before docker run and before every routed tool call.
++use crate::config::Config;
++use anyhow::{bail, ensure, Result};
++use serde_json::Value;
++use std::path::{Path, PathBuf};
++
++pub const REBUILD_HINT: &str = "请调用 sandbox_start({projectDir:目标项目路径,rebuild:true}) 迁移；旧容器将停止并改名保留，不会删除。";
++
++pub fn path_for_docker(path: &Path) -> String {
++    let text = path.to_string_lossy();
++    let text = text.trim_start_matches(r"\\?\");
++    // Detect drive paths too, so Windows fixtures can be verified on Unix.
++    if cfg!(windows) || (text.as_bytes().get(1) == Some(&b':') && text.as_bytes()[0].is_ascii_alphabetic()) {
++        text.replace('\\', "/")
++    } else { text.to_owned() }
++}
++fn forbidden_name(name: &str) -> bool {
++    let name = name.to_ascii_lowercase();
++    ["data", "claude-home", "sessions", "conversations", "providers.json", "collab.db", ".polaris", ".pi",
++        ".claude", ".codex", ".ssh", ".aws", ".gnupg", ".kube"].contains(&name.as_str()) || name.ends_with(".key")
++}
++fn normalized(path: &Path) -> Result<PathBuf> {
++    // Resolve existing ancestors even for currently absent protected directories.
++    if path.exists() { return Ok(std::fs::canonicalize(path)?); }
++    let parent = path.parent().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_PATH"))?;
++    let name = path.file_name().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_PATH"))?;
++    Ok(normalized(parent)?.join(name))
++}
++pub fn validate_source(source: &Path, protected: &[PathBuf]) -> Result<PathBuf> {
++    ensure!(source.is_absolute(), "SANDBOX_UNSAFE_MOUNT: absolute path required; {REBUILD_HINT}");
++    let source = std::fs::canonicalize(source)?;
++    for path in protected {
++        let path = normalized(path)?;
++        ensure!(!source.starts_with(&path) && !path.starts_with(&source),
++            "SANDBOX_UNSAFE_MOUNT: protected host data; {REBUILD_HINT}");
++    }
++    ensure!(!source.components().any(|p| forbidden_name(&p.as_os_str().to_string_lossy())),
++        "SANDBOX_UNSAFE_MOUNT: forbidden path; {REBUILD_HINT}");
++    ensure!(source.is_dir(), "SANDBOX_UNSAFE_MOUNT: directory required");
++    // Binding a parent also exposes its children. Reject sensitive files anywhere in it.
++    let mut pending = vec![source.clone()];
++    while let Some(directory) = pending.pop() {
++        for entry in std::fs::read_dir(directory)? {
++            let entry = entry?;
++            ensure!(!forbidden_name(&entry.file_name().to_string_lossy()),
++                "SANDBOX_UNSAFE_MOUNT: directory contains protected files; {REBUILD_HINT}");
++            // Symlinks cannot expose an unmounted host target inside the container.
++            if entry.file_type()?.is_dir() { pending.push(entry.path()); }
++        }
++    }
++    Ok(source)
++}
++#[derive(Debug)]
++pub struct ResolvedMount { pub source: PathBuf, pub destination: String, pub read_only: bool }
++impl Config {
++    pub fn resolve_mounts(&self, project: &Path, kb: &Path, home: &Path) -> Result<Vec<ResolvedMount>> {
++        self.validate()?;
++        let protected = self.protected(home);
++        let project = validate_source(project, &protected)?;
++        let kb = validate_source(kb, &protected)?;
++        ensure!(!project.starts_with(&kb) && !kb.starts_with(&project),
++            "SANDBOX_UNSAFE_MOUNT: workspace and kb must not overlap");
++        self.mounts.iter().map(|m| {
++            let source = match m.source.as_str() {
++                "${project}" => project.clone(), "${kb}" => kb.clone(),
++                path => validate_source(Path::new(path), &protected)?,
++            };
++            let expected = if m.destination == "/workspace" { &project } else { &kb };
++            ensure!(&source == expected, "SANDBOX_UNSAFE_MOUNT: source does not match requested root");
++            Ok(ResolvedMount { source, destination: m.destination.clone(), read_only: m.read_only })
++        }).collect()
++    }
++    pub fn run_args(&self, name: &str, image: &str, project: &Path, kb: &Path, home: &Path) -> Result<Vec<String>> {
++        let mounts = self.resolve_mounts(project, kb, home)?;
++        let mut args = vec!["run".into(), "-d".into(), "--name".into(), name.into(),
++            format!("--memory={}", self.memory_bytes), format!("--cpus={}", self.cpus),
++            "--cap-drop=ALL".into(), "--security-opt=no-new-privileges".into()];
++        for capability in &self.cap_add { args.push(format!("--cap-add={capability}")); }
++        for mount in mounts {
++            let source = path_for_docker(&mount.source);
++            ensure!(!source.contains([',', '\n', '\r']), "SANDBOX_INVALID_PATH: mount delimiter");
++            args.push("--mount".into());
++            args.push(format!("type=bind,src={source},dst={}{}", mount.destination,
++                if mount.read_only { ",readonly" } else { "" }));
++        }
++        args.extend([image.into(), "sleep".into(), "infinity".into()]);
++        Ok(args)
++    }
++    pub fn validate_container(&self, info: &Value, project: &Path, kb: &Path, home: &Path) -> Result<PathBuf> {
++        let expected = self.resolve_mounts(project, kb, home)?;
++        let mounts = info["Mounts"].as_array().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_MOUNTS"))?;
++        // Check all sources first: legacy broad mounts always receive the migration diagnostic.
++        for mount in mounts {
++            ensure!(mount["Type"] == "bind", "SANDBOX_UNSAFE_MOUNT: unverified volume; {REBUILD_HINT}");
++            let source = mount["Source"].as_str().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_MOUNTS"))?;
++            validate_source(Path::new(source), &self.protected(home))?;
++        }
++        ensure!(mounts.len() == expected.len(), "SANDBOX_UNSAFE_MOUNT: unexpected mounts; {REBUILD_HINT}");
++        let mut workdir_changed = false;
++        for required in expected {
++            let matching: Vec<_> = mounts.iter().filter(|m| m["Destination"] == required.destination).collect();
++            ensure!(matching.len() == 1, "SANDBOX_UNSAFE_MOUNT: incorrect destination; {REBUILD_HINT}");
++            let mount = matching[0];
++            ensure!(mount["RW"].as_bool() == Some(!required.read_only),
++                "SANDBOX_UNSAFE_MOUNT: incorrect access mode; {REBUILD_HINT}");
++            let source = mount["Source"].as_str().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_MOUNTS"))?;
++            if std::fs::canonicalize(source)? != required.source {
++                if required.destination == "/workspace" { workdir_changed = true; }
++                else { bail!("SANDBOX_UNSAFE_MOUNT: incorrect KB source; {REBUILD_HINT}"); }
++            }
++        }
++        self.validate_security(info)?;
++        ensure!(!workdir_changed, "SANDBOX_PATH_UNMOUNTED: work directory changed; {REBUILD_HINT}");
++        Ok(std::fs::canonicalize(project)?)
++    }
++    pub fn validate_security(&self, info: &Value) -> Result<()> {
++        let host = &info["HostConfig"];
++        let memory = host["Memory"].as_u64().filter(|n| *n > 0 && *n <= self.memory_bytes).is_some();
++        let cpu = host["NanoCpus"].as_u64().filter(|n| *n > 0 && *n <= (self.cpus * 1e9) as u64).is_some();
++        let drop_all = host["CapDrop"].as_array().is_some_and(|a| a.iter().any(|v| v == "ALL"));
++        let additions = host["CapAdd"].is_null() || host["CapAdd"].as_array().is_some_and(|a|
++            a.iter().all(|v| v.as_str().is_some_and(|s| self.cap_add.iter().any(|c| c == s))));
++        let no_new_privileges = host["SecurityOpt"].as_array().is_some_and(|a|
++            a.iter().any(|v| v == "no-new-privileges" || v == "no-new-privileges:true"));
++        ensure!(host["Privileged"] == false && host["PidMode"] != "host"
++            && host["IpcMode"] != "host" && host["NetworkMode"] != "host"
++            && host["Devices"].as_array().is_none_or(|a| a.is_empty())
++            && memory && cpu && drop_all && additions && no_new_privileges,
++            "SANDBOX_UNSAFE_CONTAINER: security baseline mismatch; {REBUILD_HINT}");
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-sandbox/src/templates/Dockerfile.sandbox b/src-tauri/crates/polaris-sandbox/src/templates/Dockerfile.sandbox
+index 629d4e5..ceea2dc 100644
+--- a/src-tauri/crates/polaris-sandbox/src/templates/Dockerfile.sandbox
++++ b/src-tauri/crates/polaris-sandbox/src/templates/Dockerfile.sandbox
+@@ -7,9 +7,9 @@
+ #
+ # 安全策略 (容器运行时由 docker run 注入):
+ #   --memory=4g --cpus=2
+-#   --security-opt=no-new-privileges
+-#   -v ~/Polaris:/workspace        (读写)
+-#   -v ~/Polaris/PolarisKB:/kb:ro  (只读)
++#   --cap-drop=ALL --security-opt=no-new-privileges
++#   --mount type=bind,src=<目标项目>,dst=/workspace (读写)
++#   --mount type=bind,src=<知识库>,dst=/kb,readonly (只读)
+ 
+ FROM alpine:3.20
+ 
+diff --git a/src-tauri/src/wiring.rs b/src-tauri/src/wiring.rs
+index eccc7f4..400938e 100644
+--- a/src-tauri/src/wiring.rs
++++ b/src-tauri/src/wiring.rs
+@@ -98,15 +98,38 @@ impl ExpertBridge for ShellExpertBridge {
+ pub fn wire_engine_bridges() {
+     bridges::set_kb_bridge(Arc::new(ShellKbBridge));
+     bridges::set_expert_bridge(Arc::new(ShellExpertBridge));
+-    if let (Some(dirs), Ok(config)) = (directories::UserDirs::new(), crate::chat::backend::config::Config::load()) {
++    crate::chat::backend::host_tools::set_expert_loader(Arc::new(ShellExpertLoader));
++    // The server shell has no sandbox crate; leave its executor absent (fail closed)
++    // until a shared policy dependency is approved. Never retain the old partial validator.
++    #[cfg(feature = "desktop")]
++    if let Ok(config) = crate::chat::backend::config::Config::load() {
+         crate::chat::backend::host_tools::set_sandbox_executor(Arc::new(
+             crate::chat::backend::docker_tools::ManagedSandbox {
+                 container: config.agentd.sandbox_container,
+-                protected_paths: vec![dirs.home_dir().join("Polaris/data"),
+-                    dirs.home_dir().join(".polaris"), dirs.home_dir().join(".pi"),
+-                    dirs.home_dir().join(".claude"), dirs.home_dir().join(".codex"),
+-                    dirs.home_dir().join(".ssh"), dirs.home_dir().join(".aws")],
++                policy: Arc::new(ShellSandboxPolicy),
+             },
+         ));
+     }
+ }
++
++#[cfg(feature = "desktop")]
++struct ShellSandboxPolicy;
++#[cfg(feature = "desktop")]
++impl crate::chat::backend::host_tools::SandboxPolicy for ShellSandboxPolicy {
++    fn validate(&self, info: &serde_json::Value, project: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
++        let dirs = directories::UserDirs::new().ok_or_else(|| anyhow::anyhow!("SANDBOX_HOME_UNAVAILABLE"))?;
++        polaris_sandbox::config::Config::load()?.validate_container(
++            info, project, std::path::Path::new(&crate::kb::kb_root()), dirs.home_dir())
++    }
++}
++
++struct ShellExpertLoader;
++impl crate::chat::backend::host_tools::ExpertLoader for ShellExpertLoader {
++    fn load(&self, selection: &crate::chat::backend::expert_selection::ExpertSelection) -> anyhow::Result<String> {
++        use crate::chat::backend::expert_selection::ExpertSelection;
++        match selection {
++            ExpertSelection::Expert { id } => crate::expert::expert_export(id.clone()),
++            ExpertSelection::Team { id } => crate::expert::team_export(id.clone()),
++        }.map_err(anyhow::Error::msg)
++    }
++}
+diff --git a/src/components/chat/ChatComposer.vue b/src/components/chat/ChatComposer.vue
+index edef7ff..0061882 100644
+--- a/src/components/chat/ChatComposer.vue
++++ b/src/components/chat/ChatComposer.vue
+@@ -33,6 +33,7 @@ import {
+   Eraser,
+   Check,
+ } from "@lucide/vue";
++import { applyExpertSelection, selectedExpert as requestExpert } from "../../lib/expertSelection";
+ import SearchGlass from "../icons/SearchGlass.vue";
+ import OrbitSpinner from "../icons/OrbitSpinner.vue";
+ import {
+@@ -436,7 +437,7 @@ async function summon(kind: SummonKind, id: string) {
+     agentMode.value = "expert-team";
+     if (pid) {
+       try {
+-        await expert.teamApply(pid, id, true);
++        await applyExpertSelection(pid, "team", id);
+       } catch (e) {
+         console.error("team.apply 失败", e);
+       }
+@@ -455,7 +456,7 @@ async function summon(kind: SummonKind, id: string) {
+     agentMode.value = "single-expert";
+     if (pid) {
+       try {
+-        await expert.apply(pid, id, true);
++        await applyExpertSelection(pid, "expert", id);
+       } catch (e) {
+         console.error("expert.apply 失败", e);
+       }
+@@ -628,6 +629,7 @@ function sendOptions(convId?: string | null): ChatSendOptions {
+     skillIds: Array.from(skillsStore.enabledSkills),
+     useKb: kbMode.value || undefined,
+     agentMode: agentMode.value,
++    expertSelection: requestExpert(agentMode.value, selectedExpertId.value, selectedTeamId.value),
+     workMode: workMode.value,
+     providerId: providerForConv(convId),
+   };
+@@ -893,6 +895,7 @@ async function send() {
+     dynamicWorkflow: orchestrateMode.value || undefined,
+     useKb: kbMode.value || undefined,
+     agentMode: agentMode.value,
++    expertSelection: requestExpert(agentMode.value, selectedExpertId.value, selectedTeamId.value),
+     workMode: workMode.value,
+     providerId: sendProviderId,
+   });
+diff --git a/src/components/chat/shared.ts b/src/components/chat/shared.ts
+index 9880bd3..ef322ba 100644
+--- a/src/components/chat/shared.ts
++++ b/src/components/chat/shared.ts
+@@ -417,6 +417,7 @@ export type WorkMode = "fast" | "work";
+ 
+ /** 发送选项(重新生成 / 今日建议 与主发送共用同一份形状) */
+ export interface ChatSendOptions {
++  expertSelection?: import("../../lib/expertSelection").ExpertSelection;
+   permissionMode: PermissionMode;
+   skillIds: string[];
+   useKb?: boolean;
+diff --git a/src/features/sandbox/api.ts b/src/features/sandbox/api.ts
+index c71fe92..7ed45b0 100644
+--- a/src/features/sandbox/api.ts
++++ b/src/features/sandbox/api.ts
+@@ -20,7 +20,8 @@ export interface SandboxStatus {
+ export const sandbox = {
+   status: () => invoke<SandboxStatus>("sandbox_status"),
+   build: () => invoke<string>("sandbox_build_image"),
+-  start: () => invoke<string>("sandbox_start"),
++  start: (projectDir: string, rebuild = false) =>
++    invoke<string>("sandbox_start", { projectDir, rebuild }),
+   stop: () => invoke<string>("sandbox_stop"),
+   exec: (cmd: string) => invoke<string>("sandbox_exec", { cmd }),
+ };
+diff --git a/src/features/sandbox/components/SandboxProject.vue b/src/features/sandbox/components/SandboxProject.vue
+new file mode 100644
+index 0000000..dbb8162
+--- /dev/null
++++ b/src/features/sandbox/components/SandboxProject.vue
+@@ -0,0 +1,71 @@
++<script setup lang="ts">
++import { computed, ref, watch } from "vue";
++import { open } from "@tauri-apps/plugin-dialog";
++import { useAppStore } from "../../../stores/app";
++import { isTauri } from "../../../tauri";
++import { needsSandboxMigration, startProjectSandbox } from "../project";
++
++const props = defineProps<{ disabled?: boolean; notes?: string[] }>();
++const emit = defineEmits<{ log: [message: string]; changed: [] }>();
++const app = useAppStore();
++const project = computed(() => app.projects.find(p => p.id === app.currentProjectId));
++const directory = ref("");
++const busy = ref(false);
++const error = ref("");
++watch(() => [project.value?.id, project.value?.workDir], () => {
++  directory.value = project.value?.workDir ?? "";
++  error.value = "";
++}, { immediate: true });
++const migration = computed(() => needsSandboxMigration([...(props.notes ?? []), error.value]));
++
++async function pick() {
++  try {
++    const selected = await open({ directory: true, multiple: false, title: "选择沙箱项目工作目录" });
++    if (typeof selected === "string") directory.value = selected;
++  } catch (cause) { error.value = String(cause); }
++}
++async function start(rebuild = false) {
++  busy.value = true;
++  error.value = "";
++  const projectId = project.value?.id;
++  const selected = directory.value.trim();
++  try {
++    const message = await startProjectSandbox(selected, rebuild);
++    emit("log", message);
++    // Bind the confirmed directory so the next conversation turn uses the same mount.
++    if (projectId) await app.setProjectWorkDir(projectId, selected);
++  } catch (cause) {
++    error.value = String(cause);
++    emit("log", error.value);
++  } finally {
++    busy.value = false;
++    emit("changed");
++  }
++}
++</script>
++
++<template>
++  <section class="sandbox-project">
++    <label for="sandbox-project-dir">项目工作目录{{ project ? ` · ${project.name}` : "" }}</label>
++    <p>默认使用当前会话所属项目的工作目录。确认后将作为该项目的工作目录；知识库只读挂载。</p>
++    <div class="project-actions">
++      <input id="sandbox-project-dir" v-model="directory" :disabled="busy || disabled" placeholder="输入项目目录的绝对路径" />
++      <button v-if="isTauri" :disabled="busy || disabled" @click="pick">选择文件夹</button>
++      <button :disabled="busy || disabled || !directory.trim()" @click="start()">确认目录并启动</button>
++    </div>
++    <div v-if="migration" role="alert">
++      <p>当前容器需要迁移。重建会停止旧容器并改名保留，再按所选项目创建安全容器。</p>
++      <button :disabled="busy || disabled || !directory.trim()" @click="start(true)">保留旧容器并一键重建</button>
++    </div>
++    <p v-if="error" role="alert">{{ error }}</p>
++  </section>
++</template>
++
++<style scoped>
++.sandbox-project { margin-bottom: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 4px; }
++p { font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; }
++.project-actions { display: flex; gap: 8px; flex-wrap: wrap; }
++input { flex: 1; min-width: 200px; padding: 7px; background: var(--bg); color: var(--text); border: 1px solid var(--border); }
++button { padding: 7px 12px; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
++button:disabled { opacity: 0.5; }
++</style>
+diff --git a/src/features/sandbox/components/SandboxStatus.vue b/src/features/sandbox/components/SandboxStatus.vue
+index 4f56865..6da6037 100644
+--- a/src/features/sandbox/components/SandboxStatus.vue
++++ b/src/features/sandbox/components/SandboxStatus.vue
+@@ -7,6 +7,7 @@ import {
+   type CubeConfig,
+   type CubeStatus,
+ } from "../api";
++import SandboxProject from "./SandboxProject.vue";
+ import Workstations from "../../coworker/components/Workstations.vue";
+ 
+ // KeepAlive 的 include 按组件 name 匹配 → 显式命名，确保本视图被缓存
+@@ -86,17 +87,6 @@ async function build() {
+     await refresh();
+   }
+ }
+-async function start() {
+-  busy.value = true;
+-  try {
+-    log.value.unshift(await sandbox.start());
+-  } catch (e: any) {
+-    log.value.unshift(`[start error] ${e?.message ?? e}`);
+-  } finally {
+-    busy.value = false;
+-    await refresh();
+-  }
+-}
+ async function stop() {
+   busy.value = true;
+   try {
+@@ -222,13 +212,11 @@ async function runCmd() {
+       <div v-for="(n, i) in status.notes" :key="i" class="note">▸ {{ n }}</div>
+     </div>
+ 
++    <SandboxProject :disabled="busy" :notes="status?.notes" @log="log.unshift($event)" @changed="refresh" />
+     <div class="actions">
+       <button class="primary-btn" :disabled="busy" @click="build">
+         构建镜像
+       </button>
+-      <button class="primary-btn" :disabled="busy" @click="start">
+-        启动容器
+-      </button>
+       <button class="secondary-btn" :disabled="busy" @click="stop">
+         停止容器
+       </button>
+diff --git a/src/features/sandbox/project.ts b/src/features/sandbox/project.ts
+new file mode 100644
+index 0000000..b6a6bf6
+--- /dev/null
++++ b/src/features/sandbox/project.ts
+@@ -0,0 +1,11 @@
++import { sandbox } from "./api";
++
++export function needsSandboxMigration(messages: string[]): boolean {
++  return messages.some(message => /SANDBOX_(UNSAFE_MOUNT|UNSAFE_CONTAINER|PATH_UNMOUNTED|INVALID_MOUNTS)/.test(message));
++}
++
++export async function startProjectSandbox(projectDir: string, rebuild = false): Promise<string> {
++  const directory = projectDir.trim();
++  if (!directory) throw new Error("请选择或输入项目工作目录，再确认启动。");
++  return sandbox.start(directory, rebuild);
++}
+diff --git a/src/lib/expertSelection.ts b/src/lib/expertSelection.ts
+new file mode 100644
+index 0000000..3d6bd95
+--- /dev/null
++++ b/src/lib/expertSelection.ts
+@@ -0,0 +1,22 @@
++import { expert, invoke } from "../tauri";
++
++export type ExpertSelection = { kind: "expert" | "team"; id: string };
++
++/** Resolve the backend before any legacy file-writing command. Failure never falls back. */
++export async function applyExpertSelection(projectId: string, kind: ExpertSelection["kind"], id: string): Promise<void> {
++  const status = await invoke<{ backend: string }>("agent_backend_status");
++  if (status.backend === "pi") return;
++  if (status.backend !== "claude-cli") throw new Error(`未知后端：${status.backend}`);
++  if (kind === "team") await expert.teamApply(projectId, id, true);
++  else await expert.apply(projectId, id, true);
++}
++
++export function selectedExpert(mode: string, expertId: string, teamId: string): ExpertSelection | undefined {
++  if (mode === "single-expert" && expertId) return { kind: "expert", id: expertId };
++  if (mode === "expert-team" && teamId) return { kind: "team", id: teamId };
++  return undefined;
++}
++
++export function expertRequestFields(options: { expertSelection?: ExpertSelection }): { expertSelection?: ExpertSelection } {
++  return { expertSelection: options.expertSelection };
++}
+diff --git a/src/stores/chat.ts b/src/stores/chat.ts
+index 6411450..5b4551c 100644
+--- a/src/stores/chat.ts
++++ b/src/stores/chat.ts
+@@ -9,92 +9,16 @@ import {
+   type PermissionMode,
+ } from "../tauri";
+ import { useAppStore } from "./app";
+-import { useArtifactsStore } from "./artifacts";
++import { parseArtifacts, receiveArtifact, previewDeliverable } from "./chatArtifacts";
++export { parseArtifacts } from "./chatArtifacts";
++import { expertRequestFields } from "../lib/expertSelection";
+ import { useSessionsStore } from "../features/coworker/stores/sessions";
+ import { humanizeError } from "../lib/humanizeError";
++import type { Bubble, ChatRuntimeOptions } from "./chatTypes";
++export type { Bubble } from "./chatTypes";
++import { createDeltaBuffer } from "./chatDeltas";
+ import { uploadedImagePaths } from "../lib/chatImages";
+ 
+-export interface Bubble {
+-  role: "user" | "assistant" | "tool";
+-  text: string;
+-  tool?: string;
+-  /** 工具输入摘要(命令/路径/检索词一行,后端 tool 事件给出) → pill 可展开看 */
+-  toolDetail?: string;
+-  /** 本条 assistant 消息生成的成品文件（绝对路径，正斜杠） */
+-  artifacts?: string[];
+-  /** 本条 user 消息携带的上传附件 */
+-  files?: AttachedFile[];
+-  /** 消息时间(ms);历史消息来自后端 created_at,实时消息为收到时刻 */
+-  at?: number;
+-  /** 后端 error 事件合成的展示用错误气泡。delta 不得拼进来——否则 stderr 一行
+-   *  告警之后的全部正文都会被追加进错误气泡、整段被前端当错误吞掉。 */
+-  err?: boolean;
+-  /** 展示严重度：stderr 等过程诊断是 warning，只有本轮真实失败才是 error。 */
+-  severity?: "warning" | "error";
+-}
+-
+-/** 对话框只展示用户能直接打开的常见成品格式(与后端 chat.rs DISPLAY_EXTS 同步);
+- *  脚本/配置等中间产物不展示。带尾随 `/` 的是「应用文件夹」chip, 一律保留。
+- *  这道前端过滤主要兜底**旧历史**: 白名单上线前落库的 marker 里还混着中间文件。 */
+-const DISPLAY_EXTS = new Set([
+-  "md", "markdown", "txt", "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv",
+-  "html", "htm",
+-  "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico",
+-  "mp4", "mov", "webm", "mkv", "avi", "mp3", "wav", "m4a", "aac", "flac", "ogg",
+-  "zip",
+-]);
+-function isDisplayableArtifact(path: string): boolean {
+-  if (path.endsWith("/")) return true; // 应用文件夹
+-  const name = path.split("/").pop() || path;
+-  // 演示 spec 是「课件源稿」一等产物(右抽屉开成播放器、可导出 pptx),
+-  // 不能被 json 不在白名单这条通则误杀 —— 否则重启后历史里 spec chip 消失。
+-  if (/^polaris\.slides\.json$/i.test(name)) return true;
+-  const i = name.lastIndexOf(".");
+-  return i >= 0 && DISPLAY_EXTS.has(name.slice(i + 1).toLowerCase());
+-}
+-
+-// 「强成品」= 本轮结束后值得自动弹进右抽屉预览的可打开件(Kimi 式:生成完直接看到成品)。
+-// 只认网页 / 演示 spec / pdf 这类「一眼即成品」的东西;零碎数据文件(json/csv/txt…)不自动弹,
+-// 免得打扰。优先级:演示 spec > 网页 > pdf(与 shared.ts 的预览排序同源,这里只取会弹的子集)。
+-function pickDeliverable(arts: string[]): string | undefined {
+-  const files = arts.filter((a) => !a.endsWith("/"));
+-  const rank = (p: string): number => {
+-    if (/polaris\.slides\.json$/i.test(p)) return 0;
+-    const n = p.split(/[\\/]/).pop() || p;
+-    const ext = n.slice(n.lastIndexOf(".") + 1).toLowerCase();
+-    if (ext === "html" || ext === "htm") return 1;
+-    if (ext === "pdf") return 2;
+-    return 99; // 其余不自动弹
+-  };
+-  let best: string | undefined;
+-  let bestRank = 99;
+-  for (const p of files) {
+-    const r = rank(p);
+-    if (r < bestRank) {
+-      bestRank = r;
+-      best = p;
+-    }
+-  }
+-  return bestRank < 99 ? best : undefined;
+-}
+-
+-/** 解析正文里夹带的产物清单 marker，返回剥离 marker 后的纯文本 + 路径数组 */
+-export function parseArtifacts(content: string): {
+-  text: string;
+-  artifacts: string[];
+-} {
+-  const m = content.match(/<!--POLARIS_ARTIFACTS:(\[[\s\S]*?\])-->/);
+-  if (!m) return { text: content, artifacts: [] };
+-  let arr: string[] = [];
+-  try {
+-    arr = JSON.parse(m[1]);
+-  } catch {
+-    arr = [];
+-  }
+-  const text = content.replace(m[0], "").trimEnd();
+-  return { text, artifacts: arr.filter(isDisplayableArtifact) };
+-}
+-
+ /**
+  * 对话运行时 store —— 多开的核心。
+  *
+@@ -379,18 +303,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
+     prompt: string,
+     displayText: string,
+     files: AttachedFile[] | undefined,
+-    opts: {
+-      permissionMode: PermissionMode;
+-      skillIds: string[];
+-      goal?: string;
+-      dynamicWorkflow?: boolean;
+-      useKb?: boolean;
+-      batchBuild?: boolean;
+-      batchSize?: number;
+-      agentMode?: string;
+-      workMode?: string;
+-      providerId?: string;
+-    }
++    opts: ChatRuntimeOptions
+   ) {
+     // 关键: 先确保流式监听已挂上, 否则本轮的 delta 可能早于监听器注册而丢失
+     // —— 现象正是「第一次发消息看不到输出, 但后台仍在运行」。尤其是从「更多」各工坊
+@@ -422,6 +335,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
+         batchBuild: opts.batchBuild,
+         batchSize: opts.batchSize,
+         agentMode: opts.agentMode,
++        ...expertRequestFields(opts),
+         workMode: opts.workMode,
+         providerId: opts.providerId,
+         conversationId: convId,
+@@ -473,33 +387,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
+     wakeWaiters(convId); // 取消后唤醒分批循环, 让它看到 !isRunning 自行收尾
+   }
+ 
+-  // ── delta 合并缓冲 ──
+-  // 后端开了 token 级部分流(--include-partial-messages)后,delta 会以每秒几十上百条的频率到达;
+-  // 逐条直接改响应式 text 会让活跃气泡的 markdown 全量重渲染同频触发,长回答时烧 CPU。
+-  // 这里把 delta 先攒进普通对象(非响应式),40ms 一窗批量落地 —— 视觉仍是顺滑逐字长出
+-  // (25fps 足够「豆包感」),渲染频率封顶。非 delta 事件(tool/error/done…)到达时先强制落地
+-  // 本会话的挂起文本,保证气泡顺序与旧行为完全一致。
+-  const pendingDelta: Record<string, string> = {};
+-  let deltaTimer: ReturnType<typeof setTimeout> | null = null;
+-  function appendDelta(cid: string, text: string) {
+-    if (!text) return;
+-    const arr = ensureArr(cid);
+-    const last = arr[arr.length - 1];
+-    // 末条是错误气泡时新开一条:正文绝不拼进错误气泡(见 Bubble.err 注释)
+-    if (last && last.role === "assistant" && !last.err && !last.severity) last.text += text;
+-    else arr.push({ role: "assistant", text, at: Date.now() });
+-  }
+-  function flushDelta(cid: string) {
+-    const text = pendingDelta[cid];
+-    if (text) {
+-      delete pendingDelta[cid];
+-      appendDelta(cid, text);
+-    }
+-  }
+-  function flushAllDeltas() {
+-    deltaTimer = null;
+-    for (const cid of Object.keys(pendingDelta)) flushDelta(cid);
+-  }
++  const deltas = createDeltaBuffer(ensureArr);
+ 
+   /** app 级初始化：注册一次流式监听，按 conversationId 路由进各自缓冲。
+    *  返回缓存的就绪 promise：重复调用只注册一次，且每个调用方都能 await 到「监听已挂上」。 */
+@@ -511,12 +399,11 @@ export const useChatStore = defineStore("chatRuntime", () => {
+       touchActivity(cid); // 任何流式事件都算心跳:喂给无声死亡看门狗,证明后端仍活着
+       const arr = ensureArr(cid);
+       if (ev.kind === "delta") {
+-        pendingDelta[cid] = (pendingDelta[cid] ?? "") + (ev.text ?? "");
+-        if (!deltaTimer) deltaTimer = setTimeout(flushAllDeltas, 40);
++        deltas.enqueue(cid, ev.text ?? "");
+         return;
+       }
+       // 非 delta 事件:先把本会话挂起的增量落地,保证「文本 → 工具/错误/终态」顺序不乱。
+-      flushDelta(cid);
++      deltas.flush(cid);
+       if (ev.kind === "tool") {
+         arr.push({
+           role: "tool",
+@@ -526,46 +413,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
+           at: Date.now(),
+         });
+       } else if (ev.kind === "artifact") {
+-        const path = ev.text;
+-        if (path) {
+-          let target: Bubble | undefined;
+-          for (let i = arr.length - 1; i >= 0; i--) {
+-            if (arr[i].role === "assistant" && !arr[i].err && !arr[i].severity) {
+-              target = arr[i];
+-              break;
+-            }
+-          }
+-          if (!target) {
+-            target = { role: "assistant", text: "", artifacts: [] };
+-            arr.push(target);
+-          }
+-          if (!target.artifacts) target.artifacts = [];
+-          if (!target.artifacts.includes(path)) {
+-            target.artifacts.push(path);
+-            // 豆包化:演示 spec 一落盘,右抽屉自动开成播放器(配合抽屉的宽容解析
+-            // 轮询逐页点亮),用户不必等生成结束、也不必自己点产物 chip。
+-            // push 去重保证一轮只触发一次。放在事件源头做(而非组件 watch):命令式、
+-            // 无响应性依赖,不会静默失灵。
+-            if (/polaris\.slides\.json$/i.test(path)) {
+-              try {
+-                const app = useAppStore();
+-                const arts = useArtifactsStore();
+-                // 抢焦点的分寸:①必须是用户正看的这条对话;②抽屉空着、或正看同一个
+-                // 文件 → 开;③抽屉停在**别条对话**的产物上 = 陈旧,必须让位(用户刚要
+-                // 的就是这份新课件,不能让他对着上一份发呆——这曾导致「导出」导出了
+-                // 上一条对话的旧课件);④同对话内用户特意开着别的文件 → 尊重,不抢。
+-                const cur = arts.current?.path;
+-                const stale = !!cur && !cur.replace(/\\/g, "/").includes(`/conversations/${cid}/`);
+-                if (app.currentConvId === cid && (!cur || cur === path || stale)) {
+-                  app.drawerCollapsed = false;
+-                  void arts.open(path);
+-                }
+-              } catch {
+-                /* 抽屉打不开也不能砸了流式处理 */
+-              }
+-            }
+-          }
+-        }
++        receiveArtifact(arr, cid, ev.text);
+       } else if (ev.kind === "meta") {
+         // 上下文预算自检：后端估算的本轮 input token 数（纯数字文本）
+         const n = parseInt(ev.text ?? "", 10);
+@@ -597,39 +445,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
+         const sessions = useSessionsStore();
+         sessions.finish(cid);
+         app.markUnread(cid);
+-        // Kimi 式:本轮结束,把「主成品」(网页/演示/pdf)自动弹进右抽屉预览 —— 用户不必
+-        // 生成完还得自己去点产物 chip。沿用演示 spec 那套抢焦点分寸:①必须是用户正看的这条
+-        // 对话;②抽屉空着、或停在别条对话的旧产物上(陈旧,让位)才弹;③同对话内用户特意
+-        // 开着别的文件 → 尊重不抢。slides 已在 artifact 事件即时弹过(cur===它、同对话非陈旧),
+-        // 这里的 `!cur || stale` 判断天然不会重复弹它。
+-        try {
+-          const arts2 = useArtifactsStore();
+-          let start = 0;
+-          for (let i = arr.length - 1; i >= 0; i--) {
+-            if (arr[i].role === "user") {
+-              start = i;
+-              break;
+-            }
+-          }
+-          const round: string[] = [];
+-          for (let i = start; i < arr.length; i++) {
+-            if (arr[i].role === "assistant" && arr[i].artifacts)
+-              round.push(...arr[i].artifacts!);
+-          }
+-          const deliverable = pickDeliverable(round);
+-          if (deliverable && app.currentConvId === cid) {
+-            const cur = arts2.current?.path;
+-            const stale =
+-              !!cur &&
+-              !cur.replace(/\\/g, "/").includes(`/conversations/${cid}/`);
+-            if (!cur || stale) {
+-              app.drawerCollapsed = false;
+-              void arts2.open(deliverable);
+-            }
+-          }
+-        } catch {
+-          /* 自动预览失败绝不能砸了终态处理 */
+-        }
++        previewDeliverable(arr, cid);
+         // 唤醒分批编排循环：本轮已结束，可读清单决定续不续
+         wakeWaiters(cid);
+         // 本轮结束 → 该对话不再受「发送中」保护,顺手做一次 LRU 卸载(封顶常驻气泡)。
+diff --git a/src/stores/chatArtifacts.ts b/src/stores/chatArtifacts.ts
+new file mode 100644
+index 0000000..a41de8d
+--- /dev/null
++++ b/src/stores/chatArtifacts.ts
+@@ -0,0 +1,144 @@
++import { useAppStore } from "./app";
++import { useArtifactsStore } from "./artifacts";
++import type { Bubble } from "./chat";
++
++/** 对话框只展示用户能直接打开的常见成品格式(与后端 chat.rs DISPLAY_EXTS 同步);
++ *  脚本/配置等中间产物不展示。带尾随 `/` 的是「应用文件夹」chip, 一律保留。
++ *  这道前端过滤主要兜底**旧历史**: 白名单上线前落库的 marker 里还混着中间文件。 */
++const DISPLAY_EXTS = new Set([
++  "md", "markdown", "txt", "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv",
++  "html", "htm",
++  "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico",
++  "mp4", "mov", "webm", "mkv", "avi", "mp3", "wav", "m4a", "aac", "flac", "ogg",
++  "zip",
++]);
++function isDisplayableArtifact(path: string): boolean {
++  if (path.endsWith("/")) return true; // 应用文件夹
++  const name = path.split("/").pop() || path;
++  // 演示 spec 是「课件源稿」一等产物(右抽屉开成播放器、可导出 pptx),
++  // 不能被 json 不在白名单这条通则误杀 —— 否则重启后历史里 spec chip 消失。
++  if (/^polaris\.slides\.json$/i.test(name)) return true;
++  const i = name.lastIndexOf(".");
++  return i >= 0 && DISPLAY_EXTS.has(name.slice(i + 1).toLowerCase());
++}
++
++// 「强成品」= 本轮结束后值得自动弹进右抽屉预览的可打开件(Kimi 式:生成完直接看到成品)。
++// 只认网页 / 演示 spec / pdf 这类「一眼即成品」的东西;零碎数据文件(json/csv/txt…)不自动弹,
++// 免得打扰。优先级:演示 spec > 网页 > pdf(与 shared.ts 的预览排序同源,这里只取会弹的子集)。
++function pickDeliverable(arts: string[]): string | undefined {
++  const files = arts.filter((a) => !a.endsWith("/"));
++  const rank = (p: string): number => {
++    if (/polaris\.slides\.json$/i.test(p)) return 0;
++    const n = p.split(/[\\/]/).pop() || p;
++    const ext = n.slice(n.lastIndexOf(".") + 1).toLowerCase();
++    if (ext === "html" || ext === "htm") return 1;
++    if (ext === "pdf") return 2;
++    return 99; // 其余不自动弹
++  };
++  let best: string | undefined;
++  let bestRank = 99;
++  for (const p of files) {
++    const r = rank(p);
++    if (r < bestRank) {
++      bestRank = r;
++      best = p;
++    }
++  }
++  return bestRank < 99 ? best : undefined;
++}
++
++/** 解析正文里夹带的产物清单 marker，返回剥离 marker 后的纯文本 + 路径数组 */
++export function parseArtifacts(content: string): {
++  text: string;
++  artifacts: string[];
++} {
++  const m = content.match(/<!--POLARIS_ARTIFACTS:(\[[\s\S]*?\])-->/);
++  if (!m) return { text: content, artifacts: [] };
++  let arr: string[] = [];
++  try {
++    arr = JSON.parse(m[1]);
++  } catch {
++    arr = [];
++  }
++  const text = content.replace(m[0], "").trimEnd();
++  return { text, artifacts: arr.filter(isDisplayableArtifact) };
++}
++
++export function receiveArtifact(arr: Bubble[], cid: string, path?: string) {
++  if (path) {
++    let target: Bubble | undefined;
++    for (let i = arr.length - 1; i >= 0; i--) {
++      if (arr[i].role === "assistant" && !arr[i].err && !arr[i].severity) {
++        target = arr[i];
++        break;
++      }
++    }
++    if (!target) {
++      target = { role: "assistant", text: "", artifacts: [] };
++      arr.push(target);
++    }
++    if (!target.artifacts) target.artifacts = [];
++    if (!target.artifacts.includes(path)) {
++      target.artifacts.push(path);
++      // 豆包化:演示 spec 一落盘,右抽屉自动开成播放器(配合抽屉的宽容解析
++      // 轮询逐页点亮),用户不必等生成结束、也不必自己点产物 chip。
++      // push 去重保证一轮只触发一次。放在事件源头做(而非组件 watch):命令式、
++      // 无响应性依赖,不会静默失灵。
++      if (/polaris\.slides\.json$/i.test(path)) {
++        try {
++          const app = useAppStore();
++          const arts = useArtifactsStore();
++          // 抢焦点的分寸:①必须是用户正看的这条对话;②抽屉空着、或正看同一个
++          // 文件 → 开;③抽屉停在**别条对话**的产物上 = 陈旧,必须让位(用户刚要
++          // 的就是这份新课件,不能让他对着上一份发呆——这曾导致「导出」导出了
++          // 上一条对话的旧课件);④同对话内用户特意开着别的文件 → 尊重,不抢。
++          const cur = arts.current?.path;
++          const stale = !!cur && !cur.replace(/\\/g, "/").includes(`/conversations/${cid}/`);
++          if (app.currentConvId === cid && (!cur || cur === path || stale)) {
++            app.drawerCollapsed = false;
++            void arts.open(path);
++          }
++        } catch {
++          /* 抽屉打不开也不能砸了流式处理 */
++        }
++      }
++    }
++  }
++}
++
++export function previewDeliverable(arr: Bubble[], cid: string) {
++  const app = useAppStore();
++  // Kimi 式:本轮结束,把「主成品」(网页/演示/pdf)自动弹进右抽屉预览 —— 用户不必
++  // 生成完还得自己去点产物 chip。沿用演示 spec 那套抢焦点分寸:①必须是用户正看的这条
++  // 对话;②抽屉空着、或停在别条对话的旧产物上(陈旧,让位)才弹;③同对话内用户特意
++  // 开着别的文件 → 尊重不抢。slides 已在 artifact 事件即时弹过(cur===它、同对话非陈旧),
++  // 这里的 `!cur || stale` 判断天然不会重复弹它。
++  try {
++    const arts2 = useArtifactsStore();
++    let start = 0;
++    for (let i = arr.length - 1; i >= 0; i--) {
++      if (arr[i].role === "user") {
++        start = i;
++        break;
++      }
++    }
++    const round: string[] = [];
++    for (let i = start; i < arr.length; i++) {
++      if (arr[i].role === "assistant" && arr[i].artifacts)
++        round.push(...arr[i].artifacts!);
++    }
++    const deliverable = pickDeliverable(round);
++    if (deliverable && app.currentConvId === cid) {
++      const cur = arts2.current?.path;
++      const stale =
++        !!cur &&
++        !cur.replace(/\\/g, "/").includes(`/conversations/${cid}/`);
++      if (!cur || stale) {
++        app.drawerCollapsed = false;
++        void arts2.open(deliverable);
++      }
++    }
++  } catch {
++    /* 自动预览失败绝不能砸了终态处理 */
++  }
++}
+diff --git a/src/stores/chatDeltas.ts b/src/stores/chatDeltas.ts
+new file mode 100644
+index 0000000..3f2ea51
+--- /dev/null
++++ b/src/stores/chatDeltas.ts
+@@ -0,0 +1,25 @@
++import type { Bubble } from "./chatTypes";
++
++/** Batch token events while keeping tool/error/terminal events in order. */
++export function createDeltaBuffer(ensureArr: (id: string) => Bubble[], intervalMs = 40) {
++  if (!Number.isFinite(intervalMs) || intervalMs < 0) throw new Error("Invalid delta interval");
++  const pending: Record<string, string> = {};
++  let timer: ReturnType<typeof setTimeout> | null = null;
++  function flush(id: string) {
++    const text = pending[id];
++    if (!text) return;
++    delete pending[id];
++    const arr = ensureArr(id);
++    const last = arr[arr.length - 1];
++    if (last && last.role === "assistant" && !last.err && !last.severity) last.text += text;
++    else arr.push({ role: "assistant", text, at: Date.now() });
++  }
++  function enqueue(id: string, text: string) {
++    pending[id] = (pending[id] ?? "") + text;
++    if (!timer) timer = setTimeout(() => {
++      timer = null;
++      for (const key of Object.keys(pending)) flush(key);
++    }, intervalMs);
++  }
++  return { flush, enqueue };
++}
+diff --git a/src/stores/chatTypes.ts b/src/stores/chatTypes.ts
+new file mode 100644
+index 0000000..fd564df
+--- /dev/null
++++ b/src/stores/chatTypes.ts
+@@ -0,0 +1,35 @@
++import type { AttachedFile, PermissionMode } from "../tauri";
++import type { ExpertSelection } from "../lib/expertSelection";
++
++export interface Bubble {
++  role: "user" | "assistant" | "tool";
++  text: string;
++  tool?: string;
++  /** 工具输入摘要(命令/路径/检索词一行,后端 tool 事件给出) → pill 可展开看 */
++  toolDetail?: string;
++  /** 本条 assistant 消息生成的成品文件（绝对路径，正斜杠） */
++  artifacts?: string[];
++  /** 本条 user 消息携带的上传附件 */
++  files?: AttachedFile[];
++  /** 消息时间(ms);历史消息来自后端 created_at,实时消息为收到时刻 */
++  at?: number;
++  /** 后端 error 事件合成的展示用错误气泡。delta 不得拼进来——否则 stderr 一行
++   *  告警之后的全部正文都会被追加进错误气泡、整段被前端当错误吞掉。 */
++  err?: boolean;
++  /** 展示严重度：stderr 等过程诊断是 warning，只有本轮真实失败才是 error。 */
++  severity?: "warning" | "error";
++}
++
++export interface ChatRuntimeOptions {
++  permissionMode: PermissionMode;
++  skillIds: string[];
++  goal?: string;
++  dynamicWorkflow?: boolean;
++  useKb?: boolean;
++  batchBuild?: boolean;
++  batchSize?: number;
++  agentMode?: string;
++  expertSelection?: ExpertSelection;
++  workMode?: string;
++  providerId?: string;
++}
+diff --git a/vite.config.ts b/vite.config.ts
+index 7d7ed72..d3541a2 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -1,10 +1,11 @@
+-import { defineConfig } from "vite";
++import { defineConfig, configDefaults } from "vitest/config";
+ import vue from "@vitejs/plugin-vue";
+ 
+ // Tauri devUrl 固定指向 1421。端口被占用时必须直接报错；若让 Vite 自动漂到 1422，
+ // Tauri 仍会打开 1421，可能连上旧服务或空白页，形成很难排查的假启动。
+ export default defineConfig({
+   plugins: [vue()],
++  test: { exclude: [...configDefaults.exclude, "agentd/**"] },
+   clearScreen: false,
+   server: {
+     port: 1421,

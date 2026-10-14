@@ -1,0 +1,46 @@
+{
+  "started_at": "2026-10-14T08:56:42.466703+00:00",
+  "status": "REVIEW_RECEIVED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P3b2-brief.md",
+        "bytes": 2374,
+        "lines": 19,
+        "sha256": "d4fbcf9711931f899d04c77b10708231a5a536871723dca38a8ce4580fe7eb0d"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P3b2-diff.patch",
+        "bytes": 79082,
+        "lines": 1640,
+        "sha256": "53d636c67d4de551f290e7f14fb00d02f819098b4c79194ab08a8122b7450876"
+      }
+    ],
+    "prompt_sha256": "a12144120762b64f8b3db234e934743f0dce2a89a33e21fcb7f34fd343654d4a",
+    "prompt_bytes": 92117
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "provider": "minimax",
+  "model": "MiniMax-M2.7",
+  "usage": {
+    "input": 0,
+    "output": 8362,
+    "cacheRead": 0,
+    "cacheWrite": 27381,
+    "totalTokens": 35743,
+    "cost": {
+      "input": 0,
+      "output": 0.010034399999999999,
+      "cacheRead": 0,
+      "cacheWrite": 0.010267875000000001,
+      "total": 0.020302275
+    }
+  },
+  "session_id": "01a139a1-6ed2-7068-8feb-af4055a3cf38",
+  "finished_at": "2026-10-14T09:00:38.348375+00:00"
+}
