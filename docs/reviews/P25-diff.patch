@@ -1,0 +1,1462 @@
+diff --git a/agentd/src/config/load.ts b/agentd/src/config/load.ts
+index 5dddc3d..937a65b 100644
+--- a/agentd/src/config/load.ts
++++ b/agentd/src/config/load.ts
+@@ -11,7 +11,12 @@ export function mergeConfig(base: Config, patch: unknown): Config {
+   validateConfig(ConfigPatchSchema, patch);
+   if (!Value.Check(ConfigPatchSchema, patch)) throw new Error("Unreachable invalid config");
+   const result = { ...base, ...patch };
++  // Legacy `tools` only changes the default profile, never the readonly profile.
++  if (patch.tools && !patch.toolProfiles) result.toolProfiles = { ...result.toolProfiles, default: patch.tools };
+   validateConfig(ConfigSchema, result);
++  if (!Object.hasOwn(result.toolProfiles, result.defaultToolProfile)) {
++    throw new DaemonError("INVALID_CONFIG", "Default tool profile does not exist", ["/defaultToolProfile"]);
++  }
+   if (new Set(result.providers.map((p) => p.id)).size !== result.providers.length) {
+     throw new DaemonError("INVALID_CONFIG", "提供商标识重复。", ["/providers"]);
+   }
+diff --git a/agentd/src/config/schema.ts b/agentd/src/config/schema.ts
+index 2d7847d..9779704 100644
+--- a/agentd/src/config/schema.ts
++++ b/agentd/src/config/schema.ts
+@@ -24,6 +24,12 @@ export const ConfigSchema = Type.Object({
+   turnMaxMs: Type.Integer({ minimum: 0, maximum: 2147483647 }),
+   maxLineBytes: positive,
+   tools: Type.Array(text, { uniqueItems: true }),
++  defaultToolProfile: text,
++  toolProfiles: Type.Record(text, Type.Array(text, { uniqueItems: true })),
++  attachments: Type.Object({ maxCount: Type.Integer({ minimum: 0 }), maxBytes: positive,
++    maxTotalBytes: positive, mimeTypes: Type.Array(Type.Union([
++      Type.Literal("image/png"), Type.Literal("image/jpeg"), Type.Literal("image/gif"), Type.Literal("image/webp"),
++    ]), { uniqueItems: true }) }, { additionalProperties: false }),
+   defaultModel: Type.Object({ provider: text, id: text }, { additionalProperties: false }),
+   thinkingLevel: Type.Union([Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh")]),
+   logLevel: Type.Union([Type.Literal("debug"), Type.Literal("info"), Type.Literal("warn"), Type.Literal("error"), Type.Literal("silent")]),
+diff --git a/agentd/src/daemon.ts b/agentd/src/daemon.ts
+index 2e8c47d..1ca0590 100644
+--- a/agentd/src/daemon.ts
++++ b/agentd/src/daemon.ts
+@@ -10,6 +10,8 @@ import { Models } from "./models/runtime.ts";
+ import { DaemonError, publicError } from "./protocol/errors.ts";
+ import type { ProtocolEvent } from "./protocol/events.ts";
+ import { RequestSchema, type Request, type Response } from "./protocol/schema.ts";
++import { versions } from "./protocol/version.ts";
++import { validateAttachments } from "./sessions/attachments.ts";
+ import { SessionRegistry } from "./sessions/registry.ts";
+ 
+ export class Daemon {
+@@ -48,6 +50,9 @@ export class Daemon {
+       if (raw.method === "config.apply" && raw.params && typeof raw.params === "object" && "config" in raw.params) {
+         validateConfig(ConfigPatchSchema, raw.params.config);
+       }
++      if (raw.method === "prompt" && raw.params && typeof raw.params === "object" && "attachments" in raw.params) {
++        validateAttachments(raw.params.attachments, this.config);
++      }
+       if (!Value.Check(RequestSchema, value)) {
+         throw new DaemonError(raw.method === "config.apply" ? "INVALID_CONFIG" : "INVALID_REQUEST",
+           "Request does not match schema");
+@@ -80,10 +85,11 @@ export class Daemon {
+   }
+   private async dispatch(request: Request): Promise<unknown> {
+     switch (request.method) {
+-      case "ping": return { status: "ok", sessions: this.sessions.size };
++      case "ping": return { status: "ok", sessions: this.sessions.size, ...versions };
+       case "models.list": return { models: this.models.list() };
+-      case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd);
+-      case "prompt": return this.sessions.prompt(request.params.sessionId, request.params.text);
++      case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd, request.params);
++      case "session.configure": return this.sessions.configure(request.params.sessionId, request.params);
++      case "prompt": return this.sessions.prompt(request.params.sessionId, request.params.text, request.params.attachments);
+       case "steer":
+       case "followUp": return this.sessions.queue(request.params.sessionId, request.params.text, request.method);
+       case "abort": return this.sessions.abort(request.params.sessionId);
+diff --git a/agentd/src/protocol/schema.ts b/agentd/src/protocol/schema.ts
+index f3ff689..20ee1ef 100644
+--- a/agentd/src/protocol/schema.ts
++++ b/agentd/src/protocol/schema.ts
+@@ -5,11 +5,28 @@ const id = Type.Union([text, Type.Integer()]);
+ const request = <M extends string, P extends Record<string, TSchema>>(method: M, params: P) =>
+   Type.Object({ id, method: Type.Literal(method), params: Type.Object(params, { additionalProperties: false }) },
+     { additionalProperties: false });
++export const PROTOCOL_VERSION = 2;
++export const ModelSchema = Type.Object({ provider: text, id: text }, { additionalProperties: false });
++export const ThinkingLevelSchema = Type.Union([
++  Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"),
++  Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"),
++]);
++export const SessionOptionsSchema = Type.Object({
++  model: Type.Optional(ModelSchema), thinkingLevel: Type.Optional(ThinkingLevelSchema),
++  toolProfile: Type.Optional(text),
++}, { additionalProperties: false });
++export const ImageSchema = Type.Object({ type: Type.Literal("image"), mimeType: text, data: text },
++  { additionalProperties: false });
++export type SessionOptions = Static<typeof SessionOptionsSchema>;
++export type ImageAttachment = Static<typeof ImageSchema>;
++export const PingSchema = Type.Object({ status: Type.Literal("ok"), sessions: Type.Integer({ minimum: 0 }),
++  version: text, piVersion: text, protocolVersion: Type.Literal(PROTOCOL_VERSION) });
+ // Keep every command explicit so unknown fields/methods cannot reach SDK APIs.
+ export const RequestSchema = Type.Union([
+   request("ping", {}), request("models.list", {}),
+-  request("session.open", { sessionId: Type.Optional(text), cwd: Type.Optional(text) }),
+-  request("prompt", { sessionId: text, text }),
++  request("session.open", { sessionId: Type.Optional(text), cwd: Type.Optional(text), ...SessionOptionsSchema.properties }),
++  request("session.configure", { sessionId: text, ...SessionOptionsSchema.properties }),
++  request("prompt", { sessionId: text, text, attachments: Type.Optional(Type.Array(ImageSchema)) }),
+   request("steer", { sessionId: text, text }),
+   request("followUp", { sessionId: text, text }),
+   request("abort", { sessionId: text }), request("close", { sessionId: text }),
+diff --git a/agentd/src/protocol/version.ts b/agentd/src/protocol/version.ts
+new file mode 100644
+index 0000000..99dd514
+--- /dev/null
++++ b/agentd/src/protocol/version.ts
+@@ -0,0 +1,10 @@
++import { readFileSync, existsSync } from "node:fs";
++import { VERSION as piVersion } from "@earendil-works/pi-coding-agent";
++import { PROTOCOL_VERSION } from "./schema.ts";
++
++const packageFile = ["../../package.json", "../../../package.json"]
++  .map((path) => new URL(path, import.meta.url)).find(existsSync);
++if (!packageFile) throw new Error("Missing agentd package metadata");
++const { version } = JSON.parse(readFileSync(packageFile, "utf8"));
++if (typeof version !== "string" || !version) throw new Error("Invalid agentd version");
++export const versions = { version, piVersion, protocolVersion: PROTOCOL_VERSION };
+diff --git a/agentd/src/sessions/attachments.ts b/agentd/src/sessions/attachments.ts
+new file mode 100644
+index 0000000..611b27a
+--- /dev/null
++++ b/agentd/src/sessions/attachments.ts
+@@ -0,0 +1,32 @@
++import type { Config } from "../config/schema.ts";
++import { DaemonError } from "../protocol/errors.ts";
++import type { ImageAttachment } from "../protocol/schema.ts";
++
++/** Called before schema validation too, to give unsupported kinds a named error. */
++export function validateAttachments(value: unknown, config: Config): void {
++  if (!Array.isArray(value)) return; // The wire schema rejects non-arrays.
++  const limits = config.attachments;
++  if (value.length > limits.maxCount) throw new DaemonError("ATTACHMENT_COUNT_LIMIT", "Too many images");
++  let total = 0;
++  for (const item of value) {
++    if (!item || item.type !== "image" || !limits.mimeTypes.includes(item.mimeType)) {
++      throw new DaemonError("ATTACHMENT_TYPE_UNSUPPORTED", "Unsupported image attachment type");
++    }
++    if (typeof item.data !== "string") continue; // Schema owns field types.
++    if (item.data.length > Math.ceil(limits.maxBytes / 3) * 4) {
++      throw new DaemonError("ATTACHMENT_SIZE_LIMIT", "Image exceeds configured byte limit");
++    }
++    const bytes = Buffer.from(item.data, "base64");
++    if (!bytes.length || bytes.toString("base64") !== item.data) {
++      throw new DaemonError("ATTACHMENT_INVALID_BASE64", "Image must contain canonical base64");
++    }
++    total += bytes.length;
++    if (bytes.length > limits.maxBytes || total > limits.maxTotalBytes) {
++      throw new DaemonError("ATTACHMENT_SIZE_LIMIT", "Images exceed configured byte limit");
++    }
++  }
++}
++export function imagesForPrompt(images: ImageAttachment[], config: Config): ImageAttachment[] {
++  validateAttachments(images, config);
++  return images;
++}
+diff --git a/agentd/src/sessions/create.ts b/agentd/src/sessions/create.ts
+index f6186e0..05ca2ca 100644
+--- a/agentd/src/sessions/create.ts
++++ b/agentd/src/sessions/create.ts
+@@ -6,12 +6,15 @@ import {
+ } from "@earendil-works/pi-coding-agent";
+ import type { Config } from "../config/schema.ts";
+ import type { Models } from "../models/runtime.ts";
++import type { SessionOptions } from "../protocol/schema.ts";
++import { activateTools, profileTools } from "./options.ts";
+ import { DaemonError } from "../protocol/errors.ts";
+ 
+ export async function createSession(
+-  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string,
++  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string, options: SessionOptions = {},
+ ) {
+   const runtime = models.runtime;
++  const tools = profileTools(config, options.toolProfile ?? config.defaultToolProfile);
+   mkdirSync(config.sessionDir, { recursive: true });
+   const cwd = resolve(requestedCwd ?? process.cwd());
+   let manager: SessionManager;
+@@ -27,7 +30,7 @@ export async function createSession(
+   } catch {
+     throw new DaemonError("INVALID_CWD", "Working directory does not exist");
+   }
+-  const model = runtime.getModel(config.defaultModel.provider, config.defaultModel.id);
++  const model = runtime.getModel((options.model ?? config.defaultModel).provider, (options.model ?? config.defaultModel).id);
+   if (!model) throw new DaemonError("MODEL_NOT_FOUND", "Configured default model does not exist");
+   const settingsManager = SettingsManager.inMemory({
+     compaction: config.compaction, retry: config.retry, cacheWarming: "off",
+@@ -42,11 +45,14 @@ export async function createSession(
+   await resourceLoader.reload();
+   const { session } = await createAgentSession({
+     cwd: manager.getCwd(), agentDir, model, modelRuntime: runtime,
+-    thinkingLevel: config.thinkingLevel, tools: config.tools,
++    thinkingLevel: options.thinkingLevel ?? config.thinkingLevel,
++    // Register the configured universe so idle profile changes can enable tools.
++    tools: [...new Set(Object.values(config.toolProfiles).flat())],
+     settingsManager, sessionManager: manager, resourceLoader,
+   });
+   try {
+     await session.bindExtensions({ mode: "rpc" });
++    activateTools(session, tools);
+     return session;
+   } catch (error) {
+     session.dispose();
+diff --git a/agentd/src/sessions/options.ts b/agentd/src/sessions/options.ts
+new file mode 100644
+index 0000000..f499a52
+--- /dev/null
++++ b/agentd/src/sessions/options.ts
+@@ -0,0 +1,37 @@
++import type { AgentSession } from "@earendil-works/pi-coding-agent";
++import type { Config } from "../config/schema.ts";
++import { DaemonError } from "../protocol/errors.ts";
++import type { SessionOptions } from "../protocol/schema.ts";
++
++export function profileTools(config: Config, profile: string): string[] {
++  if (!Object.hasOwn(config.toolProfiles, profile)) {
++    throw new DaemonError("TOOL_PROFILE_NOT_FOUND", "Unknown tool profile");
++  }
++  return config.toolProfiles[profile];
++}
++export function checkTools(session: AgentSession, tools: string[]): void {
++  const known = new Set(session.getAllTools().map((tool) => tool.name));
++  if (tools.some((name) => !known.has(name))) {
++    throw new DaemonError("TOOL_PROFILE_UNAVAILABLE", "Profile contains tools unavailable in this session; reopen required");
++  }
++}
++export function activateTools(session: AgentSession, tools: string[]): void {
++  checkTools(session, tools);
++  session.setActiveToolsByName(tools);
++  const active = session.getActiveToolNames();
++  if (active.length !== tools.length || tools.some((name) => !active.includes(name))) {
++    throw new DaemonError("TOOL_PROFILE_UNAVAILABLE", "SDK cannot activate the requested tool profile");
++  }
++}
++export async function configureSession(session: AgentSession, config: Config, options: SessionOptions): Promise<void> {
++  const tools = options.toolProfile === undefined ? undefined : profileTools(config, options.toolProfile);
++  if (tools) checkTools(session, tools);
++  const model = options.model && session.modelRuntime.getModel(options.model.provider, options.model.id);
++  if (options.model && !model) throw new DaemonError("MODEL_NOT_FOUND", "Requested model does not exist");
++  if (model) {
++    try { await session.setModel(model, { persist: false }); }
++    catch { throw new DaemonError("MODEL_CONFIGURE_FAILED", "SDK could not select the requested model"); }
++  }
++  if (options.thinkingLevel !== undefined) session.setThinkingLevel(options.thinkingLevel, { persist: false });
++  if (tools) activateTools(session, tools);
++}
+diff --git a/agentd/src/sessions/registry.ts b/agentd/src/sessions/registry.ts
+index 4371aee..0e14071 100644
+--- a/agentd/src/sessions/registry.ts
++++ b/agentd/src/sessions/registry.ts
+@@ -5,6 +5,9 @@ import { EventMapper } from "../events/mapper.ts";
+ import type { Models } from "../models/runtime.ts";
+ import type { ProtocolEvent, TurnStatus } from "../protocol/events.ts";
+ import { DaemonError, publicError } from "../protocol/errors.ts";
++import type { SessionOptions, ImageAttachment } from "../protocol/schema.ts";
++import { configureSession } from "./options.ts";
++import { imagesForPrompt } from "./attachments.ts";
+ import { createSession } from "./create.ts";
+ 
+ interface Run {
+@@ -16,6 +19,8 @@ interface Run {
+ interface Entry {
+   session: AgentSession;
+   run?: Run;
++  configuring?: Promise<void>;
++  toolProfile: string;
+   closing?: Promise<void>;
+   idle?: NodeJS.Timeout;
+   lastUsed: number;
+@@ -34,7 +39,7 @@ export class SessionRegistry {
+     private readonly emit: (event: ProtocolEvent) => void,
+   ) {}
+   get size(): number { return this.entries.size; }
+-  async open(sessionId?: string, cwd?: string) {
++  async open(sessionId?: string, cwd?: string, options: SessionOptions = {}) {
+     if (this.stopped) throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
+     if (sessionId && (this.entries.has(sessionId) || this.opening.has(sessionId))) {
+       throw new DaemonError("SESSION_ALREADY_OPEN", "Session is already open");
+@@ -45,18 +50,19 @@ export class SessionRegistry {
+     this.pendingOpens++;
+     if (sessionId) this.opening.add(sessionId);
+     try {
+-      const session = await createSession(this.config(), this.models, this.factories, sessionId, cwd);
++      const config = this.config();
++      const session = await createSession(config, this.models, this.factories, sessionId, cwd, options);
+       if (this.stopped) {
+         session.dispose();
+         throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
+       }
+       const id = session.sessionId;
+-      const entry: Entry = { session, lastUsed: Date.now(), queueReservations: 0 };
++      const entry: Entry = { session, toolProfile: options.toolProfile ?? config.defaultToolProfile, lastUsed: Date.now(), queueReservations: 0 };
+       this.entries.set(id, entry);
+       this.armIdle(id, entry);
+       return { sessionId: id, resumed: !!sessionId, messageCount: session.messages.length,
+         model: { provider: session.model!.provider, id: session.model!.id },
+-        thinkingLevel: session.thinkingLevel, tools: session.getActiveToolNames(),
++        thinkingLevel: session.thinkingLevel, toolProfile: entry.toolProfile, tools: session.getActiveToolNames(),
+         reopenRequired: session.modelRuntime !== this.models.runtime };
+     } finally {
+       this.pendingOpens--;
+@@ -69,18 +75,40 @@ export class SessionRegistry {
+     if (entry.closing) throw new DaemonError("SESSION_CLOSING", "Session is closing");
+     return entry;
+   }
+-  prompt(id: string, text: string) {
++  async configure(id: string, options: SessionOptions) {
+     const entry = this.get(id);
+-    if (entry.run) throw new DaemonError("SESSION_BUSY", "Use steer or followUp while a prompt is running");
++    if (entry.run || entry.configuring || !entry.session.isIdle) throw new DaemonError("SESSION_BUSY", "Session is busy");
++    clearTimeout(entry.idle);
++    entry.configuring = configureSession(entry.session, this.config(), options);
++    try {
++      await entry.configuring;
++      entry.toolProfile = options.toolProfile ?? entry.toolProfile;
++      return { sessionId: id, model: entry.session.model && {
++        provider: entry.session.model.provider, id: entry.session.model.id },
++        thinkingLevel: entry.session.thinkingLevel, toolProfile: entry.toolProfile,
++        tools: entry.session.getActiveToolNames() };
++    } finally {
++      entry.configuring = undefined;
++      entry.lastUsed = Date.now();
++      if (!entry.closing && !this.stopped) this.armIdle(id, entry);
++    }
++  }
++  prompt(id: string, text: string, attachments: ImageAttachment[] = []) {
++    const entry = this.get(id);
++    if (entry.run || entry.configuring) throw new DaemonError("SESSION_BUSY", "Use steer or followUp while a prompt is running");
++    const images = imagesForPrompt(attachments, this.config());
++    if (images.length && !entry.session.model?.input.includes("image")) {
++      throw new DaemonError("MODEL_IMAGES_UNSUPPORTED", "Selected model does not accept images");
++    }
+     clearTimeout(entry.idle);
+     const mapper = new EventMapper(id, randomUUID(), this.emit);
+     const run: Run = { id: mapper.turnId, mapper, done: Promise.resolve() };
+     entry.run = run;
+     // Reserve synchronously; start after the command returns to permit immediate abort.
+-    run.done = Promise.resolve().then(() => this.execute(id, entry, run, text));
++    run.done = Promise.resolve().then(() => this.execute(id, entry, run, text, images));
+     return { turnId: run.id, disposition: "started" };
+   }
+-  private async execute(id: string, entry: Entry, run: Run, text: string): Promise<void> {
++  private async execute(id: string, entry: Entry, run: Run, text: string, images: ImageAttachment[]): Promise<void> {
+     const { session } = entry;
+     run.mapper.emit({ event: "turn.started" });
+     const { turnIdleTimeoutMs, turnMaxMs } = this.config();
+@@ -108,7 +136,7 @@ export class SessionRegistry {
+     try {
+       if (!run.stopped) {
+         await session.prompt(text, {
+-          expandPromptTemplates: false,
++          expandPromptTemplates: false, images,
+           preflightResult: () => {
+             if (run.stopped) throw new DaemonError("TURN_CANCELLED", "Turn was cancelled during preparation");
+           },
+@@ -166,6 +194,7 @@ export class SessionRegistry {
+     clearTimeout(entry.idle);
+     entry.closing = (async () => {
+       try {
++        await entry.configuring?.catch(() => undefined);
+         if (entry.run) {
+           entry.run.stopped ??= "aborted";
+           entry.session.clearQueue();
+@@ -190,7 +219,7 @@ export class SessionRegistry {
+       .map(([id]) => id);
+   }
+   refreshConfig(): void {
+-    for (const [id, entry] of this.entries) if (!entry.run && !entry.closing) this.armIdle(id, entry);
++    for (const [id, entry] of this.entries) if (!entry.run && !entry.configuring && !entry.closing) this.armIdle(id, entry);
+   }
+   async shutdown(): Promise<void> {
+     this.stopped = true;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/attach.rs b/src-tauri/crates/polaris-kernel/src/chat/attach.rs
+index 1f3d0a7..efa2662 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/attach.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/attach.rs
+@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
+ 
+ use super::artifacts::conversation_dir;
+ 
++/// Shared host-owned location for attachment upload and send validation.
++pub(crate) fn uploads_dir(conversation_id: Option<&str>) -> PathBuf {
++    conversation_dir(conversation_id).join("uploads")
++}
++
+ // ───────────────────────── 对话附件 (拖拽上传) ─────────────────────────
+ 
+ #[derive(Debug, Clone, Serialize)]
+@@ -47,7 +52,7 @@ pub fn chat_attach_files(conversation_id: Option<String>, paths: Vec<String>) ->
+                 .collect();
+         }
+     }
+-    let dir = conversation_dir(conversation_id.as_deref()).join("uploads");
++    let dir = uploads_dir(conversation_id.as_deref());
+     let _ = std::fs::create_dir_all(&dir);
+ 
+     let mut out = Vec::new();
+@@ -99,7 +104,7 @@ pub fn chat_attach_image(
+     if bytes.len() > MAX_BYTES {
+         return Err("图片超过 20MB 上限".into());
+     }
+-    let dir = conversation_dir(conversation_id.as_deref()).join("uploads");
++    let dir = uploads_dir(conversation_id.as_deref());
+     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+     // 只接受简单文件名,杜绝路径穿越
+     let safe: String = name
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+index c1b3b71..8363cd9 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+@@ -8,16 +8,11 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
+     let backend = selected().map_err(|e| e.to_string())?;
+     let legacy = backend.status().backend == "claude-cli";
+     let conv = args.conversation_id.clone();
+-    let permission = match args.permission_mode {
+-        PermissionMode::Manual => PermissionMode::Manual, PermissionMode::AutoAll => PermissionMode::AutoAll,
+-        PermissionMode::AutoCurrent => PermissionMode::AutoCurrent, PermissionMode::Deny => PermissionMode::Deny,
+-    };
+-    let mut input = TurnRequest {
+-        req_id: req.into(), session_id: conv.clone().unwrap_or_else(|| req.into()),
+-        conversation_id: conv.clone(), prompt: args.prompt.clone(), permission,
+-        model: None, cwd: claude_cli::pipeline::effective_cwd(None), attachments: vec![],
+-        account_id: None, timeout: None, legacy: None,
+-    };
++    let config = config::Config::load().map_err(|e| e.to_string())?;
++    let mut input = chat_input::prepare(req, &args,
++        &crate::chat::attach::uploads_dir(conv.as_deref()),
++        claude_cli::pipeline::effective_cwd(None), &config.agentd.attachments)
++        .map_err(|e| e.to_string())?;
+     let mut snapshot = None;
+     let mut notice = None;
+     if legacy { input.legacy = Some((app.clone(), args)); }
+@@ -27,6 +22,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
+             return Err(BackendError::UnsupportedInput("provider selection requires P4 mapping").to_string());
+         }
+         let prepared = claude_cli::pipeline::prepare(args);
++        input.model = claude_cli::pipeline::model_for_mode(prepared.work_full).map(serde_json::Value::String);
+         input.prompt = prepared.plan.full_text();
+         input.cwd = claude_cli::pipeline::effective_cwd(prepared.project_work_dir.as_deref().map(std::path::Path::new));
+         notice = prepared.image_notice;
+@@ -38,7 +34,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
+     }
+     let stream = backend.start(input).map_err(|e| e.to_string())?;
+     let mut finalizer = None;
+-    let timeout = Duration::from_millis(config::Config::load().map_err(|e| e.to_string())?.agentd.request_timeout_ms);
++    let timeout = Duration::from_millis(config.agentd.request_timeout_ms);
+     loop {
+         let ev = match stream.recv_timeout(timeout) {
+             Ok(event) => event,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/chat_input.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/chat_input.rs
+new file mode 100644
+index 0000000..d2a04c6
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/chat_input.rs
+@@ -0,0 +1,36 @@
++//! Chat boundary conversion shared by the live bridge and input behavior tests.
++use std::path::{Path, PathBuf};
++use super::{images, pi::protocol::ThinkingLevel, TurnRequest};
++use crate::chat::{ChatSendArgs, PermissionMode};
++
++/// `uploads` must be resolved by the host for this conversation, never from IPC.
++/// Validation happens before prompt preparation or any backend request.
++pub fn prepare(
++    req: &str,
++    args: &ChatSendArgs,
++    uploads: &Path,
++    cwd: PathBuf,
++    limits: &images::ImageLimits,
++) -> anyhow::Result<TurnRequest> {
++    let thinking_level = args.thinking_level.as_deref().map(|level| {
++        serde_json::from_value::<ThinkingLevel>(serde_json::Value::String(level.into()))
++            .map_err(|_| anyhow::anyhow!("THINKING_LEVEL_INVALID: expected off/minimal/low/medium/high/xhigh"))
++    }).transpose()?;
++    let attachments = images::load(uploads, args.image_paths.as_deref().map_or(&[], |paths| paths), limits)?;
++    let permission = match args.permission_mode {
++        PermissionMode::Manual => PermissionMode::Manual,
++        PermissionMode::AutoCurrent => PermissionMode::AutoCurrent,
++        PermissionMode::AutoAll => PermissionMode::AutoAll,
++        PermissionMode::Deny => PermissionMode::Deny,
++    };
++    Ok(TurnRequest {
++        req_id: req.into(),
++        session_id: args.conversation_id.clone().map_or_else(|| req.into(), |id| id),
++        conversation_id: args.conversation_id.clone(),
++        prompt: args.prompt.clone(), permission, model: None, cwd,
++        attachments, thinking_level, account_id: None, timeout: None, legacy: None,
++    })
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/completion.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/completion.rs
+new file mode 100644
+index 0000000..b2e54c1
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/completion.rs
+@@ -0,0 +1,111 @@
++//! Ownership follows the stdout worker or queued job, beyond preparation.
++use super::*;
++
++pub(super) const WORKER_EXITED: &str = "ClaudeCliWorkerExited";
++static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
++
++pub(super) fn record_failure(error: &str) {
++    *LAST_ERROR.lock() = Some(error.into());
++}
++
++pub(super) fn status() -> BackendStatus {
++    let mut status = BackendStatus::new("claude-cli");
++    status.last_error = LAST_ERROR.lock().clone();
++    status.healthy = status.last_error.is_none() && crate::doctor::resolve_claude_exe().is_some();
++    status
++}
++
++pub(super) struct TurnGuard {
++    req: String,
++    conv: Option<String>,
++    stream: Option<Arc<stream::Mailbox>>,
++}
++
++impl TurnGuard {
++    pub(super) fn new(req: &str, conv: Option<&str>) -> Self {
++        let stream = STREAMS.lock().get(req).map(|capture| capture.stream.clone());
++        Self { req: req.into(), conv: conv.map(str::to_owned), stream }
++    }
++
++    // Failed dispatch keeps ownership with preparation, which may retry.
++    pub(super) fn disarm(&mut self) { self.stream = None; }
++}
++
++impl Drop for TurnGuard {
++    fn drop(&mut self) {
++        let Some(stream) = self.stream.take() else { return; };
++        if stream.is_finished() { return; }
++        record_failure(WORKER_EXITED);
++        {
++            let mut streams = STREAMS.lock();
++            if streams.get(&self.req).is_some_and(|entry| Arc::ptr_eq(&entry.stream, &stream)) {
++                streams.remove(&self.req);
++            }
++        }
++        CHILDREN.take_cancel(&self.req);
++        stream.finish(
++            Some(event(&self.req, self.conv.as_deref(), "error", Some(WORKER_EXITED.into()))),
++            event(&self.req, self.conv.as_deref(), "done", None),
++        );
++    }
++}
++
++#[cfg(test)]
++pub(super) fn fixture(req: &str) -> (TurnGuard, EventStream) {
++    let (stream, receiver) = stream::Mailbox::channel(1, 4096);
++    STREAMS.lock().insert(req.into(), Capture { stream, session: req.into() });
++    (TurnGuard::new(req, Some(req)), receiver)
++}
++
++#[cfg(test)]
++pub(super) fn assert_failed(req: &str, receiver: EventStream) -> anyhow::Result<()> {
++    let wait = Duration::from_secs(1);
++    let error = receiver.recv_timeout(wait)?;
++    assert_eq!(error.req_id, req);
++    assert_eq!(error.conversation_id.as_deref(), Some(req));
++    assert_eq!(error.kind, "error");
++    assert_eq!(error.text.as_deref(), Some(WORKER_EXITED));
++    assert_eq!(receiver.recv_timeout(wait)?.kind, "done");
++    let closed = receiver.recv_timeout(wait).err().ok_or_else(|| anyhow::anyhow!("duplicate terminal"))?;
++    assert!(matches!(closed.downcast_ref(), Some(stream::StreamError::Closed)));
++    assert!(!STREAMS.lock().contains_key(req));
++    let status = ClaudeCliBackend.status();
++    assert!(!status.healthy);
++    assert_eq!(status.last_error.as_deref(), Some(WORKER_EXITED));
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn stdout_worker_return_and_panic_finish_full_mailbox() -> anyhow::Result<()> {
++        for panic in [false, true] {
++            let req = format!("stdout-worker-{panic}");
++            let (guard, receiver) = fixture(&req);
++            assert!(capture(&event(&req, Some(&req), "meta", None)));
++            let worker = std::thread::spawn(move || {
++                let _completion = guard;
++                assert!(!panic, "injected stdout worker panic");
++            });
++            assert_eq!(worker.join().is_err(), panic);
++            assert_eq!(receiver.recv_timeout(Duration::from_secs(1))?.kind, "meta");
++            assert_failed(&req, receiver)?;
++        }
++        Ok(())
++    }
++
++    #[test]
++    fn finished_worker_does_not_duplicate_done() -> anyhow::Result<()> {
++        let req = "finished-worker";
++        let (guard, receiver) = fixture(req);
++        assert!(capture(&event(req, Some(req), "done", None)));
++        drop(guard);
++        assert_eq!(receiver.recv_timeout(Duration::from_secs(1))?.kind, "done");
++        let error = receiver.recv_timeout(Duration::from_secs(1)).err()
++            .ok_or_else(|| anyhow::anyhow!("duplicate terminal"))?;
++        assert!(matches!(error.downcast_ref(), Some(stream::StreamError::Closed)));
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/mod.rs
+index 25c6dc3..f4926b7 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/mod.rs
+@@ -2,6 +2,7 @@
+ pub mod pool;
+ pub(crate) mod pipeline;
+ mod headless;
++mod completion;
+ use super::*;
+ use parking_lot::Mutex;
+ use std::collections::HashMap;
+@@ -58,7 +59,10 @@ impl AgentBackend for ClaudeCliBackend {
+             let error = match outcome {
+                 Ok(Ok(())) => None,
+                 Ok(Err(e)) => Some(e),
+-                Err(_) => Some("ClaudeCliBackend: background preparation panicked".into()),
++                Err(_) => {
++                    completion::record_failure(completion::WORKER_EXITED);
++                    Some(completion::WORKER_EXITED.into())
++                }
+             };
+             if let Some(error) = error {
+                 sender.finish(Some(event(&req, conv.as_deref(), "error", Some(error))), event(&req, conv.as_deref(), "done", None));
+@@ -92,7 +96,7 @@ impl AgentBackend for ClaudeCliBackend {
+         }
+         Ok(serde_json::json!({"models": models, "source": "configured-cli-models"}))
+     }
+-    fn status(&self) -> BackendStatus { let mut s = BackendStatus::new("claude-cli"); s.healthy = crate::doctor::resolve_claude_exe().is_some(); s }
++    fn status(&self) -> BackendStatus { completion::status() }
+     fn is_running(&self, req: &str) -> bool {
+         STREAMS.lock().contains_key(req) || pool::is_active_req(req) || CHILDREN.lock().contains_key(req)
+     }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/process.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/process.rs
+index 5dfac16..b69101a 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/process.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/process.rs
+@@ -262,7 +262,9 @@ pub(crate) fn run_process(
+     let stderr_buf_for_done = stderr_buf.clone();
+     let art_dir_thread = art_dir.clone();
+     let act_out = watchdog.clone();
++    let completion = super::super::completion::TurnGuard::new(req_id, conv_id_opt.as_deref());
+     std::thread::spawn(move || {
++        let _completion = completion;
+         let reader = BufReader::new(stdout);
+         // 单轮事件流状态机(解析/合批/记账/产物)抽到 TurnStream: 与常驻 agent 路径
+         // (session_pool::reader_loop)共用同一实现, 事件契约只此一份。
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/lifecycle.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/lifecycle.rs
+index b93ce77..09b3f6f 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/lifecycle.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/lifecycle.rs
+@@ -214,6 +214,7 @@ pub(crate) fn run_persistent_turn(p: TurnParams) -> Result<(), String> {
+         *shared.active_req.lock() = Some(p.req_id.clone());
+         *shared.watchdog.lock() = Some(wd.clone());
+         let job = TurnJob {
++            completion: super::super::completion::TurnGuard::new(&p.req_id, Some(&p.conv_id)),
+             req_id: p.req_id.clone(),
+             conv_id: p.conv_id.clone(),
+             app: p.app.clone(),
+@@ -222,7 +223,8 @@ pub(crate) fn run_persistent_turn(p: TurnParams) -> Result<(), String> {
+             image_notice: p.image_notice.clone(),
+             watchdog: wd.clone(),
+         };
+-        if job_tx.send(job).is_err() {
++        if let Err(mut error) = job_tx.send(job) {
++            error.0.completion.disarm();
+             // reader 线程已死(进程 EOF) → 同 stdin 失败: 杀掉重来
+             *shared.active_req.lock() = None;
+             last_err = "常驻进程 reader 已退出".into();
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/mod.rs
+index 79eb8f5..e61eeed 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/mod.rs
+@@ -151,6 +151,7 @@ pub fn kill_all() {
+ /// 发给会话 reader 线程的「一轮」上下文: reader 常驻在 stdout 上, 每收到一个 job
+ /// 就以该轮的 req_id/产物快照/看门狗处理事件流, 直到 result 事件收尾。
+ struct TurnJob {
++    completion: super::completion::TurnGuard,
+     req_id: String,
+     conv_id: String,
+     app: AppHandle,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader.rs
+index 4368ff2..3a515fe 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader.rs
+@@ -1,7 +1,21 @@
+ use super::*;
+ 
+ pub(crate) fn reader_loop(stdout: ChildStdout, rx: mpsc::Receiver<TurnJob>, shared: Arc<SessionShared>) {
+-    let mut lines = BufReader::new(stdout).lines();
++    read_jobs(BufReader::new(stdout).lines(), rx, shared);
++}
++
++struct ReaderGuard(Arc<SessionShared>);
++impl Drop for ReaderGuard {
++    fn drop(&mut self) {
++        self.0.alive.store(false, Ordering::SeqCst);
++        *self.0.active_req.lock() = None;
++        *self.0.watchdog.lock() = None;
++    }
++}
++
++fn read_jobs(mut lines: impl Iterator<Item = std::io::Result<String>>,
++    rx: mpsc::Receiver<TurnJob>, shared: Arc<SessionShared>) {
++    let _reader = ReaderGuard(shared.clone());
+     while let Ok(job) = rx.recv() {
+         let mut ts = pipeline::TurnStream::new(
+             job.app.clone(),
+@@ -198,3 +212,7 @@ pub(crate) fn spawn_turn_watchdog(
+ 
+ // ───────────────────────── 单测 (纯记账, 时钟注入) ─────────────────────────
+ 
++#[cfg(all(test, not(feature = "desktop")))]
++#[path = "reader_tests.rs"]
++mod tests;
++
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+index 52969c4..e28c68d 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+@@ -60,6 +60,7 @@ pub struct Agentd {
+     pub shutdown_timeout_ms: u64,
+     pub control_poll_ms: u64,
+     pub session_map: PathBuf,
++    pub attachments: super::images::ImageLimits,
+ }
+ impl Default for Agentd {
+     fn default() -> Self {
+@@ -76,6 +77,7 @@ impl Default for Agentd {
+             readonly_tools: vec!["read".into(), "grep".into(), "find".into(), "ls".into()],
+             supervisor_tick_ms: 10, shutdown_timeout_ms: 1000, control_poll_ms: 1,
+             session_map: crate::runtime::paths::data_dir().join("agent-session-map"),
++            attachments: super::images::ImageLimits::default(),
+         }
+     }
+ }
+@@ -102,6 +104,7 @@ impl Config {
+     pub fn validate(&self) -> anyhow::Result<()> {
+         BackendKind::parse(&self.agent.backend)?;
+         let c = &self.agentd;
++        c.attachments.validate()?;
+         anyhow::ensure!(matches!(c.isolation.as_str(), "shared" | "per-account"), "InvalidIsolation: {}", c.isolation);
+         anyhow::ensure!(c.channel_capacity > 0 && c.max_line_bytes > 0 && c.max_processes > 0,
+             "InvalidAgentConfig: capacities must be positive");
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/images.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/images.rs
+new file mode 100644
+index 0000000..44543fc
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/images.rs
+@@ -0,0 +1,85 @@
++//! Bounded image loading at the chat boundary. Paths are never inferred from text.
++use std::{fs, io::Read, path::{Component, Path}};
++use anyhow::Context;
++use base64::Engine;
++use serde::{Deserialize, Serialize};
++use super::pi::protocol::Attachment;
++
++const SUPPORTED: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
++
++#[derive(Debug, Clone, Deserialize, Serialize)]
++#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
++pub struct ImageLimits {
++    pub max_count: usize,
++    pub max_bytes: usize,
++    pub max_total_bytes: usize,
++    pub mime_types: Vec<String>,
++}
++impl Default for ImageLimits {
++    fn default() -> Self {
++        Self { max_count: 4, max_bytes: 262_144, max_total_bytes: 524_288,
++            mime_types: SUPPORTED.iter().map(|s| (*s).into()).collect() }
++    }
++}
++impl ImageLimits {
++    pub fn validate(&self) -> anyhow::Result<()> {
++        anyhow::ensure!(self.max_bytes > 0 && self.max_total_bytes > 0,
++            "InvalidAgentConfig: attachments byte limits must be positive");
++        anyhow::ensure!(self.mime_types.iter().all(|m| SUPPORTED.contains(&m.as_str())),
++            "InvalidAgentConfig: unsupported attachments.mimeTypes");
++        Ok(())
++    }
++}
++
++/// `uploads` is resolved by the host from the conversation ID, never supplied by IPC.
++pub fn load(uploads: &Path, paths: &[String], limits: &ImageLimits) -> anyhow::Result<Vec<Attachment>> {
++    limits.validate()?;
++    anyhow::ensure!(paths.len() <= limits.max_count, "ATTACHMENT_COUNT_LIMIT");
++    if paths.is_empty() { return Ok(vec![]); }
++    anyhow::ensure!(!fs::symlink_metadata(uploads)
++        .context("ATTACHMENT_PATH_INVALID: uploads directory")?.file_type().is_symlink(),
++        "ATTACHMENT_PATH_OUTSIDE_UPLOADS: uploads cannot be a symlink");
++    let root = uploads.canonicalize().context("ATTACHMENT_PATH_INVALID: uploads directory")?;
++    let mut total = 0usize;
++    paths.iter().map(|raw| {
++        let path = Path::new(raw);
++        anyhow::ensure!(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir),
++            "ATTACHMENT_PATH_INVALID: absolute path without parent traversal required");
++        let path = path.canonicalize().context("ATTACHMENT_PATH_INVALID: image path")?;
++        anyhow::ensure!(path.starts_with(&root) && path != root, "ATTACHMENT_PATH_OUTSIDE_UPLOADS");
++        anyhow::ensure!(path.is_file(), "ATTACHMENT_NOT_FILE");
++        let mut options = fs::OpenOptions::new();
++        options.read(true);
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::OpenOptionsExt;
++            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
++        }
++        let file = options.open(&path).context("ATTACHMENT_READ_FAILED")?;
++        let meta = file.metadata().context("ATTACHMENT_READ_FAILED")?;
++        anyhow::ensure!(meta.is_file(), "ATTACHMENT_NOT_FILE");
++        let remaining = limits.max_total_bytes.saturating_sub(total);
++        let budget = limits.max_bytes.min(remaining);
++        anyhow::ensure!(meta.len() <= budget as u64, "ATTACHMENT_SIZE_LIMIT");
++        let mut bytes = Vec::new();
++        file.take((budget as u64).saturating_add(1)).read_to_end(&mut bytes)
++            .context("ATTACHMENT_READ_FAILED")?;
++        anyhow::ensure!(bytes.len() <= budget, "ATTACHMENT_SIZE_LIMIT");
++        total += bytes.len();
++        let mime = detect_mime(&bytes).ok_or_else(|| anyhow::anyhow!("ATTACHMENT_TYPE_UNSUPPORTED"))?;
++        anyhow::ensure!(limits.mime_types.iter().any(|m| m == mime), "ATTACHMENT_TYPE_UNSUPPORTED");
++        Ok(Attachment::Image { mime_type: mime.into(),
++            data: base64::engine::general_purpose::STANDARD.encode(bytes) })
++    }).collect()
++}
++
++fn detect_mime(bytes: &[u8]) -> Option<&'static str> {
++    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { Some("image/png") }
++    else if bytes.starts_with(b"\xff\xd8\xff") { Some("image/jpeg") }
++    else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { Some("image/gif") }
++    else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") { Some("image/webp") }
++    else { None }
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+index b4aa251..cf793ed 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+@@ -2,6 +2,8 @@
+ //! reads/writes and bounded queues keep UI threads independent of pipe progress.
+ //! The legacy adapter retains its existing std::thread implementation verbatim.
+ pub mod config;
++pub mod images;
++pub mod chat_input;
+ pub mod claude_cli;
+ pub mod pi;
+ pub mod stream;
+@@ -46,7 +48,9 @@ pub struct TurnRequest {
+     pub permission: PermissionMode,
+     pub model: Option<serde_json::Value>,
+     pub cwd: PathBuf,
+-    pub attachments: Vec<PathBuf>,
++    /// Validated, encoded image content; adapters never reopen IPC paths.
++    pub attachments: Vec<pi::protocol::Attachment>,
++    pub thinking_level: Option<pi::protocol::ThinkingLevel>,
+     pub account_id: Option<String>,
+     pub timeout: Option<Duration>,
+     pub(crate) legacy: Option<(AppHandle, ChatSendArgs)>,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
+index 0b9885f..e4472b8 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
+@@ -11,6 +11,10 @@ pub enum Control {
+     Bind(String, String, Reply),
+     Fail(String, String),
+     Stop,
++    #[cfg(test)]
++    TestExit(bool),
++    #[cfg(test)]
++    TestClose,
+ }
+ pub struct Client {
+     pub config: Agentd,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs
+new file mode 100644
+index 0000000..a01392f
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs
+@@ -0,0 +1,28 @@
++//! Host input conversion; no provider aliases or attachment paths are guessed.
++use super::{client::Client, protocol::{Command, Empty, Model, SessionOptions}};
++use super::super::{TurnRequest, PermissionMode};
++
++pub fn options(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionOptions> {
++    let model = match &input.model {
++        None => None,
++        Some(serde_json::Value::String(id)) => {
++            // Existing POLARIS_*_MODEL values contain only an ID. Resolve it only
++            // when the daemon catalog identifies exactly one provider.
++            let catalog = client.call(Command::Models(Empty {}))?;
++            let models: Vec<Model> = serde_json::from_value(catalog.get("models").cloned()
++                .ok_or_else(|| anyhow::anyhow!("AgentdMissingModels"))?
++                .as_array().ok_or_else(|| anyhow::anyhow!("AgentdInvalidModels"))?
++                .iter().map(|m| serde_json::json!({"provider":m["provider"], "id":m["id"]})).collect::<Vec<_>>().into())?;
++            let mut matches = models.into_iter().filter(|m| &m.id == id);
++            let model = matches.next().ok_or_else(|| anyhow::anyhow!("AgentdModelNotFound: {id}"))?;
++            anyhow::ensure!(matches.next().is_none(), "AgentdModelAmbiguous: specify provider and id");
++            Some(model)
++        }
++        Some(value) => Some(serde_json::from_value::<Model>(value.clone())?),
++    };
++    if let Some(model) = &model {
++        anyhow::ensure!(!model.provider.is_empty() && !model.id.is_empty(), "AgentdInvalidModel");
++    }
++    Ok(SessionOptions { model, thinking_level: input.thinking_level.clone(),
++        tool_profile: Some(match input.permission { PermissionMode::Deny => "readonly", _ => "workspace" }.into()) })
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+index 49b662a..ddce9e3 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+@@ -5,13 +5,15 @@ mod process;
+ pub mod protocol;
+ mod routes;
+ mod sessions;
++mod input;
++#[cfg(test)] mod extension_tests;
+ mod supervisor;
+ mod translate;
+ #[cfg(windows)] mod windows_job;
+ #[cfg(test)] mod tests;
+ use super::*;
+ use client::{Client, Control};
+-use protocol::{Command, Empty, Text};
++use protocol::{Command, Empty, Prompt};
+ use parking_lot::Mutex;
+ use std::{collections::HashSet, sync::mpsc};
+ use serde_json::Value;
+@@ -32,6 +34,10 @@ impl PiBackend {
+         if self.config.isolation == "per-account" { return Err(BackendError::AccountContextRequired.into()); }
+         self.client.get_or_try_init(|| Client::new(self.config.clone())).cloned()
+     }
++    /// Configure a mapped idle session through the protocol's typed public options.
++    pub fn configure_session(&self, key: &str, options: protocol::SessionOptions) -> anyhow::Result<Value> {
++        sessions::configure(self.client()?.as_ref(), key, options)
++    }
+     /// Process-wide configuration; close every session reported by the daemon.
+     pub fn apply_config(&self, config: Option<Value>, credentials: Option<Value>) -> anyhow::Result<Value> {
+         let client = self.client()?;
+@@ -50,7 +56,6 @@ impl AgentBackend for PiBackend {
+         if self.config.isolation == "per-account" {
+             return Err(if input.account_id.is_some() { BackendError::UnsupportedIsolation } else { BackendError::AccountContextRequired }.into());
+         }
+-        anyhow::ensure!(input.attachments.is_empty(), BackendError::UnsupportedInput("binary attachments are absent from the agentd prompt schema"));
+         anyhow::ensure!(!input.prompt.trim().is_empty(), "AgentdEmptyPrompt");
+         let client = self.client()?;
+         if client.status.lock().circuit_open { return Err(BackendError::CircuitOpen.into()); }
+@@ -72,13 +77,10 @@ impl AgentBackend for PiBackend {
+                     Some(crate::chat::prompt::estimate_tokens(&input.prompt).to_string())));
+                 if cancelled.lock().remove(&req) { sender.finish(None, event(&req, conv.as_deref(), "done", None)); return Ok(()); }
+                 let info = sessions::open(&client, &input)?;
+-                if matches!(input.permission, PermissionMode::Deny | PermissionMode::Manual) {
++                if matches!(input.permission, PermissionMode::Deny) {
+                     anyhow::ensure!(info.tools.iter().all(|t| client.config.readonly_tools.contains(t)),
+                         BackendError::UnsupportedInput("read-only/manual request cannot use a daemon with write or execution tools"));
+                 }
+-                if let Some(model) = &input.model {
+-                    anyhow::ensure!(model == &info.model, BackendError::UnsupportedInput("model selection is process-wide; apply config before opening sessions"));
+-                }
+                 let (tx, rx) = mpsc::sync_channel(1);
+                 // Control::Register.timeout is the hard limit; zero means unlimited.
+                 let configured_max = Duration::from_millis(client.config.turn_max_ms);
+@@ -94,7 +96,9 @@ impl AgentBackend for PiBackend {
+                     stream: sender.clone(), timeout, reservation: (preparing.clone(), key.clone()), reply: tx })?;
+                 client.wait(rx)?;
+                 registered = true;
+-                let result = client.call(Command::Prompt(Text { session_id: info.id.clone(), text: input.prompt }));
++                let result = client.call(Command::Prompt(Prompt {
++                    session_id: info.id.clone(), text: input.prompt, attachments: input.attachments,
++                }));
+                 eprintln!("{}", serde_json::json!({"component":"agent.backend", "backend":"pi",
+                     "reqId":req, "conversationId":conv, "sessionId":info.id, "phase":"prompt", "ok":result.is_ok()}));
+                 let result = result?;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+index 37371fc..58de1f0 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+@@ -1,6 +1,8 @@
+ //! Exact wire names from agentd/src/protocol/{schema,events}.ts.
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
++/// Mirror of agentd/src/protocol/schema.ts; fingerprint test gates changes.
++pub const PROTOCOL_VERSION: u64 = 2;
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+ #[serde(untagged)]
+ pub enum Id { Text(String), Number(i64) }
+@@ -13,7 +15,8 @@ pub enum Command {
+     #[serde(rename = "ping")] Ping(Empty),
+     #[serde(rename = "models.list")] Models(Empty),
+     #[serde(rename = "session.open")] Open(Open),
+-    #[serde(rename = "prompt")] Prompt(Text),
++    #[serde(rename = "session.configure")] Configure(Configure),
++    #[serde(rename = "prompt")] Prompt(Prompt),
+     #[serde(rename = "steer")] Steer(Text),
+     #[serde(rename = "followUp")] FollowUp(Text),
+     #[serde(rename = "abort")] Abort(Session),
+@@ -28,6 +31,48 @@ pub struct Empty {}
+ pub struct Open {
+     #[serde(skip_serializing_if = "Option::is_none")] pub session_id: Option<String>,
+     #[serde(skip_serializing_if = "Option::is_none")] pub cwd: Option<String>,
++    #[serde(flatten)] pub options: SessionOptions,
++}
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++#[serde(deny_unknown_fields)]
++pub struct Model { pub provider: String, pub id: String }
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++#[serde(rename_all = "lowercase")]
++pub enum ThinkingLevel { Off, Minimal, Low, Medium, High, Xhigh }
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct SessionOptions {
++    #[serde(skip_serializing_if = "Option::is_none")] pub model: Option<Model>,
++    #[serde(skip_serializing_if = "Option::is_none")] pub thinking_level: Option<ThinkingLevel>,
++    #[serde(skip_serializing_if = "Option::is_none")] pub tool_profile: Option<String>,
++}
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct Configure { pub session_id: String, #[serde(flatten)] pub options: SessionOptions }
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
++pub enum Attachment {
++    #[serde(rename_all = "camelCase")]
++    Image { mime_type: String, data: String },
++}
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct Prompt {
++    pub session_id: String, pub text: String,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub attachments: Vec<Attachment>,
++}
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Ping {
++    pub status: String, pub sessions: u64, pub version: String,
++    pub pi_version: String, pub protocol_version: u64,
++}
++pub fn check_ping(value: Value) -> anyhow::Result<Ping> {
++    anyhow::ensure!(value.get("protocolVersion").and_then(Value::as_u64) == Some(PROTOCOL_VERSION),
++        "AgentdProtocolMismatch: expected protocolVersion={PROTOCOL_VERSION}");
++    let ping: Ping = serde_json::from_value(value)?;
++    anyhow::ensure!(ping.status == "ok" && !ping.version.is_empty() && !ping.pi_version.is_empty(), "AgentdPingFailed");
++    Ok(ping)
+ }
+ #[derive(Debug, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs
+index 70d4de3..f53c796 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs
+@@ -2,6 +2,7 @@ use super::{translate::Translator, protocol::{Event, TurnStatus}};
+ use super::super::stream::Mailbox;
+ use crate::chat::ChatStreamEvent;
+ use std::{collections::VecDeque, sync::Arc, time::{Duration, Instant}};
++pub(super) const SUPERVISOR_EXITED: &str = "AgentdSupervisorExited";
+ pub struct Route {
+     pub req: String,
+     pub session: String,
+@@ -108,6 +109,13 @@ impl Drop for Route {
+     fn drop(&mut self) {
+         self.reservation.0.lock().remove(&self.reservation.1);
+         self.active.lock().remove(&self.req);
++        // Reserved terminal slots bypass backpressure, even during unwinding.
++        if !self.stream.is_finished() {
++            self.stream.finish(
++                Some(self.translator.make("error", Some(SUPERVISOR_EXITED.into()))),
++                self.translator.make("done", None),
++            );
++        }
+     }
+ }
+ 
+@@ -136,6 +144,33 @@ mod tests {
+         assert!(reservations.lock().is_empty());
+     }
+     #[test]
++    fn drop_finishes_full_unacknowledged_mailbox_and_preserves_finished_stream() -> anyhow::Result<()> {
++        for finished in [false, true] {
++            let (mut route, receiver) = route();
++            route.acknowledged = false;
++            for _ in 0..4 {
++                assert!(route.stream.try_push(route.translator.make("tool", None)).is_ok());
++            }
++            if finished {
++                route.stream.finish(None, route.translator.make("done", None));
++            } else {
++                route.fail("undrained failure");
++            }
++            drop(route);
++            let wait = Duration::from_secs(1);
++            for _ in 0..4 { assert_eq!(receiver.recv_timeout(wait)?.kind, "tool"); }
++            if !finished {
++                let error = receiver.recv_timeout(wait)?;
++                assert_eq!(error.kind, "error");
++                assert_eq!(error.text.as_deref(), Some(SUPERVISOR_EXITED));
++            }
++            assert_eq!(receiver.recv_timeout(wait)?.kind, "done");
++            let closed = receiver.recv_timeout(wait).err().ok_or_else(|| anyhow::anyhow!("duplicate terminal"))?;
++            assert!(matches!(closed.downcast_ref(), Some(super::super::super::stream::StreamError::Closed)));
++        }
++        Ok(())
++    }
++    #[test]
+     fn first_failure_survives_abort_timeout() {
+         for daemon_event in [false, true] {
+             let (mut route, receiver) = route();
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs
+index 50a7339..84577eb 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs
+@@ -1,5 +1,5 @@
+ //! Map Polaris keys to daemon UUIDs; never pass a conversation ID as a new UUID.
+-use super::{client::Client, protocol::{Command, Open, Session}};
++use super::{client::Client, protocol::{Command, Open, Session, Configure, SessionOptions}};
+ use super::super::TurnRequest;
+ use serde::{Serialize, Deserialize};
+ use serde_json::Value;
+@@ -11,6 +11,7 @@ fn path(client: &Client, key: &str) -> PathBuf {
+     client.config.session_map.join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
+ }
+ pub fn open(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionInfo> {
++    let options = super::input::options(client, input)?;
+     let file = path(client, &input.session_id);
+     let previous: Option<SessionInfo> = match std::fs::read(&file) {
+         Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
+@@ -22,14 +23,15 @@ pub fn open(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionInfo>
+     if let Some(previous) = &previous {
+         if previous.cwd != cwd { let _ = client.call(Command::Close(Session { session_id: previous.id.clone() })); }
+     }
+-    let response = client.call(Command::Open(Open { session_id: id, cwd: Some(cwd.to_string_lossy().into()) }));
++    let response = client.call(Command::Open(Open { session_id: id, cwd: Some(cwd.to_string_lossy().into()), options: options.clone() }));
+     let response = match response {
+         Ok(v) => v,
+         Err(e) if e.to_string().starts_with("SESSION_ALREADY_OPEN:") => {
+-            return previous.ok_or_else(|| anyhow::anyhow!("AgentdSessionMappingMissing"));
++            let previous = previous.as_ref().ok_or_else(|| anyhow::anyhow!("AgentdSessionMappingMissing"))?;
++            client.call(Command::Configure(Configure { session_id: previous.id.clone(), options: options.clone() }))?
+         }
+         Err(e) if e.to_string().starts_with("SESSION_NOT_FOUND:") => {
+-            client.call(Command::Open(Open { session_id: None, cwd: Some(cwd.to_string_lossy().into()) }))?
++            client.call(Command::Open(Open { session_id: None, cwd: Some(cwd.to_string_lossy().into()), options: options.clone() }))?
+         }
+         Err(e) => return Err(e),
+     };
+@@ -54,3 +56,9 @@ pub fn close(client: &Client, key: &str) -> anyhow::Result<()> {
+         _ => Ok(()),
+     }
+ }
++
++/// The SDK is authoritative for busy detection; an active turn rejects configuration.
++pub fn configure(client: &Client, key: &str, options: SessionOptions) -> anyhow::Result<Value> {
++    let info: SessionInfo = serde_json::from_slice(&std::fs::read(path(client, key))?)?;
++    client.call(Command::Configure(Configure { session_id: info.id, options }))
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+index ef01488..c3a7339 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+@@ -4,13 +4,14 @@ use parking_lot::Mutex;
+ use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
+ use tokio::sync::mpsc;
+ use serde_json::{Value, json};
+-struct Pending { reply: Option<Reply>, since: Instant }
++struct Pending { reply: Option<Reply>, since: Instant, ping: bool }
+ struct State {
+     config: Agentd,
+     status: Arc<Mutex<BackendStatus>>,
+     active: Arc<Mutex<HashMap<String, String>>>,
+     routes: HashMap<String, Route>,
+     pending: HashMap<Id, Pending>,
++    deferred: Vec<(Command, Reply, Instant)>,
+     counter: u64,
+     failures: u32,
+     next_start: Instant,
+@@ -21,15 +22,16 @@ struct State {
+ }
+ impl State {
+     fn request(&mut self, process: &Process, command: Command, reply: Option<Reply>) -> anyhow::Result<()> {
++        let ping = matches!(command, Command::Ping(_));
+         self.counter += 1;
+         let id = Id::Text(format!("rust-{}", self.counter));
+         process.write(&Request { id: id.clone(), command }, self.config.max_line_bytes)?;
+-        self.pending.insert(id, Pending { reply, since: Instant::now() });
++        self.pending.insert(id, Pending { reply, since: Instant::now(), ping });
+         Ok(())
+     }
+     fn fail(&mut self, error: String) {
+         self.failures = self.failures.saturating_add(1);
+-        let circuit = self.failures >= self.config.failure_threshold;
++        let circuit = error.contains("AgentdProtocolMismatch") || self.failures >= self.config.failure_threshold;
+         let error = if circuit { format!("{}: {error}", BackendError::CircuitOpen) } else { error };
+         for route in self.routes.values_mut() { route.fail(&error); }
+         let mut status = self.status.lock();
+@@ -39,6 +41,7 @@ impl State {
+         eprintln!("{}", json!({"component":"agent.backend", "backend":"pi", "phase":"failure", "error":error}));
+         status.last_error = Some(error.clone());
+         drop(status);
++        for (_, reply, _) in self.deferred.drain(..) { let _ = reply.send(Err(error.clone())); }
+         for (_, pending) in self.pending.drain() {
+             if let Some(reply) = pending.reply { let _ = reply.send(Err(error.clone())); }
+         }
+@@ -56,12 +59,22 @@ impl State {
+                 if let Some(pending) = self.pending.remove(&id) {
+                     let result = if ok { Ok(result.unwrap_or(Value::Null)) }
+                         else { Err(error.map(|e| format!("{}: {}", e.code, e.message)).unwrap_or_else(|| "AgentdResponseError".into())) };
+-                    if let Some(reply) = pending.reply { let _ = reply.send(result); }
+-                    else {
+-                        let value = result.map_err(anyhow::Error::msg)?;
+-                        anyhow::ensure!(value.get("status").and_then(Value::as_str) == Some("ok"), "AgentdPingFailed");
+-                        self.status.lock().healthy = true;
+-                    }
++                    if pending.ping {
++                        let checked = result.and_then(|v| super::protocol::check_ping(v.clone())
++                            .map(|ping| (v, ping)).map_err(|e| e.to_string()));
++                        match checked {
++                            Ok((value, ping)) => {
++                                let mut status = self.status.lock();
++                                status.healthy = true;
++                                status.agentd_version = Some(ping.version);
++                                if let Some(reply) = pending.reply { let _ = reply.send(Ok(value)); }
++                            }
++                            Err(error) => {
++                                if let Some(reply) = pending.reply { let _ = reply.send(Err(error.clone())); }
++                                anyhow::bail!(error);
++                            }
++                        }
++                    } else if let Some(reply) = pending.reply { let _ = reply.send(result); }
+                 }
+             }
+             Frame::Event { session_id, turn_id, event } => {
+@@ -75,6 +88,8 @@ impl State {
+         self.last_used = Instant::now();
+         match command {
+             Control::Stop => { self.stopping = true; }
++            #[cfg(test)]
++            Control::TestExit(_) | Control::TestClose => unreachable!("handled by run"),
+             Control::Fail(req, message) => {
+                 for route in self.routes.values_mut().filter(|r| r.req == req) { route.fail(&message); }
+             }
+@@ -96,6 +111,12 @@ impl State {
+             }
+             Control::Request(command, reply) => {
+                 if let Some(process) = process {
++                    if !self.status.lock().healthy {
++                        if self.deferred.len() >= self.config.channel_capacity {
++                            let _ = reply.send(Err("AgentdHandshakeQueueFull".into()));
++                        } else { self.deferred.push((command, reply, Instant::now())); }
++                        return Ok(());
++                    }
+                     if let Err(e) = self.request(process, command, Some(reply.clone())) {
+                         let _ = reply.send(Err(e.to_string()));
+                         return Err(e);
+@@ -159,7 +180,8 @@ impl State {
+                 anyhow::bail!(error);
+             }
+         }
+-        if self.pending.values().any(|p| p.since.elapsed().as_millis() >= self.config.request_timeout_ms as u128) {
++        if self.pending.values().any(|p| p.since.elapsed().as_millis() >= self.config.request_timeout_ms as u128)
++            || self.deferred.iter().any(|(_, _, since)| since.elapsed().as_millis() >= self.config.request_timeout_ms as u128) {
+             if process.is_some_and(Process::writes_pending) { anyhow::bail!(super::process::WRITER_BACKPRESSURE); }
+             anyhow::bail!("AgentdRequestTimeout");
+         }
+@@ -168,13 +190,25 @@ impl State {
+ }
+ // Also runs when the supervisor future is dropped or its thread unwinds.
+ impl Drop for State {
+-    fn drop(&mut self) { self.active.lock().clear(); }
++    fn drop(&mut self) {
++        {
++            let mut status = self.status.lock();
++            status.healthy = false;
++            status.pid = None;
++            if !self.stopping || !self.routes.is_empty() {
++                status.last_error = Some(super::routes::SUPERVISOR_EXITED.into());
++            }
++        }
++        // Publish failure before waking stream consumers and control callers.
++        self.routes.clear();
++        self.active.lock().clear();
++    }
+ }
+ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mutex<BackendStatus>>,
+     active: Arc<Mutex<HashMap<String, String>>>) {
+     let now = Instant::now();
+     let mut s = State { config, status, active, routes: HashMap::new(), pending: HashMap::new(),
+-        counter: 0, failures: 0, next_start: now, last_ping: now, started: now, last_used: now, stopping: false };
++        deferred: Vec::new(), counter: 0, failures: 0, next_start: now, last_ping: now, started: now, last_used: now, stopping: false };
+     let mut process: Option<Process> = None;
+     let mut ever_started = false;
+     let mut idle = false;
+@@ -197,6 +231,13 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
+         let outcome: anyhow::Result<()> = tokio::select! {
+             command = rx.recv() => {
+                 match command {
++                    #[cfg(test)]
++                    Some(Control::TestExit(panic)) => {
++                        assert!(!panic, "injected supervisor panic");
++                        return;
++                    }
++                    #[cfg(test)]
++                    Some(Control::TestClose) => { rx.close(); Ok(()) }
+                     Some(command) => {
+                         if idle {
+                             idle = false;
+@@ -213,7 +254,7 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
+                         }
+                         s.control(command, process.as_ref())
+                     }
+-                    None => { s.stopping = true; Ok(()) }
++                    None => break,
+                 }
+             }
+             frame = async { match &mut process { Some(p) => p.incoming.recv().await, None => std::future::pending().await } }, if ready => {
+@@ -234,6 +275,19 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
+                 } else { deadlines }
+             }
+         };
++        let outcome = outcome.and_then(|()| {
++            if s.status.lock().healthy {
++                if let Some(p) = process.as_ref() {
++                    for (command, reply, _) in std::mem::take(&mut s.deferred) {
++                        if let Err(error) = s.request(p, command, Some(reply.clone())) {
++                            let _ = reply.send(Err(error.to_string()));
++                            return Err(error);
++                        }
++                    }
++                }
++            }
++            Ok(())
++        });
+         if let Err(error) = outcome {
+             s.fail(error.to_string());
+             if let Some(mut p) = process.take() { p.stop().await; }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/types.rs b/src-tauri/crates/polaris-kernel/src/chat/types.rs
+index bba33d0..06424bd 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/types.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/types.rs
+@@ -32,6 +32,12 @@ impl PermissionMode {
+ #[serde(rename_all = "camelCase")]
+ pub struct ChatSendArgs {
+     pub prompt: String,
++    /// Explicit uploaded images; prompt paths remain available to legacy tools.
++    #[serde(default)]
++    pub image_paths: Option<Vec<String>>,
++    /// Pi thinking level; omitted values keep the daemon's default/current level.
++    #[serde(default)]
++    pub thinking_level: Option<String>,
+     pub permission_mode: PermissionMode,
+     #[serde(default)]
+     pub use_sandbox: bool,
+diff --git a/src-tauri/crates/polaris-kernel/src/headless.rs b/src-tauri/crates/polaris-kernel/src/headless.rs
+index 6c6b5e3..e93dda8 100644
+--- a/src-tauri/crates/polaris-kernel/src/headless.rs
++++ b/src-tauri/crates/polaris-kernel/src/headless.rs
+@@ -14,7 +14,7 @@ fn run<F: FnMut(&str, &str)>(root: &Path, prompt: &str, mut on_event: F, timeout
+     let input = TurnRequest {
+         req_id: req.clone(), session_id: req.clone(), conversation_id: None,
+         prompt: prompt.into(), permission: crate::chat::PermissionMode::Deny,
+-        model: None, cwd: root.into(), attachments: vec![], account_id: None, timeout, legacy: None,
++        model: None, thinking_level: None, cwd: root.into(), attachments: vec![], account_id: None, timeout, legacy: None,
+     };
+     let legacy = selected.status().backend == "claude-cli";
+     let result = backend::collect(selected.as_ref(), input, |kind, text| {
+diff --git a/src-tauri/crates/polaris-kernel/src/integrations/feishu.rs b/src-tauri/crates/polaris-kernel/src/integrations/feishu.rs
+index 4c04c22..7ac904d 100644
+--- a/src-tauri/crates/polaris-kernel/src/integrations/feishu.rs
++++ b/src-tauri/crates/polaris-kernel/src/integrations/feishu.rs
+@@ -835,6 +835,8 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
+             );
+             let args = crate::chat::ChatSendArgs {
+                 prompt: text.clone(),
++                image_paths: None,
++                thinking_level: None,
+                 permission_mode: if unsafe_host_tools {
+                     crate::chat::PermissionMode::AutoAll
+                 } else {
+diff --git a/src/lib/chatImages.test.ts b/src/lib/chatImages.test.ts
+new file mode 100644
+index 0000000..018613a
+--- /dev/null
++++ b/src/lib/chatImages.test.ts
+@@ -0,0 +1,22 @@
++import { describe, expect, it } from "vitest";
++import type { AttachedFile } from "../tauri";
++import { uploadedImagePaths } from "./chatImages";
++
++describe("uploadedImagePaths", () => {
++  it("omits the optional field for old text-only sends", () => {
++    expect(uploadedImagePaths()).toBeUndefined();
++    expect(uploadedImagePaths([])).toBeUndefined();
++  });
++
++  it("keeps uploaded image order and paths without guessing MIME or mutating attachments", () => {
++    const files: AttachedFile[] = [
++      { name: "a.png", path: "/uploads/a.png", kind: "image", size: 12, ok: true },
++      { name: "b.txt", path: "/uploads/b.txt", kind: "text", size: 12, ok: true },
++      { name: "failed.png", path: "", kind: "image", size: 0, ok: false },
++      { name: "c.svg", path: "/uploads/c.svg", kind: "image", size: 12, ok: true },
++    ];
++    const before = JSON.stringify(files);
++    expect(uploadedImagePaths(files)).toEqual(["/uploads/a.png", "/uploads/c.svg"]);
++    expect(JSON.stringify(files)).toBe(before);
++  });
++});
+diff --git a/src/lib/chatImages.ts b/src/lib/chatImages.ts
+new file mode 100644
+index 0000000..133c70e
+--- /dev/null
++++ b/src/lib/chatImages.ts
+@@ -0,0 +1,7 @@
++import type { AttachedFile } from "../tauri";
++
++/** Preserve every uploaded image for backend validation, including unsupported MIME types. */
++export function uploadedImagePaths(files?: readonly AttachedFile[]): string[] | undefined {
++  const paths = files?.filter((file) => file.ok && file.kind === "image").map((file) => file.path);
++  return paths?.length ? paths : undefined;
++}
+diff --git a/src/stores/chat.ts b/src/stores/chat.ts
+index 4f64790..6411450 100644
+--- a/src/stores/chat.ts
++++ b/src/stores/chat.ts
+@@ -12,6 +12,7 @@ import { useAppStore } from "./app";
+ import { useArtifactsStore } from "./artifacts";
+ import { useSessionsStore } from "../features/coworker/stores/sessions";
+ import { humanizeError } from "../lib/humanizeError";
++import { uploadedImagePaths } from "../lib/chatImages";
+ 
+ export interface Bubble {
+   role: "user" | "assistant" | "tool";
+@@ -411,6 +412,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
+     sessions.start(convId, displayText.slice(0, 18));
+     try {
+       const reqId = await chatApi.send({
++        imagePaths: uploadedImagePaths(files),
+         prompt,
+         permissionMode: opts.permissionMode,
+         skillIds: opts.skillIds,
+diff --git a/src/tauri.ts b/src/tauri.ts
+index 4462fe3..f63104d 100644
+--- a/src/tauri.ts
++++ b/src/tauri.ts
+@@ -1055,6 +1055,8 @@ export type PermissionMode =
+   | "deny";
+ 
+ export interface ChatSendArgs {
++  imagePaths?: string[];
++  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+   prompt: string;
+   permissionMode: PermissionMode;
+   useSandbox?: boolean;

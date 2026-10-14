@@ -1,0 +1,121 @@
+## 审查报告
+
+**审查模式**：packet（无工具）
+
+**结论**：CHANGES_REQUIRED
+
+---
+
+### 范围与缺失材料
+
+本次审查基于 `P25-diff.patch` 中内联的 diff，范围为 R1c（异常退出必收尾）、P2.5（协议 v2 握手与档位配置）、P2.5b（图片附件校验）。brief 提供了沙箱外测试摘要，无原始测试代码、运行时 trace 或 repo 访问权限。
+
+---
+
+### 问题
+
+#### 1. **[严重] TurnStream::process() 内 panic 导致 Mailbox 死锁，违反 R1c**
+
+**文件**：`src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs`，第 1086-1082 行（Route::drop）  
+**文件**：`src-tauri/crates/polaris-kernel/src/chat/backend/stream.rs`（Mailbox::finish）
+
+**证据**：`TurnStream::process()` 在持有 `self.inner`（Mailbox Mutex）期间执行 turn 操作。若 turn panic（例如 SDK 断言失败、库 panic、代码 bug），则锁在 panic 展开期间仍被持有：
+
+```rust
+// stream.rs - StreamGuard::process()
+let guard = self.inner.lock(); // 持有锁
+// ... turn 执行，可能 panic
+return guard.process(...); // 锁在 panic 展开期间不释放
+```
+
+当 `TurnGuard`（在 `reader_loop` 中）被 drop 时：
+
+```rust
+// completion.rs - TurnGuard::drop()
+stream.finish(...) // 内部尝试再次 lock(self.inner)
+```
+
+死锁形成：`guard.drop()` 阻塞在 `self.inner` 上，而持有该锁的 worker thread 正在 panic 展开，两者互相等待。`finish()` 永远无法执行，**error→done 永远不会发到前端**。
+
+**影响**：违反 R1c 要求（"任何 reader/job 异常都必须给前端发 error→done，且终态不重复"）。前端永久收不到该 turn 的任何结束信号。
+
+**最小修复建议**：在 `StreamGuard::process()` 的 panic 路径上，确保 Mailbox 能发送 error→done 再重新 panic。可将 turn 包裹在 `catch_unwind` 中，手动 drop `StreamGuard` 后再重新 panic；或使 `TurnGuard::drop` 不依赖 `finish()`，而是直接操作 channel。
+
+---
+
+#### 2. **[严重] metadata() 未使用 O_NOFOLLOW，TOCTOU 窗口存在**
+
+**文件**：`src-tauri/crates/polaris-kernel/src/chat/backend/images.rs`，第 821 行
+
+**证据**：
+
+```rust
+let file = options.open(&path).context(...)?; // 有 O_NOFOLLOW
+let meta = file.metadata().context(...)?;      // 无 O_NOFOLLOW ← 问题
+anyhow::ensure!(meta.is_file(), "ATTACHMENT_NOT_FILE");
+```
+
+文件 `open()` 使用了 `O_NOFOLLOW`，但后续 `file.metadata()` 未使用 `O_NOFOLLOW`。若在 `is_file()` 检查通过后、后续读取前，攻击者将文件替换为指向 uploads 目录外文件的符号链接（通过 /proc/self/fd 或其他可预测路径），`meta.is_file()` 检查的是原文件而非已打开的文件句柄（但 `file` 已是 O_NOFOLLOW 打开，其后续元数据应与打开时一致）。更关键的是，`meta.len()` 用于判断大小，而 `meta` 来自已打开的 `file` fd——这是正确的，但 `is_file()` 来自独立的 `meta`，两者之间存在 TOCTOU 窗口。
+
+此外，`fs::symlink_metadata(uploads)` 和 `path.is_absolute() && !path.components().any(...)` 检查均在 `canonicalize()` 前执行，而 `canonicalize()` 会解析路径——若路径不含 `..`，两个检查无作用。
+
+**最小修复建议**：将 `meta.is_file()` 改为基于已打开 `file` fd 的属性判断，或在 `metadata()` 后再次 `is_file()` 检查后确保没有目录替换。
+
+---
+
+#### 3. **[中等] State::drop 未清理 deferred，restart 后旧 in-flight 请求丢失**
+
+**文件**：`src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs`，第 1278-1292 行
+
+**证据**：`State::drop` 清除了 `routes`（触发 error→done 发送）和 `pending`（发送错误到 reply channel），但**未处理 `deferred`**。`deferred` 中是尚未发送给 agentd 的请求（因 `healthy = false` 而排队）。
+
+```rust
+// drop 中：
+self.routes.clear();   // ✓ 清理，触发 error→done
+// self.pending.drain(...)  // ✓ pending 被 fail() 清理
+// self.deferred.drain(...) // ✗ 未清理，restart 后丢失
+self.active.lock().clear();
+```
+
+Restart 流程：State drop → new supervisor spawn → ping 成功 → drain deferred。若在 State drop 后、drain 前有新 ping 成功，旧的 deferred 请求被处理并发送给新 agentd；但若 ping 本身在 deferred 中且失败，deferred 未清理。
+
+更核心的问题是：若 deferred 非空且 restart 后永不 drain（例如 `healthy` 持续为 false），这些请求永远不会被处理，调用者会 timeout。
+
+**最小修复建议**：在 `State::drop` 中也对 `deferred` 执行 drain，或在 `deferred` 满时对已在队列的请求执行 cancel 通知。
+
+---
+
+#### 4. **[低] refreshConfig 跳过 configuring 会话，未回写 toolProfile 状态**
+
+**文件**：`src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs`
+
+`refreshConfig` 检查 `!entry.configuring` 以避免打扰正在进行的配置。但若配置中途失败，`entry.toolProfile` 仍保持旧值，`refreshConfig` 不会更新。这在配置失败后立即 apply 新 config 时可能导致会话使用过期的 toolProfile（虽然在 `configureSession` 成功后更新 toolProfile，但失败路径未清理）。
+
+**最小修复建议**：配置失败时将 `entry.toolProfile` 回退到默认值，或在下次 `prompt` 前再次校验。
+
+---
+
+### 建议验证步骤（区分推断风险与已有证据）
+
+| 风险 | 推断/已有证据 | 验证建议 |
+|------|--------------|---------|
+| TurnStream 死锁 | **已有证据**：代码结构确认 lock 跨越 panic 边界；无 catch_unwind 包装 | 注入 panic（assert false）于 turn 执行期间，观察前端是否收到 error→done |
+| TOCTOU 路径逃逸 | **推断风险**（无 repo 验证）：符号链接替换窗口 | 用可预测 fd 构造 race，输入验证通过后替换为目录外符号链接 |
+| deferred 丢失 | **推断风险**：drop 未处理 deferred | 模拟 healthy=false 时发送请求，观察 restart 后 timeout 是否发生 |
+| 图片大小 2x 读取 | **已有证据**：代码确认 `take(budget+1)` 后检查；实现可接受 | 用极小 budget（如 1 byte）传大文件，确认内存不超 2x budget |
+| 协议握手所有路径 | **已有证据**：`check_ping` 逻辑清晰；CircuitOpen 立即触发 | 模拟版本不匹配，验证熔断后 deferred 不被发送 |
+
+---
+
+### 无问题说明
+
+以下方面经 diff 审阅**未发现阻塞问题**：
+
+- **base64 校验**：`bytes.toString("base64") !== item.data` 检测非规范 base64，逻辑正确
+- **大小限制读取前校验**（agentd）：`item.data.length > Math.ceil(limits.maxBytes / 3) * 4` 为字符长度上界，正确地在 Buffer decode 前挡住超大输入
+- **大小限制读取前校验**（Rust）：`meta.len() <= budget as u64` 在 `read_to_end` 前检查文件元数据大小
+- **终态不重复**：`is_finished()` 先检查 + `finish()` 内 re-check，正确防止双重 terminal
+- **panic 终态顺序**：`Route::drop` 先 error 后 done，`TurnGuard::drop` 先 `record_failure` 后 `finish`，顺序正确
+- **session.configure 拒绝 busy 会话**：两次检查 `entry.run || entry.configuring` 和 `!entry.session.isIdle`，逻辑一致
+- **SessionOptions 跳过未定义字段**：Schema `additionalProperties: false` + TypeScript `...SessionOptionsSchema.properties`，旧前端字段被静默忽略
+- **ping 版本握手**：Rust `check_ping` 提取 `protocolVersion`，不一致时 `contains("AgentdProtocolMismatch")` 触发熔断
