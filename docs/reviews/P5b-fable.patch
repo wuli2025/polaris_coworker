@@ -1,0 +1,331 @@
+diff --git a/src-tauri/crates/polaris-fable/src/fable/echo.rs b/src-tauri/crates/polaris-fable/src/fable/echo.rs
+index 5125267..2167c82 100644
+--- a/src-tauri/crates/polaris-fable/src/fable/echo.rs
++++ b/src-tauri/crates/polaris-fable/src/fable/echo.rs
+@@ -657,7 +657,7 @@ fn distill_and_write(
+ 
+     // 墙钟超时:子进程挂死(网络/供应商卡住)时无超时版会让本线程永不返回 → DREAMING 闸
+     // 永远不复位,「做梦/清空上下文」全线报「正在做梦中」直到重启。到点 kill 整树回收。
+-    let collected = crate::kb::run_claude_readonly_timeout(
++    let collected = crate::kb::run_agent_readonly_timeout(
+         &kb_root,
+         &prompt,
+         |kind, text| {
+@@ -990,7 +990,7 @@ fn generate_briefing(
+     let day = local_day();
+     let prompt = suggest_directive(&day, &material);
+     // 墙钟超时同上:晨报建议卡死不能钉住 DREAMING 闸。
+-    let collected = crate::kb::run_claude_readonly_timeout(
++    let collected = crate::kb::run_agent_readonly_timeout(
+         &kb_root,
+         &prompt,
+         |kind, text| {
+diff --git a/src-tauri/crates/polaris-fable/src/fable/files/llm.rs b/src-tauri/crates/polaris-fable/src/fable/files/llm.rs
+index 54bac9d..033b5c8 100644
+--- a/src-tauri/crates/polaris-fable/src/fable/files/llm.rs
++++ b/src-tauri/crates/polaris-fable/src/fable/files/llm.rs
+@@ -4,7 +4,7 @@ use super::*;
+ //
+ // 用户没有硅基嵌入 key,但聊天大模型(claude/配置的供应商)已经接通 → 直接让它读
+ // 文件清单、按主题归类,Rust 写回 cluster_id + clusters 表。
+-// 复用回声层「做梦」同一套:run_claude_readonly(无头跑已连接模型)+ extract_balanced_json。
++// 复用回声层「做梦」同一套:run_agent_readonly(无头跑已连接模型)+ extract_balanced_json。
+ 
+ // ── 归类专用模型(可选):独立于「对话供应商」,可指向便宜/免费的 OpenAI 兼容端点 ──
+ // 不配 → AI 归类沿用你聊天那个大模型;配了 → 走这个(例:硅基流动免费对话模型,省钱)。
+@@ -240,7 +240,7 @@ pub(crate) fn cluster_llm_run(
+     }
+ 
+     let prompt = llm_cluster_directive(&files);
+-    // 配了独立归类模型 → 直连它(省钱);否则用聊天那个大模型(run_claude_readonly)。
++    // 配了独立归类模型 → 直连它(省钱);否则用聊天那个大模型(run_agent_readonly)。
+     let collected = if let Some(cfg) = active_cluster_model() {
+         emit_llm(
+             app,
+@@ -259,7 +259,7 @@ pub(crate) fn cluster_llm_run(
+             std::env::temp_dir()
+         };
+         // 墙钟超时:无超时版挂死会把 CLUSTERS_TABLE_WRITE 一类一次性闸永久钉死(归类此后一直拒绝)。
+-        crate::kb::run_claude_readonly_timeout(
++        crate::kb::run_agent_readonly_timeout(
+             &cwd,
+             &prompt,
+             |kind, _text| {
+@@ -888,7 +888,7 @@ pub(crate) fn cluster_rename_llm(
+             std::env::temp_dir()
+         };
+         // 墙钟超时同上:命名卡死不能钉死后续归类。
+-        crate::kb::run_claude_readonly_timeout(
++        crate::kb::run_agent_readonly_timeout(
+             &cwd,
+             &prompt,
+             |kind, _t| {
+@@ -920,7 +920,7 @@ pub(crate) fn cluster_rename_llm(
+ //
+ // 「本地档」清洗名(clean_title)救不了的(纯哈希/纯乱码/纯时间戳图片名),交给已连接的大模型
+ // 按目录+类型+名字线索起个可读中文标题,写进 titles 表覆盖显示(磁盘文件名不动)。复用归类那套
+-// (独立归类模型 or run_claude_readonly + extract_balanced_json)。
++// (独立归类模型 or run_agent_readonly + extract_balanced_json)。
+ 
+ pub(crate) static LLM_TITLING: AtomicBool = AtomicBool::new(false);
+ 
+@@ -994,7 +994,7 @@ pub(crate) fn titles_llm_run(app: &AppHandle, root: Option<String>) -> Result<us
+             std::env::temp_dir()
+         };
+         // 墙钟超时同上。
+-        crate::kb::run_claude_readonly_timeout(
++        crate::kb::run_agent_readonly_timeout(
+             &cwd,
+             &prompt,
+             |kind, _text| {
+diff --git a/src-tauri/crates/polaris-fable/src/fable/files/profile.rs b/src-tauri/crates/polaris-fable/src/fable/files/profile.rs
+index 6128064..904dbe9 100644
+--- a/src-tauri/crates/polaris-fable/src/fable/files/profile.rs
++++ b/src-tauri/crates/polaris-fable/src/fable/files/profile.rs
+@@ -401,7 +401,7 @@ pub fn suggest_workflows(root: Option<String>) -> Result<Vec<SuggestedFlow>, Str
+                 std::env::temp_dir()
+             };
+             // 墙钟超时:向导收尾的建议卡死不能钉住阻塞线程池(挂了就用本地兜底卡)。
+-            crate::kb::run_claude_readonly_timeout(
++            crate::kb::run_agent_readonly_timeout(
+                 &cwd,
+                 &prompt,
+                 |_k, _t| {},
+diff --git a/src-tauri/crates/polaris-fable/src/fable/files/tests.rs b/src-tauri/crates/polaris-fable/src/fable/files/tests.rs
+index 3b15090..876f19f 100644
+--- a/src-tauri/crates/polaris-fable/src/fable/files/tests.rs
++++ b/src-tauri/crates/polaris-fable/src/fable/files/tests.rs
+@@ -251,7 +251,7 @@ fn digest_directive_includes_ids_and_samples() {
+ //   ③ 命名准确度(AI 簇名是否命中该簇主导主题 + 是否亲切中文)
+ //   ④ 关系边数量
+ // 隔离:用临时 db,绝不碰用户真实 ~/Polaris/data/fable.db。
+-// 触发:仅当置 POLARIS_CLUSTER_EVAL=1 才跑(普通 cargo test 跳过);真大模型走 run_claude_readonly
++// 触发:仅当置 POLARIS_CLUSTER_EVAL=1 才跑(普通 cargo test 跳过);真大模型走 run_agent_readonly
+ //   (置 EVAL_NO_LLM=1 则只测 T0,不调模型)。结果按 EVAL_OUT 追加一行 JSON。
+ 
+ fn env_u64(k: &str, d: u64) -> u64 {
+@@ -615,7 +615,7 @@ fn cluster_eval_run() {
+         let digests = collect_cluster_digests(&conn, &[]).unwrap();
+         let prompt = digest_directive(&digests);
+         let cwd = std::env::temp_dir();
+-        match crate::kb::run_claude_readonly(&cwd, &prompt, |_, _| {}) {
++        match crate::kb::run_agent_readonly(&cwd, &prompt, |_, _| {}) {
+             Ok(text) => match crate::kb::extract_balanced_json(&text) {
+                 Some(raw) => match serde_json::from_str::<LlmNameRel>(&raw) {
+                     Ok(parsed) => {
+diff --git a/src-tauri/crates/polaris-fable/src/fable/inventory/path_tests.rs b/src-tauri/crates/polaris-fable/src/fable/inventory/path_tests.rs
+new file mode 100644
+index 0000000..75262c8
+--- /dev/null
++++ b/src-tauri/crates/polaris-fable/src/fable/inventory/path_tests.rs
+@@ -0,0 +1,10 @@
++//! Native platform path construction preserves the Windows contract.
++use super::*;
++
++#[test]
++fn rel_of_is_root_relative_slash_path() {
++    let root = if cfg!(windows) { Path::new(r"C:\kb") } else { Path::new("/kb") };
++    assert_eq!(rel_of(root, root), "");
++    assert_eq!(rel_of(&root.join("a"), root), "a");
++    assert_eq!(rel_of(&root.join("a").join("b"), root), "a/b");
++}
+diff --git a/src-tauri/crates/polaris-fable/src/fable/inventory/tests.rs b/src-tauri/crates/polaris-fable/src/fable/inventory/tests.rs
+index 5331361..3253358 100644
+--- a/src-tauri/crates/polaris-fable/src/fable/inventory/tests.rs
++++ b/src-tauri/crates/polaris-fable/src/fable/inventory/tests.rs
+@@ -417,13 +417,8 @@ fn parent_rel_walks_up_one_level() {
+     assert_eq!(parent_rel("资料/项目/稿"), "资料/项目"); // CJK 同样按 '/' 分段
+ }
+ 
+-#[test]
+-fn rel_of_is_root_relative_slash_path() {
+-    let root = Path::new(r"C:\kb");
+-    assert_eq!(rel_of(Path::new(r"C:\kb"), root), ""); // 根自身 = ""
+-    assert_eq!(rel_of(Path::new(r"C:\kb\a"), root), "a");
+-    assert_eq!(rel_of(Path::new(r"C:\kb\a\b"), root), "a/b"); // 反斜杠归一成 '/'
+-}
++#[path = "path_tests.rs"]
++mod path_tests;
+ 
+ /// 增量「跳过没变目录」最易错的一步:把某目录的**直属**文件 seen 刷成本轮代际,
+ /// 而**不**波及它的子目录文件(那些由各自目录处理)、也不碰兄弟目录。这里用内存 SQLite
+diff --git a/src-tauri/crates/polaris-fable/src/fable/ontology.rs b/src-tauri/crates/polaris-fable/src/fable/ontology.rs
+index 3fcadfc..5ff288c 100644
+--- a/src-tauri/crates/polaris-fable/src/fable/ontology.rs
++++ b/src-tauri/crates/polaris-fable/src/fable/ontology.rs
+@@ -473,7 +473,7 @@ pub fn ontology_extract(app: AppHandle, schema_id: String) -> Result<String, Str
+             json!({ "kind": "phase", "text": "在框内读资料、抽关系三元组…" }),
+         );
+         // 墙钟超时:子进程挂死会把 EXTRACTING 闸永久钉死(构建知识体系此后一直拒绝)。
+-        let collected = match crate::kb::run_claude_readonly_timeout(
++        let collected = match crate::kb::run_agent_readonly_timeout(
+             &cwd,
+             &prompt,
+             |kind, _t| {
+diff --git a/src-tauri/crates/polaris-fable/src/fable/retrieve/ai.rs b/src-tauri/crates/polaris-fable/src/fable/retrieve/ai.rs
+index 709b856..c983eaf 100644
+--- a/src-tauri/crates/polaris-fable/src/fable/retrieve/ai.rs
++++ b/src-tauri/crates/polaris-fable/src/fable/retrieve/ai.rs
+@@ -202,7 +202,7 @@ fn ai_expand_query(query: &str) -> Result<Vec<String>, String> {
+     );
+     // 墙钟超时 10 分钟:claude 卡住也能放手(上层 unwrap_or_default 退回 base),
+     // 不把 server 有限的阻塞线程池永久钉死、不泄漏子进程(长任务铁律:整树回收)。
+-    let raw = crate::kb::run_claude_readonly_timeout(
++    let raw = crate::kb::run_agent_readonly_timeout(
+         root_path,
+         &prompt,
+         |_, _| {},
+diff --git a/src-tauri/crates/polaris-fable/src/kb/access.rs b/src-tauri/crates/polaris-fable/src/kb/access.rs
+index c445260..2c5ad12 100644
+--- a/src-tauri/crates/polaris-fable/src/kb/access.rs
++++ b/src-tauri/crates/polaris-fable/src/kb/access.rs
+@@ -419,41 +419,6 @@ mod tests {
+         let _ = fs::remove_dir_all(&base);
+     }
+ 
+-    #[test]
+-    fn path_contains_handles_verbatim_prefix_and_case() {
+-        // 同根, 子在内: 放行
+-        assert!(path_contains(
+-            Path::new(r"C:\Users\a\Polaris"),
+-            Path::new(r"C:\Users\a\Polaris\x.md")
+-        ));
+-        // 关键回归: 一端带 Windows `\\?\` 扩展长度前缀、一端没有, 仍判为包含 (旧裸 starts_with 会误判越界)
+-        assert!(path_contains(
+-            Path::new(r"C:\Users\a\Polaris"),
+-            Path::new(r"\\?\C:\Users\a\Polaris\x.md")
+-        ));
+-        assert!(path_contains(
+-            Path::new(r"\\?\C:\Users\a\Polaris"),
+-            Path::new(r"C:\Users\a\Polaris\x.md")
+-        ));
+-        // 伪前缀: 组件级比较不应把 `Polaris-bak` 当成 `Polaris` 的子树
+-        assert!(!path_contains(
+-            Path::new(r"C:\Users\a\Polaris"),
+-            Path::new(r"C:\Users\a\Polaris-bak\x.md")
+-        ));
+-        // 真越界: 不在根下
+-        assert!(!path_contains(
+-            Path::new(r"C:\Users\a\Polaris"),
+-            Path::new(r"C:\Windows\System32\drivers\etc\hosts")
+-        ));
+-        // Windows 上大小写不敏感: 根与子大小写不一致也应判为包含
+-        if cfg!(windows) {
+-            assert!(path_contains(
+-                Path::new(r"C:\Users\A\Polaris"),
+-                Path::new(r"c:\users\a\polaris\x.md")
+-            ));
+-        }
+-    }
+-
+     #[test]
+     fn context_block_surplus_when_nav_is_small() {
+         // 实际库 < 100 字符, 注入应接近原样而不被 55% 上限「闲置」
+@@ -497,3 +462,7 @@ mod tests {
+         assert!(out.chars().count() > 10);
+     }
+ }
++
++#[cfg(test)]
++#[path = "access_path_tests.rs"]
++mod path_tests;
+diff --git a/src-tauri/crates/polaris-fable/src/kb/access_path_tests.rs b/src-tauri/crates/polaris-fable/src/kb/access_path_tests.rs
+new file mode 100644
+index 0000000..15e0dbd
+--- /dev/null
++++ b/src-tauri/crates/polaris-fable/src/kb/access_path_tests.rs
+@@ -0,0 +1,48 @@
++//! Platform-specific path containment contracts; production logic is unchanged.
++use super::{path_contains, Path};
++
++#[test]
++#[cfg(not(windows))]
++fn path_contains_uses_posix_components_and_case() {
++    assert!(path_contains(Path::new("/kb"), Path::new("/kb/x.md")));
++    assert!(!path_contains(Path::new("/kb"), Path::new("/kb-backup/x.md")));
++    assert!(!path_contains(Path::new("/kb"), Path::new("/KB/x.md")));
++    assert!(!path_contains(Path::new("/kb"), Path::new("/outside/x.md")));
++}
++
++#[test]
++#[cfg(windows)]
++fn path_contains_handles_verbatim_prefix_and_case() {
++    // 同根, 子在内: 放行
++    assert!(path_contains(
++        Path::new(r"C:\Users\a\Polaris"),
++        Path::new(r"C:\Users\a\Polaris\x.md")
++    ));
++    // 关键回归: 一端带 Windows `\\?\` 扩展长度前缀、一端没有, 仍判为包含 (旧裸 starts_with 会误判越界)
++    assert!(path_contains(
++        Path::new(r"C:\Users\a\Polaris"),
++        Path::new(r"\\?\C:\Users\a\Polaris\x.md")
++    ));
++    assert!(path_contains(
++        Path::new(r"\\?\C:\Users\a\Polaris"),
++        Path::new(r"C:\Users\a\Polaris\x.md")
++    ));
++    // 伪前缀: 组件级比较不应把 `Polaris-bak` 当成 `Polaris` 的子树
++    assert!(!path_contains(
++        Path::new(r"C:\Users\a\Polaris"),
++        Path::new(r"C:\Users\a\Polaris-bak\x.md")
++    ));
++    // 真越界: 不在根下
++    assert!(!path_contains(
++        Path::new(r"C:\Users\a\Polaris"),
++        Path::new(r"C:\Windows\System32\drivers\etc\hosts")
++    ));
++    // Windows 上大小写不敏感: 根与子大小写不一致也应判为包含
++    if cfg!(windows) {
++        assert!(path_contains(
++            Path::new(r"C:\Users\A\Polaris"),
++            Path::new(r"c:\users\a\polaris\x.md")
++        ));
++    }
++}
++
+diff --git a/src-tauri/crates/polaris-fable/src/kb/enrich.rs b/src-tauri/crates/polaris-fable/src/kb/enrich.rs
+index 9e03076..2ac6fe3 100644
+--- a/src-tauri/crates/polaris-fable/src/kb/enrich.rs
++++ b/src-tauri/crates/polaris-fable/src/kb/enrich.rs
+@@ -202,7 +202,7 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
+ 现在开始, 直接输出 JSON 数组。"
+         );
+ 
+-        let raw = match run_claude_readonly(&root, &prompt, |kind, text| {
++        let raw = match run_agent_readonly(&root, &prompt, |kind, text| {
+             if kind == "tool" {
+                 emit("tool", Some(text.to_string()), None);
+             } else if kind == "delta" && !text.is_empty() {
+@@ -473,7 +473,7 @@ pub fn kb_dedup(app: AppHandle) -> Result<String, String> {
+ 现在开始, 直接输出 JSON 数组。"
+         );
+ 
+-        let raw = match run_claude_readonly(&root, &prompt, |kind, text| {
++        let raw = match run_agent_readonly(&root, &prompt, |kind, text| {
+             if kind == "tool" {
+                 emit("tool", Some(text.to_string()), None);
+             }
+diff --git a/src-tauri/crates/polaris-fable/src/kb/mod.rs b/src-tauri/crates/polaris-fable/src/kb/mod.rs
+index 910f704..1e7165d 100644
+--- a/src-tauri/crates/polaris-fable/src/kb/mod.rs
++++ b/src-tauri/crates/polaris-fable/src/kb/mod.rs
+@@ -27,9 +27,9 @@ pub mod search;
+ pub mod threat;
+ 
+ // headless claude 只读管线已下沉 polaris-kernel::headless(fable/wiki 共用);
+-// 此处转发保住 `kb::run_claude_readonly` 等全部旧调用路径(含 enrich 的 `use super::*`)。
++// 此处转发保住 `kb::run_agent_readonly` 等全部旧调用路径(含 enrich 的 `use super::*`)。
+ pub use polaris_kernel::headless::{
+-    extract_balanced_json, run_claude_readonly, run_claude_readonly_timeout,
++    extract_balanced_json, run_agent_readonly, run_agent_readonly_timeout,
+ };
+ 
+ // 共享依赖统一在此升为 pub(crate) 供子模块 `use super::*` 取用(与原单文件同一作用域语义)。
+@@ -60,3 +60,7 @@ pub use packs::*;
+ pub use scan::*;
+ pub use search::*;
+ pub use threat::*;
++
++// One-release compatibility for external consumers; internal callers use neutral names.
++#[allow(deprecated)]
++pub use polaris_kernel::headless::{run_claude_readonly, run_claude_readonly_timeout};
