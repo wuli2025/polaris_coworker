@@ -354,3 +354,19 @@ Linux 进程身份使用 boot ID + `/proc/PID/stat` 启动 tick，macOS 使用 C
 可回收的超时是租约上限，活持有者超过上限也可被回收；正常慢刷新在上限内受保护。配置应大于正常刷新最长时间。
 选择状态先记录并持久化，再下发 IPC；当前代次失败返回错误，保留选择供重试/下一轮准备下发；旧代次结果不回滚新选择。
 验证：agentd typecheck、两壳 check、vue-tsc、Vitest 通过；新增定向测试通过。全量 npm/kernel 仍存在环境/基线失败，详见报告；不宣称验收完成。
+
+## P5a 随包运行时、doctor 与 Docker（部分实现，验收 BLOCKED）
+
+| 入口 | 依赖与行为 | 配置、迁移与验证 |
+| --- | --- | --- |
+| `scripts/fetch-runtimes.mjs`、`scripts/runtime/node.mjs`、`scripts/pack-agentd.mjs` | 官方 Node 便携包 + SHA256；agentd 锁定生产依赖，ignore-scripts；生产树 SDK/WASM/原生模块自检 | Node 默认 engines 下限；POLARIS_NODE_VERSION/DEPS_BASE；stamp 按版本/目标复用；离线 Vitest；Linux 包 123,498,400 字节 |
+| `K/chat/backend/config.rs`、`K/doctor/bundled.rs`、`H/lib.rs`、tauri.conf | 显式路径→随包→debug 仓库 dist；Tauri 资源根；runtime 纳入 resources | POLARIS_RUNTIME_DIR、AGENTD_NODE/ENTRY/ARGS/NODE_ARGS；路径三场景测试；开发需先 npm run build |
+| `K/doctor/pi.rs`、check/verify/autopilot、install/update | 默认 Node/入口/ping/协议/Pi 版本/P4 凭据布尔就绪；Pi 不安装 Claude；旧动作仅 claude-cli | agent.backend；credentials 不输出明文；Pi deep=false；旧字段兼容；32 项 doctor 测试通过，4 个 Windows 路径基线失败修复 |
+| `K/doctor/{install,verify}/`、probe_helpers、path_tests | 安装模板、流式执行、校验步骤、冲突与测试按职责拆分 | 自有文件 ≤500 行；纯搬移和行为修改分列于报告 |
+| Dockerfile、compose、env examples、`H/apihub/server_status.rs`、docker-smoke.ps1 | 默认 Node+agentd；Claude 可选；agent_runtime 复用 backend status | INSTALL_CLAUDE=false；凭据 polaris-data / 会话 polaris-pi；旧 Claude 卷保留；Docker 实跑受环境阻塞 |
+| `src/types/doctor.ts`、`src/tauri.ts` | agentRuntime 类型与浏览器 mock；tauri.ts 净增 5 行 | P5c 按 legacyActions 控制按钮，改 Agent 文案；vue-tsc/Vitest 通过 |
+
+Windows shell 接线需要白名单外 agentd config/session 与 Rust process.rs，尚未授权，保持 BLOCKED；不把未接入的 MinGit 报为就绪。
+Node 下载受不可用代理阻塞，Windows/macOS 未实跑；agentd 全量仍有 2 文件失败，kernel 除 6 个 TCP 沙箱项后通过。
+两壳 offline check 通过。体积组成、官方 shell 配置依据、完整命令/失败名/未运行项、P5c 配合点见 [P5a 执行报告](pi-migration/p5a-runtime.md)。
+改动文件及物理行数见 [P5a 文件清单](pi-migration/p5a-files.md)。不作为 Claude / Pi 的最终验收结论。

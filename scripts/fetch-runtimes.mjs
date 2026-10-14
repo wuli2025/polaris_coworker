@@ -34,6 +34,8 @@ import {
   closeSync,
   statSync,
 } from "node:fs";
+import { nodeVersion, nodePlan, checksumFor, verifySha256, componentCurrent } from './runtime/node.mjs';
+import { packAgentd } from './pack-agentd.mjs';
 import { writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,7 +47,7 @@ const outRoot = join(srcTauri, "runtime");
 
 const isWin = process.platform === "win32";
 const isMac = process.platform === "darwin";
-if (!isWin && !isMac) {
+if (!["win32", "darwin", "linux"].includes(process.platform)) {
   console.log(`[fetch-runtimes] 平台 ${process.platform} 不打包运行时,跳过`);
   process.exit(0);
 }
@@ -62,15 +64,17 @@ const PY_TAG = "20260718"; // python-build-standalone release tag
 const GIT_VER = "2.55.0.3"; // MinGit 资产版本号
 const GIT_TAG = "v2.55.0.windows.3"; // 对应的 release tag
 
-const DEPS_BASE = "https://llmwiki.cloud/downloads/deps";
+const DEPS_BASE = process.env.POLARIS_DEPS_BASE ?? "https://llmwiki.cloud/downloads/deps";
+const NODE_VER = nodeVersion(JSON.parse(readFileSync(join(here, "../agentd/package.json"))).engines.node, process.env.POLARIS_NODE_VERSION);
 const ZIP_MAGIC = "504b"; // PK
 const GZ_MAGIC = "1f8b";
 
-const arch = process.arch === "arm64" ? "arm64" : "x64";
+const arch = process.arch;
 
 /** 本次平台要抓的组件清单。dir=解压目标(runtime/ 下),strip=解压后要不要提层。 */
 function plan() {
-  const items = [];
+  const items = [nodePlan(NODE_VER, process.platform, arch, { deps: DEPS_BASE })];
+  if (!isWin && !isMac) return items;
 
   // uv —— 单文件二进制,zip 里就是 uv.exe/uvx.exe(或 uv/uvx),解压到 runtime/uv
   const uvAsset = isWin
@@ -148,7 +152,7 @@ async function download(item, dest) {
   for (const url of item.urls) {
     try {
       console.log(`[fetch-runtimes] ${item.name} ← ${url}`);
-      const res = await fetch(url, { redirect: "follow" });
+      const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(120000) });
       if (!res.ok) {
         console.log(`[fetch-runtimes]   HTTP ${res.status},换下一个源`);
         continue;
@@ -170,6 +174,7 @@ async function download(item, dest) {
         );
         continue;
       }
+      if (item.sha256) verifySha256(readFileSync(dest), item.sha256);
       console.log(`[fetch-runtimes]   ✓ ${(size / 1048576).toFixed(1)}MB`);
       return true;
     } catch (e) {
@@ -217,18 +222,22 @@ const stampPath = join(outRoot, ".stamp.json");
 const want = {
   platform: process.platform,
   arch,
+  node: NODE_VER,
   uv: UV_VER,
   python: `${PY_VER}+${PY_TAG}`,
   ...(isWin ? { git: GIT_VER } : {}),
 };
 
+await packAgentd();
+let have;
 // 已抓齐且版本一致 → 秒退
 if (existsSync(stampPath)) {
   try {
-    const have = JSON.parse(readFileSync(stampPath, "utf8"));
+    have = JSON.parse(readFileSync(stampPath, "utf8"));
     const same = JSON.stringify(have) === JSON.stringify(want);
     const intact = items.every((it) =>
       existsSync(join(outRoot, it.dir, it.check))
+        && (it.name !== "git" || existsSync(join(outRoot, "git/usr/bin/bash.exe")))
     );
     if (same && intact) {
       console.log("[fetch-runtimes] 运行时已就绪(版本一致),跳过下载");
@@ -246,9 +255,15 @@ mkdirSync(tmpDir, { recursive: true });
 
 for (const item of items) {
   const target = join(outRoot, item.dir);
-  if (existsSync(join(target, item.check))) {
+  if (componentCurrent(have, want, item.name, existsSync(join(target, item.check)))) {
+    if (item.name === "git" && !existsSync(join(target, "usr/bin/bash.exe"))) materializeBash(target);
     console.log(`[fetch-runtimes] ${item.name} 已在,跳过`);
     continue;
+  }
+  if (item.checksumUrl) {
+    const response = await fetch(item.checksumUrl, { signal: AbortSignal.timeout(60000) });
+    if (!response.ok) throw new Error(`Official Node checksums: HTTP ${response.status}`);
+    item.sha256 = checksumFor(await response.text(), item.asset);
   }
   const archivePath = join(tmpDir, item.asset);
   if (!(await download(item, archivePath))) {

@@ -131,6 +131,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // Tauri resolves platform-specific resource layouts (including Linux bundles).
+            if std::env::var_os("POLARIS_RUNTIME_DIR").is_none() {
+                if let Ok(resources) = app.path().resource_dir() {
+                    std::env::set_var("POLARIS_RUNTIME_DIR", resources.join("runtime"));
+                }
+            }
             // 全局 panic 钩子(24/7 长稳第一道):任何后台线程(盘点/索引/做梦/热键/采集等)
             // panic 时,不再被默默吞掉成「死掉的子系统」,而是 eprintln + best-effort 追加到
             // 临时目录下的 polaris-panics.log(留耐久记录便于事后复盘)。链上一手以保留默认行为,

@@ -14,7 +14,8 @@
 		"build": "tsc -p tsconfig.json",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"test": "node --import tsx --test \"test/**/*.test.ts\"",
-		"start": "node dist/main.js"
+		"start": "node dist/main.js",
+		"package": "node ../scripts/pack-agentd.mjs"
 	},
 	"dependencies": {
 		"@earendil-works/pi-ai": "1.0.4",

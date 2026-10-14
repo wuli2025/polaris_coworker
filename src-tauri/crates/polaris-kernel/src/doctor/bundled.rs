@@ -1,4 +1,5 @@
-//! 随安装包分发的运行时 (uv / Python / Git Bash) 的定位与注入。
+//! 随安装包分发的 Node/agentd/uv/Python/Git Bash 的定位。
+//! Node/agentd 默认路径由 chat::backend::config::runtime_paths 消费。
 //!
 //! 出发点: 以前环境医生把 uv 与 PowerShell 7 当成「用户必须自己装」的东西 —— 启动关甚至会
 //! **自动替用户装 PowerShell 7**(弹 UAC、走 winget/MSI、国内还常拉不动)。这对「开箱即用」
@@ -57,7 +58,7 @@ fn resolve_root() -> Option<PathBuf> {
 
 /// 只认「确实装着我们那三样之一」的目录, 免得把某个同名空目录当成运行时根。
 fn is_runtime_root(p: &Path) -> bool {
-    p.join("uv").is_dir() || p.join("python").is_dir() || p.join("git").is_dir()
+    ["uv", "python", "git", "node", "agentd"].iter().any(|name| p.join(name).is_dir())
 }
 
 fn exe_name(stem: &str) -> String {

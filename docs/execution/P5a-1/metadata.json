@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-14T10:11:41.986374+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "257949db7ba0b5d64dc4d8ff9d2326b9afda8d4064df225fb52b66ad7f372ee9",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": "?? docs/execution/P5a-1/\n?? docs/reviews/P4-round2/\n?? docs/reviews/R5-diff.patch\n?? docs/reviews/R5-rereview-brief.md\n?? tests/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M .env.example\n M .env.server.example\n M Dockerfile\n M agentd/package.json\n M docker-compose.yml\n M docs/feature-tree.md\n M scripts/docker-smoke.ps1\n M scripts/fetch-runtimes.mjs\n M src-tauri/crates/polaris-kernel/src/chat/backend/config.rs\n M src-tauri/crates/polaris-kernel/src/doctor/autopilot.rs\n M src-tauri/crates/polaris-kernel/src/doctor/bundled.rs\n M src-tauri/crates/polaris-kernel/src/doctor/check.rs\n M src-tauri/crates/polaris-kernel/src/doctor/install.rs\n M src-tauri/crates/polaris-kernel/src/doctor/mod.rs\n M src-tauri/crates/polaris-kernel/src/doctor/path.rs\n M src-tauri/crates/polaris-kernel/src/doctor/probe.rs\n M src-tauri/crates/polaris-kernel/src/doctor/types.rs\n M src-tauri/crates/polaris-kernel/src/doctor/update.rs\n M src-tauri/crates/polaris-kernel/src/doctor/verify.rs\n M src-tauri/src/lib.rs\n M src-tauri/src/server.rs\n M src-tauri/tauri.conf.json\n M src/tauri.ts\n?? docs/execution/P5a-1/\n?? docs/pi-migration/p5a-files.md\n?? docs/pi-migration/p5a-runtime.md\n?? scripts/pack-agentd.mjs\n?? scripts/runtime/\n?? src-tauri/crates/polaris-kernel/src/doctor/install/\n?? src-tauri/crates/polaris-kernel/src/doctor/path_tests.rs\n?? src-tauri/crates/polaris-kernel/src/doctor/pi.rs\n?? src-tauri/crates/polaris-kernel/src/doctor/pi_tests.rs\n?? src-tauri/crates/polaris-kernel/src/doctor/probe_helpers.rs\n?? src-tauri/crates/polaris-kernel/src/doctor/verify/\n?? src-tauri/src/apihub/server_status.rs\n?? src/types/\n?? tests/\n",
+    "diff_stat": " .env.example                                       |   17 +-\n .env.server.example                                |   17 +-\n Dockerfile                                         |   70 +-\n agentd/package.json                                |    3 +-\n docker-compose.yml                                 |   16 +-\n docs/feature-tree.md                               |   16 +\n scripts/docker-smoke.ps1                           |    8 +-\n scripts/fetch-runtimes.mjs                         |   29 +-\n .../polaris-kernel/src/chat/backend/config.rs      |   20 +-\n .../crates/polaris-kernel/src/doctor/autopilot.rs  |   53 +-\n .../crates/polaris-kernel/src/doctor/bundled.rs    |    5 +-\n .../crates/polaris-kernel/src/doctor/check.rs      |    3 +\n .../crates/polaris-kernel/src/doctor/install.rs    |  774 +------------\n src-tauri/crates/polaris-kernel/src/doctor/mod.rs  |   32 +-\n src-tauri/crates/polaris-kernel/src/doctor/path.rs |   84 +-\n .../crates/polaris-kernel/src/doctor/probe.rs      |  307 +----\n .../crates/polaris-kernel/src/doctor/types.rs      |    5 +-\n .../crates/polaris-kernel/src/doctor/update.rs     |    5 +\n .../crates/polaris-kernel/src/doctor/verify.rs     | 1167 +-------------------\n src-tauri/src/lib.rs                               |    6 +\n src-tauri/src/server.rs                            |  184 +--\n src-tauri/tauri.conf.json                          |    7 +-\n src/tauri.ts                                       |    5 +\n 23 files changed, 249 insertions(+), 2584 deletions(-)\n"
+  },
+  "finished_at": "2026-10-14T10:31:36.228277+00:00"
+}

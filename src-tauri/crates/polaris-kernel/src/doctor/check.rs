@@ -27,6 +27,7 @@ pub fn env_check() -> EnvReport {
 /// 同步核:server flavor 与本文件内部(修 PATH / 装完复检)直接调用。
 /// 6 个工具探测互不依赖,用 scoped threads 并行跑 → 总耗时 = 最慢的单个探测。
 pub(crate) fn env_check_sync() -> EnvReport {
+    if !super::pi::legacy_enabled() { return super::pi::report(); }
     let os = std::env::consts::OS.to_string();
 
     // 体检顺手把 uv 目录并进本进程 PATH(幂等): 用户刚在本面板装完 uv 后, 前端会立即复检一次,
@@ -144,6 +145,7 @@ pub(crate) fn env_check_sync() -> EnvReport {
     let ready = claude.found && shell_ready;
 
     EnvReport {
+        agent_runtime: super::pi::AgentRuntimeReport { backend: "claude-cli".into(), legacy_actions: true, ..Default::default() },
         os,
         claude,
         pwsh,
@@ -164,6 +166,7 @@ pub(crate) fn env_check_sync() -> EnvReport {
 /// 修复 PATH: 把 claude 所在目录写进用户 PATH + 当前进程 PATH。
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_fix_path() -> Result<PathFixResult, String> {
+    super::pi::require_legacy()?;
     let report = env_check_sync();
     match report.claude_dir {
         Some(d) => Ok(ensure_dir_on_path(&d)),

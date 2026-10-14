@@ -1,23 +1,6 @@
-//! 环境静默托管 (autopilot) —— 缺什么后台自己装好, **不问用户、不用用户点**。
-//!
-//! 背景: 以前首启有一道「环境医生」关卡, 把「你缺 uv / 缺 PowerShell 7 / 缺 Claude Code」
-//! 摊给用户看, 还要他自己点安装。对普通用户这是纯负担 —— 他既不知道 uv 是什么,
-//! 也不该关心。现在:
-//!
-//! - **uv / Python / Git Bash** → 已随安装包内置(见 `doctor::bundled`), 本来就不用装;
-//! - **Claude Code** → 唯一真需要联网装的东西, 由本模块在后台悄悄装好。
-//!   **不经 `npm i -g`**(它下 80MB optional 依赖常卡死), 改成直抓平台包 tgz 解压出 claude
-//!   到 `~/.local/bin`(R2 优先、多源回落; 见 `install::claude_install_command`)。
-//! - **Node.js** → Claude 直装已**不再依赖它**, 但仍后台装一份(便携版, 免 UAC), 供 Claude
-//!   写的 JS 脚本有运行时(与内置 uv 之于 Python 同理)。装不上不致命 —— 照样继续装 Claude。
-//!
-//! 铁律 —— **全程不弹 UAC**:
-//! Windows 上装 Node 的老路子(winget / MSI)要写 `Program Files`, 必然 `-Verb RunAs` 弹管理员
-//! 授权框。后台静默安装时弹一个没有上下文的 UAC 框, 用户根本不知道是谁弹的, 只会点「否」。
-//! 故这里改用**便携版 Node**(zip 解压到 `~/.local/polaris-node`), 全程零提权。
-//! macOS 本就走免 sudo 的 tar.gz 路径, 天然满足。
-//!
-//! 失败不打扰: 装不上(断网等)只在状态里记一笔, 下次启动再试; 用户仍可去侧栏「环境」页手动看。
+//! Startup diagnostics. Pi only checks the managed runtime; it never installs
+//! Node or Claude. The explicit legacy backend retains its existing unattended
+//! portable installation flow (no administrator elevation).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -86,6 +69,11 @@ pub fn start_autopilot(app: AppHandle) {
 }
 
 fn run(app: AppHandle) {
+    if !super::pi::legacy_enabled() {
+        let report = super::pi::report();
+        finish(&app, report.ready, Vec::new(), if report.ready { "Agent 运行时已就绪" } else { "Agent 运行时未就绪，请检查诊断报告" });
+        return;
+    }
     let report = env_check_sync();
 
     // 什么都不缺 → 一声不吭 (绝大多数启动都走这条: 零噪音、零事件)
@@ -193,6 +181,31 @@ fn install_claude_silently() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Isolate environment overrides from the rest of the parallel test suite.
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn pi_autopilot_never_installs_claude() -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os("POLARIS_AUTOPILOT_TEST_CHILD").is_some() {
+            let (tx, _) = tokio::sync::broadcast::channel(8);
+            let app = crate::host::AppHandle::new(tx);
+            run(app.clone());
+            let state = env_autopilot_status();
+            assert!(state.finished && !state.running && state.installed.is_empty());
+            assert!(!state.ok); // deliberately missing Node, still no installation
+            assert!(env_install_claude(app.clone(), None).is_err());
+            assert!(super::super::update::env_update_claude(app).is_err());
+            assert!(!super::super::update::env_claude_update_check().checked);
+            return Ok(());
+        }
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "doctor::autopilot::tests::pi_autopilot_never_installs_claude", "--nocapture"])
+            .env("POLARIS_AUTOPILOT_TEST_CHILD", "1").env("POLARIS_AGENT_BACKEND", "pi")
+            .env("POLARIS_AGENTD_NODE", "/missing-polaris-test-node")
+            .env_remove("POLARIS_AGENT_CONFIG").output()?;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        Ok(())
+    }
 
     /// 状态默认值必须是「没跑过」——前端据此判断要不要显示提示。
     #[test]

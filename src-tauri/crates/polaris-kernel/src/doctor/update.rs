@@ -100,6 +100,10 @@ fn registry_latest_via_http() -> Option<String> {
 /// 检测 Claude Code 是否有新版本: 当前版本 (`claude --version`) vs 镜像 latest。
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_claude_update_check() -> ClaudeUpdateInfo {
+    if !super::pi::legacy_enabled() {
+        return ClaudeUpdateInfo { installed: false, current: None, latest: None, update_available: false,
+            checked: false, message: "LegacyBackendRequired: agent.backend=claude-cli".into() };
+    }
     // 按解析出的**绝对路径**探当前版本, 裸名仅兜底。老代码只用裸名, 而「claude 装了但不在 PATH」
     // 是面板显式支持的常态 (有「已安装 (不在 PATH)」状态 +「修复 PATH」按钮) —— 那种机器上
     // current 恒为 None, 下面的 (cur, latest) 匹配就恒落到 `_ => false`, **有新版也永远显示
@@ -218,6 +222,7 @@ fn claude_is_npm_install(exe: &std::path::Path) -> bool {
 /// 复用流式安装管线; 成功后清解析缓存并自动修 PATH (与首次安装一致)。
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_update_claude(app: AppHandle) -> Result<String, String> {
+    super::pi::require_legacy()?;
     let req_id = next_req_id();
     let native = resolve_claude_exe().filter(|p| !claude_is_npm_install(p));
     let cmd = match &native {

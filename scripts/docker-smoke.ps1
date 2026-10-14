@@ -21,9 +21,13 @@ Invoke-Cmd "kb_root" @{}
 Write-Host "`n4) provider_list currentId" -ForegroundColor Cyan
 (Invoke-Cmd "provider_list" @{}).currentId
 
-Write-Host "`n5) env_check (claude 是否就绪)" -ForegroundColor Cyan
+Write-Host "`n5) env_check (Agent 运行时是否就绪)" -ForegroundColor Cyan
 $env_ = Invoke-Cmd "env_check" @{}
-"claude.found=$($env_.claude.found)  version=$($env_.claude.version)  ready=$($env_.ready)"
+$runtime = $env_.agentRuntime
+"backend=$($runtime.backend) node=$($runtime.nodeReady) entry=$($runtime.entryExists) ping=$($runtime.handshake)"
+"protocol=$($runtime.protocolVersion) pi=$($runtime.piVersion) credentials=$($runtime.credentialsConfigured) ready=$($env_.ready)"
+if (-not $env_.ready) { throw "Agent runtime not ready" }
+Invoke-Cmd "agent_backend_status" @{}
 
 Write-Host "`n6) 建项目 + 会话" -ForegroundColor Cyan
 $proj = Invoke-Cmd "conv_create_project" @{ name = "docker-smoke" }

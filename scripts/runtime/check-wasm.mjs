@@ -1,0 +1,24 @@
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import assert from 'node:assert/strict';
+const require = createRequire(resolve(process.argv[2], 'package.json'));
+const photon = require('@silvia-odwyer/photon-node');
+const picture = new photon.PhotonImage(new Uint8Array([255, 0, 0, 255]), 1, 1);
+assert.equal(picture.get_width(), 1);
+picture.free();
+const { QuickJS } = await import(pathToFileURL(require.resolve('quickjs-wasi')).href);
+const vm = await QuickJS.create({ wasm: readFileSync(require.resolve('quickjs-wasi/quickjs.wasm')) });
+const result = vm.evalCode('1 + 2');
+assert.equal(result.toNumber(), 3);
+result[Symbol.dispose]();
+vm[Symbol.dispose]();
+console.log(`WASM OK: photon + quickjs-wasi on ${process.platform}/${process.arch}`);
+
+const tui = dirname(require.resolve('@earendil-works/pi-tui/package.json'));
+const target = `${process.platform}-${process.arch}`;
+const name = `${process.platform}-platform${process.platform === 'linux' ? '-x11' : ''}.node`;
+const native = require(resolve(tui, 'native', process.platform, 'prebuilds', target, name));
+assert.ok(Object.keys(native).length > 0);
+console.log(`Native addon load OK: pi-tui ${target}`);

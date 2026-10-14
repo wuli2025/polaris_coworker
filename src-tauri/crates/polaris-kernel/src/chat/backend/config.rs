@@ -67,7 +67,8 @@ pub struct Agentd {
 impl Default for Agentd {
     fn default() -> Self {
         Self {
-            node: "node".into(), entry: PathBuf::new(), node_args: vec![], args: vec![],
+            node: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).0,
+            entry: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).1, node_args: vec![], args: vec![],
             isolation: if cfg!(feature = "desktop") { "shared" } else { "per-account" }.into(),
             max_processes: 8, idle_ms: 600_000, request_timeout_ms: 15_000,
             turn_idle_timeout_ms: 240_000, turn_max_ms: 0, _legacy_turn_timeout: (),
@@ -83,6 +84,23 @@ impl Default for Agentd {
             attachments: super::images::ImageLimits::default(),
         }
     }
+}
+/// Deterministic resolution, shared by host loading and offline path tests.
+/// Explicit values always win, including a bare executable name such as `node`.
+pub fn runtime_paths(
+    node: Option<PathBuf>, entry: Option<PathBuf>,
+    bundled: Option<&std::path::Path>, development: Option<&std::path::Path>,
+) -> (PathBuf, PathBuf) {
+    let node = node.or_else(|| bundled.map(|root| root.join(if cfg!(windows) {
+        "node/node.exe"
+    } else { "node/bin/node" })).filter(|p| p.is_file())).unwrap_or_else(|| "node".into());
+    let entry = entry.or_else(|| bundled.map(|root| root.join("agentd/dist/src/main.js"))
+        .filter(|p| p.is_file())).or_else(|| development.map(|root| root.join("agentd/dist/src/main.js")))
+        .unwrap_or_default();
+    (node, entry)
+}
+fn development_root() -> Option<PathBuf> {
+    cfg!(debug_assertions).then(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
 }
 fn reject_turn_timeout<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
     Err(serde::de::Error::custom(

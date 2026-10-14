@@ -16,7 +16,11 @@ services:
     # 官方预构建镜像（GitHub Actions 推到 GHCR）。本地有源码想自建时
     # `docker compose up -d --build` 会用下面的 build 覆盖同一标签。
     image: ${POLARIS_IMAGE_REPO:-ghcr.io/wuli2025/polaris_coworker}:${POLARIS_IMAGE_TAG:-latest}
-    build: .
+    build:
+      context: .
+      args:
+        NODE_VERSION: ${POLARIS_NODE_VERSION:-22.19.0}
+        INSTALL_CLAUDE: ${POLARIS_INSTALL_CLAUDE:-false}
     container_name: polaris-web
     restart: unless-stopped
     # 安全默认：只给本机 TLS 反代访问，不把带 owner 能力的明文 HTTP 直接暴露公网。
@@ -29,6 +33,12 @@ services:
       # 与 .env 的 POLARIS_IROH_PORT 必须同值;云防火墙/安全组也要放行这个 UDP 口。
       - "${POLARIS_IROH_PORT:-41641}:${POLARIS_IROH_PORT:-41641}/udp"
     environment:
+      - POLARIS_AGENT_BACKEND=${POLARIS_AGENT_BACKEND:-pi}
+      - POLARIS_AGENTD_NODE=${POLARIS_AGENTD_NODE:-/usr/local/bin/node}
+      - POLARIS_AGENTD_ENTRY=${POLARIS_AGENTD_ENTRY:-/app/runtime/agentd/dist/src/main.js}
+      - POLARIS_AGENTD_ARGS=${POLARIS_AGENTD_ARGS:-[]}
+      - POLARIS_AGENTD_NODE_ARGS=${POLARIS_AGENTD_NODE_ARGS:-[]}
+      - POLARIS_AGENTD_ISOLATION=${POLARIS_AGENTD_ISOLATION:-per-account}
       # 留空（默认）= 免口令，谁连上谁能用：家用 NAS 在 NAT 后面公网连不上，
       # 而口令忘了没有找回入口。只有真做了公网映射/反代域名才在 .env 里填上它。
       - POLARIS_AUTH_TOKEN=${POLARIS_AUTH_TOKEN:-}
@@ -86,6 +96,9 @@ services:
       - POLARIS_TUNNEL_BUF_KB=${POLARIS_TUNNEL_BUF_KB:-}
       - POLARIS_FS_ZSTD_LEVEL=${POLARIS_FS_ZSTD_LEVEL:-}
     volumes:
+      # P4 providers.json（含凭据）随应用数据持久化；升级时保留此卷。
+      # agentd 会话独立落 Pi 卷；旧 Claude 卷继续保留，不迁移或删除。
+      - polaris-pi:/home/polaris/.polaris/agentd
       - polaris-data:/home/polaris/Polaris   # 数据根：知识库/collab.db(data/) 等
       - polaris-claude:/home/polaris/.claude # claude 凭证与 settings.json
     # 2G 整机预算(纯中继:无 gitea):polaris 1.6G + relay 128M,留 ~300M 给内核/系统。
@@ -148,6 +161,7 @@ services:
           memory: ${RELAY_MEM_LIMIT:-128m}
 
 volumes:
+  polaris-pi:
   polaris-data:
   polaris-claude:
   gitea-data:

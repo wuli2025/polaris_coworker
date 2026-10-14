@@ -1,3 +1,4 @@
+import type { AgentRuntimeReport } from "./types/doctor";
 /**
  * Typed wrappers around Tauri commands.
  *
@@ -2054,6 +2055,7 @@ export interface ToolStatus {
   bundled: boolean;
 }
 export interface EnvReport {
+  agentRuntime: AgentRuntimeReport;
   os: string;
   claude: ToolStatus;
   pwsh: ToolStatus;
@@ -2522,6 +2524,9 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       });
       return {
         os: "browser",
+        agentRuntime: { backend: "pi", nodeReady: false, entryExists: false, handshake: false,
+          protocolVersion: null, piVersion: null, agentdVersion: null, credentialsConfigured: false,
+          legacyActions: false, error: "BrowserPreview" },
         claude: tool("claude", "Claude Code", false, true),
         pwsh: tool("pwsh", "PowerShell 7", false),
         node: tool("node", "Node.js", true),

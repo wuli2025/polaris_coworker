@@ -19,7 +19,7 @@ pub struct ToolStatus {
     pub path: Option<String>,
     /// 是否能通过 PATH 直接发现 (即终端里敲命令能用)
     pub on_path: bool,
-    /// 是否是「必须」(claude 必须; 其余推荐)
+    /// 是否是当前后端必需组件（Pi 为 Node；旧后端为 Claude）
     pub required: bool,
     /// 一句话状态说明 / 安装建议
     pub hint: String,
@@ -31,6 +31,7 @@ pub struct ToolStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvReport {
+    pub agent_runtime: super::pi::AgentRuntimeReport,
     /// "windows" | "macos" | "linux" ...
     pub os: String,
     pub claude: ToolStatus,
@@ -51,7 +52,7 @@ pub struct EnvReport {
     pub shell_ready: bool,
     /// 当前这个 shell 是不是随应用内置的 Git Bash。true ⇒ 面板据此说明「无需另装 PowerShell 7」。
     pub shell_bundled: bool,
-    /// 整体是否就绪 (claude 已装 **且** 有可用 shell 才算真能跑起来)
+    /// 整体是否就绪；Pi 要求 Node/入口/握手/凭据及 shell 全部通过
     pub ready: bool,
     /// **运行环境由镜像托管** (server/容器 flavor) —— claude 等组件随镜像预烤, 升级靠
     /// `docker pull` 换镜像, 而非在面板里点安装/更新。
