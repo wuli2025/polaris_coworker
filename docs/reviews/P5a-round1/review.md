@@ -1,0 +1,153 @@
+## 审查结果
+
+**审查模式：** packet（无工具）；仅依据内联的三份 diff patch 及 brief 评审。
+
+**结论：CHANGES_REQUIRED**
+
+---
+
+### 范围与缺失材料
+
+| 项目 | 状态 |
+|------|------|
+| P5a-1-diff.patch（下载/打包/Docker/配置） | ✓ 已审 |
+| P5a-2-diff.patch（doctor 新逻辑/测试/宿主装配） | ✓ 已审 |
+| P5a-3-tests.patch（测试文件） | ✓ 已审 |
+| 验收条件 1-5 | 部分可验证 |
+| Windows 打包实跑、Docker 构建实跑 | **未提供（brief 已注明）** |
+
+---
+
+### 问题
+
+#### 🔴 严重 1：Linux/Mac `resolve` 存在短路逻辑缺陷
+
+**文件：** `src-tauri/crates/polaris-kernel/src/doctor/pi_shell.rs`，第 556-568 行
+
+**证据（代码片段）：**
+```rust
+#[cfg(not(windows))]
+{ Ok(if Path::new("/bin/bash").is_file() { Some("/bin/bash".into()) }
+    else { super::probe::which_all("bash").into_iter().next()
+        .or_else(|| super::probe::which_all("sh").into_iter().next()) }) }
+```
+`which_all("bash")` 返回 `Vec<PathBuf>`，调用 `.next()` 取第一个元素。若系统同时存在 `/bin/bash`（存在）和 `which bash` 输出（如 `/usr/bin/bash`），即使 `/bin/bash` 不可执行或版本不适配，函数也会提前返回 `Some("/bin/bash")`，不再尝试 `which_all("sh")` 兜底。
+
+**可复现影响：** Linux 环境中若 `/bin/bash` 存在但非期望版本，`resolve` 返回该路径而不回落到更合适的 shell，导致会话异常或启动失败。
+
+**最小修复建议：** 分离检查逻辑，对每个候选项做 `is_file().then_some(...)` 后合并迭代器，避免短路：
+```rust
+#[cfg(not(windows))]
+{
+    let candidates = [Path::new("/bin/bash"), Path::new("/usr/bin/bash")]
+        .into_iter().filter_map(|p| p.is_file().then_some(p));
+    let which_candidates = super::probe::which_all("bash").into_iter()
+        .chain(super::probe::which_all("sh"));
+    candidates.chain(which_candidates).next().map(|p| p.into())
+}
+```
+
+---
+
+#### 🟡 中等 1：`POLARIS_AGENTD_SHELL_PATH` 空字符串静默忽略
+
+**文件：** `src-tauri/crates/polaris-kernel/src/doctor/pi_shell.rs`，第 538 行
+
+**证据：**
+```rust
+let value = explicit.or_else(|| std::env::var("POLARIS_AGENTD_SHELL_PATH").ok().filter(|s| !s.is_empty()));
+```
+`filter(|s| !s.is_empty())` 在值为空字符串时丢弃该项，行为上等同于"未设置"。用户若显式设置 `POLARIS_AGENTD_SHELL_PATH=""` 想清除自定义路径，会被静默忽略而非报错或降级。
+
+**可复现影响：** 用户意图清除配置时无效，仍使用上一个残留值，调试困难。
+
+**最小修复建议：** 区分"未设置"和"显式清空"，或至少在 `report()` / `verify()` 中对空字符串给出警告提示。
+
+---
+
+#### 🟡 中等 2：`verify()` 报告的 shell 提示信息静态拼装，未反映实际回落路径
+
+**文件：** `src-tauri/crates/polaris-kernel/src/doctor/pi.rs`，第 501-505 行
+
+**证据：**
+```rust
+detail: if key == "shell" {
+    if !ok { "未找到 shell；请配置 shellPath、安装 Git Bash 或将 bash 加入 PATH" }
+    else if report.shell_bundled { "使用随包 MinGit Bash" }
+    else { "使用显式配置或系统 shell（Windows：Program Files Git → PATH）" }
+}
+```
+`report.shell_bundled` 仅在 `resolve()` 成功时为 `true`。若 `resolve()` 失败但 `shell_ready` 仍为 `true`（理论上不应发生），用户看到的提示与实际使用的 shell 不符。更关键的是，当 Windows 上最终回落为 System32 同名程序（如存在同名 bash.exe）时，`report.shell_bundled` 为 `false`，提示语不会说明潜在风险。
+
+**可复现影响：** 用户在 Windows 回落路径下看到的提示不足以指导其识别 System32 混淆风险。
+
+**最小修复建议：** 在 shell 步骤 detail 中补充实际回落来源（如 `bundled` / `program_files` / `on_path`）的字段，使提示与 `pi_shell::resolve` 的实际返回值对齐。
+
+---
+
+#### 🟡 中等 3：`runtime_paths` 未对中文/空格/非 ASCII 路径做规范化
+
+**文件：** `src-tauri/crates/polaris-kernel/src/chat/backend/config.rs`，第 698-709 行
+
+**证据：** `runtime_root()` 及各路径拼接均使用 `PathBuf::join`，未做转义或引号包裹。桌面包若装入含空格的 Program Files 或含中文用户名路径，Rust `Command` 传给 `node` / `entry` 时若无引号，路径在某些平台可能截断。
+
+**可复现影响：** Windows 用户安装目录含空格时 agentd 无法启动。
+
+**最小修复建议：** 在 `runtime_paths` 返回后，或在 `pi/process.rs` 的 `Command::new`/`Command::arg` 调用处确保路径经过 `std::ffi::OsString` 传递（非 `String`），Rust 的 `Command` API 本身对 `OsString` 会正确处理空格。确认此处传参类型为 `&Path` / `&OsStr` 而非误转 `to_string_lossy` 后的 `&str`。
+
+---
+
+#### 🟡 中等 4：Node 下载源顺序变更与文档注释不一致
+
+**文件：** `scripts/runtime/node.mjs`，第 518-519 行（`P5a-1-diff.patch`）/ `sources.mjs`
+
+**证据：** `nodeUrls` 返回 `[official, ...deps, ...mirror]`，即 `nodejs.org` → R2 → POLARIS_NODE_MIRROR。但 `P5a-1-diff.patch` 第 296-297 行注释写的是：
+```
+// GitHub 资源: 自家 R2 → GitHub 代理 → 官方。Node: 官方 → R2 → POLARIS_NODE_MIRROR。
+```
+注释对 Node 的描述与实际代码一致。但 `sources.mjs` 第 204-206 行 `githubUrls` 仍为 `[deps, ghfast, ghproxy, official]`，未对 nodejs.org 使用 GitHub 代理。
+
+**可复现影响：** 代码逻辑与预期一致，注释与代码无矛盾；但需确认 `nodeUrls` 对 nodejs.org 资源确实不走 GitHub 代理（`sources.test.mjs` 第 155 行断言 `!/ghfast|ghproxy/` 通过可作验证）。
+
+---
+
+#### 🟢 轻微 1：`path_tests.rs` 迁移后未覆盖 Linux/Mac 特定测试
+
+**文件：** `src-tauri/crates/polaris-kernel/src/doctor/path_tests.rs`，第 262-270 行
+
+**证据：** `#[cfg(windows)]` 限定了 `path_contains_dir_is_case_and_slash_insensitive` 测试，但原 `path.rs` 的 `#[cfg(test)]` 内模块无此限制。迁移后在 Linux CI 上 `path_contains_dir` 函数的路径分隔符逻辑（第 164 行的 `cfg!(windows)` 分支）缺少单元测试覆盖。
+
+**可复现影响：** Linux 下 `path_contains_dir` 用 `:` 分隔符的路径解析逻辑未被测试验证。
+
+**最小修复建议：** 在 `path_tests.rs` 中添加 `#[cfg(not(windows))]` 的 `path_contains_dir` 测试用例。
+
+---
+
+### 建议验证步骤
+
+| 步骤 | 推断风险 | 已有证据 |
+|------|---------|---------|
+| Linux 桌面包装入含空格路径（如 `/home/用户/Polaris`），agentd 能否启动 | **推断**：需实测 | 无 |
+| Windows `bash.exe` 在 System32 存在时回落行为 | **推断**：需实测 | `pi_shell_tests.rs` 第 631 行有路径覆盖测试，但无 System32 场景 |
+| Docker 镜像 `docker build` 完成且 `docker run` 后 `HEALTHCHECK` 通过 | **推断**：需实测 | 未提供实跑证据 |
+| `cargo test -p polaris-kernel -- doctor::pi` 全过 | **推断**：需实测 | `pi_tests.rs` / `pi_shell_tests.rs` 源码已提供，但未提供测试执行结果 |
+| `node --test scripts/runtime/node.test.mjs` 全过 | **推断**：需实测 | `node.test.mjs` 源码已提供，未提供执行结果 |
+| `fetch-runtimes.mjs` 在无网络环境下报错信息可诊断 | **推断**：需实测 | 代码有超时（120s）和源回退逻辑 |
+
+---
+
+### 无问题项（明确说明）
+
+1. **Node SHA256 校验流程**：校验文件（`SHASUMS256.txt`）与安装包取自同一官方源 `nodejs.org/dist/v{version}/`，校验前有 magic 头检测防止代理返回 HTML，逻辑完整。
+
+2. **Docker 镜像凭据隔离**：agentd 凭据卷 `polaris-pi` 为新增，与旧 `polaris-claude` 分离；镜像层 `COPY --from=agent` 不携带凭据文件；`ENV` 仅设置启动路径，无敏感数据。
+
+3. **agentd 生产打包**：`pack-agentd.mjs` 使用 `npm ci --omit=dev` 跳过开发依赖，`check-wasm.mjs` 验证产物后立即删除 `.contract-tests` 目录，无测试文件遗落。
+
+4. **Pi 后端不自动安装 Claude**：`autopilot.rs` 第 36-40 行通过 `legacy_enabled()` 判断，Pi 模式下直接返回 report 而不调用 `install_claude_silently()`；`pi_autopilot_never_installs_claude` 测试覆盖此分支。
+
+5. **`runtime_paths` 显式配置优先级**：`config.rs` 第 702-705 行 `node.or_else(...)` 确保显式 `node` 配置优先于 bundled fallback；测试 `runtime_paths_support_bundle_development_and_explicit` 覆盖了三种场景。
+
+---
+
+**审查完成。** 建议优先修复严重问题 1（Linux resolve 短路）和中等问题 3（中文路径），其余可在后续迭代处理。

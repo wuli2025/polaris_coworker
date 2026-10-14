@@ -1,0 +1,58 @@
+{
+  "started_at": "2026-10-14T10:46:15.206344+00:00",
+  "status": "REVIEW_RECEIVED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P5a-brief.md",
+        "bytes": 2306,
+        "lines": 16,
+        "sha256": "257702e0d578a4ff7d4705a026d1da8ff6e195641a1f191a8b9ea81b09426e36"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P5a-1-diff.patch",
+        "bytes": 39319,
+        "lines": 760,
+        "sha256": "3db508e432e2dd2f6812ddfab2f1d38aa57e53737e02c823a36e7f38b2c63fa2"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P5a-2-diff.patch",
+        "bytes": 58128,
+        "lines": 1173,
+        "sha256": "2d5518924da65e8518261bb1dc18c163a214f6416afdf35b33c5c341882d1b8b"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P5a-3-tests.patch",
+        "bytes": 11974,
+        "lines": 246,
+        "sha256": "54ec183f67b961b83150f5ea498cda044e7c0b6575e1fdb5a0a0b672835b85f4"
+      }
+    ],
+    "prompt_sha256": "2a0f8c0cc21e9a1d331cda381520454398e847bd3e7e95351e2ea59656d4a810",
+    "prompt_bytes": 124611
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "provider": "minimax",
+  "model": "MiniMax-M2.7",
+  "usage": {
+    "input": 0,
+    "output": 3766,
+    "cacheRead": 0,
+    "cacheWrite": 37426,
+    "totalTokens": 41192,
+    "cost": {
+      "input": 0,
+      "output": 0.0045192,
+      "cacheRead": 0,
+      "cacheWrite": 0.01403475,
+      "total": 0.01855395
+    }
+  },
+  "session_id": "01a13a06-929d-7031-8ea6-a01178e3fdc5",
+  "finished_at": "2026-10-14T10:49:28.404476+00:00"
+}
