@@ -1,0 +1,47 @@
+   Compiling polaris-kernel v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel)
+warning: unused import: `crate::runtime::procs::no_window`
+ --> crates/polaris-kernel/src/doctor/path.rs:9:5
+  |
+9 | use crate::runtime::procs::no_window;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `super::path::*`
+  --> crates/polaris-kernel/src/doctor/verify.rs:28:5
+   |
+28 | use super::path::*;
+   |     ^^^^^^^^^^^^^^
+
+warning: function `node_install_script` is never used
+   --> crates/polaris-kernel/src/doctor/install.rs:253:4
+    |
+253 | fn node_install_script() -> String {
+    |    ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `node_portable_script` is never used
+   --> crates/polaris-kernel/src/doctor/install.rs:260:15
+    |
+260 | pub(crate) fn node_portable_script() -> String {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `WIN_NODE_PORTABLE_BODY` is never used
+   --> crates/polaris-kernel/src/doctor/install.rs:270:7
+    |
+270 | const WIN_NODE_PORTABLE_BODY: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `NODE_INSTALL_BODY` is never used
+   --> crates/polaris-kernel/src/doctor/install.rs:324:7
+    |
+324 | const NODE_INSTALL_BODY: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: `polaris-kernel` (lib) generated 6 warnings (run `cargo fix --lib -p polaris-kernel` to apply 2 suggestions)
+    Checking polaris-fable v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-fable)
+    Checking polaris-collab v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-collab)
+    Checking polaris-wiki v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-wiki)
+    Checking polaris-app v2.9.0 (/home/mi/work/polaris-pi/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.01s

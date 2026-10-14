@@ -32,6 +32,12 @@ impl PermissionMode {
 #[serde(rename_all = "camelCase")]
 pub struct ChatSendArgs {
     pub prompt: String,
+    /// Explicit uploaded images; prompt paths remain available to legacy tools.
+    #[serde(default)]
+    pub image_paths: Option<Vec<String>>,
+    /// Pi thinking level; omitted values keep the daemon's default/current level.
+    #[serde(default)]
+    pub thinking_level: Option<String>,
     pub permission_mode: PermissionMode,
     #[serde(default)]
     pub use_sandbox: bool,

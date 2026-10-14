@@ -1055,6 +1055,8 @@ export type PermissionMode =
   | "deny";
 
 export interface ChatSendArgs {
+  imagePaths?: string[];
+  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
   prompt: string;
   permissionMode: PermissionMode;
   useSandbox?: boolean;

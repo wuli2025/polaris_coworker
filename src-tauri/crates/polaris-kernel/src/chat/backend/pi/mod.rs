@@ -96,8 +96,9 @@ impl AgentBackend for PiBackend {
                     stream: sender.clone(), timeout, reservation: (preparing.clone(), key.clone()), reply: tx })?;
                 client.wait(rx)?;
                 registered = true;
-                let attachments = input::attachments(&input.attachments, client.config.max_line_bytes)?;
-                let result = client.call(Command::Prompt(Prompt { session_id: info.id.clone(), text: input.prompt, attachments }));
+                let result = client.call(Command::Prompt(Prompt {
+                    session_id: info.id.clone(), text: input.prompt, attachments: input.attachments,
+                }));
                 eprintln!("{}", serde_json::json!({"component":"agent.backend", "backend":"pi",
                     "reqId":req, "conversationId":conv, "sessionId":info.id, "phase":"prompt", "ok":result.is_ok()}));
                 let result = result?;

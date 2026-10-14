@@ -14,7 +14,7 @@ fn run<F: FnMut(&str, &str)>(root: &Path, prompt: &str, mut on_event: F, timeout
     let input = TurnRequest {
         req_id: req.clone(), session_id: req.clone(), conversation_id: None,
         prompt: prompt.into(), permission: crate::chat::PermissionMode::Deny,
-        model: None, cwd: root.into(), attachments: vec![], account_id: None, timeout, legacy: None,
+        model: None, thinking_level: None, cwd: root.into(), attachments: vec![], account_id: None, timeout, legacy: None,
     };
     let legacy = selected.status().backend == "claude-cli";
     let result = backend::collect(selected.as_ref(), input, |kind, text| {

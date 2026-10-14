@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 
 use super::artifacts::conversation_dir;
 
+/// Shared host-owned location for attachment upload and send validation.
+pub(crate) fn uploads_dir(conversation_id: Option<&str>) -> PathBuf {
+    conversation_dir(conversation_id).join("uploads")
+}
+
 // ───────────────────────── 对话附件 (拖拽上传) ─────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,7 +52,7 @@ pub fn chat_attach_files(conversation_id: Option<String>, paths: Vec<String>) ->
                 .collect();
         }
     }
-    let dir = conversation_dir(conversation_id.as_deref()).join("uploads");
+    let dir = uploads_dir(conversation_id.as_deref());
     let _ = std::fs::create_dir_all(&dir);
 
     let mut out = Vec::new();
@@ -99,7 +104,7 @@ pub fn chat_attach_image(
     if bytes.len() > MAX_BYTES {
         return Err("图片超过 20MB 上限".into());
     }
-    let dir = conversation_dir(conversation_id.as_deref()).join("uploads");
+    let dir = uploads_dir(conversation_id.as_deref());
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     // 只接受简单文件名,杜绝路径穿越
     let safe: String = name

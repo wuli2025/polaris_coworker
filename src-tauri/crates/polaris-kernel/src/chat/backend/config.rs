@@ -60,6 +60,7 @@ pub struct Agentd {
     pub shutdown_timeout_ms: u64,
     pub control_poll_ms: u64,
     pub session_map: PathBuf,
+    pub attachments: super::images::ImageLimits,
 }
 impl Default for Agentd {
     fn default() -> Self {
@@ -76,6 +77,7 @@ impl Default for Agentd {
             readonly_tools: vec!["read".into(), "grep".into(), "find".into(), "ls".into()],
             supervisor_tick_ms: 10, shutdown_timeout_ms: 1000, control_poll_ms: 1,
             session_map: crate::runtime::paths::data_dir().join("agent-session-map"),
+            attachments: super::images::ImageLimits::default(),
         }
     }
 }
@@ -102,6 +104,7 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         BackendKind::parse(&self.agent.backend)?;
         let c = &self.agentd;
+        c.attachments.validate()?;
         anyhow::ensure!(matches!(c.isolation.as_str(), "shared" | "per-account"), "InvalidIsolation: {}", c.isolation);
         anyhow::ensure!(c.channel_capacity > 0 && c.max_line_bytes > 0 && c.max_processes > 0,
             "InvalidAgentConfig: capacities must be positive");

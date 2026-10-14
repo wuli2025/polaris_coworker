@@ -12,6 +12,7 @@ import { useAppStore } from "./app";
 import { useArtifactsStore } from "./artifacts";
 import { useSessionsStore } from "../features/coworker/stores/sessions";
 import { humanizeError } from "../lib/humanizeError";
+import { uploadedImagePaths } from "../lib/chatImages";
 
 export interface Bubble {
   role: "user" | "assistant" | "tool";
@@ -411,6 +412,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
     sessions.start(convId, displayText.slice(0, 18));
     try {
       const reqId = await chatApi.send({
+        imagePaths: uploadedImagePaths(files),
         prompt,
         permissionMode: opts.permissionMode,
         skillIds: opts.skillIds,

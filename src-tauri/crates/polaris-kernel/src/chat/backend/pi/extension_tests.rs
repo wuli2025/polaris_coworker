@@ -26,19 +26,26 @@ fn mismatched_protocol_fuses_before_any_application_request() -> anyhow::Result<
 fn model_profile_image_and_idle_reconfiguration_are_on_the_wire() -> anyhow::Result<()> {
     let mut c = super::tests::config();
     let record = c.session_map.with_extension("requests.jsonl");
-    let image = c.session_map.with_extension("png");
+    let uploads = c.session_map.with_extension("uploads");
+    std::fs::create_dir_all(&uploads)?;
+    let image = uploads.join("image.png");
     c.args = vec!["--record".into(), record.to_string_lossy().into()];
     std::fs::write(&image, b"\x89PNG\r\n\x1a\nfixture")?;
+    let args: ChatSendArgs = serde_json::from_value(json!({
+        "prompt": format!("Describe {}", image.display()), "permissionMode": "deny",
+        "conversationId": "wire", "imagePaths": [image], "thinkingLevel": "low"
+    }))?;
+    let mut first = chat_input::prepare("wire", &args, &uploads, std::env::temp_dir(), &c.attachments)?;
     let b = PiBackend::new(c)?;
-    let mut first = super::tests::input("wire", "normal");
     first.model = Some(json!({"provider":"fixture","id":"test"}));
-    first.attachments.push(image.clone());
+    std::fs::remove_file(&image)?;
     collect(&b, first, |_, _| {})?;
     b.configure_session("wire", SessionOptions { model: None,
         thinking_level: Some(ThinkingLevel::High), tool_profile: Some("full".into()) })?;
     let mut second = super::tests::input("wire", "normal");
     second.model = Some(Value::String("test".into()));
     second.permission = PermissionMode::Manual;
+    second.thinking_level = Some(ThinkingLevel::Xhigh);
     // Wait for the previous route to release its session reservation.
     let deadline = Instant::now() + Duration::from_secs(2);
     while b.preparing.lock().contains("session:wire") {
@@ -52,17 +59,20 @@ fn model_profile_image_and_idle_reconfiguration_are_on_the_wire() -> anyhow::Res
         .ok_or_else(|| anyhow::anyhow!("missing open"))?;
     assert_eq!(open["params"]["model"], json!({"provider":"fixture","id":"test"}));
     assert_eq!(open["params"]["toolProfile"], "readonly");
+    assert_eq!(open["params"]["thinkingLevel"], "low");
     assert!(sent.iter().any(|r| r["method"] == "session.configure" && r["params"]["thinkingLevel"] == "high"));
     assert!(sent.iter().any(|r| r["method"] == "session.configure" && r["params"]["toolProfile"] == "workspace"));
+    assert!(sent.iter().any(|r| r["method"] == "session.configure" && r["params"]["thinkingLevel"] == "xhigh"));
     let prompt = sent.iter().find(|r| r["method"] == "prompt")
         .ok_or_else(|| anyhow::anyhow!("missing prompt"))?;
     assert_eq!(prompt["params"]["attachments"][0]["mimeType"], "image/png");
     assert_eq!(prompt["params"]["attachments"][0]["type"], "image");
     assert_eq!(prompt["params"]["attachments"][0]["data"], "iVBORw0KGgpmaXh0dXJl");
+    assert_eq!(prompt["params"]["text"], args.prompt);
     assert_eq!(b.status().agentd_version.as_deref(), Some("0.1.0"));
     b.shutdown();
     std::fs::remove_file(record)?;
-    std::fs::remove_file(image)?;
+    std::fs::remove_dir(uploads)?;
     Ok(())
 }
 

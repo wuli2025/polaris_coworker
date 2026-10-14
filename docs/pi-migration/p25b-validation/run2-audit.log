@@ -1,0 +1,32 @@
+ 253 lines; max 369 chars; docs/feature-tree.md
+ 152 lines; max 170 chars; docs/pi-migration/p25b-result.md
+  47 lines; max 117 chars; docs/pi-migration/p25b-validation/run2-app-check.log
+  91 lines; max 130 chars; docs/pi-migration/p25b-validation/run2-backend-tests.log
+  10 lines; max 102 chars; docs/pi-migration/p25b-validation/run2-frontend-tests.log
+  52 lines; max 117 chars; docs/pi-migration/p25b-validation/run2-integration-tests.log
+ 300 lines; max 163 chars; docs/pi-migration/p25b-validation/run2-kernel-tests.log
+  48 lines; max 117 chars; docs/pi-migration/p25b-validation/run2-server-check.log
+   0 lines; max   0 chars; docs/pi-migration/p25b-validation/run2-vue-tsc.log
+ 294 lines; max 100 chars; src-tauri/crates/polaris-kernel/src/chat/attach.rs
+  65 lines; max 123 chars; src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+  36 lines; max 111 chars; src-tauri/crates/polaris-kernel/src/chat/backend/chat_input.rs
+ 118 lines; max 109 chars; src-tauri/crates/polaris-kernel/src/chat/backend/chat_input/tests.rs
+ 128 lines; max 130 chars; src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+  85 lines; max 104 chars; src-tauri/crates/polaris-kernel/src/chat/backend/images.rs
+ 133 lines; max 114 chars; src-tauri/crates/polaris-kernel/src/chat/backend/images/tests.rs
+ 134 lines; max 153 chars; src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+  85 lines; max 114 chars; src-tauri/crates/polaris-kernel/src/chat/backend/pi/extension_tests.rs
+  28 lines; max 122 chars; src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs
+ 144 lines; max 146 chars; src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+ 402 lines; max 162 chars; src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs
+ 123 lines; max  82 chars; src-tauri/crates/polaris-kernel/src/chat/types.rs
+  75 lines; max 143 chars; src-tauri/crates/polaris-kernel/src/headless.rs
+1157 lines; max 109 chars; src-tauri/crates/polaris-kernel/src/integrations/feishu.rs
+  22 lines; max  98 chars; src/lib/chatImages.test.ts
+   7 lines; max  99 chars; src/lib/chatImages.ts
+ 667 lines; max  99 chars; src/stores/chat.ts
+2633 lines; max 225 chars; src/tauri.ts
+Frontend net increase: 2 lines; src/stores/chat.ts
+Frontend net increase: 2 lines; src/tauri.ts
+New Rust unwrap/expect: none
+git diff --check: exit 0

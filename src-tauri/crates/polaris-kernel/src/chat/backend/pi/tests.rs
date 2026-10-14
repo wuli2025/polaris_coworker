@@ -21,7 +21,7 @@ pub(super) fn config() -> config::Agentd {
 }
 pub(super) fn input(req: &str, prompt: &str) -> TurnRequest {
     TurnRequest { req_id: req.into(), session_id: req.into(), conversation_id: Some(req.into()),
-        prompt: prompt.into(), permission: PermissionMode::Deny, model: None,
+        prompt: prompt.into(), permission: PermissionMode::Deny, model: None, thinking_level: None,
         cwd: std::env::temp_dir(), attachments: vec![], account_id: None, timeout: None, legacy: None }
 }
 fn collect_events(stream: EventStream) -> Vec<crate::chat::ChatStreamEvent> {

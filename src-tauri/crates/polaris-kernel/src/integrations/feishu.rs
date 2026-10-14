@@ -835,6 +835,8 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
             );
             let args = crate::chat::ChatSendArgs {
                 prompt: text.clone(),
+                image_paths: None,
+                thinking_level: None,
                 permission_mode: if unsafe_host_tools {
                     crate::chat::PermissionMode::AutoAll
                 } else {

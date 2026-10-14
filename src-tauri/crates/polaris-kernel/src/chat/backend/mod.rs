@@ -2,6 +2,8 @@
 //! reads/writes and bounded queues keep UI threads independent of pipe progress.
 //! The legacy adapter retains its existing std::thread implementation verbatim.
 pub mod config;
+pub mod images;
+pub mod chat_input;
 pub mod claude_cli;
 pub mod pi;
 pub mod stream;
@@ -46,7 +48,9 @@ pub struct TurnRequest {
     pub permission: PermissionMode,
     pub model: Option<serde_json::Value>,
     pub cwd: PathBuf,
-    pub attachments: Vec<PathBuf>,
+    /// Validated, encoded image content; adapters never reopen IPC paths.
+    pub attachments: Vec<pi::protocol::Attachment>,
+    pub thinking_level: Option<pi::protocol::ThinkingLevel>,
     pub account_id: Option<String>,
     pub timeout: Option<Duration>,
     pub(crate) legacy: Option<(AppHandle, ChatSendArgs)>,

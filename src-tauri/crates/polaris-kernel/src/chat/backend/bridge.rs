@@ -8,16 +8,11 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
     let backend = selected().map_err(|e| e.to_string())?;
     let legacy = backend.status().backend == "claude-cli";
     let conv = args.conversation_id.clone();
-    let permission = match args.permission_mode {
-        PermissionMode::Manual => PermissionMode::Manual, PermissionMode::AutoAll => PermissionMode::AutoAll,
-        PermissionMode::AutoCurrent => PermissionMode::AutoCurrent, PermissionMode::Deny => PermissionMode::Deny,
-    };
-    let mut input = TurnRequest {
-        req_id: req.into(), session_id: conv.clone().unwrap_or_else(|| req.into()),
-        conversation_id: conv.clone(), prompt: args.prompt.clone(), permission,
-        model: None, cwd: claude_cli::pipeline::effective_cwd(None), attachments: vec![],
-        account_id: None, timeout: None, legacy: None,
-    };
+    let config = config::Config::load().map_err(|e| e.to_string())?;
+    let mut input = chat_input::prepare(req, &args,
+        &crate::chat::attach::uploads_dir(conv.as_deref()),
+        claude_cli::pipeline::effective_cwd(None), &config.agentd.attachments)
+        .map_err(|e| e.to_string())?;
     let mut snapshot = None;
     let mut notice = None;
     if legacy { input.legacy = Some((app.clone(), args)); }
@@ -39,7 +34,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
     }
     let stream = backend.start(input).map_err(|e| e.to_string())?;
     let mut finalizer = None;
-    let timeout = Duration::from_millis(config::Config::load().map_err(|e| e.to_string())?.agentd.request_timeout_ms);
+    let timeout = Duration::from_millis(config.agentd.request_timeout_ms);
     loop {
         let ev = match stream.recv_timeout(timeout) {
             Ok(event) => event,
