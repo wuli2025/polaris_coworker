@@ -27,8 +27,11 @@ pub mod image_store;
 pub mod oauth_loopback;
 pub mod store;
 pub mod credential_file;
+mod credential_lock;
+mod lock_owner;
 pub mod pi_config;
 pub mod pi_translate;
+pub(crate) mod selection;
 mod pi_login;
 mod pi_usage;
 pub mod usage;
@@ -100,6 +103,6 @@ pub use store::*;
 pub use usage::*;
 pub use balance::*;
 
-/// Serializes Rust UI saves/switches and chat selection against one another.
+/// Protects selection/configuration state only; release before disk or daemon I/O.
 pub(crate) static PROVIDER_MUTATION: Lazy<parking_lot::Mutex<()>> =
     Lazy::new(|| parking_lot::Mutex::new(()));

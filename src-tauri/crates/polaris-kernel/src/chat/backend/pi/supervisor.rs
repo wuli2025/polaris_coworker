@@ -70,6 +70,7 @@ impl State {
                                 let mut status = self.status.lock();
                                 status.healthy = true;
                                 status.agentd_version = Some(ping.version);
+                                status.usage_persist_failures = ping.usage_persist_failures;
                                 if let Some(reply) = pending.reply { let _ = reply.send(Ok(value)); }
                             }
                             Err(error) => {

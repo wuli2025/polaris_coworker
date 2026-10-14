@@ -27,3 +27,24 @@ test("usage replay deduplicates a request; distinct requests/days remain separat
     assert.equal(readdirSync(join(dir, "2026-10-15")).length, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("usage persistence failure is logged and counted beyond its turn", async () => {
+  const { harness, result, until } = await import("./helpers.ts");
+  const { writeFileSync } = await import("node:fs");
+  const h = await harness([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+  try {
+    const blocked = join(h.dir, "blocked");
+    writeFileSync(blocked, "file prevents mkdir");
+    result(await h.request("config.apply", { config: { usageDir: blocked } }));
+    const { sessionId } = result<{ sessionId: string }>(await h.request("session.open"));
+    for (let turn = 1; turn <= 2; turn++) {
+      result(await h.request("prompt", { sessionId, text: "test" }));
+      await until(() => h.events.filter((e) => e.event === "turn.completed").length === turn);
+      assert.equal(result<{ usagePersistFailures: number }>(await h.request("ping")).usagePersistFailures, turn);
+    }
+    const warnings = h.logs.map((line) => JSON.parse(line)).filter((l) => l.code === "USAGE_PERSIST_FAILED");
+    assert.equal(warnings.length, 2);
+    assert.equal(warnings[1].usagePersistFailures, 2);
+    assert.ok(!h.logs.join("").includes(blocked));
+  } finally { await h.close(); }
+});

@@ -6,6 +6,7 @@ import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { loadConfig, mergeConfig } from "../src/config/load.ts";
 import type { ConfigPatch } from "../src/config/schema.ts";
+import type { CredentialStore } from "../src/models/credentials.ts";
 import { Daemon } from "../src/daemon.ts";
 import type { ProtocolEvent } from "../src/protocol/events.ts";
 import type { Response } from "../src/protocol/schema.ts";
@@ -17,7 +18,7 @@ export function providerConfig(model: ReturnType<ReturnType<typeof registerFauxP
   return { id: model.provider, api, baseUrl,
     models: [{ id, name, reasoning, input, cost, contextWindow, maxTokens }] };
 }
-export async function harness(steps: Steps = [], patch: ConfigPatch = {}, factories: ExtensionFactory[] = []) {
+export async function harness(steps: Steps = [], patch: ConfigPatch = {}, factories: ExtensionFactory[] = [], credentials?: CredentialStore) {
   const dir = mkdtempSync(join(tmpdir(), "polaris-agentd-"));
   const faux = registerFauxProvider({ models: [{ id: "test", reasoning: true }], tokensPerSecond: Infinity });
   faux.setResponses(steps);
@@ -32,7 +33,7 @@ export async function harness(steps: Steps = [], patch: ConfigPatch = {}, factor
   const logs: string[] = [];
   const daemon = await Daemon.create(config, (value) => {
     if (value.type === "event") events.push(value);
-  }, (line) => logs.push(line), { factories });
+  }, (line) => logs.push(line), { factories, credentials });
   await daemon.models.apply(config, { [model.provider]: "test-secret-key-7654321" });
   let nextId = 0;
   const request = (method: string, params: object = {}) => daemon.handle({ id: ++nextId, method, params });

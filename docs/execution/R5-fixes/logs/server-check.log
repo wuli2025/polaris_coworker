@@ -1,0 +1,82 @@
+   Compiling polaris-kernel v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel)
+warning: unused import: `crate::runtime::procs::no_window`
+ --> crates/polaris-kernel/src/doctor/path.rs:9:5
+  |
+9 | use crate::runtime::procs::no_window;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `super::path::*`
+  --> crates/polaris-kernel/src/doctor/verify.rs:28:5
+   |
+28 | use super::path::*;
+   |     ^^^^^^^^^^^^^^
+
+warning: function `node_install_script` is never used
+   --> crates/polaris-kernel/src/doctor/install.rs:253:4
+    |
+253 | fn node_install_script() -> String {
+    |    ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `node_portable_script` is never used
+   --> crates/polaris-kernel/src/doctor/install.rs:260:15
+    |
+260 | pub(crate) fn node_portable_script() -> String {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `WIN_NODE_PORTABLE_BODY` is never used
+   --> crates/polaris-kernel/src/doctor/install.rs:270:7
+    |
+270 | const WIN_NODE_PORTABLE_BODY: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `NODE_INSTALL_BODY` is never used
+   --> crates/polaris-kernel/src/doctor/install.rs:324:7
+    |
+324 | const NODE_INSTALL_BODY: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: `polaris-kernel` (lib) generated 6 warnings (run `cargo fix --lib -p polaris-kernel` to apply 2 suggestions)
+    Checking polaris-fable v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-fable)
+    Checking polaris-collab v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-collab)
+    Checking polaris-wiki v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-wiki)
+    Checking polaris-app v2.9.0 (/home/mi/work/polaris-pi/src-tauri)
+warning: unreachable statement
+   --> src/mesh.rs:473:5
+    |
+470 |         return;
+    |         ------ any code following this expression is unreachable
+...
+473 |     set_phase(node_id, "authenticating");
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+    --> src/mesh.rs:1386:5
+     |
+1381 |         return Err("此构建没有 P2P 隧道(collab-net),连不了".into());
+     |         ----------------------------------------------------------- any code following this expression is unreachable
+...
+1386 |     let me = my_node_id();
+     |     ^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `c`
+   --> src/mesh.rs:329:22
+    |
+329 | async fn ensure_peer(c: &Cfg, node_id: &str, name: &str, uid: &str) {
+    |                      ^ help: if this is intentional, prefix it with an underscore: `_c`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `access`
+    --> src/mesh.rs:1348:10
+     |
+1348 |     let (access, node_id) = parse_device_code(&code)?;
+     |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_access`
+
+warning: `polaris-app` (lib) generated 4 warnings (run `cargo fix --lib -p polaris-app` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.89s

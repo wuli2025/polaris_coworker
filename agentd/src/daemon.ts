@@ -9,7 +9,7 @@ import { memoryCredentials, Redactor, type CredentialStore } from "./models/cred
 import { Models } from "./models/runtime.ts";
 import { DaemonError, publicError } from "./protocol/errors.ts";
 import type { ProtocolEvent } from "./protocol/events.ts";
-import { RequestSchema, type Request, type Response } from "./protocol/schema.ts";
+import { RequestSchema, type Catalog, type Request, type Response } from "./protocol/schema.ts";
 import { versions } from "./protocol/version.ts";
 import { validateAttachments } from "./sessions/attachments.ts";
 import { SessionRegistry } from "./sessions/registry.ts";
@@ -17,6 +17,7 @@ import { SessionRegistry } from "./sessions/registry.ts";
 import { Logins } from "./models/logins.ts";
 
 export class Daemon {
+  private usagePersistFailures = 0;
   readonly logins: Logins;
   readonly sessions: SessionRegistry;
   private readonly queues = new Map<string, Promise<void>>();
@@ -32,7 +33,12 @@ export class Daemon {
   ) {
     this.logins = new Logins(models, () => this.config.oauthTimeoutMs);
     this.sessions = new SessionRegistry(() => this.config, models, factories,
-      (event) => send(models.redactor.clean(event)));
+      (event) => send(models.redactor.clean(event)), () => {
+        this.usagePersistFailures++;
+        this.logger.log("warn", "Usage record could not be persisted", {
+          code: "USAGE_PERSIST_FAILED", usagePersistFailures: this.usagePersistFailures,
+        });
+      });
   }
   static async create(config: Config, send: (value: ProtocolEvent | Response) => void,
     log: (line: string) => void, options: {
@@ -92,9 +98,9 @@ export class Daemon {
       case "provider.auth": return this.logins.handle(request.params.provider, request.params.operation, request.params.input);
       case "permission.respond": return this.sessions.respondPermission(request.params.sessionId, request.params.callId, request.params.decision);
       case "sandbox.respond": return this.sessions.respondSandbox(request.params.sessionId, request.params.callId, request.params);
-      case "ping": return { status: "ok", sessions: this.sessions.size, ...versions };
+      case "ping": return { status: "ok", sessions: this.sessions.size, usagePersistFailures: this.usagePersistFailures, ...versions };
       case "models.list": return { models: this.models.list() };
-      case "models.catalog": return { models: this.models.builtinCatalog };
+      case "models.catalog": return { models: this.models.builtinCatalog } satisfies Catalog;
       case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd, request.params);
       case "session.configure": return this.sessions.configure(request.params.sessionId, request.params);
       case "prompt": return this.sessions.prompt(request.params.sessionId, request.params.text, request.params.attachments);

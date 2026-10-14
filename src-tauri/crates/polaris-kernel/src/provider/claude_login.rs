@@ -49,7 +49,7 @@ fn claude_creds_has_token(path: &Path) -> bool {
 }
 
 /// 是否已登录 Claude 官方订阅
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn claude_oauth_status() -> Result<ClaudeAuthStatus, String> {
     if pi_translate::is_pi() { return pi_login::claude_status(); }
     let path = claude_credentials_path();
@@ -81,7 +81,7 @@ pub struct ClaudeLoginStart {
 
 /// ① 生成 PKCE(S256)+ state, 拼授权 URL 并打开浏览器。
 /// 桌面端优先回环一键授权; `force_manual` / 54545 被占 / server flavor → 手工回贴。
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn claude_start_login(force_manual: Option<bool>) -> Result<ClaudeLoginStart, String> {
     if pi_translate::is_pi() { return pi_login::claude_start(); }
     let verifier = claude_rand_b64url(32)?;
@@ -157,14 +157,14 @@ pub fn claude_start_login(force_manual: Option<bool>) -> Result<ClaudeLoginStart
 }
 
 /// 回环一键授权进度 (auto 模式前端轮询用)
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn claude_login_poll() -> Result<LoginPollResult, String> {
     if pi_translate::is_pi() { return pi_login::poll("anthropic"); }
     Ok(loopback_poll(&CLAUDE_LOOPBACK))
 }
 
 /// 取消进行中的回环授权 (关卡片/改手工时释放 54545 端口)
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn claude_login_cancel() -> Result<(), String> {
     if pi_translate::is_pi() { return pi_login::cancel("anthropic"); }
     loopback_stop(&CLAUDE_LOOPBACK);
@@ -183,7 +183,7 @@ struct ClaudeTokenResp {
 }
 
 /// ② 用户回贴的授权码(授权页给的是 `code#state`)+ verifier/state 换 token 落盘
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn claude_finish_login(
     pasted: String,
     verifier: String,

@@ -71,6 +71,7 @@ pub struct BackendStatus {
     pub agentd_version: Option<String>,
     pub pid: Option<u32>,
     pub restarts: u32,
+    pub usage_persist_failures: u64,
     pub circuit_open: bool,
     pub healthy: bool,
     pub last_error: Option<String>,
@@ -78,7 +79,7 @@ pub struct BackendStatus {
 impl BackendStatus {
     pub(crate) fn new(name: &str) -> Self {
         Self { backend: name.into(), agentd_version: None, pid: None, restarts: 0,
-            circuit_open: false, healthy: false, last_error: None }
+            usage_persist_failures: 0, circuit_open: false, healthy: false, last_error: None }
     }
 }
 pub trait AgentBackend: Send + Sync {

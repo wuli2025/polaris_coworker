@@ -1,7 +1,6 @@
 use super::*;
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn provider_switch(id: String) -> Result<String, String> {
-    let _mutation = PROVIDER_MUTATION.lock();
     let store = STORE.read().clone();
     let views = build_views(&store);
     let v = views
@@ -10,12 +9,19 @@ pub fn provider_switch(id: String) -> Result<String, String> {
         .ok_or_else(|| format!("供应商不存在: {id}"))?;
 
     if pi_translate::is_pi() {
+        {
+            let _mutation = PROVIDER_MUTATION.lock();
+            STORE.write().current_id = id.clone();
+            selection::changed();
+        }
+        persist_checked()?;
         crate::chat::backend::selected().map_err(|_| "AgentBackendUnavailable")?
             .provider_apply(&id).map_err(|e| e.to_string())?;
-        STORE.write().current_id = id.clone();
-        persist_checked()?;
         return Ok(id);
     }
+    // Legacy process env/settings mutations still serialize independently.
+    static LEGACY_SWITCH: Lazy<parking_lot::Mutex<()>> = Lazy::new(|| parking_lot::Mutex::new(()));
+    let _legacy = LEGACY_SWITCH.lock();
     let cfg = cfg_for_view(v, store.route_local)?;
     // 联动才碰全局 settings.json; 隔离只走进程 env, 外部 CLI 原封不动 ——
     // 但顺手做一次残留体检: 全局若还躺着我们(旧版/联动时代)写的受管键, 先清掉,
@@ -27,12 +33,16 @@ pub fn provider_switch(id: String) -> Result<String, String> {
     }
     apply_process_env(&cfg);
 
-    STORE.write().current_id = id.clone();
+    {
+        let _mutation = PROVIDER_MUTATION.lock();
+        STORE.write().current_id = id.clone();
+        selection::changed();
+    }
     persist();
     Ok(id)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn provider_set_link_mode(link: bool) -> Result<bool, String> {
     if pi_translate::is_pi() { return Err("ProviderLinkModeUnsupported: Pi 后端不使用 Claude 联动模式".into()); }
     STORE.write().link_global = link;
@@ -65,7 +75,7 @@ pub fn provider_set_link_mode(link: bool) -> Result<bool, String> {
 /// 本地路由总开关(cc-switch 式代理模式)。开 = 当前及后续切换的 Anthropic 兼容供应商
 /// 统一改走 127.0.0.1 本地路由透传(热切换: 改 key 即刻生效); 关 = 回到直连。
 /// 切换开关立即对「当前供应商」重新生效, 联动模式下全局 settings.json 同步校正。
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn provider_set_route_mode(route: bool) -> Result<bool, String> {
     if pi_translate::is_pi() { return Err("ProviderRouteModeUnsupported: Pi 直接连接上游".into()); }
     STORE.write().route_local = route;
@@ -84,9 +94,8 @@ pub fn provider_set_route_mode(route: bool) -> Result<bool, String> {
     Ok(route)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn provider_save(input: ProviderInput) -> Result<String, String> {
-    let _mutation = PROVIDER_MUTATION.lock();
     let token_field = input
         .token_field
         .clone()
@@ -141,26 +150,31 @@ pub fn provider_save(input: ProviderInput) -> Result<String, String> {
         settings_config: cfg,
     };
 
+    let mutation = PROVIDER_MUTATION.lock();
     let mut store = STORE.write();
     if let Some(existing) = store.items.iter_mut().find(|i| i.id == id) {
         *existing = item;
     } else {
         store.items.push(item);
     }
+    selection::changed();
     drop(store);
+    drop(mutation);
     persist_without(clear_key.then_some(id.as_str()))?;
     Ok(id)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn provider_delete(id: String) -> Result<(), String> {
-    let _mutation = PROVIDER_MUTATION.lock();
+    let mutation = PROVIDER_MUTATION.lock();
     let mut store = STORE.write();
     store.items.retain(|i| i.id != id);
     if store.current_id == id {
         store.current_id = "claude-official".to_string();
     }
+    selection::changed();
     drop(store);
+    drop(mutation);
     persist_without(Some(&id))?;
     Ok(())
 }

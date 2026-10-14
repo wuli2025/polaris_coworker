@@ -1,28 +1,10 @@
-//! Shared with agentd/models/file-credentials.ts. mkdir lock covers the entire
-//! read/refresh/write transaction. Never steal a lock from a slow refresh.
+//! Shared with agentd/models/file-credentials.ts. Generation lock covers the entire
+//! read/refresh/write transaction; reclaim only a dead owner or expired lease.
 use super::*;
 
 pub fn provider_store_path() -> Option<PathBuf> { store::shared_path() }
 
-pub struct FileLock(PathBuf);
-impl FileLock {
-    pub fn acquire(path: &Path) -> Result<Self, String> {
-        let settings = super::pi_config::load()?;
-        let lock = PathBuf::from(format!("{}.lock", path.display()));
-        let deadline = Instant::now() + Duration::from_millis(settings.lock_timeout_ms);
-        loop {
-            match fs::create_dir(&lock) {
-                Ok(()) => return Ok(Self(lock)),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if Instant::now() >= deadline { return Err("CredentialStoreBusy".into()); }
-                    thread::sleep(Duration::from_millis(settings.lock_poll_ms));
-                }
-                Err(_) => return Err("CredentialStoreLockFailed".into()),
-            }
-        }
-    }
-}
-impl Drop for FileLock { fn drop(&mut self) { let _ = fs::remove_dir(&self.0); } }
+pub use super::credential_lock::FileLock;
 
 pub fn read_root(path: &Path) -> Result<Value, String> {
     match fs::read(path) {
@@ -51,5 +33,6 @@ pub fn write(id: &str, credential: Option<Value>) -> Result<(), String> {
     if let Some(credential) = credential { entries.insert(id.into(), credential); }
     else { entries.remove(id); }
     let text = serde_json::to_string_pretty(&root).map_err(|_| "CredentialStoreInvalid")?;
+    _lock.assert_owned()?;
     atomic_write(&path, &text).map_err(|_| "CredentialStoreWriteFailed".into())
 }

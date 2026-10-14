@@ -55,6 +55,7 @@ export class SessionRegistry {
     private readonly models: Models,
     private readonly factories: ExtensionFactory[],
     private readonly emit: (event: ProtocolEvent) => void,
+    private readonly usagePersistFailed: () => void = () => {},
   ) {}
   get size(): number { return this.entries.size; }
   async open(sessionId?: string, cwd?: string, options: SessionOptions = {}, parent?: { id: string; callId: string }) {
@@ -198,7 +199,10 @@ export class SessionRegistry {
       armIdle(); // All SDK events count, including tool progress and retry/compaction events.
       if (event.type === "message_end" && event.message.role === "assistant") {
         try { recordUsage(this.config().usageDir, id, run.id, usageOrdinal++, event.message); }
-        catch { run.mapper.error("USAGE_PERSIST_FAILED", "Usage record could not be persisted"); }
+        catch {
+          this.usagePersistFailed();
+          run.mapper.error("USAGE_PERSIST_FAILED", "Usage record could not be persisted");
+        }
       }
       run.mapper.accept(event, !!run.stopped);
     });

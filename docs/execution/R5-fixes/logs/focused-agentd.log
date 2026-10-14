@@ -1,0 +1,40 @@
+TAP version 13
+# Subtest: test/catalog.test.ts
+ok 1 - test/catalog.test.ts
+  ---
+  duration_ms: 1465.254036
+  type: 'test'
+  ...
+# Subtest: test/credential-lock.test.ts
+ok 2 - test/credential-lock.test.ts
+  ---
+  duration_ms: 2540.256076
+  type: 'test'
+  ...
+# Subtest: test/provider-credentials.test.ts
+ok 3 - test/provider-credentials.test.ts
+  ---
+  duration_ms: 1823.573251
+  type: 'test'
+  ...
+# Subtest: test/provider-login.test.ts
+ok 4 - test/provider-login.test.ts
+  ---
+  duration_ms: 1563.399373
+  type: 'test'
+  ...
+# Subtest: test/provider-usage.test.ts
+ok 5 - test/provider-usage.test.ts
+  ---
+  duration_ms: 1596.761908
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2550.765106

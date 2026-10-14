@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtemp, readFile, rm, stat, readdir, open } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FileCredentials } from "../src/models/file-credentials.ts";
+import { Redactor } from "../src/models/credentials.ts";
 import { harness, result } from "./helpers.ts";
 
 test("OAuth interaction bridge persists SDK login and never returns credential data", async () => {
-  const h = await harness();
+  const dir = await mkdtemp(join(tmpdir(), "r5-oauth-login-"));
+  const path = join(dir, "providers.json");
+  const h = await harness([], {}, [], new FileCredentials(path, new Redactor()));
+  const before = await readFile(path, "utf8");
+  const oldFile = await open(path, "r");
   try {
     const native = h.daemon.models.runtime.getProvider("anthropic");
     assert.ok(native?.auth.oauth);
@@ -18,8 +27,15 @@ test("OAuth interaction bridge persists SDK login and never returns credential d
     assert.equal(started.url, "https://example.test/authorize");
     const finished = result(await h.request("provider.auth", { provider: "anthropic", operation: "respond", input: "one-time-code" }));
     assert.deepEqual(finished, { status: "ok" });
-    assert.equal((await h.daemon.models.credentials.read("anthropic"))?.type, "oauth");
+    const disk = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(disk.credentials.anthropic.access, "private-access");
+    assert.equal(disk.credentials.anthropic.refresh, "private-refresh");
+    if (process.platform !== "win32") {
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+      assert.equal(await oldFile.readFile("utf8"), before, "rename preserves the old open inode");
+    }
+    assert.deepEqual(await readdir(dir), ["providers.json"]);
     assert.ok(!JSON.stringify([started, finished, h.logs, h.events]).includes("private-"));
     assert.deepEqual(result(await h.request("provider.auth", { provider: "anthropic", operation: "cancel" })), { status: "idle" });
-  } finally { await h.close(); }
+  } finally { await oldFile.close(); await h.close(); await rm(dir, { recursive: true, force: true }); }
 });

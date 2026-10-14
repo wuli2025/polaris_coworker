@@ -54,13 +54,25 @@ impl AgentBackend for PiBackend {
         self.client()?.call(Command::Auth(protocol::Auth { operation: operation.into(), provider: provider.into(), input }))
     }
     fn provider_apply(&self, id: &str) -> anyhow::Result<Value> {
+        let (generation, selected) = crate::provider::selection::snapshot();
+        if selected != id { return Ok(serde_json::json!({"applied":false,"superseded":true})); }
         let client = self.client()?;
+        // Serialize deliveries, independently of provider state/queries. Check the
+        // ticket both before sending and after every potentially slow daemon call.
         let mut last = self.provider_config.lock();
-        let catalog = client.call(Command::Catalog(Empty {}))?;
-        let config = crate::provider::pi_translate::config(id, &catalog).map_err(anyhow::Error::msg)?;
+        let current = || crate::provider::selection::current(generation);
+        let superseded = || serde_json::json!({"applied":false,"superseded":true});
+        if !current() { return Ok(superseded()); }
+        let catalog = client.call(Command::Catalog(Empty {}));
+        if !current() { return Ok(superseded()); }
+        let catalog = protocol::Catalog::parse(catalog?)?;
+        let config = crate::provider::pi_translate::config(id, &serde_json::to_value(catalog)?).map_err(anyhow::Error::msg)?;
         let pid = client.status.lock().pid;
+        if !current() { return Ok(superseded()); }
         if last.as_ref() == Some(&(pid, config.clone())) { return Ok(serde_json::json!({"applied":true})); }
-        let result = self.apply_config(Some(config.clone()), None)?;
+        let result = self.apply_config(Some(config.clone()), None);
+        if !current() { *last = None; return Ok(superseded()); }
+        let result = result?;
         *last = Some((pid, config));
         Ok(result)
     }
@@ -80,9 +92,10 @@ impl AgentBackend for PiBackend {
         }
         anyhow::ensure!(!input.prompt.trim().is_empty(), "AgentdEmptyPrompt");
         if crate::provider::credential_file::provider_store_path().is_some() {
-            let _selection = crate::provider::PROVIDER_MUTATION.lock();
-            let id = crate::provider::current_provider_id();
-            self.provider_apply(if id.is_empty() { "claude-official" } else { &id })?;
+            loop {
+                let (_, id) = crate::provider::selection::snapshot();
+                if self.provider_apply(&id)?["superseded"] != true { break; }
+            }
         }
         let client = self.client()?;
         if client.status.lock().circuit_open { return Err(BackendError::CircuitOpen.into()); }

@@ -1,17 +1,17 @@
 import { mkdir, readFile, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
+import { acquire, DEFAULT_MAX_HOLD_MS, type LockOptions } from "./credential-lock.ts";
+export type { LockOptions } from "./credential-lock.ts";
 import type { Credential, CredentialStore, AuthOperationOptions } from "@earendil-works/pi-ai";
 import { Redactor } from "./credentials.ts";
 
-export interface LockOptions { timeoutMs: number; pollMs: number }
-/** Same mkdir/atomic-rename contract as provider/credential_file.rs. No stale
- * lock stealing: a timed-out waiter must never overwrite an ongoing refresh. */
+/** Shared generation-directory lock contract with Rust credential_lock.rs. */
 export class FileCredentials implements CredentialStore {
   constructor(readonly path: string, private readonly redactor: Redactor,
     private readonly locks: LockOptions = { timeoutMs: 30000, pollMs: 25 }) {
     if (!path || !Number.isSafeInteger(locks.timeoutMs) || locks.timeoutMs <= 0
+      || !Number.isSafeInteger(locks.maxHoldMs ?? DEFAULT_MAX_HOLD_MS) || (locks.maxHoldMs ?? DEFAULT_MAX_HOLD_MS) <= 0
       || !Number.isSafeInteger(locks.pollMs) || locks.pollMs <= 0) throw new Error("CredentialStoreConfigInvalid");
   }
   private async root(): Promise<Record<string, unknown> & { credentials?: Record<string, Credential> }> {
@@ -36,21 +36,11 @@ export class FileCredentials implements CredentialStore {
       for (const v of Object.values(credential.env ?? {})) if (typeof v === "string") this.redactor.add(v);
     } else throw new Error("CredentialStoreInvalid");
   }
-  private async locked<T>(work: () => Promise<T>, options?: AuthOperationOptions): Promise<T> {
+  private async locked<T>(work: (assertOwned: () => Promise<void>) => Promise<T>, options?: AuthOperationOptions): Promise<T> {
     await mkdir(dirname(this.path), { recursive: true });
-    const lock = `${this.path}.lock`;
-    const deadline = Date.now() + this.locks.timeoutMs;
-    while (true) {
-      options?.signal?.throwIfAborted();
-      try { await mkdir(lock); break; }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw new Error("CredentialStoreLockFailed");
-        if (Date.now() >= deadline) throw new Error("CredentialStoreBusy");
-        await delay(this.locks.pollMs, undefined, { signal: options?.signal });
-      }
-    }
-    try { options?.signal?.throwIfAborted(); return await work(); }
-    finally { await rm(lock, { recursive: true }); }
+    const lock = await acquire(`${this.path}.lock`, this.locks, options?.signal);
+    try { options?.signal?.throwIfAborted(); return await work(lock.assertOwned); }
+    finally { await lock.release(); }
   }
   private async save(root: object): Promise<void> {
     const temp = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
@@ -72,22 +62,24 @@ export class FileCredentials implements CredentialStore {
     return Object.entries((await this.root()).credentials ?? {}).map(([providerId, c]) => ({ providerId, type: c.type }));
   }
   async modify(id: string, fn: (current: Credential | undefined) => Promise<Credential | undefined>, options?: AuthOperationOptions) {
-    return this.locked(async () => {
+    return this.locked(async (assertOwned) => {
       const root = await this.root();
       const entries = root.credentials ??= Object.create(null) as Record<string, Credential>;
       const credential = await fn(Object.hasOwn(entries, id) ? entries[id] : undefined);
       if (credential !== undefined) {
         this.register(credential);
         Object.defineProperty(entries, id, { value: credential, enumerable: true, configurable: true, writable: true });
+        await assertOwned();
         await this.save(root);
       }
       return entries[id];
     }, options);
   }
   async delete(id: string, options?: AuthOperationOptions): Promise<void> {
-    await this.locked(async () => {
+    await this.locked(async (assertOwned) => {
       const root = await this.root();
       if (root.credentials) delete root.credentials[id];
+      await assertOwned();
       await this.save(root);
     }, options);
   }

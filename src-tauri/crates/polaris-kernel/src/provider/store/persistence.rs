@@ -178,6 +178,7 @@ pub(super) fn persist_without(remove: Option<&str>) -> Result<(), String> {
     move_credentials(&mut candidate, entries);
     let mut value = serde_json::to_value(&candidate).map_err(|_| "ProviderStoreInvalid")?;
     value["credentials"] = credentials;
+    _file.assert_owned()?;
     atomic_write(&path, &serde_json::to_string_pretty(&value).map_err(|_| "ProviderStoreInvalid")?)
         .map_err(|_| "ProviderStoreWriteFailed")?;
     *store = candidate;

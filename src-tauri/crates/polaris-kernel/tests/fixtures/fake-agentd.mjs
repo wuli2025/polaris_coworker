@@ -1,11 +1,17 @@
 // Protocol-only fixture. Never launches a child process or calls a model provider.
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
-import { openSync, writeFileSync, fsyncSync, closeSync } from 'node:fs';
+import { openSync, writeFileSync, fsyncSync, closeSync, existsSync } from 'node:fs';
 const recordIndex = process.argv.indexOf('--record');
 const record = recordIndex < 0 ? undefined : process.argv[recordIndex + 1];
 if (process.argv.includes('--crash-start')) process.exit(7);
 const sessions = new Map();
+let applied;
+async function gate(option) {
+  const index = process.argv.indexOf(option);
+  if (index < 0) return;
+  while (!existsSync(process.argv[index + 1])) await new Promise(resolve => setTimeout(resolve, 5));
+}
 let nextSession = 0;
 let nextTurn = 0;
 let tail = Promise.resolve();
@@ -60,8 +66,11 @@ async function dispatch({ id, method, params: p }) {
     case 'ping':
       if (process.argv.includes('--ping-hang')) return;
       return response(id, { status: 'ok', sessions: sessions.size, version: '0.1.0', piVersion: '1.0.4',
-        protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 5 });
-    case 'models.list': return response(id, { models: [{ provider: 'fixture', id: 'test' }] });
+        usagePersistFailures: 7, protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 6 });
+    case 'models.catalog':
+      await gate('--gate-catalog');
+      return response(id, { models: [] });
+    case 'models.list': return response(id, { models: applied ? [applied.defaultModel] : [{ provider: 'fixture', id: 'test' }] });
     case 'session.open': {
       if (p.sessionId && sessions.has(p.sessionId)) return error(id, 'SESSION_ALREADY_OPEN');
       const sid = p.sessionId ?? `fake-${++nextSession}`;
@@ -92,7 +101,10 @@ async function dispatch({ id, method, params: p }) {
       return response(id, { aborted: true });
     }
     case 'close': sessions.delete(p.sessionId); return response(id, { closed: true });
-    case 'config.apply': return response(id, { applied: true, reopenRequired: [...sessions.keys()] });
+    case 'config.apply':
+      await gate('--gate-apply');
+      applied = p.config;
+      return response(id, { applied: true, reopenRequired: [...sessions.keys()] });
     case 'steer': case 'followUp': return response(id, { turnId: sessions.get(p.sessionId)?.turn, disposition: 'queued' });
     default: return error(id, 'INVALID_REQUEST');
   }

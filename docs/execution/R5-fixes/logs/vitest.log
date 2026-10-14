@@ -1,0 +1,17 @@
+
+ RUN  v3.2.7 /home/mi/work/polaris-pi
+
+ ✓ src/features/auth/authorityTransport.test.ts (3 tests) 4ms
+ ✓ src/lib/chatImages.test.ts (2 tests) 3ms
+ ✓ src/stores/chatDeltas.test.ts (1 test) 3ms
+ ✓ src/features/permissions/queue.test.ts (3 tests) 4ms
+ ✓ src/stores/chatArtifacts.test.ts (2 tests) 4ms
+ ✓ src/features/sandbox/project.test.ts (4 tests) 6ms
+ ✓ tests/frontend/expertSelection.test.ts (5 tests) 15ms
+ ✓ src/components/chat/shared.test.ts (5 tests) 5ms
+
+ Test Files  8 passed (8)
+      Tests  25 passed (25)
+   Start at  18:57:43
+   Duration  594ms (transform 487ms, setup 0ms, collect 1.05s, tests 44ms, environment 4ms, prepare 792ms)
+

@@ -8,7 +8,7 @@ export class Models {
     public runtime: ModelRuntime,
     readonly credentials: CredentialStore,
     readonly redactor: Redactor,
-    readonly builtinCatalog: ReturnType<Models["list"]>,
+    public builtinCatalog: ReturnType<Models["list"]>,
   ) {}
 
   static async create(config: Config, credentials: CredentialStore, redactor: Redactor): Promise<Models> {
@@ -23,11 +23,12 @@ export class Models {
 
   private static async build(config: Config, credentials: CredentialStore) {
     const runtime = await ModelRuntime.create({ credentials, modelsPath: null, allowModelNetwork: false });
-    const catalog = runtime.getModels().map(({ provider, id, name, api, baseUrl, input, cost, reasoning, contextWindow, maxTokens }) => ({
-      provider, id, name, api, baseUrl, input, cost, reasoning, contextWindow, maxTokens,
-    }));
+    const builtinProviders = new Set(runtime.getModels().map((m) => m.provider));
     for (const { id, ...provider } of config.providers) runtime.registerProvider(id, provider);
     if (runtime.getError()) throw new DaemonError("INVALID_PROVIDER", "Provider configuration is invalid");
+    const catalog = runtime.getModels().filter((m) => builtinProviders.has(m.provider)).map(({ provider, id, name, api, baseUrl, input, cost, reasoning, contextWindow, maxTokens }) => ({
+      provider, id, name, api, baseUrl, input, cost, reasoning, contextWindow, maxTokens,
+    }));
     return { runtime, catalog };
   }
 
@@ -39,6 +40,7 @@ export class Models {
       else await this.credentials.modify(provider, async () => ({ type: "api_key", key }));
     }
     this.runtime = candidate.runtime;
+    this.builtinCatalog = candidate.catalog;
   }
 
   list() {

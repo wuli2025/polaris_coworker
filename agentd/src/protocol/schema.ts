@@ -5,8 +5,21 @@ const id = Type.Union([text, Type.Integer()]);
 const request = <M extends string, P extends Record<string, TSchema>>(method: M, params: P) =>
   Type.Object({ id, method: Type.Literal(method), params: Type.Object(params, { additionalProperties: false }) },
     { additionalProperties: false });
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 export const ModelSchema = Type.Object({ provider: text, id: text }, { additionalProperties: false });
+const nonnegative = Type.Number({ minimum: 0 });
+// SDK catalog uses negative rates for unknown/dynamic pricing. Preserve them.
+const costRates = { input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(), cacheWrite: Type.Number() };
+export const CatalogModelSchema = Type.Object({
+  provider: text, id: text, name: text, api: text, baseUrl: Type.String(),
+  input: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")])),
+  cost: Type.Object({ ...costRates, tiers: Type.Optional(Type.Array(
+    Type.Object({ ...costRates, inputTokensAbove: nonnegative }, { additionalProperties: false }))) },
+    { additionalProperties: false }),
+  reasoning: Type.Boolean(), contextWindow: Type.Integer({ minimum: 1 }), maxTokens: Type.Integer({ minimum: 1 }),
+}, { additionalProperties: false });
+export const CatalogSchema = Type.Object({ models: Type.Array(CatalogModelSchema) }, { additionalProperties: false });
+export type Catalog = Static<typeof CatalogSchema>;
 export const ThinkingLevelSchema = Type.Union([
   Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"),
   Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"),
@@ -26,6 +39,7 @@ export const ImageSchema = Type.Object({ type: Type.Literal("image"), mimeType: 
 export type SessionOptions = Static<typeof SessionOptionsSchema>;
 export type ImageAttachment = Static<typeof ImageSchema>;
 export const PingSchema = Type.Object({ status: Type.Literal("ok"), sessions: Type.Integer({ minimum: 0 }),
+  usagePersistFailures: Type.Integer({ minimum: 0 }),
   version: text, piVersion: text, protocolVersion: Type.Literal(PROTOCOL_VERSION) });
 // Keep every command explicit so unknown fields/methods cannot reach SDK APIs.
 export const SandboxResultSchema = Type.Object({

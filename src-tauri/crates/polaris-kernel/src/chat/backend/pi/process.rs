@@ -29,6 +29,7 @@ impl Process {
             let settings = crate::provider::pi_config::load().map_err(anyhow::Error::msg)?;
             command.env("POLARIS_PROVIDER_STORE", &path)
                 .env("POLARIS_CREDENTIAL_LOCK_TIMEOUT_MS", settings.lock_timeout_ms.to_string())
+                .env("POLARIS_CREDENTIAL_LOCK_MAX_HOLD_MS", settings.lock_max_hold_ms.to_string())
                 .env("POLARIS_CREDENTIAL_LOCK_POLL_MS", settings.lock_poll_ms.to_string());
             if let Some(dir) = path.parent() { command.env("POLARIS_USAGE_DIR", dir.join("pi-usage")); }
         }

@@ -179,7 +179,7 @@ pub(crate) fn codex_agent() -> ureq::Agent {
 ///   给出验证网址 + 配对码, 用户在网页填码即完成 —— server flavor / 远端也能用。
 /// - `force_device=false`: 桌面端走回环一键(浏览器点 Authorize 即完成), 更省事。
 /// 两条路拿到的 token 都按官方格式写 ~/.codex/auth.json, Codex CLI 与 Claude Code 翻译代理共用。
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn codex_start_login(force_device: Option<bool>) -> Result<CodexDeviceLogin, String> {
     if pi_translate::is_pi() { return pi_login::codex_start(force_device); }
     // 回环一键: server flavor 浏览器在远端打不回本机, 只在桌面端启用;
@@ -265,14 +265,14 @@ pub fn codex_start_login(force_device: Option<bool>) -> Result<CodexDeviceLogin,
 }
 
 /// 回环一键授权进度 (auto 模式前端轮询用)
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn codex_login_poll() -> Result<LoginPollResult, String> {
     if pi_translate::is_pi() { return pi_login::poll("openai-codex"); }
     Ok(loopback_poll(&CODEX_LOOPBACK))
 }
 
 /// 取消进行中的回环授权 (关卡片/重开时释放 1455 端口)
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn codex_login_cancel() -> Result<(), String> {
     if pi_translate::is_pi() { return pi_login::cancel("openai-codex"); }
     loopback_stop(&CODEX_LOOPBACK);
@@ -280,7 +280,7 @@ pub fn codex_login_cancel() -> Result<(), String> {
 }
 
 /// ② 轮询授权状态; 成功则换 token 并落盘 ~/.codex/auth.json
-#[cfg_attr(feature = "desktop", tauri::command)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexPollResult, String> {
     if pi_translate::is_pi() { return Ok(CodexPollResult { status: pi_login::poll("openai-codex")?.status }); }
     let pending = || {

@@ -4,6 +4,7 @@ use super::*;
 pub struct PiSettings {
     pub lock_timeout_ms: u64,
     pub lock_poll_ms: u64,
+    pub lock_max_hold_ms: u64,
     pub context_window: u64,
     pub max_tokens: u64,
     pub reasoning: bool,
@@ -22,7 +23,8 @@ pub fn load() -> Result<PiSettings, String> {
         target.extend(patch.clone());
     }
     let settings: PiSettings = serde_json::from_value(value).map_err(|_| "ProviderConfigInvalid")?;
-    if settings.lock_timeout_ms == 0 || settings.lock_poll_ms == 0 || settings.context_window == 0
+    if [settings.lock_max_hold_ms, settings.lock_timeout_ms, settings.lock_poll_ms]
+        .iter().any(|v| *v == 0 || *v > 9007199254740991) || settings.context_window == 0
         || settings.max_tokens == 0 || settings.max_tokens > settings.context_window
         || settings.input.is_empty() || settings.input.iter().any(|s| s != "text" && s != "image")
         || ["input", "output", "cacheRead", "cacheWrite"].iter()

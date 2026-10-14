@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 /// Mirror of agentd/src/protocol/schema.ts; fingerprint test gates changes.
-pub const PROTOCOL_VERSION: u64 = 5;
+pub const PROTOCOL_VERSION: u64 = 6;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum Id { Text(String), Number(i64) }
@@ -88,7 +88,7 @@ pub struct Prompt {
 #[serde(rename_all = "camelCase")]
 pub struct Ping {
     pub status: String, pub sessions: u64, pub version: String,
-    pub pi_version: String, pub protocol_version: u64,
+    pub pi_version: String, pub protocol_version: u64, pub usage_persist_failures: u64,
 }
 pub fn check_ping(value: Value) -> anyhow::Result<Ping> {
     anyhow::ensure!(value.get("protocolVersion").and_then(Value::as_u64) == Some(PROTOCOL_VERSION),
@@ -181,4 +181,45 @@ pub struct Auth {
     pub provider: String,
     pub operation: String,
     #[serde(skip_serializing_if = "Option::is_none")] pub input: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Catalog { pub models: Vec<CatalogModel> }
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogModel {
+    pub provider: String, pub id: String, pub name: String, pub api: String, pub base_url: String,
+    pub input: Vec<ModelInput>, pub cost: ModelCost, pub reasoning: bool,
+    pub context_window: u64, pub max_tokens: u64,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelInput { Text, Image }
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelCost {
+    pub input: f64, pub output: f64, pub cache_read: f64, pub cache_write: f64,
+    #[serde(skip_serializing_if = "Option::is_none")] pub tiers: Option<Vec<ModelCostTier>>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelCostTier {
+    pub input: f64, pub output: f64, pub cache_read: f64, pub cache_write: f64, pub input_tokens_above: f64,
+}
+impl Catalog {
+    pub fn parse(value: Value) -> anyhow::Result<Self> {
+        let catalog: Self = serde_json::from_value(value)?;
+        for m in &catalog.models {
+            anyhow::ensure!([&m.provider, &m.id, &m.name, &m.api].iter().all(|s| !s.is_empty())
+                && m.context_window > 0 && m.max_tokens > 0
+                && [m.cost.input, m.cost.output, m.cost.cache_read, m.cost.cache_write]
+                    .iter().all(|n| n.is_finite()), "AgentdInvalidCatalog");
+            for tier in m.cost.tiers.iter().flatten() {
+                anyhow::ensure!([tier.input, tier.output, tier.cache_read, tier.cache_write, tier.input_tokens_above]
+                    .iter().all(|n| n.is_finite()) && tier.input_tokens_above >= 0.0, "AgentdInvalidCatalogTier");
+            }
+        }
+        Ok(catalog)
+    }
 }

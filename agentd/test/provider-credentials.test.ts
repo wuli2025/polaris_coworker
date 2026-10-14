@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, stat, open, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -28,8 +28,19 @@ test("SDK refresh persists and serializes across store instances with fake clock
   try {
     const runtimes = await Promise.all(stores.map((credentials) => ModelRuntime.create({ credentials,
       modelsPath: null, allowModelNetwork: false, refreshOnCreate: false })));
+    const before = await readFile(path, "utf8");
+    const oldFile = await open(path, "r");
+    t.after(() => oldFile.close());
     const results = await Promise.all(runtimes.map((runtime) => runtime.getAuth("anthropic")));
     assert.equal(refreshes, 1);
+    const disk = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(disk.credentials.anthropic.access, "new-access-secret");
+    assert.equal(disk.credentials.anthropic.refresh, "new-refresh-secret");
+    if (process.platform !== "win32") {
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+      assert.equal(await oldFile.readFile("utf8"), before, "refresh replaces the file atomically");
+    }
+    assert.deepEqual(await readdir(dir), ["providers.json"]);
     assert.ok(results.every((result) => result?.auth.apiKey === "new-access-secret"));
     const stored = await new FileCredentials(path, redactor).read("anthropic");
     if (stored?.type !== "oauth") throw new Error("Missing OAuth credential");

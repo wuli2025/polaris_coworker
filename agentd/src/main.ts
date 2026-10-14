@@ -32,6 +32,7 @@ async function main(): Promise<void> {
   const path = process.env.POLARIS_PROVIDER_STORE;
   const credentials = path ? new FileCredentials(path, redactor, {
     timeoutMs: Number(process.env.POLARIS_CREDENTIAL_LOCK_TIMEOUT_MS ?? 30000),
+    maxHoldMs: Number(process.env.POLARIS_CREDENTIAL_LOCK_MAX_HOLD_MS ?? 600000),
     pollMs: Number(process.env.POLARIS_CREDENTIAL_LOCK_POLL_MS ?? 25),
   }) : undefined;
   const daemon = await Daemon.create(config,

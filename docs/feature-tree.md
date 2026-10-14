@@ -47,7 +47,7 @@ kernel 没有 sandbox 编译依赖；P3 通过壳注入 SandboxExecutor，使用
 | claude_cli → `K/chat/backend/claude_cli/pipeline/`、`pool/` | 原 spawn / parser / pool / 提示拼装 / 产物收尾按职责搬移 | 旧工具/模型/池开关保留；原池和管线单测随迁移 |
 | session_pool → `K/chat/session_pool.rs` | 原公开路径兼容门面；删除会话、退出转交 backend | 保留 conv 和宿主调用路径 |
 | pi → `K/chat/backend/pi/` | JSONL 请求关联、session/turn 路由、有界队列、约 30ms delta 合批、重启/熔断/取消 | 假 daemon 与协议样例测试；shared 已实现；per-account 明确拒绝，尚未实现 |
-| 状态 → `K/chat/backend/mod.rs::agent_backend_status` | 后端类型、PID、重启次数、熔断与健康状态 | Tauri/HTTP 已注册；协议 v2 ping 提供版本，握手成功后填 agentdVersion；版本不符熔断 |
+| 状态 → `K/chat/backend/mod.rs::agent_backend_status` | 后端类型、PID、重启次数、熔断与健康状态 | Tauri/HTTP 已注册；协议 v6 ping 提供版本和 usagePersistFailures；握手/周期 ping 更新状态，版本不符熔断 |
 | prompt → `K/chat/prompt.rs:66,252,356,1049,1091,1145` | 历史、记忆、检索、批次、目标与动态工作流指令 | →conv/桥返回的数据；当前预算常量 `:22`、`POLARIS_PROMPT_FULL` 逻辑 `:626`；迁到配置/提示资源 |
 | types → `K/chat/types.rs:10,33,108` | 四档 PermissionMode，ChatSendArgs，ChatStreamEvent | 权限当前是 CLI 值映射；前端字段由 Rust camelCase 序列化；Pi 权限交互尚待实现 |
 | bridges → `K/chat/bridges.rs:48,76,91,96` | KbBridge/ExpertBridge，set_* 一次注入 | 内核不直接依赖 fable 或 expert；装配在 `H/wiring.rs:98`，未注入按 Option 降级 |
@@ -209,7 +209,7 @@ P3b 已接入桌面路由校验、请求级专家选择和项目迁移 UI；服�
 | --- | --- | --- |
 | `agentd/src/sessions/create.ts`、`options.ts`、`registry.ts` | session.open 可选 model/thinkingLevel/toolProfile；session.configure 仅空闲可用，SDK setModel/setThinkingLevel/setActiveToolsByName | defaultModel/thinkingLevel/defaultToolProfile；toolProfiles 名单由配置管理，旧 tools 只映射 default 档；`agentd/test/protocol-extension.test.ts` |
 | `agentd/src/sessions/attachments.ts` | prompt.attachments 图片 base64 校验，经 SDK prompt.images 传入模型 | attachments.maxCount=4、maxBytes=262144、maxTotalBytes=524288，PNG/JPEG/GIF/WebP；faux 模型验证真实消息 |
-| `agentd/src/protocol/version.ts`、`backend/pi/supervisor.rs` | ping 返回 agentd/npm 实际版本、Pi SDK VERSION、protocolVersion=4（R3 升级）；握手成功前阻止业务请求 | 沿用 requestTimeoutMs/channelCapacity；版本错误立即熔断；`pi/extension_tests.rs` 验证仅发出 ping |
+| `agentd/src/protocol/version.ts`、`backend/pi/supervisor.rs` | ping 返回 agentd/npm 实际版本、Pi SDK VERSION、protocolVersion=6（R5 升级）；握手成功前阻止业务请求 | 沿用 requestTimeoutMs/channelCapacity；版本错误立即熔断；`pi/extension_tests.rs` 验证仅发出 ping |
 | `backend/bridge.rs`、`pi/input.rs`、`pi/sessions.rs` | 每轮模型、权限及思考档位进 open/configure；已有会话每轮重新配置；TurnRequest 携带已校验图片内容；公开 PiBackend.configure_session 支持思考档位 | 复用 POLARIS_WORK_MODEL/POLARIS_FAST_MODEL，通过 models.list 唯一匹配 provider，歧义具名拒绝；Deny→readonly，其余→workspace |
 | `tests/fixtures/protocol-samples.jsonl`、`protocol-schema.sha256` | 双端样例与 TS schema 哈希锁定，新增 configure/图片/版本样例 | TS 校验请求，Rust 逐条解析及往返；backend 定向测试含 R1c 回归 |
 
@@ -324,8 +324,8 @@ agentd typecheck 通过，npm test 18 文件通过、2 失败（web EPERM；e2e 
 | 入口 | 依赖与行为 | 配置、迁移与验证 |
 | --- | --- | --- |
 | `K/provider/{pi_translate,pi_config}.rs`、store 门面 | ProviderView→Pi providers/defaultModel；显式 models→env→同提供商内置目录；具名协议映射 | pi-default.json；POLARIS_PROVIDER_CONFIG；类型校验、模型/价格/alias 覆盖；三协议与优先级测试 |
-| `K/provider/credential_file.rs`、`agentd/src/models/file-credentials.ts` | 方案 A：共享 providers.json.credentials，mkdir 锁覆盖刷新/保存，原子替换；API key 从 env 同文件迁移 | 默认锁等待 30000ms、轮询 25ms；旧外部 OAuth 不复制，Pi 首次重登；假时钟/端点并发刷新和重开持久化测试 |
-| `K/chat/backend/pi/`、`agentd/src/sessions/registry.ts` | provider_switch→config.apply；空闲自动重建保留历史，运行会话本轮后应用；Pi 不启动 codex_proxy、不写 Claude 全局配置 | 协议 v5；SDK SessionManager / ModelRuntime；切换、历史保留、新会话、版本指纹验证 |
+| `K/provider/credential_file.rs`、`agentd/src/models/file-credentials.ts` | 方案 A：共享 providers.json.credentials，代次目录锁覆盖刷新/保存，原子替换与陈旧锁回收；API key 从 env 同文件迁移 | 默认锁等待 30000ms、轮询 25ms、最大持有 600000ms；旧外部 OAuth 不复制，Pi 首次重登；假时钟/端点并发刷新和重开持久化测试 |
+| `K/chat/backend/pi/`、`agentd/src/sessions/registry.ts` | provider_switch→config.apply；空闲自动重建保留历史，运行会话本轮后应用；Pi 不启动 codex_proxy、不写 Claude 全局配置 | 协议 v6（R5）；SDK SessionManager / ModelRuntime；切换、历史保留、新会话、版本指纹验证 |
 | `K/provider/pi_login.rs`、`agentd/src/models/logins.ts` | provider.auth 复用 anthropic/openai-codex 原生登录/刷新；Rust 登录接口保留旧后端分支 | oauthTimeoutMs=600000；Codex 默认 device code；登录交互不返回 token |
 | `agentd/src/events/usage-store.ts`、`K/provider/{usage,pi_usage}.rs` | 每条权威 assistant usage 按会话/提供商/模型持久化；与 Claude JSONL 按日期及明确请求身份合并 | Pi 默认由 Rust 指向 Polaris/data/pi-usage；独立 agentd usageDir=""；记录去重测试 |
 | `K/provider/store/failover.rs`、Pi Translator | MODEL_AUTH/RATE_LIMIT/NETWORK/ERROR 接既有滑窗；成功清零，取消/上下文/工具错误不切换 | 无新增滑窗依赖；错误分类及阈值测试，真实网络故障切换未验收 |
@@ -334,3 +334,23 @@ agentd typecheck 通过，npm test 18 文件通过、2 失败（web EPERM；e2e 
 全部文件/行数、SDK d.ts 证据、默认值与切换示例、凭据与账本迁移、命令及失败名单见 [P4 报告](pi-migration/p4-result.md)。
 两壳 check、vue-tsc 和过滤后的 kernel 测试通过；agentd 全量仍有 web EPERM 与 e2e ping 超时，不能宣称完成。
 前端开关/登录/用量文案需配合；没有直接修改前端、没有新增依赖、没有 commit/push。
+
+### R5 — P4 第 1 轮采纳项修复（2026-10-14）
+
+本节覆盖上方 P4 的旧锁/目录/协议说明；执行结果与未通过项见 [R5 执行报告](execution/R5-fixes/report.md)。驳回项未改业务代码。
+
+| 入口 | 行为、依赖与配置 | 迁移与验证 |
+| --- | --- | --- |
+| `agentd/src/models/{file-credentials,credential-lock,lock-owner}.ts`、`K/provider/{credential_file,credential_lock,lock_owner}.rs` | 同主机 PID/启动时间判死，或年龄严格超过最大持有时长后回收；持有者含 hostname/pid/processStart/acquiredAt | 完整候选目录原子发布；唯一代次子目录重命名为唯一墓碑后删除；旧释放者不能删除新锁；共享 `credential-lock-vectors.json` |
+| `K/provider/{pi-default.json,pi_config.rs}`、`agentd/src/main.ts`、`backend/pi/process.rs` | `lockMaxHoldMs=600000`，等待/轮询仍为 30000/25ms；三项均须正安全整数；Rust 启动 agentd 时传同值 | `POLARIS_PROVIDER_CONFIG` 指向 `{"lockMaxHoldMs":900000}`；独立 agentd 用 `POLARIS_CREDENTIAL_LOCK_MAX_HOLD_MS=900000`；须同步升级并停掉旧版持锁进程 |
+| `agentd/test/{provider-login,provider-credentials}.test.ts` | 实际 FileCredentials 注入 SDK 登录与刷新；不改 SDK OAuth 生产逻辑 | 断言磁盘 access/refresh 更新、0600、旧打开 inode 内容不变、无临时文件；假端点与凭据，无真实授权 |
+| `agentd/src/{daemon,log}.ts`、`sessions/registry.ts`、`K/chat/backend/{mod.rs,pi/supervisor.rs}` | 每次用量写盘失败记 warn 和 daemon 累计数；`ping.usagePersistFailures` → `agent_backend_status.usagePersistFailures` | 进程重启计数重置；沿现有日志级别过滤；Rust 状态在握手/周期 ping 后更新；故障注入两轮验证 |
+| `agentd/src/models/runtime.ts` | apply 成功后同时替换 runtime 与 builtinCatalog；内置提供商的配置覆盖反映到目录，自定义提供商仍不混入 | `catalog.test.ts` 检查 apply 后名称/上下文变化 |
+| `agentd/src/protocol/schema.ts`、`K/chat/backend/pi/protocol.rs` | 协议 **v6**：CatalogSchema/CatalogModelSchema、Rust Catalog 类型；含可选价格 tiers，保留 SDK 空端点/未知价格负值 | 双端握手、JSONL 样例、TS 源 SHA256 和假 daemon 同步；旧 v5 握手拒绝；真实 SDK 目录通过 schema |
+| `K/provider/{store/commands.rs,selection.rs,claude_login.rs,codex_login.rs}`、`backend/pi/mod.rs` | Tauri provider 命令用 `command(async)`；状态锁只保护状态和代次；IPC 独立串行，在发送前与响应后丢弃旧代次 | server 原有 `invoke → spawn_blocking → dispatch_sync → chat_services` 路径已检查；集成测试门控 catalog/apply 两阶段，查询不等待慢 IPC，最后选择生效 |
+
+锁目录格式变更后不支持旧/新进程混跑。空旧锁自动回收；无法解析的代次元数据保守等待目录年龄超过 maxHoldMs。
+Linux 进程身份使用 boot ID + `/proc/PID/stat` 启动 tick，macOS 使用 C locale 的 ps 启动时间，Windows 使用 PowerShell UTC 启动 ticks。
+可回收的超时是租约上限，活持有者超过上限也可被回收；正常慢刷新在上限内受保护。配置应大于正常刷新最长时间。
+选择状态先记录并持久化，再下发 IPC；当前代次失败返回错误，保留选择供重试/下一轮准备下发；旧代次结果不回滚新选择。
+验证：agentd typecheck、两壳 check、vue-tsc、Vitest 通过；新增定向测试通过。全量 npm/kernel 仍存在环境/基线失败，详见报告；不宣称验收完成。
