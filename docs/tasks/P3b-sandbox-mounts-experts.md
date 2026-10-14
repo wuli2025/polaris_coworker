@@ -21,3 +21,8 @@
 - 允许修改：`src-tauri/crates/polaris-sandbox/`、`src-tauri/crates/polaris-kernel/src/chat/backend/`、`src-tauri/src/expert*`（仅专家传递所需）、`src/components/chat/ChatComposer.vue`（净增 ≤15 行）与相关 store/类型/新文件、`vite.config.ts`、测试、`docs/`。
 - 无新依赖；新写/改动文件 ≤500 行、≤500 字符（既有超长文件按上面的净增限制）；新 Rust 代码无 unwrap/expect；可变值进配置。
 - 必须通过：agentd `npm run typecheck && npm test`；两壳 `cargo check --offline`；`cargo test -p polaris-kernel --lib --tests --offline` 与 `cargo test -p polaris-sandbox --offline`（基线与沙箱 TCP 项除外并列出）；`npx vue-tsc --noEmit`；`npx vitest run` 全部通过。不 commit。
+
+## 来自 P3 审查的并入项（见 `docs/reviews/P3-round1-triage.md`）
+- P3b-2：受保护路径名单从 `src-tauri/src/wiring.rs` 写死改为"配置 + 代码兜底名单"（兜底名单至少含 `~/Polaris/data`、`~/.polaris`、`~/.pi`、`~/.claude`、`~/.codex`、`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.kube`），配置只能追加不能移除兜底项。
+- P3b-4：路由前校验容器挂载的 `Destination` 与读写属性：`/workspace` 必须是目标项目目录且可写，`/kb` 必须只读，不允许其他宿主路径挂载。
+- P3b-5：容器创建时按配置设置内存/CPU 上限、`--cap-drop=ALL`（按需最小加回）、`--security-opt no-new-privileges`；路由前校验这些安全基线，不满足报 `SANDBOX_UNSAFE_CONTAINER` 并提示重建。
