@@ -1,0 +1,16 @@
+{
+  "sessionDir": "~/.polaris/agentd/sessions",
+  "maxSessions": 8,
+  "maxQueuedMessages": 8,
+  "idleTimeoutMs": 600000,
+  "turnTimeoutMs": 300000,
+  "maxLineBytes": 1048576,
+  "tools": ["read", "bash", "edit", "write"],
+  "defaultModel": { "provider": "anthropic", "id": "claude-sonnet-4-5" },
+  "thinkingLevel": "medium",
+  "logLevel": "info",
+  "extensions": { "enabled": false },
+  "providers": [],
+  "retry": { "enabled": false },
+  "compaction": { "enabled": false }
+}

@@ -18,6 +18,7 @@
    - JSONL 客户端：请求 id ↔ 响应关联；按 sessionId/turnId 路由事件；有界通道 + 回压；单行上限；stdout 只解析协议，stderr 进日志。
    - 事件翻译：agentd 事件 → 现有 `ChatStreamEvent`。text.delta→delta（保留约 30ms 合批）；tool.started→tool；写文件类工具（按 Pi 工具名 write/edit 等，名单进配置）→artifact；error→error；turn.completed→done（失败先 error 再 done）；`meta` 维持现有 prompt token 估算。轮末产物快照 diff 继续复用现有实现。
    - 取消：`chat_cancel` → agentd `abort`；保证最终一定有 `done`。
+   - 隔离模式：配置项 `agentd.isolation = "shared" | "per-account"`。桌面默认 `shared`（一个 agentd 多会话）；服务端/NAS 多用户形态默认 `per-account`（每个登录账号一个 agentd 进程，崩溃互不影响、工作目录与凭据互不可见）。进程表有上限与空闲回收，均可配置。
 3. **拆分**：本次触及的 `pipeline.rs`（2080 行）、`session_pool.rs`（1170 行）拆到每文件 ≤500 行，按职责分（提示词拼装 / 进程 / 流解析 / 产物 / 收尾）。只搬运与拆分，不顺手改行为。
 4. **装配**：`chat_send` 走 `AgentBackend`；`headless.rs` 的只读调用也走同一个后端接口（无 UI 场景用"收集全部 delta 直到 done"的辅助函数）。
 
