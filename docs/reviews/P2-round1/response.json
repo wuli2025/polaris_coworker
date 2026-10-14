@@ -1,0 +1,21 @@
+{
+  "text": "## 审查报告\n\n**审查模式**：packet（无工具）\n\n**结论**：CHANGES_REQUIRED\n\n---\n\n### 范围与缺失材料\n\n**已审查文件**：\n- `mod.rs` (130行)\n- `config.rs` (113行)\n- `stream.rs` (99行)\n- `bridge.rs` (67行)\n- `pi/mod.rs` (131行)\n- `pi/supervisor.rs` (243行)\n- `pi/process.rs` (110行)\n- `pi/client.rs` (62行)\n- `pi/routes.rs` (82行)\n- `pi/sessions.rs` (56行)\n- `pi/translate.rs` (76行)\n- `pi/protocol.rs` (99行)\n- `pi/windows_job.rs` (25行)\n- `fake-agentd.mjs` 测试固件\n\n**已知问题**（主控已标注，本次独立核实）：\n- turnTimeoutMs 与 agentd 空闲超时语义冲突 → 已确认存在（见问题 #6）\n\n**测试证据**：依赖 brief 中声称的 134 通过 / 4 Windows 失败；packet 模式无法验证。\n\n---\n\n### 问题\n\n#### 1. `active` HashMap 泄漏 — 严重性：中\n**文件**：`pi/routes.rs`，第 80-81 行 + `pi/mod.rs` 第 119 行\n\n**证据**：\n```rust\n// routes.rs Drop impl\nimpl Drop for Route {\n    fn drop(&mut self) { self.reservation.0.lock().remove(&self.reservation.1); }\n    // ^^^ 未清理 self.active 中的 req 映射\n}\n```\n`drain()`（第 59-77 行）会在正常流程下清理 `active`，但：\n- 若 `EventStream` 被丢弃（调用方放弃轮次），`stream.is_finished()` 为真 → `drain()` 跳过 active 清理\n- `routes.rs` 的 `Drop` 未清理 `active`\n- `close()` 只删会话，不删 active\n\n**可复现影响**：长时间运行中 active 持续增长（内存泄漏 + O(n) 性能退化）。\n\n**最小修复**：`routes.rs` 的 `Drop` 应调用 `self.active.lock().remove(&self.req)`，或在 `EventStream` Drop 时触发 cleanup。\n\n---\n\n#### 2. Abort 超时不覆盖原有 error — 严重性：低\n**文件**：`pi/supervisor.rs`，第 147-149 行\n\n**证据**：\n```rust\nif route.abort_deadline.is_some_and(|d| Instant::now() >= d) {\n    route.aborted();\n    anyhow::bail!(\"AgentdAbortTimeout: daemon restarted...\");\n}\n```\n若 `fail()` 已触发（daemon 返回 error），`aborted()` 的 no-op 保护不覆盖原有 error，但 `bail!` 仍向 supervisor 报告新错误，掩盖原始原因。\n\n**最小修复**：abort 超时时检查 `route.terminal` 状态，或在 `fail()` 中记录原始错误代码。\n\n---\n\n#### 3. `Event::Reasoning` 丢弃且无缓冲 — 严重性：低\n**文件**：`pi/translate.rs`，第 71 行\n\n**证据**：\n```rust\nEvent::Started | Event::Reasoning { .. } | Event::Usage { .. } => {}\n```\n`Event::Reasoning` 被静默丢弃。协议有 `reasoning.delta` 事件，但前端契约未定义接收方式（delta 还是其他 kind）。\n\n**最小修复**：明确忽略（保持现状加注释）或将其缓冲为前端可消费的 kind。\n\n---\n\n#### 4. Process::write 错误语义模糊 — 严重性：低\n**文件**：`pi/process.rs`，第 79 行\n\n**证据**：\n```rust\nself.writer.try_send(bytes).map_err(|_| anyhow::anyhow!(\"AgentdWriterBackpressure\"))\n```\n但 `try_send` 失败会被 supervisor 包装为 `AgentdRequestTimeout`（`supervisor.rs` 第 26 行），用户看到\"请求超时\"而非\"内部背压\"。\n\n**最小修复**：使用独立错误码 `\"AgentdWriterBackpressure\"`，或在 `request()` 层区分。\n\n---\n\n#### 5. turnTimeoutMs 默认 600s 语义冲突 — 严重性：低（已知）\n**文件**：`config.rs`，第 65 行；`bridge.rs`，第 41 行\n\n**证据**：Rust 侧固定 600s 总时长超时，但 agentd 可能有独立的 idle 超时（`idle_ms`）和硬上限。两者同时生效可能导致意料之外的提前终止。\n\n**最小修复**：提供配置选项让 `turn_timeout_ms` 可选（零值表示不设置 Rust 侧超时），或明确文档化语义。\n\n---\n\n### 正面发现\n\n1. **配置校验完整**：`config.rs` 验证 backend 类型、isolation 值、所有正数配置项，有单元测试\n2. **事件回压安全**：`stream.rs` 的 terminal 槽位保留机制确保 error/done 不因队列满而丢失\n3. **取消路径正确**：`PiBackend::cancel()` 标记 cancelled，线程内检查 → 保证 `done` 事件\n4. **Windows Job 正确**：使用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` + `AssignProcessToJobObject`\n5. **无 unwrap/expect 新增**：所有错误使用 `anyhow::bail!` 或具名错误\n6. **进程清理**：Linux PDEATHSIG + Unix killpg + Drop 清理\n7. **熔断机制**：指数退避 + jitter + `failure_threshold` 正确实现\n\n---\n\n### 建议验证步骤\n\n| 风险 | 推断/已有证据 | 验证方式 |\n|------|-------------|---------|\n| active 泄漏 | 推断 | 长时间运行观察内存，或增加活跃会话数量压测 |\n| abort 超时覆盖 | 推断 | 模拟 agentd error 后触发 abort timeout |\n| 背压错误码 | 推断 | 快速发送大量请求触发 writer 背压 |\n| turnTimeoutMs 冲突 | 已知 | 配置短 idle_ms 观察行为 |\n\n---\n\n**CHANGES_REQUIRED** 原因：`active` HashMap 泄漏是明确的功能缺陷，需修复后方可通过审查。",
+  "stopReason": "stop",
+  "model": "MiniMax-M2.7",
+  "provider": "minimax",
+  "usage": {
+    "input": 0,
+    "output": 5967,
+    "cacheRead": 0,
+    "cacheWrite": 20850,
+    "totalTokens": 26817,
+    "cost": {
+      "input": 0,
+      "output": 0.0071604,
+      "cacheRead": 0,
+      "cacheWrite": 0.007818750000000001,
+      "total": 0.01497915
+    }
+  },
+  "session_id": "01a138c2-fe55-7920-8dbf-5bb75d74259b"
+}

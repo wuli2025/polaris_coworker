@@ -1,0 +1,124 @@
+{
+  "started_at": "2026-10-14T04:53:35.923442+00:00",
+  "status": "REVIEW_RECEIVED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P2-brief.md",
+        "bytes": 1975,
+        "lines": 23,
+        "sha256": "802067228ffa9ebbbd9497b02b71efa3c971cf50ab4a7d886e045c5fe4d58cff"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs",
+        "bytes": 5524,
+        "lines": 130,
+        "sha256": "0980be68fec79b6ee2bf4128eebb1c46d6b22b963db8da92db83c6b6be252236"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs",
+        "bytes": 5099,
+        "lines": 113,
+        "sha256": "f2fced7b1783a1fe3d26f30fe079dc82e5f76eb0dcbdd8dc2c5a54f38aaee7b9"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/stream.rs",
+        "bytes": 3769,
+        "lines": 99,
+        "sha256": "fc337a9962de8d6055a9c2128800c6bdf132c98a455ad3b05323dcc561bd5517"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs",
+        "bytes": 3463,
+        "lines": 67,
+        "sha256": "4cff2b9b2c0c3facd94bd90f5b5a576b0a82e424ab72aae31b4affd88bc925f1"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs",
+        "bytes": 7382,
+        "lines": 131,
+        "sha256": "d34b861c69a2d9a946348aea0f74268afd22106ded6b275c99dc611986de34cf"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs",
+        "bytes": 12626,
+        "lines": 243,
+        "sha256": "a7986cb93bec4bee41e950bd1df45d920aba98e488465ff191d203d1cd5280bd"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs",
+        "bytes": 5201,
+        "lines": 110,
+        "sha256": "65562316f19454f8433a8c9618990ba666f88484f266a45ce08d7e07f38b3ae8"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs",
+        "bytes": 2988,
+        "lines": 62,
+        "sha256": "3ed29feec675417eb46c05ad92261a77096bd9875fe94e8646e881d9bf2aa83a"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs",
+        "bytes": 3402,
+        "lines": 82,
+        "sha256": "21ea800791617a9f54ab209bc018f38108b3c0a37577ace630b0fbea12321c47"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs",
+        "bytes": 2914,
+        "lines": 56,
+        "sha256": "a02197b73ed2113c60031a5fb49df3b2ae4425165706ca55131624700dedebe8"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs",
+        "bytes": 3915,
+        "lines": 76,
+        "sha256": "4edd1538bd39f5404ad909a2a07e2a07e03fa07c244f4bcbace325923e7d403b"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs",
+        "bytes": 4947,
+        "lines": 99,
+        "sha256": "c2ed87e365a23e88ab49c599b3dfc473acaccc4d3da9dcaf3973b28077ff61e8"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/src/chat/backend/pi/windows_job.rs",
+        "bytes": 1348,
+        "lines": 25,
+        "sha256": "713585cf7d8c29b6ff72d14280086165ea03dc495ef986107a5a6922538ccb2c"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs",
+        "bytes": 3755,
+        "lines": 79,
+        "sha256": "21e58552d9c7c40d59fdf562a10a62541487c1de0083b89c1aad267effd67a47"
+      }
+    ],
+    "prompt_sha256": "3a6c120d6a7a3388e94de83381c127cbbcad4e5099b14ac914c1cabaaa068979",
+    "prompt_bytes": 77787
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "provider": "minimax",
+  "model": "MiniMax-M2.7",
+  "usage": {
+    "input": 0,
+    "output": 5967,
+    "cacheRead": 0,
+    "cacheWrite": 20850,
+    "totalTokens": 26817,
+    "cost": {
+      "input": 0,
+      "output": 0.0071604,
+      "cacheRead": 0,
+      "cacheWrite": 0.007818750000000001,
+      "total": 0.01497915
+    }
+  },
+  "session_id": "01a138c2-fe55-7920-8dbf-5bb75d74259b",
+  "finished_at": "2026-10-14T04:57:09.330414+00:00"
+}

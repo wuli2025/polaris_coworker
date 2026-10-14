@@ -1,0 +1,21 @@
+{
+  "text": "\n\n## 审查报告\n\n### 审查模式\n**packet**（无工具）。仅依据内联材料评审。\n\n---\n\n### 结论\n**CHANGES_REQUIRED**\n\n所审范围发现 3 个需要修复的问题，其中 1 个严重（竞态导致错误被静默吞噬）、2 个中等（Redactor 绕过风险、opening 集合不对称）。\n\n---\n\n### 范围与缺失材料\n\n| 类别 | 范围 |\n|------|------|\n| 已审文件 | 14 个源码/测试/配置文件（`config/load.ts` ~ `agent.default.json`，`test/sessions.test.ts` ~ `test/timeouts.test.ts`） |\n| 未提供 | `src/models/runtime.ts`（仅部分行）、`test/helpers.ts`（测试工具）、端到端测试完整源码 |\n\n---\n\n### 问题\n\n#### 问题 1（严重）\n**文件**：`src/sessions/registry.ts` 行 134–149\n\n**证据**：\n```typescript\nasync queue(id: string, text: string, method: \"steer\" | \"followUp\") {\n  const entry = this.get(id);\n  const run = entry.run;\n  if (!run || run.stopped) throw new DaemonError(\"SESSION_NOT_RUNNING\", ...);\n  // ← 此处检查通过后，abort/close 可能设置 run.stopped\n  entry.session.clearQueue(); // ← 只清队列，不停止正在执行的 steer/followUp\n  try {\n    const disposition = await entry.session[method](text);\n    return { turnId: run.id, disposition };\n  } catch (error) {\n    // ← 错误被静默捕获，用户只收到 abort 的终端事件\n  } finally {\n    entry.queueReservations--;\n    if (entry.run !== run || run.stopped) entry.session.clearQueue();\n  }\n}\n```\n\n**影响**：如果用户在 steer/followUp 执行期间调用 `abort`/`close`，`queue` 中的后续 steer/followUp 调用虽然会抛出 `SESSION_NOT_RUNNING`（因为 `run.stopped` 已被设置），但如果 `queue` 在 `run.stopped` 检查通过后、`entry.session[method]` 调用执行期间收到 abort，则：\n1. `clearQueue()` 仅清空排队消息，不中断已开始的 steer/followUp 调用\n2. `method` 调用抛出的错误被 catch 块吞没（没有 rethrow 或发出 error 事件）\n3. 用户只收到一个 `turn.completed` / `error` 事件，且错误原因不明确\n\n**最小修复**：catch 块应 rethrow 不应静默吞噬，或在 finally 中检测 `run.stopped` 变化并发送错误事件。\n\n---\n\n#### 问题 2（中等）\n**文件**：`src/models/credentials.ts` 行 15–19\n\n**证据**：\n```typescript\ntext(value: string): string {\n  for (const secret of [...this.secrets].sort((a, b) => b.length - a.length)) {\n    value = value.split(secret).join(\"[REDACTED]\");\n  }\n  return value;\n}\n```\n\n**绕过路径**：\n1. **Unicode 规范化**：`key` vs `k\\u0301ey`（组合字符）在 JSON 序列化后可能不匹配 split\n2. **分割注入**：`apikey` → `ap\" + \"ikey` 若出现在日志上下文（JSON 序列化后）则无法匹配原始 `apikey`\n3. **零宽字符**：密钥中的零宽字符在 split 前若被 normalize 可能导致不匹配\n\n**影响**：在异常路径（如错误消息、调试日志）中，密钥片段可能以变体编码出现并泄露。\n\n**最小修复**：对密钥进行 Unicode NFC 规范化后再加入 Set；考虑使用正则全局替换并检测边界字符。\n\n---\n\n#### 问题 3（低）\n**文件**：`src/sessions/registry.ts` 行 45–46, 63\n\n**证据**：\n```typescript\nif (sessionId) this.opening.add(sessionId);  // 行 46：只在有 sessionId 时添加\n// ...\nif (sessionId) this.opening.delete(sessionId); // 行 63：同样只在有 sessionId 时删除\n```\n\n**分析**：opening 集合用于检测 `SESSION_ALREADY_OPEN`，其条件 `this.opening.has(sessionId)` 仅在 `sessionId` 非空时为真。因此无 sessionId 参数时 opening 集合不会被使用。不对称是无意的还是设计的需要确认。\n\n**影响**：有限——无 sessionId 时不会触发 duplicate 检测，且 opening 集合始终为空。\n\n**最小修复**：澄清意图；如无意义则移除 opening 集合的相关操作。\n\n---\n\n### 建议验证步骤（推断风险，非已有证据）\n\n| 风险 | 验证方式 |\n|------|----------|\n| 问题 1（竞态静默吞噬） | 在 steer 执行期间并发 abort，用测试断言验证是否收到 `error` 事件或 `turn.completed` 带 `aborted` 状态 |\n| 问题 2（Redactor 绕过） | 注入含 Unicode 组合字符的 API key，触发错误路径，确认日志中无明文泄露 |\n| 问题 3（opening 集合） | 确认无 sessionId 时 opening 集合永远为空，不影响功能即可关闭 |\n\n---\n\n### 已有证据与验收条件匹配\n\n| 验收条件 | 证据 |\n|----------|------|\n| 配置不硬编码 | schema.ts + validate.ts + load.ts 支持运行时 patch ✓ |\n| 跨会话并发、同会话串行 | `schedule()` 以 session key 隔离 + pending Set ✓；ping 不阻塞已在 `concurrency.test.ts` 验证 ✓ |\n| 超时语义 | `expire()` 设置单终态 + `timeouts.test.ts` 验证 idle/max/active 三模式 ✓ |\n| 密钥不进日志 | Redactor 覆盖日志与事件写入 ✓；问题 2 为潜在绕过 |\n| 模型错误固定中文提示 | `model-error.ts` 五类映射 ✓ |\n| 优雅退出 | `shutdown()` 等待 pending + close 所有 session ✓ |\n\n---\n\n### 无需阻塞的问题（设计已知权衡）\n\n1. **JsonlWriter 无显式背压**：write 失败时 Promise 链保存错误，后续 send 被拒绝；内存可能短暂积累，但不丢数据。\n\n2. **model-error.ts 对无 diagnostics 的适配器返回 `MODEL_ERROR`**：注释已标注为已知限制，非本次修复范围。\n\n3. **turnMaxMs=0 表示不限**：schema 允许 0 值，`max: 2147483647` 覆盖非负整数 ✓。",
+  "stopReason": "stop",
+  "model": "MiniMax-M2.7",
+  "provider": "minimax",
+  "usage": {
+    "input": 17103,
+    "output": 3492,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 20595,
+    "cost": {
+      "input": 0.0051309,
+      "output": 0.0041903999999999995,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.0093213
+    }
+  },
+  "session_id": "01a138c3-1043-74ec-b090-919a383678d4"
+}

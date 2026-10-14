@@ -1,0 +1,166 @@
+{
+  "started_at": "2026-10-14T04:53:48.930036+00:00",
+  "status": "REVIEW_RECEIVED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P1-brief.md",
+        "bytes": 1674,
+        "lines": 19,
+        "sha256": "57fbf093615f72726c5048291a3180885bb01b4a80fccb5f7eae519eea99f5f4"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/config/load.ts",
+        "bytes": 1905,
+        "lines": 37,
+        "sha256": "e55ba01e38ea3965c2ed6135ceade2e9ddd72258c287066c62d46903641dcb33"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/config/schema.ts",
+        "bytes": 2343,
+        "lines": 44,
+        "sha256": "8d577e31abde29fad8ae952fb33d8bd393aa172e2f549d9b772690bf2e042779"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/config/validate.ts",
+        "bytes": 852,
+        "lines": 16,
+        "sha256": "852a9a847e52837e6ca3faecc3247291fc50dea5aafd91179d143dea8d91fd69"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/daemon.ts",
+        "bytes": 5521,
+        "lines": 110,
+        "sha256": "6424e043f4b987191bcc05198376450a1788f35fd4b3d0eb907ef02615442ddf"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/events/mapper.ts",
+        "bytes": 3037,
+        "lines": 62,
+        "sha256": "d37f4eeb789763da0ca9f766219e9181940a7cc6e24cb727719918df276377aa"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/events/model-error.ts",
+        "bytes": 2565,
+        "lines": 38,
+        "sha256": "18097d5693712e2ddc1afccabcc176e4ae126fcbc4166398629731e7d6b28773"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/extensions/index.ts",
+        "bytes": 218,
+        "lines": 4,
+        "sha256": "f42f1954dec9b563ea3255b1ea740be616416969d2935d68abb303c206302bca"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/log.ts",
+        "bytes": 731,
+        "lines": 15,
+        "sha256": "0f7ac977ba7fd43bde24a03fd39a99b90d37092cdcd0414bfc2390880453cf25"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/main.ts",
+        "bytes": 2597,
+        "lines": 67,
+        "sha256": "25d13c8711d8a4f12b4e2513517f519b8f4d4a66c326173e398e3da918c42e9f"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/models/credentials.ts",
+        "bytes": 1018,
+        "lines": 29,
+        "sha256": "24316a0e9c68f03dd88ef1acd3a2b50aa205025842e2ce792bde5ae8e093b400"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/models/runtime.ts",
+        "bytes": 1985,
+        "lines": 45,
+        "sha256": "31cfed4a61062f45deb405f554dc7859e86e2cac4e6cbbe1d6c4e01d82623d0b"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/protocol/errors.ts",
+        "bytes": 550,
+        "lines": 12,
+        "sha256": "9dbdf6711cde3cdc8969fa410da1f2f7baeabdbd04802a3f1984c99a364c2ae6"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/protocol/events.ts",
+        "bytes": 1392,
+        "lines": 22,
+        "sha256": "d9d81eb56be9ce35f4b4e60be1d36d90bff064c9b9b0ca2f8fb3e110aedb0e4b"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/protocol/jsonl.ts",
+        "bytes": 2288,
+        "lines": 68,
+        "sha256": "b34a8c214d4d9204cf7f8c0b2bd63ad39e84890b630f94993babb0f72d888dc8"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/protocol/schema.ts",
+        "bytes": 1732,
+        "lines": 27,
+        "sha256": "e31fa7582397e305518fcb6b88b3799428df99d3a998503a4088e9ec193b4c30"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/sessions/create.ts",
+        "bytes": 2577,
+        "lines": 55,
+        "sha256": "8d1b87363cc5d97b84c4b6a16220ae9b88653a3e7f763890e1caa49cceeb4b9e"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/src/sessions/registry.ts",
+        "bytes": 8080,
+        "lines": 199,
+        "sha256": "e1c6b53cc612d8eacac8e16b3e95953a918480914d2ba82c73d7cd3385e5c04c"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/config/agent.default.json",
+        "bytes": 556,
+        "lines": 17,
+        "sha256": "793ddd636d86cf7cffdb9d418d1a299f549c9317c4e2f43488718f783a4f0e50"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/test/sessions.test.ts",
+        "bytes": 6770,
+        "lines": 123,
+        "sha256": "ed7f234a143572a748630f5ec98ff0c384877e122e227481a5d8b668242f5886"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/test/concurrency.test.ts",
+        "bytes": 3518,
+        "lines": 75,
+        "sha256": "466975eb6560635ac9517c5c5c8de158ce48ee7f5817b8a3f4da7ebfd1ddccf1"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/agentd/test/timeouts.test.ts",
+        "bytes": 2214,
+        "lines": 48,
+        "sha256": "b3dc74983ab9be7df19b10b188dcf88ff5068f6b47d806bab7650c839f81a319"
+      }
+    ],
+    "prompt_sha256": "7e2e8dff81c8ee770cb23dd8287e8f7e0febce824fdc9e631297baecf6798814",
+    "prompt_bytes": 62582
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "provider": "minimax",
+  "model": "MiniMax-M2.7",
+  "usage": {
+    "input": 17103,
+    "output": 3492,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 20595,
+    "cost": {
+      "input": 0.0051309,
+      "output": 0.0041903999999999995,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.0093213
+    }
+  },
+  "session_id": "01a138c3-1043-74ec-b090-919a383678d4",
+  "finished_at": "2026-10-14T04:55:45.025403+00:00"
+}
