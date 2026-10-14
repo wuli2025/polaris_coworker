@@ -3,7 +3,7 @@ use super::types::*;
 use crate::chat::backend::{config::{Config, Agentd}, pi::protocol::{check_ping, Ping}};
 use serde::Serialize;
 use serde_json::Value;
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -67,6 +67,8 @@ pub fn ping(config: &Agentd) -> Result<Ping, String> {
         let mut cmd = tokio::process::Command::new(&config.node);
         cmd.args(&config.node_args).arg(&config.entry).args(&config.args)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        #[cfg(windows)]
+        super::pi_shell::configure(cmd.as_std_mut(), config)?;
         crate::runtime::procs::no_window(cmd.as_std_mut());
         let mut child = cmd.spawn().map_err(|_| "AgentdSpawnFailed")?;
         let result = tokio::time::timeout(Duration::from_millis(config.request_timeout_ms), async {
@@ -124,20 +126,20 @@ pub fn report() -> EnvReport {
     let mut runtime = AgentRuntimeReport { backend: "pi".into(), ..Default::default() };
     let mut node = absent("node");
     node.required = true;
+    let mut shell = None;
     match Config::load() {
         Err(_) => runtime.error = Some("AgentConfigInvalid".into()),
-        Ok(config) => { (node, runtime) = inspect(&config.agentd, store_ready()); }
+        Ok(config) => {
+            (node, runtime) = inspect(&config.agentd, store_ready());
+            match super::pi_shell::resolve(&config.agentd) {
+                Ok(found) => shell = found,
+                Err(error) => runtime.error = Some(error),
+            }
+        }
     }
-    // Match Pi's actual discovery order. A bundled bash that is not wired into
-    // the daemon must not make the report green (see P5a Windows scope blocker).
-    let shell = if cfg!(windows) {
-        ["ProgramFiles", "ProgramFiles(x86)"].iter().filter_map(std::env::var_os)
-            .map(|p| std::path::PathBuf::from(p).join("Git/bin/bash.exe")).find(|p| p.is_file())
-            .or_else(|| super::probe::which_all("bash.exe").into_iter().next())
-    } else if Path::new("/bin/bash").is_file() { Some("/bin/bash".into()) }
-    else { super::probe::which_all("bash").into_iter().next() };
     let shell_ready = shell.is_some();
     let shell_bundled = shell.as_deref().is_some_and(super::bundled::is_bundled);
+    if !shell_ready && runtime.error.is_none() { runtime.error = Some("AgentShellMissing".into()); }
     let ready = runtime.ready() && shell_ready;
     let uv = super::probe::detect("uv", "uv", "uv", &["--version"], &super::probe::uv_candidates(), false, "可选组件未配置");
     let python = super::probe::detect("python", "Python", "python", &["--version"], &super::probe::python_candidates(), false, "可选组件未配置");
@@ -152,7 +154,11 @@ pub fn verify() -> VerifyReport {
     let steps = [("node", r.node_ready), ("agentd-entry", r.entry_exists), ("ping", r.handshake),
         ("credentials", r.credentials_configured), ("shell", report.shell_ready)].into_iter().map(|(key, ok)| VerifyStep {
             key: key.into(), name: key.into(), status: if ok { "ok" } else { "fail" }.into(),
-            detail: if ok { "已配置" } else { "未配置" }.into(), command: None, output: None, ms: 0,
+            detail: if key == "shell" {
+                if !ok { "未找到 shell；请配置 shellPath、安装 Git Bash 或将 bash 加入 PATH" }
+                else if report.shell_bundled { "使用随包 MinGit Bash" }
+                else { "使用显式配置或系统 shell（Windows：Program Files Git Bash → PATH）" }
+            } else if ok { "已配置" } else { "未配置" }.into(), command: None, output: None, ms: 0,
         }).collect();
     VerifyReport { os: report.os, ok: report.ready, app_runnable: r.handshake, terminal_runnable: r.node_ready,
         deep: false, steps, conflicts: vec![], summary: if report.ready { "Agent 运行时已就绪" } else { "Agent 运行时未就绪" }.into() }

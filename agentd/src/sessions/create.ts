@@ -35,6 +35,7 @@ export async function createSession(
   const model = runtime.getModel((options.model ?? config.defaultModel).provider, (options.model ?? config.defaultModel).id);
   if (!model) throw new DaemonError("MODEL_NOT_FOUND", "Configured default model does not exist");
   const settingsManager = SettingsManager.inMemory({
+    shellPath: config.shellPath || undefined,
     compaction: config.compaction, retry: config.retry, cacheWarming: "off",
   });
   const agentDir = join(config.sessionDir, ".resources");

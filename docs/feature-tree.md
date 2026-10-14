@@ -366,7 +366,22 @@ Linux 进程身份使用 boot ID + `/proc/PID/stat` 启动 tick，macOS 使用 C
 | Dockerfile、compose、env examples、`H/apihub/server_status.rs`、docker-smoke.ps1 | 默认 Node+agentd；Claude 可选；agent_runtime 复用 backend status | INSTALL_CLAUDE=false；凭据 polaris-data / 会话 polaris-pi；旧 Claude 卷保留；Docker 实跑受环境阻塞 |
 | `src/types/doctor.ts`、`src/tauri.ts` | agentRuntime 类型与浏览器 mock；tauri.ts 净增 5 行 | P5c 按 legacyActions 控制按钮，改 Agent 文案；vue-tsc/Vitest 通过 |
 
-Windows shell 接线需要白名单外 agentd config/session 与 Rust process.rs，尚未授权，保持 BLOCKED；不把未接入的 MinGit 报为就绪。
-Node 下载受不可用代理阻塞，Windows/macOS 未实跑；agentd 全量仍有 2 文件失败，kernel 除 6 个 TCP 沙箱项后通过。
+P5a-2 已获 Windows shell 范围例外授权并完成接线，见下节；Node 下载列表已移除错误的 GitHub 代理。
+真实下载、Windows/macOS 安装包仍未实跑；agentd 全量仍有 2 文件失败，kernel 除 6 个 TCP 沙箱项后通过。
 两壳 offline check 通过。体积组成、官方 shell 配置依据、完整命令/失败名/未运行项、P5c 配合点见 [P5a 执行报告](pi-migration/p5a-runtime.md)。
 改动文件及物理行数见 [P5a 文件清单](pi-migration/p5a-files.md)。不作为 Claude / Pi 的最终验收结论。
+
+## P5a-2 收尾执行结果（验收 BLOCKED）
+
+| 入口 | 依赖与行为 | 配置、迁移与验证 |
+| --- | --- | --- |
+| `agentd/src/config/{schema,load}.ts`、`config/agent.default.json`、`sessions/create.ts` | shellPath → Pi SettingsManager.inMemory；沿用 Pi 的 `~` 展开 | 可选 string/null，默认 null，空串视为未配置；显式 JSON 优先于 POLARIS_AGENTD_SHELL_PATH；旧 JSON 无需迁移；shell-config.test.ts |
+| `K/doctor/{pi_shell,bundled}.rs`、`backend/pi/process.rs`、`doctor/pi.rs` | Windows 启动与 doctor 共用解析：显式 → 随包 MinGit → ProgramFiles Git Bash → ProgramFiles(x86) Git Bash → PATH；仅子进程前插随包工具目录 | POLARIS_RUNTIME_DIR 沿用；显式失效不静默回落；doctor 报 shellReady/shellBundled 与缺失提示；三种路径场景、PATH 次序及配置错误测试 |
+| `K/doctor/{path,probe,verify,install}.rs`、`install/tests.rs` | 删除多余导入，平台导入按 cfg 保留；Node MSI/portable 原调用链仍受 claude-cli 守卫，Windows/test 条件编译 | 不删除旧安装能力，不新增 allow 警告抑制；实际 desktop 0 / server 4 警告，与 brief 指定的各 7 条不一致 |
+| `scripts/runtime/{sources,node}.mjs`、`fetch-runtimes.mjs` | Node 官方 → R2 → 可选 Node 镜像；GitHub 资源保留独立代理列表；官方 SHA256 清单不变 | POLARIS_NODE_MIRROR 默认未设，HTTPS 版本目录基址；POLARIS_DEPS_BASE 默认既有 R2，空串禁用；7 个 URL/版本/校验测试兼容 node:test 与 Vitest |
+
+切换示例：agentd JSON `{"shellPath":"C:/Tools/Git/bin/bash.exe"}`；`{"shellPath":null}` 恢复启动默认。
+Node 镜像示例：`POLARIS_NODE_MIRROR=https://npmmirror.com/mirrors/node node scripts/fetch-runtimes.mjs`。
+验证：agentd typecheck 通过，npm test 24/26 文件通过（E2E 管道、HTTP 沙箱失败）；vue-tsc 通过；Vitest 32 测试通过；runtime 7 测试通过。
+Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列出的 6 项后单元 189 + 集成 8 通过。
+详见 [P5a-2 执行报告](pi-migration/p5a2-closeout.md)：完整文件、命令、失败名、警告口径及未运行项。不能作为 Claude/Pi 最终验收结论。

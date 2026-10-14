@@ -2,11 +2,9 @@
 
 use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 use super::types::*;
-use crate::runtime::procs::no_window;
 
 #[path = "probe_helpers.rs"]
 mod helpers;

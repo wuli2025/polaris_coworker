@@ -76,16 +76,15 @@ use super::*;
     /// 三个 Windows 脚本一个都不能漏, 故在此锁死。
     #[test]
     fn windows_scripts_disable_progress_bar() {
-        let mut all = vec![
+        let all = [
             node_install_script(),
             pwsh_install_script(),
             node_portable_script(),
+            #[cfg(windows)]
+            uv_install_script(),
+            #[cfg(windows)]
+            claude_install_script(),
         ];
-        #[cfg(windows)]
-        {
-            all.push(uv_install_script());
-            all.push(claude_install_script());
-        }
         for s in &all {
             assert!(s.contains("$ProgressPreference = 'SilentlyContinue'"));
         }

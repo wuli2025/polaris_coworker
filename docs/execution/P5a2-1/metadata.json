@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-14T10:35:07.055810+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "46198ac82d7255e4b20b346718166d56fdd5c416ca32bd309339d527ca8ee9a8",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": "?? docs/execution/P5a2-1/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M agentd/config/agent.default.json\n M agentd/src/config/load.ts\n M agentd/src/config/schema.ts\n M agentd/src/sessions/create.ts\n M docs/feature-tree.md\n M scripts/fetch-runtimes.mjs\n M scripts/runtime/node.mjs\n M scripts/runtime/node.test.mjs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs\n M src-tauri/crates/polaris-kernel/src/doctor/bundled.rs\n M src-tauri/crates/polaris-kernel/src/doctor/install.rs\n M src-tauri/crates/polaris-kernel/src/doctor/install/tests.rs\n M src-tauri/crates/polaris-kernel/src/doctor/mod.rs\n M src-tauri/crates/polaris-kernel/src/doctor/path.rs\n M src-tauri/crates/polaris-kernel/src/doctor/pi.rs\n M src-tauri/crates/polaris-kernel/src/doctor/probe.rs\n M src-tauri/crates/polaris-kernel/src/doctor/verify.rs\n?? agentd/test/shell-config.test.ts\n?? docs/execution/P5a2-1/\n?? docs/pi-migration/p5a2-closeout.md\n?? scripts/runtime/sources.mjs\n?? scripts/runtime/sources.test.mjs\n?? src-tauri/crates/polaris-kernel/src/doctor/pi_shell.rs\n?? src-tauri/crates/polaris-kernel/src/doctor/pi_shell_tests.rs\n",
+    "diff_stat": " agentd/config/agent.default.json                   |  1 +\n agentd/src/config/load.ts                          |  6 +++--\n agentd/src/config/schema.ts                        |  1 +\n agentd/src/sessions/create.ts                      |  1 +\n docs/feature-tree.md                               | 19 +++++++++++++--\n scripts/fetch-runtimes.mjs                         | 19 +++++++--------\n scripts/runtime/node.mjs                           |  9 +++----\n scripts/runtime/node.test.mjs                      |  8 ++++---\n .../polaris-kernel/src/chat/backend/pi/process.rs  |  2 ++\n .../crates/polaris-kernel/src/doctor/bundled.rs    |  9 +++++--\n .../crates/polaris-kernel/src/doctor/install.rs    |  4 ++++\n .../polaris-kernel/src/doctor/install/tests.rs     | 11 ++++-----\n src-tauri/crates/polaris-kernel/src/doctor/mod.rs  |  1 +\n src-tauri/crates/polaris-kernel/src/doctor/path.rs |  1 +\n src-tauri/crates/polaris-kernel/src/doctor/pi.rs   | 28 +++++++++++++---------\n .../crates/polaris-kernel/src/doctor/probe.rs      |  4 +---\n .../crates/polaris-kernel/src/doctor/verify.rs     |  1 +\n 17 files changed, 79 insertions(+), 46 deletions(-)\n"
+  },
+  "finished_at": "2026-10-14T10:44:37.179892+00:00"
+}

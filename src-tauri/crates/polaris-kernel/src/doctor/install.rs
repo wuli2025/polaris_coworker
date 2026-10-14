@@ -149,6 +149,7 @@ fn fill(script: &str) -> String {
 }
 
 /// Node.js LTS 安装脚本 (前奏 + msiexec 封装 + 正文)。
+#[cfg(any(windows, test))]
 fn node_install_script() -> String {
     fill(&format!(
         "{PS_DOWNLOAD_PRELUDE}\n{PS_MSIEXEC_HELPER}\n{NODE_INSTALL_BODY}"
@@ -156,6 +157,7 @@ fn node_install_script() -> String {
 }
 
 /// **便携版** Node.js 安装脚本 (前奏 + 正文) —— 后台静默安装专用, 不弹 UAC。
+#[cfg(any(windows, test))]
 pub(crate) fn node_portable_script() -> String {
     fill(&format!("{PS_DOWNLOAD_PRELUDE}\n{WIN_NODE_PORTABLE_BODY}"))
 }
@@ -166,6 +168,7 @@ pub(crate) fn node_portable_script() -> String {
 /// **必弹 UAC**。而后台静默安装的前提就是「用户不用点任何东西」, 弹一个没有上下文的
 /// 管理员授权框是最糟的体验(用户根本不知道这是谁弹的)。zip 解压到用户目录全程无提权,
 /// npm 的全局前缀也落在同一个用户目录里, 装 claude 同样不需要管理员。
+#[cfg(any(windows, test))]
 const WIN_NODE_PORTABLE_BODY: &str = include_str!("install/win_node_portable_body.ps1");
 
 /// PowerShell 7 安装脚本 (前奏 + msiexec 封装 + 正文)。
@@ -189,6 +192,7 @@ fn mac_uv_install_script() -> String {
 
 /// Node.js LTS 安装脚本正文: winget 优先, 失败则下载官方 MSI (国内 npmmirror 镜像加速) 静默安装。
 /// 选 20.x LTS ("Iron"): 长期支持、兼容 Windows 10。
+#[cfg(any(windows, test))]
 const NODE_INSTALL_BODY: &str = include_str!("install/node_install_body.ps1");
 
 /// 安装 PowerShell 7。成功无需改 PATH (MSI / winget 安装都会自带配 PATH)。

@@ -6,6 +6,7 @@
 //! Optional bundled Python/uv and platform PATH utilities remain shared.
 
 pub mod pi;
+pub(crate) mod pi_shell;
 pub mod autopilot;
 pub mod bundled;
 pub mod check;

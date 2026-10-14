@@ -25,7 +25,7 @@ export function mergeConfig(base: Config, patch: unknown): Config {
   return result;
 }
 
-export function loadConfig(path?: string): Config {
+export function loadConfig(path?: string, env: NodeJS.ProcessEnv = process.env): Config {
   // tsc preserves src/ under dist/; support both source and compiled entrypoints.
   const candidates = ["../../config/agent.default.json", "../../../config/agent.default.json"];
   const defaults = candidates.map((p) => fileURLToPath(new URL(p, import.meta.url))).find(existsSync);
@@ -34,7 +34,9 @@ export function loadConfig(path?: string): Config {
     const base: unknown = JSON.parse(readFileSync(defaults, "utf8"));
     validateConfig(ConfigSchema, base);
     if (!Value.Check(ConfigSchema, base)) throw new Error("Unreachable invalid defaults");
-    return mergeConfig(base, path ? JSON.parse(readFileSync(path, "utf8")) : {});
+    const config = mergeConfig(base, path ? JSON.parse(readFileSync(path, "utf8")) : {});
+    // The host supplies the bundled shell as a default; explicit JSON wins.
+    return mergeConfig(config, { shellPath: config.shellPath || env.POLARIS_AGENTD_SHELL_PATH || null });
   } catch (error) {
     if (error instanceof DaemonError) throw error;
     throw new DaemonError("INVALID_CONFIG", error instanceof SyntaxError ? "配置文件不是有效的 JSON。" : "无法读取配置文件。", ["/"]);

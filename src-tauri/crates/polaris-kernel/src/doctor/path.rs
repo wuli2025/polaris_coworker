@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::probe::*;
 use super::types::*;
+#[cfg(windows)]
 use crate::runtime::procs::no_window;
 
 // ───────────────────────── 用户 PATH (Windows) ─────────────────────────

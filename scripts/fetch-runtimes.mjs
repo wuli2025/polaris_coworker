@@ -17,8 +17,8 @@
 //      System32 的同名 exe**(语义完全不同)。这个坑在 Rust 侧堵:见
 //      doctor/bundled.rs 把 usr/bin、mingw64/bin 前插进 claude 子进程的 PATH。
 //
-// 下载源顺序与安装脚本(doctor/install.rs)同一套规矩:自家 R2 打头(发版时传上去、
-// 字节数核对过、出站免费),再公共 GitHub 代理,最后 GitHub 直连。每个源都校验文件头
+// GitHub 资源: 自家 R2 → GitHub 代理 → 官方。Node: 官方 → R2 → POLARIS_NODE_MIRROR。
+// GitHub 代理不能服务 nodejs.org。每个源都校验文件头
 // 魔数 —— 代理挂掉时常回「200 + HTML 错误页」,只看「文件非空」会把错误页当安装包解压。
 
 import {
@@ -35,6 +35,7 @@ import {
   statSync,
 } from "node:fs";
 import { nodeVersion, nodePlan, checksumFor, verifySha256, componentCurrent } from './runtime/node.mjs';
+import { defaultDepsBase, githubUrls } from './runtime/sources.mjs';
 import { packAgentd } from './pack-agentd.mjs';
 import { writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -64,7 +65,7 @@ const PY_TAG = "20260718"; // python-build-standalone release tag
 const GIT_VER = "2.55.0.3"; // MinGit 资产版本号
 const GIT_TAG = "v2.55.0.windows.3"; // 对应的 release tag
 
-const DEPS_BASE = process.env.POLARIS_DEPS_BASE ?? "https://llmwiki.cloud/downloads/deps";
+const DEPS_BASE = process.env.POLARIS_DEPS_BASE ?? defaultDepsBase;
 const NODE_VER = nodeVersion(JSON.parse(readFileSync(join(here, "../agentd/package.json"))).engines.node, process.env.POLARIS_NODE_VERSION);
 const ZIP_MAGIC = "504b"; // PK
 const GZ_MAGIC = "1f8b";
@@ -73,7 +74,9 @@ const arch = process.arch;
 
 /** 本次平台要抓的组件清单。dir=解压目标(runtime/ 下),strip=解压后要不要提层。 */
 function plan() {
-  const items = [nodePlan(NODE_VER, process.platform, arch, { deps: DEPS_BASE })];
+  const items = [nodePlan(NODE_VER, process.platform, arch, {
+    deps: DEPS_BASE, mirror: process.env.POLARIS_NODE_MIRROR,
+  })];
   if (!isWin && !isMac) return items;
 
   // uv —— 单文件二进制,zip 里就是 uv.exe/uvx.exe(或 uv/uvx),解压到 runtime/uv
@@ -127,13 +130,7 @@ function plan() {
 
 /** 自家 R2 打头,公共代理居中,GitHub 直连兜底 —— 与 doctor/install.rs 同一套顺序。 */
 function ghUrls(repo, tag, asset) {
-  const rel = `https://github.com/${repo}/releases/download/${tag}/${asset}`;
-  return [
-    `${DEPS_BASE}/${asset}`,
-    `https://ghfast.top/${rel}`,
-    `https://ghproxy.net/${rel}`,
-    rel,
-  ];
+  return githubUrls(repo, tag, asset, { deps: DEPS_BASE });
 }
 
 /** 读文件头 n 字节的十六进制 —— 用来识破「200 + HTML 错误页」。 */

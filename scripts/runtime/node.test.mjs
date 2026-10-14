@@ -1,4 +1,5 @@
-import { test } from 'vitest';
+// Keep the same assertions runnable by both required test commands.
+const { test } = await import(process.env.VITEST ? 'vitest' : 'node:test');
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { nodeVersion, nodePlan, checksumFor, verifySha256, componentCurrent } from './node.mjs';
@@ -13,8 +14,9 @@ test('Node engine minimum and explicit versions are validated', () => {
 test('official artifacts cover six supported targets and ordered mirrors', () => {
   for (const platform of ['win32', 'darwin', 'linux']) for (const arch of ['x64', 'arm64']) {
     const plan = nodePlan('22.19.0', platform, arch);
-    assert.ok(plan.urls[0].includes('llmwiki.cloud'));
-    assert.ok(plan.urls.at(-1).startsWith('https://nodejs.org/dist/'));
+    assert.ok(plan.urls[0].startsWith('https://nodejs.org/dist/'));
+    assert.ok(plan.urls[1].includes('llmwiki.cloud'));
+    assert.ok(plan.urls.every(url => !/ghfast|ghproxy/.test(url)));
     assert.ok(plan.asset.includes(arch));
     assert.equal(plan.check, platform === 'win32' ? 'node.exe' : 'bin/node');
   }

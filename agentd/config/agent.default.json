@@ -1,4 +1,5 @@
 {
+  "shellPath": null,
   "sessionDir": "~/.polaris/agentd/sessions",
   "maxSessions": 8,
   "maxQueuedMessages": 8,

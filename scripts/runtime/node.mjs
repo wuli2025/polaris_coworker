@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { nodeUrls } from './sources.mjs';
 
 export function nodeVersion(engine, override) {
   const match = /^>=(\d+\.\d+\.\d+)$/.exec(engine);
@@ -12,21 +13,17 @@ export function nodeVersion(engine, override) {
 }
 
 export function nodePlan(version, platform, arch, sources = {}) {
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Node version must be x.y.z');
   if (!['win32', 'darwin', 'linux'].includes(platform) || !['x64', 'arm64'].includes(arch)) {
     throw new Error(`Unsupported Node target: ${platform}/${arch}`);
   }
   const win = platform === 'win32';
   const asset = `node-v${version}-${win ? 'win' : platform}-${arch}.${win ? 'zip' : 'tar.gz'}`;
   const official = `https://nodejs.org/dist/v${version}`;
-  const base = sources.deps ?? 'https://llmwiki.cloud/downloads/deps';
-  const proxies = sources.proxies ?? ['https://ghfast.top', 'https://ghproxy.net'];
-  for (const url of [base, ...proxies]) {
-    if (new URL(url).protocol !== 'https:') throw new Error('Runtime sources must use HTTPS');
-  }
   return {
     name: 'node', dir: 'node', asset, magic: win ? '504b' : '1f8b',
     minBytes: 10 * 1024 * 1024, strip: 1, check: win ? 'node.exe' : 'bin/node',
-    urls: [`${base}/${asset}`, ...proxies.map(p => `${p}/${official}/${asset}`), `${official}/${asset}`],
+    urls: nodeUrls(version, asset, sources),
     checksumUrl: `${official}/SHASUMS256.txt`,
   };
 }

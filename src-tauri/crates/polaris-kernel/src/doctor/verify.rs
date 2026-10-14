@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
 use super::path::*;
 use super::probe::*;
 use super::types::*;

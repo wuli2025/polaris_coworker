@@ -106,12 +106,17 @@ pub fn git_bash() -> Option<PathBuf> {
     if !cfg!(windows) {
         return None;
     }
-    let p = runtime_root()?
+    git_bash_at(runtime_root()?)
+}
+
+/// Shared with platform-independent Windows resolution tests.
+pub(crate) fn git_bash_at(root: &Path) -> Option<PathBuf> {
+    let p = root
         .join("git")
         .join("usr")
         .join("bin")
         .join("bash.exe");
-    p.exists().then_some(p)
+    p.is_file().then_some(p)
 }
 
 /// 内置 Git Bash 的 unix 工具目录 (`usr/bin`、`mingw64/bin`)。

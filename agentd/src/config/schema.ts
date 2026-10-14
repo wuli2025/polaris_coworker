@@ -16,6 +16,7 @@ export const ProviderSchema = Type.Object({
   }, { additionalProperties: false }), { minItems: 1 }),
 }, { additionalProperties: false });
 export const ConfigSchema = Type.Object({
+  shellPath: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   oauthTimeoutMs: positive,
   usageDir: Type.String(),
   permissions: Type.Object({ defaultMode: Type.Union([

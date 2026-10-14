@@ -25,6 +25,8 @@ impl Process {
         let mut command = Command::new(&config.node);
         command.args(&config.node_args).arg(&config.entry).args(&config.args)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        #[cfg(windows)]
+        crate::doctor::pi_shell::configure(command.as_std_mut(), config).map_err(anyhow::Error::msg)?;
         if let Some(path) = crate::provider::credential_file::provider_store_path() {
             let settings = crate::provider::pi_config::load().map_err(anyhow::Error::msg)?;
             command.env("POLARIS_PROVIDER_STORE", &path)
