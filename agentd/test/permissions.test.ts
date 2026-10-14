@@ -125,3 +125,19 @@ test("permission expiry and turn cancellation emit exactly one resolution", asyn
     assert.equal(resolutions.length, 1);
   }
 });
+
+test("failed resolved notification preserves local allow, cancel and expiry", async (t) => {
+  const logs: unknown[][] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => logs.push(args));
+  const permissions = new Permissions("manual", process.cwd(), 10, 100, () => {},
+    () => { throw new Error("transport secret must not be logged"); });
+  const allowed = permissions.check("allow", "bash", { command: "true" });
+  assert.equal(permissions.respond("allow", "allow"), true);
+  assert.equal(await allowed, true);
+  const cancelled = permissions.check("cancel", "bash", { command: "true" });
+  assert.doesNotThrow(() => permissions.cancel());
+  assert.equal(await cancelled, false);
+  assert.equal(await permissions.check("expire", "bash", { command: "true" }), false);
+  assert.equal(logs.length, 3);
+  assert.ok(!JSON.stringify(logs).includes("transport secret"));
+});

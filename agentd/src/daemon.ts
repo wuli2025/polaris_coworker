@@ -14,7 +14,10 @@ import { versions } from "./protocol/version.ts";
 import { validateAttachments } from "./sessions/attachments.ts";
 import { SessionRegistry } from "./sessions/registry.ts";
 
+import { Logins } from "./models/logins.ts";
+
 export class Daemon {
+  readonly logins: Logins;
   readonly sessions: SessionRegistry;
   private readonly queues = new Map<string, Promise<void>>();
   private readonly pending = new Set<Promise<void>>();
@@ -27,6 +30,7 @@ export class Daemon {
     send: (value: ProtocolEvent | Response) => void,
     factories: ExtensionFactory[],
   ) {
+    this.logins = new Logins(models, () => this.config.oauthTimeoutMs);
     this.sessions = new SessionRegistry(() => this.config, models, factories,
       (event) => send(models.redactor.clean(event)));
   }
@@ -85,10 +89,12 @@ export class Daemon {
   }
   private async dispatch(request: Request): Promise<unknown> {
     switch (request.method) {
+      case "provider.auth": return this.logins.handle(request.params.provider, request.params.operation, request.params.input);
       case "permission.respond": return this.sessions.respondPermission(request.params.sessionId, request.params.callId, request.params.decision);
       case "sandbox.respond": return this.sessions.respondSandbox(request.params.sessionId, request.params.callId, request.params);
       case "ping": return { status: "ok", sessions: this.sessions.size, ...versions };
       case "models.list": return { models: this.models.list() };
+      case "models.catalog": return { models: this.models.builtinCatalog };
       case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd, request.params);
       case "session.configure": return this.sessions.configure(request.params.sessionId, request.params);
       case "prompt": return this.sessions.prompt(request.params.sessionId, request.params.text, request.params.attachments);
@@ -101,8 +107,9 @@ export class Daemon {
       case "config.apply": {
         const config = mergeConfig(this.config, request.params.config ?? {});
         await this.models.apply(config, request.params.credentials);
+        const defaultChanged = JSON.stringify(this.config.defaultModel) !== JSON.stringify(config.defaultModel);
         this.config = config;
-        this.sessions.refreshConfig();
+        await this.sessions.refreshConfig(defaultChanged);
         // No config echo: credentials can also be embedded in endpoint URLs.
         return { applied: true, reopenRequired: this.sessions.reopenRequired() };
       }
@@ -111,6 +118,7 @@ export class Daemon {
   shutdown(): Promise<void> {
     this.stopping = true;
     return this.shutdownTask ??= (async () => {
+      await this.logins.shutdown();
       await Promise.all(this.pending);
       await this.sessions.shutdown();
     })();

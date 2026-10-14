@@ -21,18 +21,22 @@ test("provider apply reports idle/running sessions to reopen; reopened sessions 
       credentials: { [model.provider]: "next-provider-key" },
     }));
     assert.equal(applied.applied, true);
-    assert.deepEqual(applied.reopenRequired.sort(), [idle, running].sort());
+    assert.deepEqual(applied.reopenRequired, [running]);
+    const created = result<{model: {provider: string}}>(await h.request("session.open", {cwd:h.dir}));
+    assert.equal(created.model.provider, model.provider);
     assert.equal(next.state.callCount, 0);
     release(fauxAssistantMessage("old provider finished"));
     await h.daemon.sessions.wait(running);
     assert.equal(h.events.filter((event) => event.sessionId === running).filter((event) => event.event === "text.delta").map((event) => event.text).join(""), "old provider finished");
-    next.setResponses([fauxAssistantMessage("new provider finished"), fauxAssistantMessage("new provider finished")]);
+    next.setResponses(["persist idle", "old provider finished"].map((previous) => (context) => {
+      assert.ok(JSON.stringify(context).includes(previous), "reopen must retain the previous provider response");
+      return fauxAssistantMessage("new provider finished");
+    }));
     for (const id of [idle, running]) {
-      await h.request("close", { sessionId: id });
-      const reopened = result<{ model: { provider: string }; reopenRequired: boolean }>(
-        await h.request("session.open", { sessionId: id }));
+      const reopened = result<{ model: { provider: string } }>(
+        await h.request("session.configure", { sessionId: id }));
       assert.equal(reopened.model.provider, model.provider);
-      assert.equal(reopened.reopenRequired, false);
+
       await h.request("prompt", { sessionId: id, text: "new provider turn" });
       await h.daemon.sessions.wait(id);
     }

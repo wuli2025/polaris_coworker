@@ -12,8 +12,9 @@
 //!     终端 CLI 跟着 Polaris 一起切。
 //! - 用量看板: 读 `~/.claude/projects/**/*.jsonl`(ccusage 思路), 聚合 token + 按内置
 //!   定价表估算成本, 今日/周/月/年 + 14 天趋势。零额外网络、零额外依赖。
-//! - Codex / Copilot: 说 OpenAI 协议, 让 `claude` 直连需翻译代理(cc-switch 的 proxy/,
-//!   1.5MB+), 与轻量化冲突 → 不路由。Codex 授权委托官方 `codex` CLI。
+//! - Pi 后端: provider 翻译为原生 API/模型配置；OAuth 由 Pi SDK 登录/刷新。
+//!   providers.json.credentials 是共享凭据真源，mkdir 锁覆盖刷新与原子写。
+//!   Claude 环境/联动/代理仅用于旧 claude-cli；Pi 用量与历史 JSONL 合并。
 
 // 模块拆分(纯移动): 原 `crate::provider::xxx` 公有路径经 `pub use 子模块::*` 门面保持零变化,
 // lib.rs generate_handler! 与 server / chat / kb / integrations 等外部引用一律不用改
@@ -25,7 +26,13 @@ pub mod codex_login;
 pub mod image_store;
 pub mod oauth_loopback;
 pub mod store;
+pub mod credential_file;
+pub mod pi_config;
+pub mod pi_translate;
+mod pi_login;
+mod pi_usage;
 pub mod usage;
+pub mod balance;
 
 // 共享依赖统一在此升为 pub(crate) 供子模块 `use super::*` 取用(与原单文件同一作用域语义)。
 #[cfg(not(feature = "desktop"))]
@@ -91,3 +98,8 @@ pub use image_store::*;
 pub use oauth_loopback::*;
 pub use store::*;
 pub use usage::*;
+pub use balance::*;
+
+/// Serializes Rust UI saves/switches and chat selection against one another.
+pub(crate) static PROVIDER_MUTATION: Lazy<parking_lot::Mutex<()>> =
+    Lazy::new(|| parking_lot::Mutex::new(()));

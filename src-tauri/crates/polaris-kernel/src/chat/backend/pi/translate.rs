@@ -8,13 +8,15 @@ pub struct Translator {
     tools: HashMap<String, String>, write_tools: Vec<String>,
     delta: String, last_flush: Instant, window: Duration, max_bytes: usize,
     error_seen: bool, done: bool,
+    provider: Option<String>, failure_code: Option<String>,
 }
 impl Translator {
     pub fn new(req: String, conv: Option<String>, cwd: PathBuf, config: &Agentd) -> Self {
         Self { req, conv, cwd, tools: HashMap::new(), write_tools: config.write_tools.clone(),
             delta: String::new(), last_flush: Instant::now(), window: Duration::from_millis(config.delta_batch_ms),
-            max_bytes: config.max_line_bytes, error_seen: false, done: false }
+            max_bytes: config.max_line_bytes, error_seen: false, done: false, provider: None, failure_code: None }
     }
+    pub fn with_provider(mut self, id: &str) -> Self { self.provider = Some(id.into()); self }
     pub fn make(&self, kind: &str, text: Option<String>) -> ChatStreamEvent { event(&self.req, self.conv.as_deref(), kind, text) }
     pub fn flush(&mut self) -> Vec<ChatStreamEvent> {
         self.last_flush = Instant::now();
@@ -78,8 +80,18 @@ impl Translator {
                     }
                 }
             }
-            Event::Error { code, message } => { self.error_seen = true; out.push(self.make("error", Some(format!("{code}: {message}")))); }
+            Event::Error { code, message } => {
+                if crate::provider::pi_failure_counts(&code) { self.failure_code = Some(code.clone()); }
+                self.error_seen = true;
+                out.push(self.make("error", Some(format!("{code}: {message}"))));
+            }
             Event::Completed { status } => {
+                if let Some(provider) = self.provider.take() {
+                    let code = self.failure_code.take();
+                    let success = status == TurnStatus::Completed;
+                    let failed = status == TurnStatus::Error;
+                    std::thread::spawn(move || crate::provider::pi_outcome(&provider, success, failed, code.as_deref()));
+                }
                 if matches!(status, TurnStatus::Error | TurnStatus::Timeout) && !self.error_seen {
                     out.push(self.make("error", Some(format!("AgentdTurnFailed: {status:?}"))));
                 }

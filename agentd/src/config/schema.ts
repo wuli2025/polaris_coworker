@@ -8,7 +8,7 @@ const cost = Type.Object({
   cacheRead: Type.Number({ minimum: 0 }), cacheWrite: Type.Number({ minimum: 0 }),
 }, { additionalProperties: false });
 export const ProviderSchema = Type.Object({
-  id: text, baseUrl: text, api: text,
+  id: text, baseUrl: text, api: text, authHeader: Type.Optional(Type.Boolean()),
   models: Type.Array(Type.Object({
     id: text, name: text, reasoning: Type.Boolean(),
     input: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")])),
@@ -16,6 +16,8 @@ export const ProviderSchema = Type.Object({
   }, { additionalProperties: false }), { minItems: 1 }),
 }, { additionalProperties: false });
 export const ConfigSchema = Type.Object({
+  oauthTimeoutMs: positive,
+  usageDir: Type.String(),
   permissions: Type.Object({ defaultMode: Type.Union([
     Type.Literal("deny"), Type.Literal("manual"), Type.Literal("auto-current"), Type.Literal("auto-all"),
   ]), timeoutMs: positive, summaryChars: positive }, { additionalProperties: false }),

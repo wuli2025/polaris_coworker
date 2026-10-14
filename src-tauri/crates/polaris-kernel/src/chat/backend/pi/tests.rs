@@ -235,7 +235,7 @@ fn stalled_stdin_reports_backpressure_to_caller_and_status() -> anyhow::Result<(
     c.node_args = vec!["-e".into(), r#"process.stdin.once('data', bytes => {
   const request = JSON.parse(bytes.toString().trim());
   process.stdout.write(JSON.stringify({type:'response',id:request.id,ok:true,
-    result:{status:'ok',sessions:0,version:'0.1.0',piVersion:'1.0.4',protocolVersion:4}})+'\n');
+    result:{status:'ok',sessions:0,version:'0.1.0',piVersion:'1.0.4',protocolVersion:5}})+'\n');
   process.stdin.pause();
 }); setInterval(() => {}, 1000)"#.into()];
     c.request_timeout_ms = 300;
@@ -259,7 +259,7 @@ fn supervisor_exit_clears_orphan_active_entries() {
     let client = b.client.get().unwrap();
     // Simulate an orphan not owned by a Route; only supervisor exit can clear it.
     client.active.lock().insert("orphan".into(), "session".into());
-    assert!(b.apply_config(None, None).unwrap_err().to_string().contains("AgentdConfigBusy"));
+    assert!(b.apply_config(None, None).is_ok()); // P4 defers running sessions in agentd.
     b.shutdown();
     let deadline = Instant::now() + Duration::from_secs(2);
     while !client.active.lock().is_empty() {
@@ -323,7 +323,7 @@ const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 const reply = (id, result) => send({type:'response', id, ok:true, result});
 rl.on('line', line => {
   const {id, method, params:p} = JSON.parse(line);
-  if (method === 'ping') return reply(id, {status:'ok',sessions:0,version:'0.1.0',piVersion:'1.0.4',protocolVersion:4});
+  if (method === 'ping') return reply(id, {status:'ok',sessions:0,version:'0.1.0',piVersion:'1.0.4',protocolVersion:5});
   if (method === 'models.list') return reply(id, {models:[]});
   if (method === 'session.open') return reply(id, {
     sessionId:p.sessionId || 'timed', model:{provider:'fixture', id:'test'}, tools:['read']

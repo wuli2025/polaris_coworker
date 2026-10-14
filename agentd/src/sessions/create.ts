@@ -12,14 +12,15 @@ import { activateTools, profileTools } from "./options.ts";
 import { DaemonError } from "../protocol/errors.ts";
 
 export async function createSession(
-  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string, options: SessionOptions = {}, mandatoryFactories: (cwd: string) => ExtensionFactory[] = () => [],
+  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string, options: SessionOptions = {}, mandatoryFactories: (cwd: string) => ExtensionFactory[] = () => [], existingManager?: SessionManager,
 ) {
   const runtime = models.runtime;
   const tools = profileTools(config, options.toolProfile ?? config.defaultToolProfile);
   mkdirSync(config.sessionDir, { recursive: true });
   const cwd = resolve(requestedCwd ?? process.cwd());
   let manager: SessionManager;
-  if (sessionId) {
+  if (existingManager) manager = existingManager;
+  else if (sessionId) {
     // Exact lookup, never treat an untrusted session id as a filesystem path.
     if (!/^[a-zA-Z0-9-]+$/.test(sessionId)) throw new DaemonError("INVALID_SESSION_ID", "Invalid session id");
     const path = (await SessionManager.listAll(config.sessionDir)).find((info) => info.id === sessionId)?.path;

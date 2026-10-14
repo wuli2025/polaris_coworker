@@ -25,6 +25,13 @@ impl Process {
         let mut command = Command::new(&config.node);
         command.args(&config.node_args).arg(&config.entry).args(&config.args)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        if let Some(path) = crate::provider::credential_file::provider_store_path() {
+            let settings = crate::provider::pi_config::load().map_err(anyhow::Error::msg)?;
+            command.env("POLARIS_PROVIDER_STORE", &path)
+                .env("POLARIS_CREDENTIAL_LOCK_TIMEOUT_MS", settings.lock_timeout_ms.to_string())
+                .env("POLARIS_CREDENTIAL_LOCK_POLL_MS", settings.lock_poll_ms.to_string());
+            if let Some(dir) = path.parent() { command.env("POLARIS_USAGE_DIR", dir.join("pi-usage")); }
+        }
         crate::runtime::procs::no_window(command.as_std_mut());
         #[cfg(unix)]
         {

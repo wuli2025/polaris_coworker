@@ -318,3 +318,19 @@ agentd typecheck 通过，npm test 18 文件通过、2 失败（web EPERM；e2e 
 两壳 offline check 通过；内核排除既有 4 项基线与 6 项 TCP 限制后，171 单测和 4 集成测试通过，2 忽略。
 默认值、配置切换例、全部失败名称、命令/日志、未运行项见 [R4 执行报告](pi-migration/r4-review-fixes.md)。
 历史 P3b 报告的名称黑名单/全树扫描说明已由本节取代；服务端策略依赖和真实 Docker 验收边界仍按历史记录保留。
+
+## P4 提供商、凭据与用量（执行报告，验收 BLOCKED）
+
+| 入口 | 依赖与行为 | 配置、迁移与验证 |
+| --- | --- | --- |
+| `K/provider/{pi_translate,pi_config}.rs`、store 门面 | ProviderView→Pi providers/defaultModel；显式 models→env→同提供商内置目录；具名协议映射 | pi-default.json；POLARIS_PROVIDER_CONFIG；类型校验、模型/价格/alias 覆盖；三协议与优先级测试 |
+| `K/provider/credential_file.rs`、`agentd/src/models/file-credentials.ts` | 方案 A：共享 providers.json.credentials，mkdir 锁覆盖刷新/保存，原子替换；API key 从 env 同文件迁移 | 默认锁等待 30000ms、轮询 25ms；旧外部 OAuth 不复制，Pi 首次重登；假时钟/端点并发刷新和重开持久化测试 |
+| `K/chat/backend/pi/`、`agentd/src/sessions/registry.ts` | provider_switch→config.apply；空闲自动重建保留历史，运行会话本轮后应用；Pi 不启动 codex_proxy、不写 Claude 全局配置 | 协议 v5；SDK SessionManager / ModelRuntime；切换、历史保留、新会话、版本指纹验证 |
+| `K/provider/pi_login.rs`、`agentd/src/models/logins.ts` | provider.auth 复用 anthropic/openai-codex 原生登录/刷新；Rust 登录接口保留旧后端分支 | oauthTimeoutMs=600000；Codex 默认 device code；登录交互不返回 token |
+| `agentd/src/events/usage-store.ts`、`K/provider/{usage,pi_usage}.rs` | 每条权威 assistant usage 按会话/提供商/模型持久化；与 Claude JSONL 按日期及明确请求身份合并 | Pi 默认由 Rust 指向 Polaris/data/pi-usage；独立 agentd usageDir=""；记录去重测试 |
+| `K/provider/store/failover.rs`、Pi Translator | MODEL_AUTH/RATE_LIMIT/NETWORK/ERROR 接既有滑窗；成功清零，取消/上下文/工具错误不切换 | 无新增滑窗依赖；错误分类及阈值测试，真实网络故障切换未验收 |
+| `agentd/src/extensions/permissions.ts` | resolved 通知发送/日志失败不改变本地决策 | 固定日志文案；allow/cancel/expiry 发送失败测试 |
+
+全部文件/行数、SDK d.ts 证据、默认值与切换示例、凭据与账本迁移、命令及失败名单见 [P4 报告](pi-migration/p4-result.md)。
+两壳 check、vue-tsc 和过滤后的 kernel 测试通过；agentd 全量仍有 web EPERM 与 e2e ping 超时，不能宣称完成。
+前端开关/登录/用量文案需配合；没有直接修改前端、没有新增依赖、没有 commit/push。

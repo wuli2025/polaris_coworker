@@ -60,7 +60,7 @@ async function dispatch({ id, method, params: p }) {
     case 'ping':
       if (process.argv.includes('--ping-hang')) return;
       return response(id, { status: 'ok', sessions: sessions.size, version: '0.1.0', piVersion: '1.0.4',
-        protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 4 });
+        protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 5 });
     case 'models.list': return response(id, { models: [{ provider: 'fixture', id: 'test' }] });
     case 'session.open': {
       if (p.sessionId && sessions.has(p.sessionId)) return error(id, 'SESSION_ALREADY_OPEN');

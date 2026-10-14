@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { ModelsError, type AssistantMessage } from "@earendil-works/pi-ai";
 
 const messages = {
   MODEL_AUTH: "模型身份验证失败，请检查提供商凭据与访问权限。",
@@ -35,4 +35,12 @@ export function modelError(message: AssistantMessage): { code: Code; message: st
     if (code) return { code, message: messages[code] };
   }
   return { code: "MODEL_ERROR", message: messages.MODEL_ERROR };
+}
+
+/** SDK auth failures can happen before an assistant message exists. */
+export function modelException(error: unknown): { code: string; message: string } | undefined {
+  if (error instanceof ModelsError && ["auth", "oauth"].includes(error.code)) {
+    return { code: "MODEL_AUTH", message: messages.MODEL_AUTH };
+  }
+  return undefined;
 }

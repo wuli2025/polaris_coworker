@@ -23,11 +23,13 @@ pub struct PiBackend {
     client: once_cell::sync::OnceCell<Arc<Client>>,
     preparing: Arc<Mutex<HashSet<String>>>,
     cancelled: Arc<Mutex<HashSet<String>>>,
+    provider_config: Mutex<Option<(Option<u32>, Value)>>,
 }
 impl PiBackend {
     pub fn new(config: config::Agentd) -> anyhow::Result<Self> {
         config::Config { agent: config::Agent::default(), agentd: config.clone() }.validate()?;
         Ok(Self { config, client: once_cell::sync::OnceCell::new(),
+            provider_config: Mutex::new(None),
             preparing: Arc::new(Mutex::new(HashSet::new())), cancelled: Arc::new(Mutex::new(HashSet::new())) })
     }
     fn client(&self) -> anyhow::Result<Arc<Client>> {
@@ -41,17 +43,28 @@ impl PiBackend {
     /// Process-wide configuration; close every session reported by the daemon.
     pub fn apply_config(&self, config: Option<Value>, credentials: Option<Value>) -> anyhow::Result<Value> {
         let client = self.client()?;
-        anyhow::ensure!(client.active.lock().is_empty(), "AgentdConfigBusy");
+        // agentd reopens idle sessions with their existing SessionManager and defers
+        // busy sessions until completion; never abort an in-flight provider switch.
         let result = client.call(Command::Apply(protocol::Apply { config, credentials }))?;
-        if let Some(ids) = result.get("reopenRequired").and_then(Value::as_array) {
-            for id in ids {
-                if let Some(id) = id.as_str() { client.call(Command::Close(protocol::Session { session_id: id.into() }))?; }
-            }
-        }
         Ok(result)
     }
 }
 impl AgentBackend for PiBackend {
+    fn auth(&self, operation: &str, provider: &str, input: Option<String>) -> anyhow::Result<Value> {
+        self.client()?.call(Command::Auth(protocol::Auth { operation: operation.into(), provider: provider.into(), input }))
+    }
+    fn provider_apply(&self, id: &str) -> anyhow::Result<Value> {
+        let client = self.client()?;
+        let mut last = self.provider_config.lock();
+        let catalog = client.call(Command::Catalog(Empty {}))?;
+        let config = crate::provider::pi_translate::config(id, &catalog).map_err(anyhow::Error::msg)?;
+        let pid = client.status.lock().pid;
+        if last.as_ref() == Some(&(pid, config.clone())) { return Ok(serde_json::json!({"applied":true})); }
+        let result = self.apply_config(Some(config.clone()), None)?;
+        *last = Some((pid, config));
+        Ok(result)
+    }
+
     fn permission_respond(&self, response: protocol::PermissionResponse) -> anyhow::Result<()> {
         self.client()?.call(Command::PermissionRespond(response)).map(|_| ())
     }
@@ -66,6 +79,11 @@ impl AgentBackend for PiBackend {
             return Err(if input.account_id.is_some() { BackendError::UnsupportedIsolation } else { BackendError::AccountContextRequired }.into());
         }
         anyhow::ensure!(!input.prompt.trim().is_empty(), "AgentdEmptyPrompt");
+        if crate::provider::credential_file::provider_store_path().is_some() {
+            let _selection = crate::provider::PROVIDER_MUTATION.lock();
+            let id = crate::provider::current_provider_id();
+            self.provider_apply(if id.is_empty() { "claude-official" } else { &id })?;
+        }
         let client = self.client()?;
         if client.status.lock().circuit_open { return Err(BackendError::CircuitOpen.into()); }
         let (sender, stream) = stream::Mailbox::channel(self.config.channel_capacity, self.config.max_line_bytes);
@@ -101,7 +119,8 @@ impl AgentBackend for PiBackend {
                     None => configured_max,
                 };
                 client.send(Control::Register { session: info.id.clone(), req: req.clone(),
-                    translator: translate::Translator::new(req.clone(), conv.clone(), input.cwd.clone(), &client.config),
+                    translator: translate::Translator::new(req.clone(), conv.clone(), input.cwd.clone(), &client.config)
+                        .with_provider(info.model.get("provider").and_then(Value::as_str).unwrap_or_default()),
                     stream: sender.clone(), timeout, reservation: (preparing.clone(), key.clone()), reply: tx })?;
                 client.wait(rx)?;
                 registered = true;

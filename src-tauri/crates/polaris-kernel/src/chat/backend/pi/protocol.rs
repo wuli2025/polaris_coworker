@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 /// Mirror of agentd/src/protocol/schema.ts; fingerprint test gates changes.
-pub const PROTOCOL_VERSION: u64 = 4;
+pub const PROTOCOL_VERSION: u64 = 5;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum Id { Text(String), Number(i64) }
@@ -12,10 +12,12 @@ pub struct Request { pub id: Id, #[serde(flatten)] pub command: Command }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Command {
+    #[serde(rename = "provider.auth")] Auth(Auth),
     #[serde(rename = "permission.respond")] PermissionRespond(PermissionResponse),
     #[serde(rename = "sandbox.respond")] SandboxRespond(SandboxResponse),
     #[serde(rename = "ping")] Ping(Empty),
     #[serde(rename = "models.list")] Models(Empty),
+    #[serde(rename = "models.catalog")] Catalog(Empty),
     #[serde(rename = "session.open")] Open(Open),
     #[serde(rename = "session.configure")] Configure(Configure),
     #[serde(rename = "prompt")] Prompt(Prompt),
@@ -171,4 +173,12 @@ impl Frame {
         }
         Ok(frame)
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Auth {
+    pub provider: String,
+    pub operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")] pub input: Option<String>,
 }

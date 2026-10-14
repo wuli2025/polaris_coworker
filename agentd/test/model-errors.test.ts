@@ -37,3 +37,13 @@ for (const [name, diagnostic, code] of cases) {
     assert.equal(events.filter((event) => event.event === "error")[1].message, error.message);
   });
 }
+
+
+test("SDK OAuth exceptions become MODEL_AUTH without exposing causes", async () => {
+  const { ModelsError } = await import("@earendil-works/pi-ai");
+  const { modelException } = await import("../src/events/model-error.ts");
+  const result = modelException(new ModelsError("oauth", "private-refresh-token"));
+  assert.equal(result?.code, "MODEL_AUTH");
+  assert.ok(!JSON.stringify(result).includes("private-refresh-token"));
+  assert.equal(modelException(new Error("arbitrary provider prose")), undefined);
+});

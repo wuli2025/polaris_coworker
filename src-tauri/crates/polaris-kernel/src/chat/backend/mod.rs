@@ -82,6 +82,12 @@ impl BackendStatus {
     }
 }
 pub trait AgentBackend: Send + Sync {
+    fn provider_apply(&self, _id: &str) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("ProviderApplyUnsupported")
+    }
+    fn auth(&self, _operation: &str, _provider: &str, _input: Option<String>) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("ProviderAuthUnsupported")
+    }
     fn permission_respond(&self, _response: pi::protocol::PermissionResponse) -> anyhow::Result<()> {
         anyhow::bail!("PermissionResponseUnsupported")
     }

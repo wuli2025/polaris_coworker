@@ -1,3 +1,5 @@
+import { modelException } from "../events/model-error.ts";
+import { recordUsage } from "../events/usage-store.ts";
 import { Permissions, type Decision } from "../extensions/permissions.ts";
 import type { SandboxResult } from "../protocol/schema.ts";
 import { Sandbox } from "../extensions/sandbox.ts";
@@ -23,6 +25,9 @@ interface Run {
 }
 interface Entry {
   session: AgentSession;
+  rebuild: () => Promise<void>;
+  pendingReopen?: boolean;
+  pendingModel?: SessionOptions["model"];
   permissions: Permissions;
   sandbox: Sandbox;
   options: SessionOptions;
@@ -68,6 +73,7 @@ export class SessionRegistry {
       let permissions!: Permissions;
       let sandbox!: Sandbox;
       const assemble = (actualCwd: string): ExtensionFactory[] => {
+        const config = this.config();
         permissions = new Permissions(options.permissionMode ?? config.permissions.defaultMode,
           actualCwd, config.permissions.timeoutMs, config.permissions.summaryChars,
           (approval) => this.extensionEvent(state.id, { event: "permission.request", targetSessionId: state.id, ...approval }),
@@ -94,7 +100,19 @@ export class SessionRegistry {
         throw new DaemonError("TURN_CANCELLED", "Parent stopped while opening child");
       }
       const id = session.sessionId;
-      const entry: Entry = { session, permissions, sandbox, options: { ...options }, parent,
+      const entry: Entry = { session, permissions, sandbox, rebuild: async () => {
+        options = { ...entry.options, ...(entry.pendingModel ? { model: entry.pendingModel } : {}) };
+        const replacement = await createSession(this.config(), this.models, this.factories,
+          undefined, entry.session.sessionManager.getCwd(), options, assemble, entry.session.sessionManager);
+        const previous = entry.session;
+        entry.session = replacement;
+        entry.options = options;
+        entry.pendingModel = undefined;
+        entry.permissions = permissions;
+        entry.sandbox = sandbox;
+        entry.pendingReopen = replacement.modelRuntime !== this.models.runtime;
+        previous.dispose();
+      }, pendingReopen: session.modelRuntime !== this.models.runtime, options: { ...options }, parent,
         depth: parentEntry ? parentEntry.depth + 1 : 0, children: new Set(),
         toolProfile: options.toolProfile ?? config.defaultToolProfile, lastUsed: Date.now(), queueReservations: 0 };
       this.entries.set(id, entry);
@@ -117,6 +135,7 @@ export class SessionRegistry {
   }
   async configure(id: string, options: SessionOptions) {
     const entry = this.get(id);
+    if (entry.pendingReopen && !entry.run && !entry.configuring) await this.reopen(id, entry);
     if (entry.run || entry.configuring || !entry.session.isIdle) throw new DaemonError("SESSION_BUSY", "Session is busy");
     clearTimeout(entry.idle);
     entry.configuring = configureSession(entry.session, this.config(), options);
@@ -133,12 +152,14 @@ export class SessionRegistry {
     } finally {
       entry.configuring = undefined;
       entry.lastUsed = Date.now();
+      if (entry.pendingReopen && !entry.closing && !this.stopped) await this.reopen(id, entry);
       if (!entry.closing && !this.stopped) this.armIdle(id, entry);
     }
   }
   prompt(id: string, text: string, attachments: ImageAttachment[] = []) {
     const entry = this.get(id);
     if (entry.run || entry.configuring) throw new DaemonError("SESSION_BUSY", "Use steer or followUp while a prompt is running");
+    if (entry.pendingReopen) throw new DaemonError("SESSION_REOPEN_REQUIRED", "Session must be reopened before prompting");
     const images = imagesForPrompt(attachments, this.config());
     if (images.length && !entry.session.model?.input.includes("image")) {
       throw new DaemonError("MODEL_IMAGES_UNSUPPORTED", "Selected model does not accept images");
@@ -172,8 +193,13 @@ export class SessionRegistry {
       clearTimeout(idleTimer);
       if (!run.stopped) idleTimer = setTimeout(() => expire("TURN_IDLE_TIMEOUT"), turnIdleTimeoutMs);
     };
+    let usageOrdinal = 0;
     const unsubscribe = session.subscribe((event) => {
       armIdle(); // All SDK events count, including tool progress and retry/compaction events.
+      if (event.type === "message_end" && event.message.role === "assistant") {
+        try { recordUsage(this.config().usageDir, id, run.id, usageOrdinal++, event.message); }
+        catch { run.mapper.error("USAGE_PERSIST_FAILED", "Usage record could not be persisted"); }
+      }
       run.mapper.accept(event, !!run.stopped);
     });
     armIdle();
@@ -190,7 +216,7 @@ export class SessionRegistry {
     } catch (error) {
       if (!run.stopped) {
         run.mapper.status = "error";
-        const safe = publicError(error);
+        const safe = modelException(error) ?? publicError(error);
         run.mapper.error(safe.code, safe.message);
       }
     } finally {
@@ -203,6 +229,10 @@ export class SessionRegistry {
       entry.lastStatus = run.stopped ?? run.mapper.status;
       entry.run = undefined;
       entry.lastUsed = Date.now();
+      if (entry.pendingReopen && !entry.closing && !this.stopped) {
+        try { await this.reopen(id, entry); }
+        catch { run.mapper.error("SESSION_REOPEN_FAILED", "Provider configuration will be retried before the next turn"); }
+      }
       run.mapper.emit({ event: "turn.completed", status: run.stopped ?? run.mapper.status });
       if (!entry.closing && !this.stopped) this.armIdle(id, entry);
     }
@@ -334,8 +364,24 @@ export class SessionRegistry {
     return [...this.entries].filter(([, entry]) => entry.session.modelRuntime !== this.models.runtime)
       .map(([id]) => id);
   }
-  refreshConfig(): void {
-    for (const [id, entry] of this.entries) if (!entry.run && !entry.configuring && !entry.closing) this.armIdle(id, entry);
+  private async reopen(id: string, entry: Entry): Promise<void> {
+    clearTimeout(entry.idle);
+    entry.configuring = entry.rebuild();
+    try { await entry.configuring; }
+    finally {
+      entry.configuring = undefined;
+      if (!entry.closing && !this.stopped) this.armIdle(id, entry);
+    }
+  }
+  async refreshConfig(defaultChanged = false): Promise<void> {
+    for (const [id, entry] of this.entries) {
+      entry.pendingReopen = entry.session.modelRuntime !== this.models.runtime;
+      if (defaultChanged) entry.pendingModel = this.config().defaultModel;
+      if (!entry.run && !entry.configuring && !entry.closing) {
+        try { await this.reopen(id, entry); }
+        catch { /* Keep pendingReopen; config.apply reports unresolved sessions. */ }
+      }
+    }
   }
   async shutdown(): Promise<void> {
     this.stopped = true;

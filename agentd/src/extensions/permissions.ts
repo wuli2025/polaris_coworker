@@ -82,7 +82,11 @@ export class Permissions {
         if (!this.pending.has(callId)) return;
         clearTimeout(timer);
         this.pending.delete(callId);
-        try { this.resolved({ callId, reason }); } finally { resolve(decision); }
+        try { this.resolved({ callId, reason }); }
+        catch {
+          try { console.warn("permission.resolved notification failed"); } catch { /* Logging cannot revoke a decision. */ }
+        }
+        finally { resolve(decision); }
       };
       this.pending.set(callId, finish);
       try { this.emit({ callId, tool, summary: JSON.stringify(args).slice(0, this.summaryChars), expiresAt: Date.now() + this.timeoutMs }); }

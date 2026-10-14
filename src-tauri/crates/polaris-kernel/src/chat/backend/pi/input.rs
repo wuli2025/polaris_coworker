@@ -13,10 +13,13 @@ pub fn options(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionOp
                 .ok_or_else(|| anyhow::anyhow!("AgentdMissingModels"))?
                 .as_array().ok_or_else(|| anyhow::anyhow!("AgentdInvalidModels"))?
                 .iter().map(|m| serde_json::json!({"provider":m["provider"], "id":m["id"]})).collect::<Vec<_>>().into())?;
+            let current = crate::provider::current_provider_id();
+            let selected = crate::provider::pi_translate::credential_id(&current);
+            let preferred = models.iter().find(|m| &m.id == id && m.provider == selected).cloned();
             let mut matches = models.into_iter().filter(|m| &m.id == id);
             let model = matches.next().ok_or_else(|| anyhow::anyhow!("AgentdModelNotFound: {id}"))?;
-            anyhow::ensure!(matches.next().is_none(), "AgentdModelAmbiguous: specify provider and id");
-            Some(model)
+            anyhow::ensure!(preferred.is_some() || matches.next().is_none(), "AgentdModelAmbiguous: specify provider and id");
+            Some(preferred.unwrap_or(model))
         }
         Some(value) => Some(serde_json::from_value::<Model>(value.clone())?),
     };

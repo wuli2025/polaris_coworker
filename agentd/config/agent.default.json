@@ -122,5 +122,7 @@
       "credential": "web-search",
       "maxResults": 5
     }
-  }
+  },
+  "oauthTimeoutMs": 600000,
+  "usageDir": ""
 }

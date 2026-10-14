@@ -5,7 +5,7 @@ const id = Type.Union([text, Type.Integer()]);
 const request = <M extends string, P extends Record<string, TSchema>>(method: M, params: P) =>
   Type.Object({ id, method: Type.Literal(method), params: Type.Object(params, { additionalProperties: false }) },
     { additionalProperties: false });
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 export const ModelSchema = Type.Object({ provider: text, id: text }, { additionalProperties: false });
 export const ThinkingLevelSchema = Type.Union([
   Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"),
@@ -35,9 +35,12 @@ export const SandboxResultSchema = Type.Object({
 });
 export type SandboxResult = Static<typeof SandboxResultSchema>;
 export const RequestSchema = Type.Union([
+  request("provider.auth", { provider: text,
+    operation: Type.Union([Type.Literal("start"), Type.Literal("poll"), Type.Literal("respond"), Type.Literal("cancel")]),
+    input: Type.Optional(text) }),
   request("permission.respond", { sessionId: text, callId: text, decision: DecisionSchema }),
   request("sandbox.respond", { sessionId: text, callId: text, ...SandboxResultSchema.properties }),
-  request("ping", {}), request("models.list", {}),
+  request("ping", {}), request("models.list", {}), request("models.catalog", {}),
   request("session.open", { sessionId: Type.Optional(text), cwd: Type.Optional(text), ...SessionOptionsSchema.properties }),
   request("session.configure", { sessionId: text, ...SessionOptionsSchema.properties }),
   request("prompt", { sessionId: text, text, attachments: Type.Optional(Type.Array(ImageSchema)) }),

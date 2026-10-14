@@ -3,6 +3,7 @@ import { format } from "node:util";
 import { loadConfig } from "./config/load.ts";
 import { Daemon } from "./daemon.ts";
 import { Logger } from "./log.ts";
+import { FileCredentials } from "./models/file-credentials.ts";
 import { Redactor } from "./models/credentials.ts";
 import { publicError } from "./protocol/errors.ts";
 import { JsonlReader, JsonlWriter } from "./protocol/jsonl.ts";
@@ -26,8 +27,15 @@ async function main(): Promise<void> {
   if (args.length && (args.length !== 2 || args[0] !== "--config")) {
     throw new Error("Expected --config <path>");
   }
-  const daemon = await Daemon.create(loadConfig(args[1] ?? process.env.POLARIS_AGENTD_CONFIG),
-    (value) => output.send(value), writeLog, { redactor });
+  const config = loadConfig(args[1] ?? process.env.POLARIS_AGENTD_CONFIG);
+  if (process.env.POLARIS_USAGE_DIR) config.usageDir = process.env.POLARIS_USAGE_DIR;
+  const path = process.env.POLARIS_PROVIDER_STORE;
+  const credentials = path ? new FileCredentials(path, redactor, {
+    timeoutMs: Number(process.env.POLARIS_CREDENTIAL_LOCK_TIMEOUT_MS ?? 30000),
+    pollMs: Number(process.env.POLARIS_CREDENTIAL_LOCK_POLL_MS ?? 25),
+  }) : undefined;
+  const daemon = await Daemon.create(config,
+    (value) => output.send(value), writeLog, { redactor, credentials });
   logger = daemon.logger;
   let shutdown: Promise<void> | undefined;
   const reader = new JsonlReader(() => daemon.config.maxLineBytes, (value) => {
