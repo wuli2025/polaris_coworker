@@ -1,6 +1,8 @@
 //! Exact wire names from agentd/src/protocol/{schema,events}.ts.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+/// Mirror of agentd/src/protocol/schema.ts; fingerprint test gates changes.
+pub const PROTOCOL_VERSION: u64 = 2;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum Id { Text(String), Number(i64) }
@@ -13,7 +15,8 @@ pub enum Command {
     #[serde(rename = "ping")] Ping(Empty),
     #[serde(rename = "models.list")] Models(Empty),
     #[serde(rename = "session.open")] Open(Open),
-    #[serde(rename = "prompt")] Prompt(Text),
+    #[serde(rename = "session.configure")] Configure(Configure),
+    #[serde(rename = "prompt")] Prompt(Prompt),
     #[serde(rename = "steer")] Steer(Text),
     #[serde(rename = "followUp")] FollowUp(Text),
     #[serde(rename = "abort")] Abort(Session),
@@ -28,6 +31,48 @@ pub struct Empty {}
 pub struct Open {
     #[serde(skip_serializing_if = "Option::is_none")] pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub cwd: Option<String>,
+    #[serde(flatten)] pub options: SessionOptions,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Model { pub provider: String, pub id: String }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel { Off, Minimal, Low, Medium, High, Xhigh }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionOptions {
+    #[serde(skip_serializing_if = "Option::is_none")] pub model: Option<Model>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub thinking_level: Option<ThinkingLevel>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub tool_profile: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Configure { pub session_id: String, #[serde(flatten)] pub options: SessionOptions }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum Attachment {
+    #[serde(rename_all = "camelCase")]
+    Image { mime_type: String, data: String },
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Prompt {
+    pub session_id: String, pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub attachments: Vec<Attachment>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ping {
+    pub status: String, pub sessions: u64, pub version: String,
+    pub pi_version: String, pub protocol_version: u64,
+}
+pub fn check_ping(value: Value) -> anyhow::Result<Ping> {
+    anyhow::ensure!(value.get("protocolVersion").and_then(Value::as_u64) == Some(PROTOCOL_VERSION),
+        "AgentdProtocolMismatch: expected protocolVersion={PROTOCOL_VERSION}");
+    let ping: Ping = serde_json::from_value(value)?;
+    anyhow::ensure!(ping.status == "ok" && !ping.version.is_empty() && !ping.pi_version.is_empty(), "AgentdPingFailed");
+    Ok(ping)
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

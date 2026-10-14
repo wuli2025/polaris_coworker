@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-14T05:24:08.389156+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "d5e4bcad55f6ad9a4d99349f264142beb972f443e572a39d30e84aa65798d56e",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": "?? docs/execution/P2.5-1/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M agentd/config/agent.default.json\n M agentd/src/config/load.ts\n M agentd/src/config/schema.ts\n M agentd/src/daemon.ts\n M agentd/src/protocol/schema.ts\n M agentd/src/sessions/create.ts\n M agentd/src/sessions/registry.ts\n M docs/feature-tree.md\n M src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs\n M src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs\n M src-tauri/crates/polaris-kernel/tests/fixtures/protocol-samples.jsonl\n M src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256\n?? agentd/src/protocol/version.ts\n?? agentd/src/sessions/attachments.ts\n?? agentd/src/sessions/options.ts\n?? agentd/test/protocol-extension.test.ts\n?? docs/execution/P2.5-1/\n?? docs/pi-migration/p25-files.md\n?? docs/pi-migration/p25-result.md\n?? docs/pi-migration/p25-validation/\n?? src-tauri/crates/polaris-kernel/src/chat/backend/pi/extension_tests.rs\n?? src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs\n",
+    "diff_stat": " agentd/config/agent.default.json                   | 70 ++++++++++++++++++++--\n agentd/src/config/load.ts                          |  5 ++\n agentd/src/config/schema.ts                        |  6 ++\n agentd/src/daemon.ts                               | 12 +++-\n agentd/src/protocol/schema.ts                      | 21 ++++++-\n agentd/src/sessions/create.ts                      | 12 +++-\n agentd/src/sessions/registry.ts                    | 49 +++++++++++----\n docs/feature-tree.md                               | 20 ++++++-\n .../polaris-kernel/src/chat/backend/bridge.rs      |  1 +\n .../polaris-kernel/src/chat/backend/pi/mod.rs      | 17 +++---\n .../polaris-kernel/src/chat/backend/pi/protocol.rs | 47 ++++++++++++++-\n .../polaris-kernel/src/chat/backend/pi/sessions.rs | 16 +++--\n .../src/chat/backend/pi/supervisor.rs              | 55 +++++++++++++----\n .../polaris-kernel/src/chat/backend/pi/tests.rs    | 25 +++++---\n .../polaris-kernel/tests/fixtures/fake-agentd.mjs  | 11 +++-\n .../tests/fixtures/protocol-samples.jsonl          |  6 +-\n .../tests/fixtures/protocol-schema.sha256          |  2 +-\n 17 files changed, 315 insertions(+), 60 deletions(-)\n"
+  },
+  "finished_at": "2026-10-14T05:38:25.247108+00:00"
+}

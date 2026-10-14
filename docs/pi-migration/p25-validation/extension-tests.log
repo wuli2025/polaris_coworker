@@ -1,0 +1,46 @@
+TAP version 13
+# Subtest: schema accepts v2 options and rejects arbitrary tools and invalid levels
+ok 1 - schema accepts v2 options and rejects arbitrary tools and invalid levels
+  ---
+  duration_ms: 3.748758
+  type: 'test'
+  ...
+# Subtest: shared request samples validate against the authoritative TypeScript schema
+ok 2 - shared request samples validate against the authoritative TypeScript schema
+  ---
+  duration_ms: 2.302176
+  type: 'test'
+  ...
+# Subtest: ping versions, default options, idle configure and isolated tool/model changes
+ok 3 - ping versions, default options, idle configure and isolated tool/model changes
+  ---
+  duration_ms: 73.349449
+  type: 'test'
+  ...
+# Subtest: profile and attachment configuration is validated; unavailable tools and text-only models fail by name
+ok 4 - profile and attachment configuration is validated; unavailable tools and text-only models fail by name
+  ---
+  duration_ms: 48.704002
+  type: 'test'
+  ...
+# Subtest: configure while running returns SESSION_BUSY and image reaches faux model messages
+ok 5 - configure while running returns SESSION_BUSY and image reaches faux model messages
+  ---
+  duration_ms: 108.238707
+  type: 'test'
+  ...
+# Subtest: image count, per-image/total bytes, unsupported kinds and base64 fail before a turn starts
+ok 6 - image count, per-image/total bytes, unsupported kinds and base64 fail before a turn starts
+  ---
+  duration_ms: 20.519547
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 265.823018

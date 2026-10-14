@@ -5,13 +5,15 @@ mod process;
 pub mod protocol;
 mod routes;
 mod sessions;
+mod input;
+#[cfg(test)] mod extension_tests;
 mod supervisor;
 mod translate;
 #[cfg(windows)] mod windows_job;
 #[cfg(test)] mod tests;
 use super::*;
 use client::{Client, Control};
-use protocol::{Command, Empty, Text};
+use protocol::{Command, Empty, Prompt};
 use parking_lot::Mutex;
 use std::{collections::HashSet, sync::mpsc};
 use serde_json::Value;
@@ -32,6 +34,10 @@ impl PiBackend {
         if self.config.isolation == "per-account" { return Err(BackendError::AccountContextRequired.into()); }
         self.client.get_or_try_init(|| Client::new(self.config.clone())).cloned()
     }
+    /// Configure a mapped idle session through the protocol's typed public options.
+    pub fn configure_session(&self, key: &str, options: protocol::SessionOptions) -> anyhow::Result<Value> {
+        sessions::configure(self.client()?.as_ref(), key, options)
+    }
     /// Process-wide configuration; close every session reported by the daemon.
     pub fn apply_config(&self, config: Option<Value>, credentials: Option<Value>) -> anyhow::Result<Value> {
         let client = self.client()?;
@@ -50,7 +56,6 @@ impl AgentBackend for PiBackend {
         if self.config.isolation == "per-account" {
             return Err(if input.account_id.is_some() { BackendError::UnsupportedIsolation } else { BackendError::AccountContextRequired }.into());
         }
-        anyhow::ensure!(input.attachments.is_empty(), BackendError::UnsupportedInput("binary attachments are absent from the agentd prompt schema"));
         anyhow::ensure!(!input.prompt.trim().is_empty(), "AgentdEmptyPrompt");
         let client = self.client()?;
         if client.status.lock().circuit_open { return Err(BackendError::CircuitOpen.into()); }
@@ -72,12 +77,9 @@ impl AgentBackend for PiBackend {
                     Some(crate::chat::prompt::estimate_tokens(&input.prompt).to_string())));
                 if cancelled.lock().remove(&req) { sender.finish(None, event(&req, conv.as_deref(), "done", None)); return Ok(()); }
                 let info = sessions::open(&client, &input)?;
-                if matches!(input.permission, PermissionMode::Deny | PermissionMode::Manual) {
+                if matches!(input.permission, PermissionMode::Deny) {
                     anyhow::ensure!(info.tools.iter().all(|t| client.config.readonly_tools.contains(t)),
                         BackendError::UnsupportedInput("read-only/manual request cannot use a daemon with write or execution tools"));
-                }
-                if let Some(model) = &input.model {
-                    anyhow::ensure!(model == &info.model, BackendError::UnsupportedInput("model selection is process-wide; apply config before opening sessions"));
                 }
                 let (tx, rx) = mpsc::sync_channel(1);
                 // Control::Register.timeout is the hard limit; zero means unlimited.
@@ -94,7 +96,8 @@ impl AgentBackend for PiBackend {
                     stream: sender.clone(), timeout, reservation: (preparing.clone(), key.clone()), reply: tx })?;
                 client.wait(rx)?;
                 registered = true;
-                let result = client.call(Command::Prompt(Text { session_id: info.id.clone(), text: input.prompt }));
+                let attachments = input::attachments(&input.attachments, client.config.max_line_bytes)?;
+                let result = client.call(Command::Prompt(Prompt { session_id: info.id.clone(), text: input.prompt, attachments }));
                 eprintln!("{}", serde_json::json!({"component":"agent.backend", "backend":"pi",
                     "reqId":req, "conversationId":conv, "sessionId":info.id, "phase":"prompt", "ok":result.is_ok()}));
                 let result = result?;

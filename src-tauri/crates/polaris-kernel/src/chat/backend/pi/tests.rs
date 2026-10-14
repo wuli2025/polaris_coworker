@@ -1,7 +1,7 @@
 use super::*;
 use super::protocol::{Event, Frame, TurnStatus};
 use std::time::Instant;
-fn config() -> config::Agentd {
+pub(super) fn config() -> config::Agentd {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut c = config::Agentd::default();
     c.entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agentd.mjs");
@@ -19,7 +19,7 @@ fn config() -> config::Agentd {
     c.session_map = std::env::temp_dir().join(format!("pi-tests-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     c
 }
-fn input(req: &str, prompt: &str) -> TurnRequest {
+pub(super) fn input(req: &str, prompt: &str) -> TurnRequest {
     TurnRequest { req_id: req.into(), session_id: req.into(), conversation_id: Some(req.into()),
         prompt: prompt.into(), permission: PermissionMode::Deny, model: None,
         cwd: std::env::temp_dir(), attachments: vec![], account_id: None, timeout: None, legacy: None }
@@ -226,20 +226,27 @@ fn config_apply_is_not_busy_after_circuit_or_thread_exit() {
 }
 
 #[test]
-fn stalled_stdin_reports_backpressure_to_caller_and_status() {
+fn stalled_stdin_reports_backpressure_to_caller_and_status() -> anyhow::Result<()> {
     let mut c = config();
-    c.node_args = vec!["-e".into(), "setInterval(() => {}, 1000)".into()];
+    c.node_args = vec!["-e".into(), r#"process.stdin.once('data', bytes => {
+  const request = JSON.parse(bytes.toString().trim());
+  process.stdout.write(JSON.stringify({type:'response',id:request.id,ok:true,
+    result:{status:'ok',sessions:0,version:'0.1.0',piVersion:'1.0.4',protocolVersion:2}})+'\n');
+  process.stdin.pause();
+}); setInterval(() => {}, 1000)"#.into()];
     c.request_timeout_ms = 300;
     c.max_line_bytes = 2_000_000;
     c.failure_threshold = 1;
-    let b = PiBackend::new(c).unwrap();
-    let client = b.client().unwrap();
-    let error = client.call(Command::Prompt(Text { session_id: "s".into(), text: "x".repeat(1_000_000) })).unwrap_err().to_string();
+    let b = PiBackend::new(c)?;
+    let client = b.client()?;
+    let error = client.call(Command::Prompt(Prompt { session_id: "s".into(), text: "x".repeat(1_000_000), attachments: vec![] })).err()
+        .ok_or_else(|| anyhow::anyhow!("expected writer backpressure"))?.to_string();
     assert!(error.contains("AgentdWriterBackpressure"), "{error}");
     assert!(!error.contains("RequestTimeout"), "{error}");
     let status = b.status();
     assert!(status.circuit_open);
-    assert!(status.last_error.unwrap().contains("AgentdWriterBackpressure"));
+    assert!(status.last_error.is_some_and(|e| e.contains("AgentdWriterBackpressure")));
+    Ok(())
 }
 
 #[test]
@@ -312,7 +319,7 @@ const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 const reply = (id, result) => send({type:'response', id, ok:true, result});
 rl.on('line', line => {
   const {id, method, params:p} = JSON.parse(line);
-  if (method === 'ping') return reply(id, {status:'ok'});
+  if (method === 'ping') return reply(id, {status:'ok',sessions:0,version:'0.1.0',piVersion:'1.0.4',protocolVersion:2});
   if (method === 'models.list') return reply(id, {models:[]});
   if (method === 'session.open') return reply(id, {
     sessionId:p.sessionId || 'timed', model:{provider:'fixture', id:'test'}, tools:['read']

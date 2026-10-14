@@ -1,0 +1,26 @@
+TAP version 13
+# Subtest: main.ts subprocess speaks JSONL through a real SDK tool round and shuts down via EOF/SIGTERM
+not ok 1 - main.ts subprocess speaks JSONL through a real SDK tool round and shuts down via EOF/SIGTERM
+  ---
+  duration_ms: 5007.958874
+  type: 'test'
+  location: '/home/mi/work/polaris-pi/agentd/test/e2e.test.ts:1:623'
+  failureType: 'testCodeFailure'
+  error: 'Error: Timed out waiting for condition; exit=0; stderr='
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    <anonymous> (/home/mi/work/polaris-pi/agentd/test/e2e.test.ts:43:35)
+    async request (/home/mi/work/polaris-pi/agentd/test/e2e.test.ts:42:7)
+    async TestContext.<anonymous> (/home/mi/work/polaris-pi/agentd/test/e2e.test.ts:47:47)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 5012.870039

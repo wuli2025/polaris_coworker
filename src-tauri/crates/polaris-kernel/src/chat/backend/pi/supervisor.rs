@@ -4,13 +4,14 @@ use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
 use tokio::sync::mpsc;
 use serde_json::{Value, json};
-struct Pending { reply: Option<Reply>, since: Instant }
+struct Pending { reply: Option<Reply>, since: Instant, ping: bool }
 struct State {
     config: Agentd,
     status: Arc<Mutex<BackendStatus>>,
     active: Arc<Mutex<HashMap<String, String>>>,
     routes: HashMap<String, Route>,
     pending: HashMap<Id, Pending>,
+    deferred: Vec<(Command, Reply, Instant)>,
     counter: u64,
     failures: u32,
     next_start: Instant,
@@ -21,15 +22,16 @@ struct State {
 }
 impl State {
     fn request(&mut self, process: &Process, command: Command, reply: Option<Reply>) -> anyhow::Result<()> {
+        let ping = matches!(command, Command::Ping(_));
         self.counter += 1;
         let id = Id::Text(format!("rust-{}", self.counter));
         process.write(&Request { id: id.clone(), command }, self.config.max_line_bytes)?;
-        self.pending.insert(id, Pending { reply, since: Instant::now() });
+        self.pending.insert(id, Pending { reply, since: Instant::now(), ping });
         Ok(())
     }
     fn fail(&mut self, error: String) {
         self.failures = self.failures.saturating_add(1);
-        let circuit = self.failures >= self.config.failure_threshold;
+        let circuit = error.contains("AgentdProtocolMismatch") || self.failures >= self.config.failure_threshold;
         let error = if circuit { format!("{}: {error}", BackendError::CircuitOpen) } else { error };
         for route in self.routes.values_mut() { route.fail(&error); }
         let mut status = self.status.lock();
@@ -39,6 +41,7 @@ impl State {
         eprintln!("{}", json!({"component":"agent.backend", "backend":"pi", "phase":"failure", "error":error}));
         status.last_error = Some(error.clone());
         drop(status);
+        for (_, reply, _) in self.deferred.drain(..) { let _ = reply.send(Err(error.clone())); }
         for (_, pending) in self.pending.drain() {
             if let Some(reply) = pending.reply { let _ = reply.send(Err(error.clone())); }
         }
@@ -56,12 +59,22 @@ impl State {
                 if let Some(pending) = self.pending.remove(&id) {
                     let result = if ok { Ok(result.unwrap_or(Value::Null)) }
                         else { Err(error.map(|e| format!("{}: {}", e.code, e.message)).unwrap_or_else(|| "AgentdResponseError".into())) };
-                    if let Some(reply) = pending.reply { let _ = reply.send(result); }
-                    else {
-                        let value = result.map_err(anyhow::Error::msg)?;
-                        anyhow::ensure!(value.get("status").and_then(Value::as_str) == Some("ok"), "AgentdPingFailed");
-                        self.status.lock().healthy = true;
-                    }
+                    if pending.ping {
+                        let checked = result.and_then(|v| super::protocol::check_ping(v.clone())
+                            .map(|ping| (v, ping)).map_err(|e| e.to_string()));
+                        match checked {
+                            Ok((value, ping)) => {
+                                let mut status = self.status.lock();
+                                status.healthy = true;
+                                status.agentd_version = Some(ping.version);
+                                if let Some(reply) = pending.reply { let _ = reply.send(Ok(value)); }
+                            }
+                            Err(error) => {
+                                if let Some(reply) = pending.reply { let _ = reply.send(Err(error.clone())); }
+                                anyhow::bail!(error);
+                            }
+                        }
+                    } else if let Some(reply) = pending.reply { let _ = reply.send(result); }
                 }
             }
             Frame::Event { session_id, turn_id, event } => {
@@ -98,6 +111,12 @@ impl State {
             }
             Control::Request(command, reply) => {
                 if let Some(process) = process {
+                    if !self.status.lock().healthy {
+                        if self.deferred.len() >= self.config.channel_capacity {
+                            let _ = reply.send(Err("AgentdHandshakeQueueFull".into()));
+                        } else { self.deferred.push((command, reply, Instant::now())); }
+                        return Ok(());
+                    }
                     if let Err(e) = self.request(process, command, Some(reply.clone())) {
                         let _ = reply.send(Err(e.to_string()));
                         return Err(e);
@@ -161,7 +180,8 @@ impl State {
                 anyhow::bail!(error);
             }
         }
-        if self.pending.values().any(|p| p.since.elapsed().as_millis() >= self.config.request_timeout_ms as u128) {
+        if self.pending.values().any(|p| p.since.elapsed().as_millis() >= self.config.request_timeout_ms as u128)
+            || self.deferred.iter().any(|(_, _, since)| since.elapsed().as_millis() >= self.config.request_timeout_ms as u128) {
             if process.is_some_and(Process::writes_pending) { anyhow::bail!(super::process::WRITER_BACKPRESSURE); }
             anyhow::bail!("AgentdRequestTimeout");
         }
@@ -188,7 +208,7 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
     active: Arc<Mutex<HashMap<String, String>>>) {
     let now = Instant::now();
     let mut s = State { config, status, active, routes: HashMap::new(), pending: HashMap::new(),
-        counter: 0, failures: 0, next_start: now, last_ping: now, started: now, last_used: now, stopping: false };
+        deferred: Vec::new(), counter: 0, failures: 0, next_start: now, last_ping: now, started: now, last_used: now, stopping: false };
     let mut process: Option<Process> = None;
     let mut ever_started = false;
     let mut idle = false;
@@ -255,6 +275,19 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
                 } else { deadlines }
             }
         };
+        let outcome = outcome.and_then(|()| {
+            if s.status.lock().healthy {
+                if let Some(p) = process.as_ref() {
+                    for (command, reply, _) in std::mem::take(&mut s.deferred) {
+                        if let Err(error) = s.request(p, command, Some(reply.clone())) {
+                            let _ = reply.send(Err(error.to_string()));
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        });
         if let Err(error) = outcome {
             s.fail(error.to_string());
             if let Some(mut p) = process.take() { p.stop().await; }

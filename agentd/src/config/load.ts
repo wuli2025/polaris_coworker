@@ -11,7 +11,12 @@ export function mergeConfig(base: Config, patch: unknown): Config {
   validateConfig(ConfigPatchSchema, patch);
   if (!Value.Check(ConfigPatchSchema, patch)) throw new Error("Unreachable invalid config");
   const result = { ...base, ...patch };
+  // Legacy `tools` only changes the default profile, never the readonly profile.
+  if (patch.tools && !patch.toolProfiles) result.toolProfiles = { ...result.toolProfiles, default: patch.tools };
   validateConfig(ConfigSchema, result);
+  if (!Object.hasOwn(result.toolProfiles, result.defaultToolProfile)) {
+    throw new DaemonError("INVALID_CONFIG", "Default tool profile does not exist", ["/defaultToolProfile"]);
+  }
   if (new Set(result.providers.map((p) => p.id)).size !== result.providers.length) {
     throw new DaemonError("INVALID_CONFIG", "提供商标识重复。", ["/providers"]);
   }

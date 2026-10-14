@@ -6,12 +6,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Config } from "../config/schema.ts";
 import type { Models } from "../models/runtime.ts";
+import type { SessionOptions } from "../protocol/schema.ts";
+import { activateTools, profileTools } from "./options.ts";
 import { DaemonError } from "../protocol/errors.ts";
 
 export async function createSession(
-  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string,
+  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string, options: SessionOptions = {},
 ) {
   const runtime = models.runtime;
+  const tools = profileTools(config, options.toolProfile ?? config.defaultToolProfile);
   mkdirSync(config.sessionDir, { recursive: true });
   const cwd = resolve(requestedCwd ?? process.cwd());
   let manager: SessionManager;
@@ -27,7 +30,7 @@ export async function createSession(
   } catch {
     throw new DaemonError("INVALID_CWD", "Working directory does not exist");
   }
-  const model = runtime.getModel(config.defaultModel.provider, config.defaultModel.id);
+  const model = runtime.getModel((options.model ?? config.defaultModel).provider, (options.model ?? config.defaultModel).id);
   if (!model) throw new DaemonError("MODEL_NOT_FOUND", "Configured default model does not exist");
   const settingsManager = SettingsManager.inMemory({
     compaction: config.compaction, retry: config.retry, cacheWarming: "off",
@@ -42,11 +45,14 @@ export async function createSession(
   await resourceLoader.reload();
   const { session } = await createAgentSession({
     cwd: manager.getCwd(), agentDir, model, modelRuntime: runtime,
-    thinkingLevel: config.thinkingLevel, tools: config.tools,
+    thinkingLevel: options.thinkingLevel ?? config.thinkingLevel,
+    // Register the configured universe so idle profile changes can enable tools.
+    tools: [...new Set(Object.values(config.toolProfiles).flat())],
     settingsManager, sessionManager: manager, resourceLoader,
   });
   try {
     await session.bindExtensions({ mode: "rpc" });
+    activateTools(session, tools);
     return session;
   } catch (error) {
     session.dispose();

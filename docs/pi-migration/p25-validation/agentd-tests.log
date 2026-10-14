@@ -1,0 +1,98 @@
+
+> @polaris/agentd@0.1.0 test
+> node --import tsx --test "test/**/*.test.ts"
+
+TAP version 13
+# Subtest: test/concurrency.test.ts
+ok 1 - test/concurrency.test.ts
+  ---
+  duration_ms: 3179.986911
+  type: 'test'
+  ...
+# Subtest: test/config-review.test.ts
+ok 2 - test/config-review.test.ts
+  ---
+  duration_ms: 3282.325703
+  type: 'test'
+  ...
+# Subtest: test/config.test.ts
+ok 3 - test/config.test.ts
+  ---
+  duration_ms: 3232.58699
+  type: 'test'
+  ...
+# Subtest: test/credentials-review.test.ts
+ok 4 - test/credentials-review.test.ts
+  ---
+  duration_ms: 3266.505791
+  type: 'test'
+  ...
+# Subtest: test/e2e.test.ts
+not ok 5 - test/e2e.test.ts
+  ---
+  duration_ms: 7817.344311
+  type: 'test'
+  location: '/home/mi/work/polaris-pi/agentd/test/e2e.test.ts:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+  signal: ~
+  error: 'test failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: test/events.test.ts
+ok 6 - test/events.test.ts
+  ---
+  duration_ms: 3225.125633
+  type: 'test'
+  ...
+# Subtest: test/model-errors.test.ts
+ok 7 - test/model-errors.test.ts
+  ---
+  duration_ms: 1677.860729
+  type: 'test'
+  ...
+# Subtest: test/protocol-extension.test.ts
+ok 8 - test/protocol-extension.test.ts
+  ---
+  duration_ms: 3410.457879
+  type: 'test'
+  ...
+# Subtest: test/protocol.test.ts
+ok 9 - test/protocol.test.ts
+  ---
+  duration_ms: 1607.381586
+  type: 'test'
+  ...
+# Subtest: test/runtime.test.ts
+ok 10 - test/runtime.test.ts
+  ---
+  duration_ms: 3094.007807
+  type: 'test'
+  ...
+# Subtest: test/sdk-contract.test.ts
+ok 11 - test/sdk-contract.test.ts
+  ---
+  duration_ms: 7803.73131
+  type: 'test'
+  ...
+# Subtest: test/sessions.test.ts
+ok 12 - test/sessions.test.ts
+  ---
+  duration_ms: 3400.017053
+  type: 'test'
+  ...
+# Subtest: test/timeouts.test.ts
+ok 13 - test/timeouts.test.ts
+  ---
+  duration_ms: 3918.688755
+  type: 'test'
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 12
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 7831.66353

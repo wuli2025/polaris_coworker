@@ -27,6 +27,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
             return Err(BackendError::UnsupportedInput("provider selection requires P4 mapping").to_string());
         }
         let prepared = claude_cli::pipeline::prepare(args);
+        input.model = claude_cli::pipeline::model_for_mode(prepared.work_full).map(serde_json::Value::String);
         input.prompt = prepared.plan.full_text();
         input.cwd = claude_cli::pipeline::effective_cwd(prepared.project_work_dir.as_deref().map(std::path::Path::new));
         notice = prepared.image_notice;

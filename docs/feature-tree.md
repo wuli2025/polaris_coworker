@@ -47,7 +47,7 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 | claude_cli → `K/chat/backend/claude_cli/pipeline/`、`pool/` | 原 spawn / parser / pool / 提示拼装 / 产物收尾按职责搬移 | 旧工具/模型/池开关保留；原池和管线单测随迁移 |
 | session_pool → `K/chat/session_pool.rs` | 原公开路径兼容门面；删除会话、退出转交 backend | 保留 conv 和宿主调用路径 |
 | pi → `K/chat/backend/pi/` | JSONL 请求关联、session/turn 路由、有界队列、约 30ms delta 合批、重启/熔断/取消 | 假 daemon 与协议样例测试；shared 已实现；per-account 明确拒绝，尚未实现 |
-| 状态 → `K/chat/backend/mod.rs::agent_backend_status` | 后端类型、PID、重启次数、熔断与健康状态 | Tauri/HTTP 已注册；协议无版本，agentdVersion=null |
+| 状态 → `K/chat/backend/mod.rs::agent_backend_status` | 后端类型、PID、重启次数、熔断与健康状态 | Tauri/HTTP 已注册；协议 v2 ping 提供版本，握手成功后填 agentdVersion；版本不符熔断 |
 | prompt → `K/chat/prompt.rs:66,252,356,1049,1091,1145` | 历史、记忆、检索、批次、目标与动态工作流指令 | →conv/桥返回的数据；当前预算常量 `:22`、`POLARIS_PROMPT_FULL` 逻辑 `:626`；迁到配置/提示资源 |
 | types → `K/chat/types.rs:10,33,108` | 四档 PermissionMode，ChatSendArgs，ChatStreamEvent | 权限当前是 CLI 值映射；前端字段由 Rust camelCase 序列化；Pi 权限交互尚待实现 |
 | bridges → `K/chat/bridges.rs:48,76,91,96` | KbBridge/ExpertBridge，set_* 一次注入 | 内核不直接依赖 fable 或 expert；装配在 `H/wiring.rs:98`，未注入按 Option 降级 |
@@ -191,9 +191,25 @@ Pi `useSandbox` 明确报 UnsupportedInput，等待 P3；旧后端原宿主行�
 | 会话设置 → `agentd/src/sessions/create.ts` | 默认启用重试与压缩；重试次数和退避传给 SettingsManager | retry.maxRetries/baseDelayMs/maxAgentDelayMs；`config-review.test.ts` |
 | 错误 → `agentd/src/events/model-error.ts`、`config/validate.ts` | 模型错误按 SDK diagnostics 分类，固定中文模板；配置错误仅返回字段路径 | `model-errors.test.ts`、`config-review.test.ts` |
 | 运行时 → `agentd/src/models/runtime.ts` | config.apply 重建运行时，响应 reopenRequired 列出需关闭重开的已有会话 | SDK 无公开运行时替换接口；`runtime.test.ts`；详见 [R1 实现说明](agentd-review-r1.md) |
-| 工具 → `agentd/config/agent.default.json` | 默认只读 read/grep/find/ls；写入和执行须由宿主显式配置 | **未接权限扩展前不得开放写/执行工具**；`config-review.test.ts` |
+| 工具 → `agentd/config/agent.default.json` | 默认档与 readonly 为 read/grep/find/ls；workspace 加 edit/write，full 再加 bash；按会话选择配置中的名单 | P2.5：Deny→readonly，其余→workspace；这是工具选择，P3 细化权限；`config-review.test.ts`、`protocol-extension.test.ts` |
 
 验证命令：`cd agentd && npm run typecheck && npm test`；逐项证据与环境限制见 [R1 实现说明](agentd-review-r1.md)。
+
+## P2.5 协议 v2（执行报告，验收仍 BLOCKED）
+
+唯一协议源：`agentd/src/protocol/schema.ts` / `events.ts`；Rust 镜像 `backend/pi/protocol.rs`。
+两端必须一并升级；旧版/缺失 protocolVersion 的 ping 会触发 AgentdProtocolMismatch 并立即熔断。
+
+| 入口 | 行为与依赖 | 配置、迁移与验证 |
+| --- | --- | --- |
+| `agentd/src/sessions/create.ts`、`options.ts`、`registry.ts` | session.open 可选 model/thinkingLevel/toolProfile；session.configure 仅空闲可用，SDK setModel/setThinkingLevel/setActiveToolsByName | defaultModel/thinkingLevel/defaultToolProfile；toolProfiles 名单由配置管理，旧 tools 只映射 default 档；`agentd/test/protocol-extension.test.ts` |
+| `agentd/src/sessions/attachments.ts` | prompt.attachments 图片 base64 校验，经 SDK prompt.images 传入模型 | attachments.maxCount=4、maxBytes=262144、maxTotalBytes=524288，PNG/JPEG/GIF/WebP；faux 模型验证真实消息 |
+| `agentd/src/protocol/version.ts`、`backend/pi/supervisor.rs` | ping 返回 agentd/npm 实际版本、Pi SDK VERSION、protocolVersion=2；握手成功前阻止业务请求 | 沿用 requestTimeoutMs/channelCapacity；版本错误立即熔断；`pi/extension_tests.rs` 验证仅发出 ping |
+| `backend/bridge.rs`、`pi/input.rs`、`pi/sessions.rs` | 每轮模型及权限进 open/configure；已有会话每轮重新配置；TurnRequest 图片路径读为 MIME/base64；公开 PiBackend.configure_session 支持思考档位 | 复用 POLARIS_WORK_MODEL/POLARIS_FAST_MODEL，通过 models.list 唯一匹配 provider，歧义具名拒绝；Deny→readonly，其余→workspace |
+| `tests/fixtures/protocol-samples.jsonl`、`protocol-schema.sha256` | 双端样例与 TS schema 哈希锁定，新增 configure/图片/版本样例 | TS 校验请求，Rust 逐条解析及往返；backend 定向测试含 R1c 回归 |
+
+入口限制：ChatSendArgs 没有结构化图片和思考档位字段，未越界修改 `chat/types.rs`；UI 路径文本保持原行为，不能声称图片 UI 已端到端接通。
+默认值、类型校验、切换示例、SDK d.ts 出处、命令真实结果与文件行数见 [P2.5 执行报告](pi-migration/p25-result.md)；无新依赖、未提交。
 
 ## P1/P2 审查修复（R1，部分执行）
 

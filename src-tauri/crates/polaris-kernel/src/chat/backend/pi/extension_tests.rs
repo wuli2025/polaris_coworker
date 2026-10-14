@@ -1,0 +1,75 @@
+use super::*;
+use protocol::{SessionOptions, ThinkingLevel};
+use serde_json::json;
+use std::time::Instant;
+
+#[test]
+fn mismatched_protocol_fuses_before_any_application_request() -> anyhow::Result<()> {
+    let mut c = super::tests::config();
+    let record = c.session_map.with_extension("requests.jsonl");
+    c.args = vec!["--protocol-mismatch".into(), "--record".into(), record.to_string_lossy().into()];
+    let b = PiBackend::new(c)?;
+    let error = b.models().err().ok_or_else(|| anyhow::anyhow!("expected mismatch"))?;
+    assert!(error.to_string().contains("AgentdProtocolMismatch"), "{error}");
+    assert!(b.status().circuit_open);
+    assert!(!b.status().healthy);
+    assert_eq!(b.status().restarts, 0);
+    let sent = std::fs::read_to_string(&record)?;
+    assert_eq!(sent.lines().count(), 1);
+    assert_eq!(serde_json::from_str::<Value>(&sent)?["method"], "ping");
+    assert!(b.models().is_err());
+    std::fs::remove_file(record)?;
+    Ok(())
+}
+
+#[test]
+fn model_profile_image_and_idle_reconfiguration_are_on_the_wire() -> anyhow::Result<()> {
+    let mut c = super::tests::config();
+    let record = c.session_map.with_extension("requests.jsonl");
+    let image = c.session_map.with_extension("png");
+    c.args = vec!["--record".into(), record.to_string_lossy().into()];
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nfixture")?;
+    let b = PiBackend::new(c)?;
+    let mut first = super::tests::input("wire", "normal");
+    first.model = Some(json!({"provider":"fixture","id":"test"}));
+    first.attachments.push(image.clone());
+    collect(&b, first, |_, _| {})?;
+    b.configure_session("wire", SessionOptions { model: None,
+        thinking_level: Some(ThinkingLevel::High), tool_profile: Some("full".into()) })?;
+    let mut second = super::tests::input("wire", "normal");
+    second.model = Some(Value::String("test".into()));
+    second.permission = PermissionMode::Manual;
+    // Wait for the previous route to release its session reservation.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while b.preparing.lock().contains("session:wire") {
+        anyhow::ensure!(Instant::now() < deadline, "reservation was not released");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    collect(&b, second, |_, _| {})?;
+    let sent: Vec<Value> = std::fs::read_to_string(&record)?.lines()
+        .map(serde_json::from_str).collect::<Result<_, _>>()?;
+    let open = sent.iter().find(|r| r["method"] == "session.open")
+        .ok_or_else(|| anyhow::anyhow!("missing open"))?;
+    assert_eq!(open["params"]["model"], json!({"provider":"fixture","id":"test"}));
+    assert_eq!(open["params"]["toolProfile"], "readonly");
+    assert!(sent.iter().any(|r| r["method"] == "session.configure" && r["params"]["thinkingLevel"] == "high"));
+    assert!(sent.iter().any(|r| r["method"] == "session.configure" && r["params"]["toolProfile"] == "workspace"));
+    let prompt = sent.iter().find(|r| r["method"] == "prompt")
+        .ok_or_else(|| anyhow::anyhow!("missing prompt"))?;
+    assert_eq!(prompt["params"]["attachments"][0]["mimeType"], "image/png");
+    assert_eq!(prompt["params"]["attachments"][0]["type"], "image");
+    assert_eq!(prompt["params"]["attachments"][0]["data"], "iVBORw0KGgpmaXh0dXJl");
+    assert_eq!(b.status().agentd_version.as_deref(), Some("0.1.0"));
+    b.shutdown();
+    std::fs::remove_file(record)?;
+    std::fs::remove_file(image)?;
+    Ok(())
+}
+
+#[test]
+fn missing_or_noninteger_protocol_version_is_a_named_mismatch() {
+    for version in [Value::Null, json!(1), json!("2"), json!(2.1)] {
+        let result = protocol::check_ping(json!({"status":"ok","protocolVersion":version}));
+        assert!(result.err().is_some_and(|e| e.to_string().contains("AgentdProtocolMismatch")));
+    }
+}

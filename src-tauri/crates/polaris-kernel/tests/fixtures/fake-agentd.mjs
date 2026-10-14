@@ -1,6 +1,9 @@
 // Protocol-only fixture. Never launches a child process or calls a model provider.
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
+import { appendFileSync } from 'node:fs';
+const recordIndex = process.argv.indexOf('--record');
+const record = recordIndex < 0 ? undefined : process.argv[recordIndex + 1];
 if (process.argv.includes('--crash-start')) process.exit(7);
 const sessions = new Map();
 let nextSession = 0;
@@ -35,10 +38,12 @@ async function turn(s, text) {
   if (!s.aborted) await event(s, 'turn.completed', { status: 'completed' });
 }
 async function dispatch({ id, method, params: p }) {
+  if (record) appendFileSync(record, JSON.stringify({id,method,params:p}) + '\n');
   switch (method) {
     case 'ping':
       if (process.argv.includes('--ping-hang')) return;
-      return response(id, { status: 'ok', sessions: sessions.size });
+      return response(id, { status: 'ok', sessions: sessions.size, version: '0.1.0', piVersion: '1.0.4',
+        protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 2 });
     case 'models.list': return response(id, { models: [{ provider: 'fixture', id: 'test' }] });
     case 'session.open': {
       if (p.sessionId && sessions.has(p.sessionId)) return error(id, 'SESSION_ALREADY_OPEN');
@@ -46,6 +51,10 @@ async function dispatch({ id, method, params: p }) {
       sessions.set(sid, { id: sid });
       return response(id, { sessionId: sid, resumed: !!p.sessionId, messageCount: 0,
         model: { provider: 'fixture', id: 'test' }, thinkingLevel: 'off', tools: ['read'], reopenRequired: false });
+    }
+    case 'session.configure': {
+      if (!sessions.has(p.sessionId)) return error(id, 'SESSION_NOT_FOUND');
+      return response(id, {sessionId:p.sessionId, model:p.model ?? {provider:'fixture',id:'test'}, tools:['read']});
     }
     case 'prompt': {
       const s = sessions.get(p.sessionId);

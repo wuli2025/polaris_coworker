@@ -10,6 +10,8 @@ import { Models } from "./models/runtime.ts";
 import { DaemonError, publicError } from "./protocol/errors.ts";
 import type { ProtocolEvent } from "./protocol/events.ts";
 import { RequestSchema, type Request, type Response } from "./protocol/schema.ts";
+import { versions } from "./protocol/version.ts";
+import { validateAttachments } from "./sessions/attachments.ts";
 import { SessionRegistry } from "./sessions/registry.ts";
 
 export class Daemon {
@@ -48,6 +50,9 @@ export class Daemon {
       if (raw.method === "config.apply" && raw.params && typeof raw.params === "object" && "config" in raw.params) {
         validateConfig(ConfigPatchSchema, raw.params.config);
       }
+      if (raw.method === "prompt" && raw.params && typeof raw.params === "object" && "attachments" in raw.params) {
+        validateAttachments(raw.params.attachments, this.config);
+      }
       if (!Value.Check(RequestSchema, value)) {
         throw new DaemonError(raw.method === "config.apply" ? "INVALID_CONFIG" : "INVALID_REQUEST",
           "Request does not match schema");
@@ -80,10 +85,11 @@ export class Daemon {
   }
   private async dispatch(request: Request): Promise<unknown> {
     switch (request.method) {
-      case "ping": return { status: "ok", sessions: this.sessions.size };
+      case "ping": return { status: "ok", sessions: this.sessions.size, ...versions };
       case "models.list": return { models: this.models.list() };
-      case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd);
-      case "prompt": return this.sessions.prompt(request.params.sessionId, request.params.text);
+      case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd, request.params);
+      case "session.configure": return this.sessions.configure(request.params.sessionId, request.params);
+      case "prompt": return this.sessions.prompt(request.params.sessionId, request.params.text, request.params.attachments);
       case "steer":
       case "followUp": return this.sessions.queue(request.params.sessionId, request.params.text, request.method);
       case "abort": return this.sessions.abort(request.params.sessionId);

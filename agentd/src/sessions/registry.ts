@@ -5,6 +5,9 @@ import { EventMapper } from "../events/mapper.ts";
 import type { Models } from "../models/runtime.ts";
 import type { ProtocolEvent, TurnStatus } from "../protocol/events.ts";
 import { DaemonError, publicError } from "../protocol/errors.ts";
+import type { SessionOptions, ImageAttachment } from "../protocol/schema.ts";
+import { configureSession } from "./options.ts";
+import { imagesForPrompt } from "./attachments.ts";
 import { createSession } from "./create.ts";
 
 interface Run {
@@ -16,6 +19,8 @@ interface Run {
 interface Entry {
   session: AgentSession;
   run?: Run;
+  configuring?: Promise<void>;
+  toolProfile: string;
   closing?: Promise<void>;
   idle?: NodeJS.Timeout;
   lastUsed: number;
@@ -34,7 +39,7 @@ export class SessionRegistry {
     private readonly emit: (event: ProtocolEvent) => void,
   ) {}
   get size(): number { return this.entries.size; }
-  async open(sessionId?: string, cwd?: string) {
+  async open(sessionId?: string, cwd?: string, options: SessionOptions = {}) {
     if (this.stopped) throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
     if (sessionId && (this.entries.has(sessionId) || this.opening.has(sessionId))) {
       throw new DaemonError("SESSION_ALREADY_OPEN", "Session is already open");
@@ -45,18 +50,19 @@ export class SessionRegistry {
     this.pendingOpens++;
     if (sessionId) this.opening.add(sessionId);
     try {
-      const session = await createSession(this.config(), this.models, this.factories, sessionId, cwd);
+      const config = this.config();
+      const session = await createSession(config, this.models, this.factories, sessionId, cwd, options);
       if (this.stopped) {
         session.dispose();
         throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
       }
       const id = session.sessionId;
-      const entry: Entry = { session, lastUsed: Date.now(), queueReservations: 0 };
+      const entry: Entry = { session, toolProfile: options.toolProfile ?? config.defaultToolProfile, lastUsed: Date.now(), queueReservations: 0 };
       this.entries.set(id, entry);
       this.armIdle(id, entry);
       return { sessionId: id, resumed: !!sessionId, messageCount: session.messages.length,
         model: { provider: session.model!.provider, id: session.model!.id },
-        thinkingLevel: session.thinkingLevel, tools: session.getActiveToolNames(),
+        thinkingLevel: session.thinkingLevel, toolProfile: entry.toolProfile, tools: session.getActiveToolNames(),
         reopenRequired: session.modelRuntime !== this.models.runtime };
     } finally {
       this.pendingOpens--;
@@ -69,18 +75,40 @@ export class SessionRegistry {
     if (entry.closing) throw new DaemonError("SESSION_CLOSING", "Session is closing");
     return entry;
   }
-  prompt(id: string, text: string) {
+  async configure(id: string, options: SessionOptions) {
     const entry = this.get(id);
-    if (entry.run) throw new DaemonError("SESSION_BUSY", "Use steer or followUp while a prompt is running");
+    if (entry.run || entry.configuring || !entry.session.isIdle) throw new DaemonError("SESSION_BUSY", "Session is busy");
+    clearTimeout(entry.idle);
+    entry.configuring = configureSession(entry.session, this.config(), options);
+    try {
+      await entry.configuring;
+      entry.toolProfile = options.toolProfile ?? entry.toolProfile;
+      return { sessionId: id, model: entry.session.model && {
+        provider: entry.session.model.provider, id: entry.session.model.id },
+        thinkingLevel: entry.session.thinkingLevel, toolProfile: entry.toolProfile,
+        tools: entry.session.getActiveToolNames() };
+    } finally {
+      entry.configuring = undefined;
+      entry.lastUsed = Date.now();
+      if (!entry.closing && !this.stopped) this.armIdle(id, entry);
+    }
+  }
+  prompt(id: string, text: string, attachments: ImageAttachment[] = []) {
+    const entry = this.get(id);
+    if (entry.run || entry.configuring) throw new DaemonError("SESSION_BUSY", "Use steer or followUp while a prompt is running");
+    const images = imagesForPrompt(attachments, this.config());
+    if (images.length && !entry.session.model?.input.includes("image")) {
+      throw new DaemonError("MODEL_IMAGES_UNSUPPORTED", "Selected model does not accept images");
+    }
     clearTimeout(entry.idle);
     const mapper = new EventMapper(id, randomUUID(), this.emit);
     const run: Run = { id: mapper.turnId, mapper, done: Promise.resolve() };
     entry.run = run;
     // Reserve synchronously; start after the command returns to permit immediate abort.
-    run.done = Promise.resolve().then(() => this.execute(id, entry, run, text));
+    run.done = Promise.resolve().then(() => this.execute(id, entry, run, text, images));
     return { turnId: run.id, disposition: "started" };
   }
-  private async execute(id: string, entry: Entry, run: Run, text: string): Promise<void> {
+  private async execute(id: string, entry: Entry, run: Run, text: string, images: ImageAttachment[]): Promise<void> {
     const { session } = entry;
     run.mapper.emit({ event: "turn.started" });
     const { turnIdleTimeoutMs, turnMaxMs } = this.config();
@@ -108,7 +136,7 @@ export class SessionRegistry {
     try {
       if (!run.stopped) {
         await session.prompt(text, {
-          expandPromptTemplates: false,
+          expandPromptTemplates: false, images,
           preflightResult: () => {
             if (run.stopped) throw new DaemonError("TURN_CANCELLED", "Turn was cancelled during preparation");
           },
@@ -166,6 +194,7 @@ export class SessionRegistry {
     clearTimeout(entry.idle);
     entry.closing = (async () => {
       try {
+        await entry.configuring?.catch(() => undefined);
         if (entry.run) {
           entry.run.stopped ??= "aborted";
           entry.session.clearQueue();
@@ -190,7 +219,7 @@ export class SessionRegistry {
       .map(([id]) => id);
   }
   refreshConfig(): void {
-    for (const [id, entry] of this.entries) if (!entry.run && !entry.closing) this.armIdle(id, entry);
+    for (const [id, entry] of this.entries) if (!entry.run && !entry.configuring && !entry.closing) this.armIdle(id, entry);
   }
   async shutdown(): Promise<void> {
     this.stopped = true;

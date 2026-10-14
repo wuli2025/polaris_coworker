@@ -1,5 +1,5 @@
 //! Map Polaris keys to daemon UUIDs; never pass a conversation ID as a new UUID.
-use super::{client::Client, protocol::{Command, Open, Session}};
+use super::{client::Client, protocol::{Command, Open, Session, Configure, SessionOptions}};
 use super::super::TurnRequest;
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
@@ -11,6 +11,7 @@ fn path(client: &Client, key: &str) -> PathBuf {
     client.config.session_map.join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
 }
 pub fn open(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionInfo> {
+    let options = super::input::options(client, input)?;
     let file = path(client, &input.session_id);
     let previous: Option<SessionInfo> = match std::fs::read(&file) {
         Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
@@ -22,14 +23,15 @@ pub fn open(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionInfo>
     if let Some(previous) = &previous {
         if previous.cwd != cwd { let _ = client.call(Command::Close(Session { session_id: previous.id.clone() })); }
     }
-    let response = client.call(Command::Open(Open { session_id: id, cwd: Some(cwd.to_string_lossy().into()) }));
+    let response = client.call(Command::Open(Open { session_id: id, cwd: Some(cwd.to_string_lossy().into()), options: options.clone() }));
     let response = match response {
         Ok(v) => v,
         Err(e) if e.to_string().starts_with("SESSION_ALREADY_OPEN:") => {
-            return previous.ok_or_else(|| anyhow::anyhow!("AgentdSessionMappingMissing"));
+            let previous = previous.as_ref().ok_or_else(|| anyhow::anyhow!("AgentdSessionMappingMissing"))?;
+            client.call(Command::Configure(Configure { session_id: previous.id.clone(), options: options.clone() }))?
         }
         Err(e) if e.to_string().starts_with("SESSION_NOT_FOUND:") => {
-            client.call(Command::Open(Open { session_id: None, cwd: Some(cwd.to_string_lossy().into()) }))?
+            client.call(Command::Open(Open { session_id: None, cwd: Some(cwd.to_string_lossy().into()), options: options.clone() }))?
         }
         Err(e) => return Err(e),
     };
@@ -53,4 +55,10 @@ pub fn close(client: &Client, key: &str) -> anyhow::Result<()> {
         Err(e) if !e.to_string().starts_with("SESSION_NOT_FOUND:") => Err(e),
         _ => Ok(()),
     }
+}
+
+/// The SDK is authoritative for busy detection; an active turn rejects configuration.
+pub fn configure(client: &Client, key: &str, options: SessionOptions) -> anyhow::Result<Value> {
+    let info: SessionInfo = serde_json::from_slice(&std::fs::read(path(client, key))?)?;
+    client.call(Command::Configure(Configure { session_id: info.id, options }))
 }

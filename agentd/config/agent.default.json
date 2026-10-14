@@ -6,12 +6,72 @@
   "turnIdleTimeoutMs": 180000,
   "turnMaxMs": 0,
   "maxLineBytes": 1048576,
-  "tools": ["read", "grep", "find", "ls"],
-  "defaultModel": { "provider": "anthropic", "id": "claude-sonnet-4-5" },
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls"
+  ],
+  "defaultModel": {
+    "provider": "anthropic",
+    "id": "claude-sonnet-4-5"
+  },
   "thinkingLevel": "medium",
   "logLevel": "info",
-  "extensions": { "enabled": false },
+  "extensions": {
+    "enabled": false
+  },
   "providers": [],
-  "retry": { "enabled": true, "maxRetries": 3, "baseDelayMs": 2000, "maxAgentDelayMs": 60000 },
-  "compaction": { "enabled": true }
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3,
+    "baseDelayMs": 2000,
+    "maxAgentDelayMs": 60000
+  },
+  "compaction": {
+    "enabled": true
+  },
+  "defaultToolProfile": "default",
+  "toolProfiles": {
+    "default": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ],
+    "readonly": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ],
+    "workspace": [
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "edit",
+      "write"
+    ],
+    "full": [
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "edit",
+      "write",
+      "bash"
+    ]
+  },
+  "attachments": {
+    "maxCount": 4,
+    "maxBytes": 262144,
+    "maxTotalBytes": 524288,
+    "mimeTypes": [
+      "image/png",
+      "image/jpeg",
+      "image/gif",
+      "image/webp"
+    ]
+  }
 }

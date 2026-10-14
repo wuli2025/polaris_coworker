@@ -24,6 +24,12 @@ export const ConfigSchema = Type.Object({
   turnMaxMs: Type.Integer({ minimum: 0, maximum: 2147483647 }),
   maxLineBytes: positive,
   tools: Type.Array(text, { uniqueItems: true }),
+  defaultToolProfile: text,
+  toolProfiles: Type.Record(text, Type.Array(text, { uniqueItems: true })),
+  attachments: Type.Object({ maxCount: Type.Integer({ minimum: 0 }), maxBytes: positive,
+    maxTotalBytes: positive, mimeTypes: Type.Array(Type.Union([
+      Type.Literal("image/png"), Type.Literal("image/jpeg"), Type.Literal("image/gif"), Type.Literal("image/webp"),
+    ]), { uniqueItems: true }) }, { additionalProperties: false }),
   defaultModel: Type.Object({ provider: text, id: text }, { additionalProperties: false }),
   thinkingLevel: Type.Union([Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh")]),
   logLevel: Type.Union([Type.Literal("debug"), Type.Literal("info"), Type.Literal("warn"), Type.Literal("error"), Type.Literal("silent")]),
