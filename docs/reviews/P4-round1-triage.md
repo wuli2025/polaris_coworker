@@ -29,3 +29,16 @@
 - 回收必须原子：先把残留锁重命名为唯一墓碑名再删除，避免两个进程同时回收后都以为自己拿到锁。
 - Node 与 Rust 两侧语义完全一致，共用一份测试向量（例如 JSON 夹具描述"持有者信息 → 是否可回收"）。
 - 测试：子进程拿锁后被强杀（不清理），另一进程在超时前成功回收并完成读写；活着的慢持有者不被抢锁；两进程同时回收只有一个成功。
+
+## 第 2 轮（复审 `P4-round2/`）—— 结论 INCOMPLETE（如实记录）
+Pi 判 **INCOMPLETE**：主控为控制包体积排除了测试文件，Pi 无法确认锁回收、OAuth 落盘、目录刷新、代次号的测试覆盖。此为送审材料不足导致，**不是 PASS**；本模块已达 2 轮上限，不再开第 3 轮。
+
+逐条处置（主控轻量自检，仅作收尾核实，不代替独立审查）：
+- #1 中"owner.json 丢失时锁永久残留"：**驳回**。`agentd/src/models/credential-lock.ts:30` 在持有者信息无效时按目录年龄回收，超过 `maxHoldMs`（默认 600000，`:8`）即重命名为墓碑；最坏 10 分钟自愈，不会永久残留。
+- #2 低"切换进行中提前返回 superseded"：**不处理**。Pi 自认只多一次 IPC，正确性不受影响。
+- #3 低"assertOwned 与写入之间的竞态窗口"：**记为已知限制**。仅当活着的持有者持锁超过 10 分钟才可能被回收；正常刷新为秒级本地 I/O。
+- #4 信息"协议指纹是否同步"：**已核实**。`tests/fixtures/protocol-schema.sha256` 与当前 `agentd/src/protocol/schema.ts`、`events.ts` 的 SHA-256 完全一致，且指纹测试随内核测试通过。
+- 测试证据（主控实跑）：`agentd/test/credential-lock.test.ts:28` 以 SIGKILL 杀死持锁子进程后另一进程回收；`src-tauri/crates/polaris-kernel/tests/credential_lock_interop.rs` 验证 Node↔Rust 同一把锁互通；全部通过。
+
+结论：P4 **标记完成，独立审查状态 = INCOMPLETE（非 PASS）**，无已知阻塞。
+流程改进：后续送审包必须包含测试文件；体积超限时拆包，而不是剔除测试。
