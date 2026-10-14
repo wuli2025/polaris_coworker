@@ -1,0 +1,295 @@
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/expert_selection.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/expert_selection.rs
+index 9dccf0c..dfead65 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/expert_selection.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/expert_selection.rs
+@@ -10,9 +10,14 @@ pub enum ExpertSelection {
+ }
+ 
+ pub fn load(selection: &ExpertSelection, loader: Option<&dyn ExpertLoader>) -> anyhow::Result<String> {
+-    let id = match selection { ExpertSelection::Expert { id } | ExpertSelection::Team { id } => id };
+-    anyhow::ensure!(!id.trim().is_empty(), "EXPERT_INVALID_SELECTION: id required");
+-    loader.ok_or_else(|| anyhow::anyhow!("EXPERT_LOADER_UNAVAILABLE"))?.load(selection)
++    let (kind, id) = match selection {
++        ExpertSelection::Expert { id } => ("expert", id),
++        ExpertSelection::Team { id } => ("team", id),
++    };
++    anyhow::ensure!(!id.trim().is_empty(), "EXPERT_INVALID_SELECTION: kind={kind} id={id:?}; id required");
++    let loader = loader.ok_or_else(|| anyhow::anyhow!("EXPERT_LOADER_UNAVAILABLE: kind={kind} id={id:?}"))?;
++    // Loader diagnostics can contain template text. Expose only selection metadata.
++    loader.load(selection).map_err(|_| anyhow::anyhow!("EXPERT_LOAD_FAILED: kind={kind} id={id:?}"))
+ }
+ 
+ #[cfg(test)]
+@@ -41,4 +46,27 @@ mod tests {
+         }
+         Ok(())
+     }
++    #[test]
++    fn failures_identify_selection_without_exposing_loader_prompt() -> anyhow::Result<()> {
++        struct Failed;
++        impl ExpertLoader for Failed {
++            fn load(&self, _: &ExpertSelection) -> anyhow::Result<String> {
++                anyhow::bail!("private prompt text");
++            }
++        }
++        for kind in ["expert", "team"] {
++            let selection = serde_json::from_value(serde_json::json!({"kind":kind,"id":"missing-id"}))?;
++            for (loader, code) in [(None, "EXPERT_LOADER_UNAVAILABLE"),
++                (Some(&Failed as &dyn ExpertLoader), "EXPERT_LOAD_FAILED")] {
++                let error = load(&selection, loader).err().ok_or_else(|| anyhow::anyhow!("expected load failure"))?;
++                let diagnostic = format!("{error:#}");
++                assert!(diagnostic.contains(code), "{diagnostic}");
++                assert!(diagnostic.contains(&format!("kind={kind}")), "{diagnostic}");
++                assert!(diagnostic.contains("missing-id"), "{diagnostic}");
++                assert!(!diagnostic.contains("private prompt text"));
++            }
++        }
++        Ok(())
++    }
++
+ }
+diff --git a/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs b/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs
+index abad514..30630bb 100644
+--- a/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs
++++ b/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs
+@@ -1,7 +1,7 @@
+ // Protocol-only fixture. Never launches a child process or calls a model provider.
+ import { createInterface } from 'node:readline';
+ import { once } from 'node:events';
+-import { appendFileSync } from 'node:fs';
++import { openSync, writeFileSync, fsyncSync, closeSync } from 'node:fs';
+ const recordIndex = process.argv.indexOf('--record');
+ const record = recordIndex < 0 ? undefined : process.argv[recordIndex + 1];
+ if (process.argv.includes('--crash-start')) process.exit(7);
+@@ -41,7 +41,13 @@ async function turn(s, text) {
+   if (!s.aborted) await event(s, 'turn.completed', { status: 'completed' });
+ }
+ async function dispatch({ id, method, params: p }) {
+-  if (record) appendFileSync(record, JSON.stringify({id,method,params:p}) + '\n');
++  if (record) {
++    const fd = openSync(record, 'a');
++    try {
++      writeFileSync(fd, JSON.stringify({id,method,params:p}) + '\n');
++      fsyncSync(fd);
++    } finally { closeSync(fd); }
++  }
+   switch (method) {
+     case 'permission.respond': {
+       const s = sessions.get(p.sessionId);
+diff --git a/src-tauri/crates/polaris-sandbox/src/lifecycle.rs b/src-tauri/crates/polaris-sandbox/src/lifecycle.rs
+index 03f74eb..2d39f13 100644
+--- a/src-tauri/crates/polaris-sandbox/src/lifecycle.rs
++++ b/src-tauri/crates/polaris-sandbox/src/lifecycle.rs
+@@ -90,4 +90,43 @@ mod tests {
+         std::fs::remove_dir_all(root)?;
+         Ok(())
+     }
++    #[test]
++    fn ordinary_project_mounts_end_to_end_and_protected_roots_never_reach_docker() -> Result<()> {
++        let f = crate::policy_tests::Fixture::new()?;
++        for suffix in ["src/data", "sessions", "fixtures"] {
++            std::fs::create_dir_all(f.project.join(suffix))?;
++        }
++        std::fs::write(f.project.join("fixtures/x.key"), "fixture")?;
++        let c = Config::default();
++        let mut calls = Vec::<Vec<String>>::new();
++        start_with(&c, "managed", "image", &f.project, &f.kb, &f.home, false, &mut |args| {
++            calls.push(args.to_vec());
++            Ok(if args[0] == "ps" { "" } else { "container-id" }.into())
++        })?;
++        assert_eq!(calls.iter().map(|a| a[0].as_str()).collect::<Vec<_>>(), ["ps", "run"]);
++        let mounts: Vec<_> = calls[1].windows(2).filter(|pair| pair[0] == "--mount")
++            .map(|pair| pair[1].clone()).collect();
++        assert_eq!(mounts, [
++            format!("type=bind,src={},dst=/workspace", crate::policy::path_for_docker(&std::fs::canonicalize(&f.project)?)),
++            format!("type=bind,src={},dst=/kb,readonly", crate::policy::path_for_docker(&std::fs::canonicalize(&f.kb)?)),
++        ]);
++        // Route the generated mount sources back through the same inspect policy.
++        c.validate_container(&f.inspect(), &f.project, &f.kb, &f.home)?;
++        calls.clear();
++        let mut protected_config = c.clone();
++        let protected = f.project.join("private");
++        let child = protected.join("child");
++        std::fs::create_dir_all(&child)?;
++        protected_config.protected_paths.push(protected.clone());
++        let filesystem_root = f.home.ancestors().last().ok_or_else(|| anyhow::anyhow!("missing root"))?;
++        for source in [&f.project, &protected, &child, &f.home, filesystem_root] {
++            assert!(start_with(&protected_config, "managed", "image", source, &f.kb, &f.home, false, &mut |args| {
++                calls.push(args.to_vec());
++                Ok("unexpected Docker call".into())
++            }).is_err(), "{source:?}");
++        }
++        assert!(calls.is_empty());
++        Ok(())
++    }
++
+ }
+diff --git a/src-tauri/crates/polaris-sandbox/src/policy.rs b/src-tauri/crates/polaris-sandbox/src/policy.rs
+index ea139ed..db31a9a 100644
+--- a/src-tauri/crates/polaris-sandbox/src/policy.rs
++++ b/src-tauri/crates/polaris-sandbox/src/policy.rs
+@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
+ 
+ pub const REBUILD_HINT: &str = "请调用 sandbox_start({projectDir:目标项目路径,rebuild:true}) 迁移；旧容器将停止并改名保留，不会删除。";
+ 
++/// Canonical Windows paths may carry the extended-length `\\?\` prefix.
++/// Docker CLI bind sources use drive-letter paths with forward slashes; keep
++/// the drive colon and spaces intact (the argument is passed without a shell).
+ pub fn path_for_docker(path: &Path) -> String {
+     let text = path.to_string_lossy();
+     let text = text.trim_start_matches(r"\\?\");
+@@ -14,11 +17,6 @@ pub fn path_for_docker(path: &Path) -> String {
+         text.replace('\\', "/")
+     } else { text.to_owned() }
+ }
+-fn forbidden_name(name: &str) -> bool {
+-    let name = name.to_ascii_lowercase();
+-    ["data", "claude-home", "sessions", "conversations", "providers.json", "collab.db", ".polaris", ".pi",
+-        ".claude", ".codex", ".ssh", ".aws", ".gnupg", ".kube"].contains(&name.as_str()) || name.ends_with(".key")
+-}
+ fn normalized(path: &Path) -> Result<PathBuf> {
+     // Resolve existing ancestors even for currently absent protected directories.
+     if path.exists() { return Ok(std::fs::canonicalize(path)?); }
+@@ -34,20 +32,17 @@ pub fn validate_source(source: &Path, protected: &[PathBuf]) -> Result<PathBuf>
+         ensure!(!source.starts_with(&path) && !path.starts_with(&source),
+             "SANDBOX_UNSAFE_MOUNT: protected host data; {REBUILD_HINT}");
+     }
+-    ensure!(!source.components().any(|p| forbidden_name(&p.as_os_str().to_string_lossy())),
+-        "SANDBOX_UNSAFE_MOUNT: forbidden path; {REBUILD_HINT}");
+     ensure!(source.is_dir(), "SANDBOX_UNSAFE_MOUNT: directory required");
+-    // Binding a parent also exposes its children. Reject sensitive files anywhere in it.
+-    let mut pending = vec![source.clone()];
+-    while let Some(directory) = pending.pop() {
+-        for entry in std::fs::read_dir(directory)? {
+-            let entry = entry?;
+-            ensure!(!forbidden_name(&entry.file_name().to_string_lossy()),
+-                "SANDBOX_UNSAFE_MOUNT: directory contains protected files; {REBUILD_HINT}");
+-            // Symlinks cannot expose an unmounted host target inside the container.
+-            if entry.file_type()?.is_dir() { pending.push(entry.path()); }
+-        }
+-    }
++    // Only resolve the supplied roots. Never enumerate project contents here:
++    // this policy also runs before every routed tool call.
++    Ok(source)
++}
++fn validate_mount_source(source: &Path, protected: &[PathBuf], home: &Path) -> Result<PathBuf> {
++    let source = validate_source(source, protected)?;
++    // Explicitly forbid HOME and its ancestors even if baseline paths resolve
++    // through symlinks to locations outside HOME.
++    ensure!(!normalized(home)?.starts_with(&source),
++        "SANDBOX_UNSAFE_MOUNT: home or ancestor; {REBUILD_HINT}");
+     Ok(source)
+ }
+ #[derive(Debug)]
+@@ -56,14 +51,14 @@ impl Config {
+     pub fn resolve_mounts(&self, project: &Path, kb: &Path, home: &Path) -> Result<Vec<ResolvedMount>> {
+         self.validate()?;
+         let protected = self.protected(home);
+-        let project = validate_source(project, &protected)?;
+-        let kb = validate_source(kb, &protected)?;
++        let project = validate_mount_source(project, &protected, home)?;
++        let kb = validate_mount_source(kb, &protected, home)?;
+         ensure!(!project.starts_with(&kb) && !kb.starts_with(&project),
+             "SANDBOX_UNSAFE_MOUNT: workspace and kb must not overlap");
+         self.mounts.iter().map(|m| {
+             let source = match m.source.as_str() {
+                 "${project}" => project.clone(), "${kb}" => kb.clone(),
+-                path => validate_source(Path::new(path), &protected)?,
++                path => validate_mount_source(Path::new(path), &protected, home)?,
+             };
+             let expected = if m.destination == "/workspace" { &project } else { &kb };
+             ensure!(&source == expected, "SANDBOX_UNSAFE_MOUNT: source does not match requested root");
+@@ -93,7 +88,7 @@ impl Config {
+         for mount in mounts {
+             ensure!(mount["Type"] == "bind", "SANDBOX_UNSAFE_MOUNT: unverified volume; {REBUILD_HINT}");
+             let source = mount["Source"].as_str().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_MOUNTS"))?;
+-            validate_source(Path::new(source), &self.protected(home))?;
++            validate_mount_source(Path::new(source), &self.protected(home), home)?;
+         }
+         ensure!(mounts.len() == expected.len(), "SANDBOX_UNSAFE_MOUNT: unexpected mounts; {REBUILD_HINT}");
+         let mut workdir_changed = false;
+diff --git a/src/features/sandbox/components/SandboxProject.vue b/src/features/sandbox/components/SandboxProject.vue
+index dbb8162..41a5983 100644
+--- a/src/features/sandbox/components/SandboxProject.vue
++++ b/src/features/sandbox/components/SandboxProject.vue
+@@ -3,13 +3,14 @@ import { computed, ref, watch } from "vue";
+ import { open } from "@tauri-apps/plugin-dialog";
+ import { useAppStore } from "../../../stores/app";
+ import { isTauri } from "../../../tauri";
+-import { needsSandboxMigration, startProjectSandbox } from "../project";
++import { needsSandboxMigration, projectDirectoryHint, startProjectSandbox } from "../project";
+ 
+ const props = defineProps<{ disabled?: boolean; notes?: string[] }>();
+ const emit = defineEmits<{ log: [message: string]; changed: [] }>();
+ const app = useAppStore();
+ const project = computed(() => app.projects.find(p => p.id === app.currentProjectId));
+ const directory = ref("");
++const pathHint = computed(() => projectDirectoryHint(directory.value));
+ const busy = ref(false);
+ const error = ref("");
+ watch(() => [project.value?.id, project.value?.workDir], () => {
+@@ -49,10 +50,11 @@ async function start(rebuild = false) {
+     <label for="sandbox-project-dir">项目工作目录{{ project ? ` · ${project.name}` : "" }}</label>
+     <p>默认使用当前会话所属项目的工作目录。确认后将作为该项目的工作目录；知识库只读挂载。</p>
+     <div class="project-actions">
+-      <input id="sandbox-project-dir" v-model="directory" :disabled="busy || disabled" placeholder="输入项目目录的绝对路径" />
++      <input id="sandbox-project-dir" v-model="directory" :aria-invalid="!!pathHint" aria-describedby="sandbox-project-path-hint" :disabled="busy || disabled" placeholder="输入项目目录的绝对路径" />
+       <button v-if="isTauri" :disabled="busy || disabled" @click="pick">选择文件夹</button>
+       <button :disabled="busy || disabled || !directory.trim()" @click="start()">确认目录并启动</button>
+     </div>
++    <p id="sandbox-project-path-hint" aria-live="polite">{{ pathHint || "路径格式符合要求；目录是否可用以后端校验为准。" }}</p>
+     <div v-if="migration" role="alert">
+       <p>当前容器需要迁移。重建会停止旧容器并改名保留，再按所选项目创建安全容器。</p>
+       <button :disabled="busy || disabled || !directory.trim()" @click="start(true)">保留旧容器并一键重建</button>
+diff --git a/src/features/sandbox/project.test.ts b/src/features/sandbox/project.test.ts
+index 979204d..e281f97 100644
+--- a/src/features/sandbox/project.test.ts
++++ b/src/features/sandbox/project.test.ts
+@@ -1,8 +1,8 @@
+ import { beforeEach, expect, it, vi } from "vitest";
+ const invoke = vi.hoisted(() => vi.fn());
+ vi.mock("../../tauri", () => ({ invoke }));
+-import { needsSandboxMigration, startProjectSandbox } from "./project";
+-beforeEach(() => invoke.mockReset());
++import { needsSandboxMigration, projectDirectoryHint, startProjectSandbox } from "./project";
++beforeEach(() => { invoke.mockReset(); });
+ it("starts only a confirmed project and passes the explicit rebuild flag", async () => {
+   invoke.mockResolvedValue("preserved old container");
+   await startProjectSandbox(" D:/My Project ");
+@@ -19,3 +19,18 @@ it("shows migration for unsafe mounts, security baselines and changed workdirs",
+   }
+   expect(needsSandboxMigration(["Docker unavailable"])).toBe(false);
+ });
++
++it("gives immediate POSIX and Windows drive format guidance", () => {
++  for (const value of ["/home/me/project", "/", "C:/Projects/app", "d:\\Projects\\app", " D:/My Project "]) {
++    expect(projectDirectoryHint(value)).toBe("");
++  }
++  for (const value of ["app", "./app", "../app", "~/app", "C:app", "C:", "\\app"]) {
++    expect(projectDirectoryHint(value)).toContain("绝对路径");
++  }
++  expect(projectDirectoryHint(" ")).toContain("请选择");
++});
++it("keeps the backend authoritative for paths that pass the format hint", async () => {
++  invoke.mockRejectedValue(new Error("SANDBOX_UNSAFE_MOUNT: protected host data"));
++  expect(projectDirectoryHint("/home/me/.ssh")).toBe("");
++  await expect(startProjectSandbox("/home/me/.ssh")).rejects.toThrow("SANDBOX_UNSAFE_MOUNT");
++});
+diff --git a/src/features/sandbox/project.ts b/src/features/sandbox/project.ts
+index b6a6bf6..fb483e1 100644
+--- a/src/features/sandbox/project.ts
++++ b/src/features/sandbox/project.ts
+@@ -9,3 +9,13 @@ export async function startProjectSandbox(projectDir: string, rebuild = false):
+   if (!directory) throw new Error("请选择或输入项目工作目录，再确认启动。");
+   return sandbox.start(directory, rebuild);
+ }
++
++// Format guidance only: existence, host platform and mount safety belong to the backend.
++export function projectDirectoryHint(value: string): string {
++  const directory = value.trim();
++  if (!directory) return "请选择或输入项目工作目录。";
++  if (!directory.startsWith("/") && !/^[a-zA-Z]:[\\/]/.test(directory)) {
++    return "请输入绝对路径，例如 /home/me/project 或 C:\\Projects\\app；目录是否可用以后端校验为准。";
++  }
++  return "";
++}
