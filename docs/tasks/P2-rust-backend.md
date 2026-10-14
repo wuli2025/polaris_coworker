@@ -45,3 +45,8 @@
 - 背压：事件通道有界；前端消费慢时合批 delta，不丢 `error`/`done`。
 - 可观测：每轮带 reqId/conversationId/sessionId 的结构化日志（沿用仓库现有日志方式）；提供 `agent_backend_status` 查询（后端类型、agentd 版本、进程 pid、重启次数、熔断状态）。
 - 契约测试：从 `agentd/src/protocol` 生成或手写一份 JSON 样例集放 `agentd/test/fixtures/protocol-samples.jsonl`（若不存在则在 Rust 侧 `tests/fixtures/` 建），Rust 解析测试必须逐条通过——两端协议漂移时测试立即失败。
+
+## 环境说明
+- 你的沙箱里 `cargo` 可用（`~/.cargo` 可写）、无网络；所有 crate 已在本地缓存，用 `cargo ... --offline` 避免联网失败。
+- 沙箱里 Node 不能再派生子进程，但 Rust 的 `std::process::Command` 可以启动 `node <脚本>`；假 agentd 脚本本身不要再派生子进程。
+- agentd 的协议以 `agentd/src/protocol/` 为准（P1 已验证，含 F1–F6 修复）：请求 `ping / models.list / session.open / prompt / steer / followUp / abort / close / config.apply`；事件 `turn.started / text.delta / reasoning.delta / tool.started / tool.completed / usage / turn.completed(status) / error(code,message)`；`config.apply` 可能返回 `reopenRequired`。
