@@ -1,0 +1,209 @@
+# P3b 审查报告
+
+## 审查模式
+- **模式**: packet（无工具）
+- **范围**: `P3b-diff.patch`（Rust 工具路由/协议/前端授权弹窗）
+
+---
+
+## 结论
+**CHANGES_REQUIRED**
+
+---
+
+## 问题
+
+### 1. [严重] 沙箱不可用时无阻止回退宿主机制
+
+**文件/行号**: `bridge.rs:41`, `docker_tools.rs:395-408`
+
+**证据**:
+```rust
+// bridge.rs:41
+if host_tools::handle_sandbox(backend.as_ref(), &ev).map_err(|e| e.to_string())? { continue; }
+```
+
+当沙箱不可用时，`SandboxResponse` 包含 `error: "SANDBOX_UNAVAILABLE"`，但代码只继续循环，**没有任何机制阻止工具在宿主机上执行**。Brief 明确要求"沙箱不可用时报错，**禁止静默回落宿主**"。
+
+**影响**: 权限闸形同虚设，`manual` 模式下用户可能以为工具在沙箱执行，实际绕过沙箱。
+
+**最小修复**: 在 `bridge.rs` 的 `handle_sandbox` 之后检查 `error` 字段，如果沙箱错误不是用户取消导致的，应返回错误而非继续。
+
+---
+
+### 2. [严重] 受保护路径配置不一致
+
+**文件/行号**: `docker_tools.rs:378-381` vs `wiring.rs:893-896`
+
+**证据**:
+```rust
+// docker_tools.rs 硬编码:
+pub struct ManagedSandbox {
+    pub container: String,
+    pub protected_paths: Vec<PathBuf>, // 调用方传入
+}
+
+// docker_tools.rs:379
+anyhow::ensure!(!protected.starts_with(&source) && !source.starts_with(&protected), ...);
+
+// wiring.rs 传入:
+protected_paths: vec![
+    dirs.home_dir().join("Polaris/data"),
+    dirs.home_dir().join(".polaris"), dirs.home_dir().join(".pi"),
+    dirs.home_dir().join(".claude"), dirs.home_dir().join(".codex"),
+    dirs.home_dir().join(".ssh"), dirs.home_dir().join(".aws")
+]
+```
+
+**影响**: 已知问题提到 `~/Polaris/data/providers.json` 含明文 Key。`wiring.rs` 保护了 `Polaris/data` 和 `.polaris`，但 `docker_tools.rs` 检查的是 **挂载源路径** 不能是受保护路径的前缀/被前缀——如果用户把项目目录建在 `~/.polaris` 内，仍可能被挂载到容器内。
+
+**最小修复**: 统一 `docker_tools.rs` 使用与 `wiring.rs` 相同的受保护路径列表；添加对 `cwd` 本身是否在受保护路径下的检查。
+
+---
+
+### 3. [严重] 删除了沙箱降级路径
+
+**文件/行号**: `spawn.rs`（原 `spawn_in_sandbox` 整个函数被删除）
+
+**证据**: diff 显示原 1-253 行的 `spawn_in_sandbox` 函数完全移除，无替代。
+
+**影响**: 没有 Docker-in-Docker 降级方案。容器不可用时只有 `ManagedSandbox` 报错，而没有备用隔离执行路径。
+
+**最小修复**: 如属故意移除，确认设计决策；否则恢复该函数作为降级路径。
+
+---
+
+### 4. [中等] 挂载验证不完整
+
+**文件/行号**: `docker_tools.rs:383-385`
+
+**证据**:
+```rust
+anyhow::ensure!(!source.starts_with("/var/run") && !source.starts_with("/run")
+    && !source.starts_with("/proc") && !source.starts_with("/sys") && !source.starts_with("/dev"),
+    "SANDBOX_UNSAFE_MOUNT: host control endpoint");
+```
+
+**影响**: 缺少对 `/etc`、`/root`、`/home`、`.ssh`、`.aws` 等敏感路径的检查。挂载源检查了，但**目标路径**未验证（可挂载到容器内任何位置）。Docker inspect 返回的 mount 信息中 `Destination` 字段未校验。
+
+**最小修复**: 添加目标路径黑名单；验证 RW 标志与目录性质的匹配（只读目录不应 RW）。
+
+---
+
+### 5. [中等] 容器安全检查缺少资源限制验证
+
+**文件/行号**: `docker_tools.rs:403-405`
+
+**证据**:
+```rust
+anyhow::ensure!(info["HostConfig"]["Privileged"] != true
+    && info["HostConfig"]["PidMode"] != "host"
+    && info["HostConfig"]["NetworkMode"] != "host", "SANDBOX_UNSAFE_CONTAINER");
+```
+
+**影响**: 未检查 `--memory`、`--cpus`、capabilities、安全选项（如 `--security-opt`）。如果容器配置了不安全的 seccomp 或 capabilities，攻击面扩大。
+
+**最小修复**: 添加对资源限制和安全选项的验证，或在文档中明确沙箱容器必须满足的安全基线。
+
+---
+
+### 6. [中等] `allowAlways` 作用域未实现
+
+**文件/行号**: `protocol.rs:720`, `PermissionDialog.vue:955`
+
+**证据**: `Decision` 只有 `Allow | Deny | AllowAlways`，无会话级永久性区分。前端有"本会话相同调用总是允许"按钮，但：
+- `PermissionResponse` 只有 `decision: Decision`，没有 `scope` 字段
+- agentd 端如何识别"相同调用"、何时清除无不清楚
+
+**影响**: 用户点击"本会话相同调用总是允许"后，行为取决于 agentd 实现，与 kernel 端行为可能不一致。
+
+**最小修复**: 在协议中添加 `scope` 字段或明确文档说明 `allowAlways` 的生命周期。
+
+---
+
+### 7. [中等] Pi 模式下 `expert_prompt` 逻辑矛盾
+
+**文件/行号**: `prepare.rs:160-169` vs `bridge.rs:23`
+
+**证据**:
+```rust
+// prepare.rs:160-169 (prepare_impl)
+let expert_block: Option<String> = if pi { None } else { match args.agent_mode... };
+// Pi 模式跳过 expert_block
+
+// bridge.rs:23
+tool_options = ToolOptions { sandbox: args.use_sandbox, expert_prompt: host_tools::expert_prompt(&args) };
+// 但仍调用 expert_prompt()
+```
+
+**影响**: `prepare_impl` 中 `pi=true` 时 `expert_block = None`，但 `host_tools::expert_prompt()` 内部又重新实现了相同的逻辑（`expert_bridge().route_block()`）。Pi 模式下 prompt 中不含 expert_block，但 `SessionOptions` 中仍传了 `expert_prompt`，行为不一致。
+
+**最小修复**: 统一 expert 逻辑，或在 `expert_prompt()` 入口检查 `pi` 模式。
+
+---
+
+### 8. [低] 前端授权弹窗无超时机制
+
+**文件/行号**: `PermissionDialog.vue:927-942`
+
+**证据**: `respond()` 函数在用户点击后才发送响应。但 brief 要求"超时按拒绝"。如果用户在 `permission.request` 后长时间不响应，前端没有倒计时机制。
+
+**影响**: 用户可能误以为长时间不操作会自动拒绝，实际可能一直等待 daemon 超时。
+
+**最小修复**: 添加倒计时 UI，超时后自动触发 `deny`。
+
+---
+
+### 9. [低] 沙箱执行器初始化静默失败
+
+**文件/行号**: `wiring.rs:889-899`
+
+**证据**:
+```rust
+pub fn wire_engine_bridges() {
+    // ...
+    if let (Some(dirs), Ok(config)) = (directories::UserDirs::new(), ...) {
+        crate::chat::backend::host_tools::set_sandbox_executor(...); // 返回 Result 被忽略
+    }
+}
+```
+
+`set_sandbox_executor` 返回 `Result<(), T>`，但此处忽略。如果 `set` 失败（如已设置），无日志无告警。
+
+**最小修复**: 记录警告日志。
+
+---
+
+## 建议验证步骤
+
+以下为推断风险，**无测试证据**：
+
+1. **沙箱回退**: 启动时无 `polaris-sandbox` 容器，发送需要写操作的请求，观察是否报错（应报错）vs 静默在宿主机执行（不应发生）。
+2. **受保护路径**: 将项目目录设在 `~/.polaris/myproject`，启用沙箱，检查 mount 是否拒绝。
+3. **挂载验证**: 用 `docker inspect` 返回伪造的 mount（含 `/etc/passwd` 的 bind mount），验证是否被拒绝。
+4. **expert 矛盾**: Pi 模式下发送需要专家路由的 prompt，检查 expert prompt 是否出现（不应出现）在最终发送给 daemon 的 `SessionOptions.expert_prompt` 中。
+5. **allowAlways**: 两次触发相同工具调用，第二次应自动放行（需 agentd 端配合）。
+6. **容器安全**: 检查修改 `docker update --memory=256m polaris-sandbox` 后工具执行是否受限。
+
+---
+
+## 范围与缺失材料
+
+| 项目 | 状态 |
+|------|------|
+| `docker_tools.rs`（148行）| 在审 |
+| `host_tools.rs`（78行）| 在审 |
+| `PermissionDialog.vue`（63行）| 在审 |
+| `protocol.rs` 协议 v3 | 在审 |
+| agentd 端实现 | **未提供**（属于 A 包 P3a-diff.patch） |
+| 沙箱容器启动/管理（polaris-sandbox crate）| **未提供** |
+| 权限模式在 daemon 端的实际执行 | **未提供** |
+| web_fetch/web_search SSRF 防护 | **未提供**（仅见 `readonly_tools` 配置） |
+| 子代理继承与级联中止 | **未提供** |
+| 上下文优先级（AGENTS.md/CLAUDE.md）| **未提供** |
+
+**关键缺失**: 本 patch 仅含 kernel→daemon 的协议层和前端 UI，**沙箱实际执行和权限判定逻辑在 agentd（A 包）**，无法独立验证：
+- 四档权限的实际拦截行为
+- `permission.respond` 的 daemon 端处理
+- `allowAlways` 的实现
+- SSRF 防护的实际逻辑
