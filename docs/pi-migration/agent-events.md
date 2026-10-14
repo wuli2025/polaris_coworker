@@ -4,6 +4,20 @@
 路径缩写：`K/`=`src-tauri/crates/polaris-kernel/src/`，`F/`=`src-tauri/crates/polaris-fable/src/`，`W/`=`src-tauri/crates/polaris-wiki/src/`，`H/`=`src-tauri/src/`。
 范围：对话 Agent 流，以及迁移 headless/wiki/doctor 时必须继续提供的外围事件。不是全应用事件总表（文件同步、媒体渲染、设备遥测不属于 Agent 流）。
 
+## R3 增补：Pi 协议 v4 授权生命周期
+
+本节覆盖下文旧基线中“没有 permission 专门事件”的描述；其他旧基线保持迁移对照用途。
+Pi `permission.request` 经 Rust 翻译为 `chat:stream` 的同名 kind，text 为 JSON：
+`{sessionId, callId, tool, summary, parentCallId?, expiresAt}`，expiresAt 为 Unix 毫秒截止时间。
+`permission.resolved` 的 text 为 `{sessionId, callId, reason}`，reason 是 responded/expired/cancelled。
+前端按会话和调用 ID 关闭弹窗；子会话经父轮次透传但保留子会话身份；轮次结束的 done 仍清理队列。
+
+`permission.respond` 的 allowAlways **仅限同一会话、完全相同的工具与参数**，按 JSON 序列化结果匹配。
+不会扩展到“同工具任意参数”，也不会传递到其他会话；关闭会话或重新配置权限清空记忆。
+弹窗剩余时间使用 expiresAt；未回应到期由 agentd 拒绝并发 resolved，不由前端倒计时授予权限。
+
+协议版本升级、沙箱退出码/信号/超时字段、probe 和配置迁移见 [R3 协议说明](r3-result.md#协议-v4-与迁移)。
+
 ## 传输封装与关联键
 
 | 层 | 已有行为 | 证据 |

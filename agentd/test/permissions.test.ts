@@ -72,6 +72,10 @@ test("real Pi hook blocks a visible write until protocol approval; abort cancels
       await h.daemon.sessions.wait(sessionId);
       const { existsSync } = await import("node:fs");
       assert.equal(existsSync(join(h.dir, "result.txt")), !abort);
+      const resolution = h.events.findIndex((event) => event.event === "permission.resolved");
+      assert.ok(resolution >= 0);
+      assert.ok(resolution < h.events.findIndex((event) => event.event === "turn.completed"));
+      assert.equal((h.events[resolution] as { reason: string }).reason, abort ? "cancelled" : "responded");
     } finally { await h.close(); }
   }
 });
@@ -89,4 +93,35 @@ test("production defaults remain manual with validated security options", async 
     { web: { ...config.web, maxBytes: 0 } },
     { experts: { ...config.experts, enabled: "yes" } },
   ]) assert.throws(() => mergeConfig(config, patch));
+});
+
+test("containment rejects parent traversal before normalization and dangling symlink prefixes", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "containment-"));
+  try {
+    symlinkSync(tmpdir(), join(cwd, "link"));
+    symlinkSync(join(tmpdir(), "missing-target-unique"), join(cwd, "dangling"));
+    for (const path of ["link/../x", "link\\..\\x", "./a/../b", "link/x", "dangling/x", "dangling",
+      join(tmpdir(), "outside"), "C:\\outside\\x"]) assert.equal(await withinWorkspace(cwd, path), false, path);
+    for (const path of ["./a/b", join(cwd, "a/b")]) assert.equal(await withinWorkspace(cwd, path), true, path);
+    assert.equal(await withinWorkspace(cwd, ".\\a\\b"), process.platform === "win32");
+    const approvals: Approval[] = [];
+    const gate = new Permissions("auto-current", cwd, 5, 100, (request) => approvals.push(request));
+    assert.equal(await gate.check("escape", "write", { path: "link/../x" }), false);
+    assert.equal(approvals.length, 1);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+test("permission expiry and turn cancellation emit exactly one resolution", async () => {
+  for (const cancel of [false, true]) {
+    const resolutions: unknown[] = [];
+    const gate = new Permissions("manual", tmpdir(), 10, 100, (event) => {
+      assert.ok(event.expiresAt > Date.now());
+    }, (event) => resolutions.push(event));
+    const pending = gate.check("call", "bash", { command: "pwd" });
+    if (cancel) gate.cancel();
+    assert.equal(await pending, false);
+    assert.deepEqual(resolutions, [{ callId: "call", reason: cancel ? "cancelled" : "expired" }]);
+    assert.equal(gate.respond("call", "allow"), false);
+    gate.cancel();
+    assert.equal(resolutions.length, 1);
+  }
 });

@@ -23,7 +23,7 @@ const event = (s, name, fields = {}) => send({ type: 'event', sessionId: s.id, t
 async function turn(s, text) {
   await event(s, 'turn.started');
   if (text === 'permission') return event(s, 'permission.request', {
-    targetSessionId: s.id, callId: 'approve-call', tool: 'bash', summary: 'pwd', parentCallId: 'parent-call'
+    targetSessionId: s.id, callId: 'approve-call', tool: 'bash', summary: 'pwd', expiresAt: Date.now() + 60000, parentCallId: 'parent-call'
   });
   if (text === 'crash') return process.exit(9);
   if (text === 'malformed') return process.stdout.write('not-json\n');
@@ -47,13 +47,14 @@ async function dispatch({ id, method, params: p }) {
       const s = sessions.get(p.sessionId);
       if (!s || p.callId !== 'approve-call') return error(id, 'APPROVAL_NOT_FOUND');
       await response(id, {accepted:true});
+      await event(s, 'permission.resolved', {targetSessionId:s.id, callId:p.callId, reason:'responded'});
       await event(s, 'text.delta', {text:p.decision});
       return event(s, 'turn.completed', {status:'completed'});
     }
     case 'ping':
       if (process.argv.includes('--ping-hang')) return;
       return response(id, { status: 'ok', sessions: sessions.size, version: '0.1.0', piVersion: '1.0.4',
-        protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 3 });
+        protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 4 });
     case 'models.list': return response(id, { models: [{ provider: 'fixture', id: 'test' }] });
     case 'session.open': {
       if (p.sessionId && sessions.has(p.sessionId)) return error(id, 'SESSION_ALREADY_OPEN');

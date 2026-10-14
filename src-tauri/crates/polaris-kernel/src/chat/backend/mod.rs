@@ -10,6 +10,7 @@ pub mod stream;
 mod bridge;
 pub mod host_tools;
 pub mod docker_tools;
+mod sandbox_process;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use serde::Serialize;
 use crate::chat::{ChatSendArgs, PermissionMode};

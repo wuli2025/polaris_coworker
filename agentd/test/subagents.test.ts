@@ -60,15 +60,42 @@ test("sandbox setting is inherited and requests retain parentCallId", async () =
     const { sessionId } = result<any>(await h.request("session.open", { cwd: h.dir,
       toolProfile: "full", permissionMode: "auto-all", sandbox: true }));
     await h.request("prompt", { sessionId, text: "delegate" });
-    await until(() => h.events.some((e) => e.event === "sandbox.request"));
-    const event = h.events.find((e) => e.event === "sandbox.request")!;
-    assert.equal(event.sessionId, sessionId);
-    assert.ok(event.parentCallId);
-    if (event.event === "sandbox.request") {
-      assert.notEqual(event.targetSessionId, sessionId);
-      await h.request("sandbox.respond", { sessionId: event.targetSessionId, callId: event.callId, output: "/container" });
-    }
+    const handled = new Set<string>();
+    await until(() => {
+      for (const event of h.events) if (event.event === "sandbox.request" && !handled.has(event.callId)) {
+        handled.add(event.callId);
+        assert.equal(event.sessionId, sessionId);
+        if (event.operation === "bash") {
+          assert.ok(event.parentCallId);
+          assert.notEqual(event.targetSessionId, sessionId);
+        }
+        void h.request("sandbox.respond", { sessionId: event.targetSessionId, callId: event.callId,
+          output: "/container", exitCode: 0, signal: null, timedOut: false });
+      }
+      return h.events.some((event) => event.event === "turn.completed");
+    });
     await h.daemon.sessions.wait(sessionId);
     assert.equal(h.events.filter((e) => e.event === "turn.completed").length, 1);
+  } finally { await h.close(); }
+});
+
+test("child permission expiry reaches parent stream with child identity before turn completion", async () => {
+  const h = await harness([tool("subagent", { task: "child" }), tool("bash", { command: "pwd" }),
+    fauxAssistantMessage("child summary"), fauxAssistantMessage("done")],
+    { permissions: { defaultMode: "manual", timeoutMs: 20, summaryChars: 100 } });
+  try {
+    const { sessionId } = result<{ sessionId: string }>(await h.request("session.open", { cwd: h.dir, toolProfile: "full" }));
+    await h.request("prompt", { sessionId, text: "delegate" });
+    await h.daemon.sessions.wait(sessionId);
+    const approval = h.events.find((event) => event.event === "permission.request");
+    const resolved = h.events.find((event) => event.event === "permission.resolved");
+    assert.ok(approval?.event === "permission.request" && resolved?.event === "permission.resolved");
+    assert.equal(resolved.reason, "expired");
+    assert.equal(resolved.sessionId, sessionId);
+    assert.equal(resolved.targetSessionId, approval.targetSessionId);
+    assert.notEqual(resolved.targetSessionId, sessionId);
+    assert.equal(resolved.callId, approval.callId);
+    assert.equal(resolved.parentCallId, approval.parentCallId);
+    assert.ok(h.events.indexOf(resolved) < h.events.findIndex((event) => event.event === "turn.completed"));
   } finally { await h.close(); }
 });

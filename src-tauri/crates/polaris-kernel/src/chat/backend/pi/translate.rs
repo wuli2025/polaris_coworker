@@ -36,10 +36,15 @@ impl Translator {
         }
         let mut out = self.flush();
         match input {
-            Event::PermissionRequest { target_session_id, call_id, tool, summary, parent_call_id } => {
+            Event::PermissionRequest { target_session_id, call_id, tool, summary, expires_at, parent_call_id } => {
                 out.push(self.make("permission.request", Some(serde_json::json!({
                     "sessionId": target_session_id, "callId": call_id, "tool": tool,
-                    "summary": summary, "parentCallId": parent_call_id,
+                    "summary": summary, "expiresAt": expires_at, "parentCallId": parent_call_id,
+                }).to_string())));
+            }
+            Event::PermissionResolved { target_session_id, call_id, reason } => {
+                out.push(self.make("permission.resolved", Some(serde_json::json!({
+                    "sessionId": target_session_id, "callId": call_id, "reason": reason,
                 }).to_string())));
             }
             Event::SandboxRequest { target_session_id, call_id, operation, args } => {

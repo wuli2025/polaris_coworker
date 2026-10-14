@@ -19,7 +19,7 @@ export const ConfigSchema = Type.Object({
   permissions: Type.Object({ defaultMode: Type.Union([
     Type.Literal("deny"), Type.Literal("manual"), Type.Literal("auto-current"), Type.Literal("auto-all"),
   ]), timeoutMs: positive, summaryChars: positive }, { additionalProperties: false }),
-  sandbox: Type.Object({ timeoutMs: positive, maxOutputBytes: Type.Integer({ minimum: 1, maximum: 1048576 }),
+  sandbox: Type.Object({ probeTimeoutMs: positive, probeCacheMs: positive, timeoutMs: positive, maxOutputBytes: Type.Integer({ minimum: 1, maximum: 1048576 }),
     shell: Type.Union([Type.Literal("sh"), Type.Literal("bash")]) }, { additionalProperties: false }),
   subagents: Type.Object({ maxConcurrent: positive, maxDepth: Type.Integer({ minimum: 0 }),
     summaryChars: positive }, { additionalProperties: false }),

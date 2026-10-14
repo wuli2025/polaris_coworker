@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke, listen } from "../../tauri";
-import { consume, type Approval, type Decision, type PermissionEvent } from "./queue";
+import { consume, remainingSeconds, type Approval, type Decision, type PermissionEvent } from "./queue";
 
 const queue = ref<Approval[]>([]);
 const current = computed(() => queue.value[0]);
 const busy = ref(false);
+const now = ref(Date.now());
+const remaining = computed(() => current.value ? remainingSeconds(current.value, now.value) : 0);
+let tick: ReturnType<typeof setInterval> | undefined;
 const error = ref("");
 let dispose: (() => void) | undefined;
 let stopped = false;
 onMounted(async () => {
+  tick = setInterval(() => { now.value = Date.now(); }, 1000);
   try {
     const stop = await listen<PermissionEvent>("chat:stream", (event) => {
       queue.value = consume(queue.value, event);
@@ -17,7 +21,7 @@ onMounted(async () => {
     if (stopped) stop(); else dispose = stop;
   } catch { error.value = "无法连接授权请求；未确认的操作会自动拒绝。"; }
 });
-onUnmounted(() => { stopped = true; dispose?.(); });
+onUnmounted(() => { stopped = true; dispose?.(); clearInterval(tick); });
 async function respond(decision: Decision) {
   const approval = current.value;
   if (!approval || busy.value) return;
@@ -42,11 +46,13 @@ async function respond(decision: Decision) {
       <h2 id="permission-title">允许此操作？</h2>
       <p>{{ current.tool }}<span v-if="current.parentCallId"> · 子任务</span></p>
       <pre>{{ current.summary }}</pre>
+      <p aria-live="polite">{{ remaining > 0 ? `剩余 ${remaining} 秒；超时自动拒绝。` : "授权已过期，等待关闭。" }}</p>
+      <p>总是允许仅适用于同一会话、完全相同的工具与参数。</p>
       <p v-if="error" role="alert">{{ error }}</p>
       <div class="permission-actions">
-        <button :disabled="busy" @click="respond('deny')">拒绝</button>
-        <button :disabled="busy" @click="respond('allow')">允许一次</button>
-        <button :disabled="busy" @click="respond('allowAlways')">本会话相同调用总是允许</button>
+        <button :disabled="busy || remaining === 0" @click="respond('deny')">拒绝</button>
+        <button :disabled="busy || remaining === 0" @click="respond('allow')">允许一次</button>
+        <button :disabled="busy || remaining === 0" @click="respond('allowAlways')">本会话相同调用总是允许</button>
       </div>
     </section>
   </div>

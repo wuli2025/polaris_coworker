@@ -20,7 +20,7 @@ test("sandbox bash/write/edit only reach the protocol backend, never host filesy
       await until(() => {
         for (const event of h.events) if (event.event === "sandbox.request" && !handled.has(event.callId)) {
           handled.add(event.callId);
-          void h.request("sandbox.respond", { sessionId, callId: event.callId,
+          void h.request("sandbox.respond", { sessionId, callId: event.callId, exitCode: 0, signal: null, timedOut: false,
             output: event.operation === "read" ? Buffer.from("before").toString("base64") : "" });
         }
         return h.events.some((event) => event.event === "turn.completed");
@@ -39,7 +39,7 @@ test("unavailable sandbox yields a tool error without falling back", async () =>
     await until(() => h.events.some((event) => event.event === "sandbox.request"));
     const event = h.events.find((event) => event.event === "sandbox.request")!;
     if (event.event === "sandbox.request") await h.request("sandbox.respond", {
-      sessionId, callId: event.callId, output: "", error: "SANDBOX_UNAVAILABLE",
+      sessionId, callId: event.callId, exitCode: 0, signal: null, timedOut: false, output: "", error: "SANDBOX_UNAVAILABLE",
     });
     await h.daemon.sessions.wait(sessionId);
     assert.ok(h.events.some((event) => event.event === "tool.completed" && event.isError));

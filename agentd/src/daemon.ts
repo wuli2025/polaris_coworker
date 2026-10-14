@@ -86,7 +86,7 @@ export class Daemon {
   private async dispatch(request: Request): Promise<unknown> {
     switch (request.method) {
       case "permission.respond": return this.sessions.respondPermission(request.params.sessionId, request.params.callId, request.params.decision);
-      case "sandbox.respond": return this.sessions.respondSandbox(request.params.sessionId, request.params.callId, request.params.output, request.params.error);
+      case "sandbox.respond": return this.sessions.respondSandbox(request.params.sessionId, request.params.callId, request.params);
       case "ping": return { status: "ok", sessions: this.sessions.size, ...versions };
       case "models.list": return { models: this.models.list() };
       case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd, request.params);

@@ -204,7 +204,7 @@ Pi `useSandbox` 在 P3 路由 bash/write/edit 到宿主容器桥；不可用或�
 | --- | --- | --- |
 | `agentd/src/sessions/create.ts`、`options.ts`、`registry.ts` | session.open 可选 model/thinkingLevel/toolProfile；session.configure 仅空闲可用，SDK setModel/setThinkingLevel/setActiveToolsByName | defaultModel/thinkingLevel/defaultToolProfile；toolProfiles 名单由配置管理，旧 tools 只映射 default 档；`agentd/test/protocol-extension.test.ts` |
 | `agentd/src/sessions/attachments.ts` | prompt.attachments 图片 base64 校验，经 SDK prompt.images 传入模型 | attachments.maxCount=4、maxBytes=262144、maxTotalBytes=524288，PNG/JPEG/GIF/WebP；faux 模型验证真实消息 |
-| `agentd/src/protocol/version.ts`、`backend/pi/supervisor.rs` | ping 返回 agentd/npm 实际版本、Pi SDK VERSION、protocolVersion=3（P3 升级）；握手成功前阻止业务请求 | 沿用 requestTimeoutMs/channelCapacity；版本错误立即熔断；`pi/extension_tests.rs` 验证仅发出 ping |
+| `agentd/src/protocol/version.ts`、`backend/pi/supervisor.rs` | ping 返回 agentd/npm 实际版本、Pi SDK VERSION、protocolVersion=4（R3 升级）；握手成功前阻止业务请求 | 沿用 requestTimeoutMs/channelCapacity；版本错误立即熔断；`pi/extension_tests.rs` 验证仅发出 ping |
 | `backend/bridge.rs`、`pi/input.rs`、`pi/sessions.rs` | 每轮模型、权限及思考档位进 open/configure；已有会话每轮重新配置；TurnRequest 携带已校验图片内容；公开 PiBackend.configure_session 支持思考档位 | 复用 POLARIS_WORK_MODEL/POLARIS_FAST_MODEL，通过 models.list 唯一匹配 provider，歧义具名拒绝；Deny→readonly，其余→workspace |
 | `tests/fixtures/protocol-samples.jsonl`、`protocol-schema.sha256` | 双端样例与 TS schema 哈希锁定，新增 configure/图片/版本样例 | TS 校验请求，Rust 逐条解析及往返；backend 定向测试含 R1c 回归 |
 
@@ -272,13 +272,14 @@ Rust 入口路径以 `src-tauri/crates/polaris-kernel/src/chat/` 为前缀。
 
 | 入口 | 公开接口及依赖 | 配置、迁移、验证 |
 | --- | --- | --- |
-| `agentd/src/extensions/permissions.ts` | Pi tool_call 强制闸；permission.request/respond→Rust→授权弹窗 | permissions 默认 manual/60000ms；四档×四类矩阵、allowAlways、超时、取消 |
-| `agentd/src/extensions/sandbox.ts`、`K/chat/backend/{host_tools,docker_tools}.rs` | Pi operations→sandbox.request/respond→SandboxExecutor；复用已管理 Docker 容器 | sandbox 超时/输出/shell；Rust sandboxContainer；拒绝宽挂载暴露 Key；假执行后端验证 |
+| `agentd/src/extensions/permissions.ts` | Pi tool_call 强制闸；permission.request/respond→Rust→授权弹窗 | permissions 默认 manual/60000ms；allowAlways 仅同一会话、完全相同工具与参数；拒绝含 `..` 路径自动放行 |
+| `agentd/src/extensions/sandbox.ts`、`K/chat/backend/{host_tools,docker_tools}.rs` | Pi operations→sandbox.request/respond→SandboxExecutor；复用已管理 Docker 容器 | sandbox 超时/输出/shell；probeTimeoutMs=5000、probeCacheMs=10000；v4 返回 exitCode/signal/timedOut；Rust sandboxContainer |
 | `agentd/src/extensions/web.ts` | web_fetch、SearchAdapter、BraveSearch、HttpAdapter；已有内存凭据 | web 大小/超时/重定向、search endpoint/credential；SSRF/契约测试，TCP 假服务器受环境限制 |
 | `agentd/src/extensions/subagent.ts`、`sessions/registry.ts` | 子会话继承权限/沙箱；全局并发及深度限制；父取消级联 | subagents 默认 2/2/16000；parentCallId 归组；并发/递归/继承/取消测试 |
 | `agentd/src/extensions/resources.ts`、`sessions/create.ts` | DefaultResourceLoader；AGENTS 优先、CLAUDE 兼容；专家附加系统提示 | skills.paths 默认 ~/Polaris/skills；experts.enabled=false；上下文/技能/专家开关测试 |
-| `src/features/permissions/`、`src/main.ts` | 独立 Vue 确认弹窗、队列，调用 chat_permission_respond | Tauri/HTTP 装配；HTTP owner 角色沿用；队列单测及 vue-tsc，无浏览器点击验收 |
+| `src/features/permissions/`、`src/main.ts` | 独立 Vue 确认弹窗、队列，调用 chat_permission_respond | Tauri/HTTP 装配；expiresAt 倒计时、permission.resolved 关闭；队列单测及 vue-tsc，无浏览器点击验收 |
 
-协议 v3、所有默认值/切换示例、旧容器挂载风险、手工上下文迁移与命令结果见 [P3 执行报告](pi-migration/p3-result.md)。
+协议已升 v4（两端需一并升级）；R3 入口、协议说明、配置切换、迁移及验证见 [R3 执行报告](pi-migration/r3-result.md)。
+P3 初始协议 v3、所有默认值/切换示例、旧容器挂载风险、手工上下文迁移与命令结果见 [P3 执行报告](pi-migration/p3-result.md)。
 新增资源配置需重开会话；不自动改名用户文件、不新增依赖、不修改图片/思考档位协议。
 基线豁免仍仅 4 项；端口测试与真实安全容器验证未通过前，P3 整体验收为 BLOCKED。

@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 /// Mirror of agentd/src/protocol/schema.ts; fingerprint test gates changes.
-pub const PROTOCOL_VERSION: u64 = 3;
+pub const PROTOCOL_VERSION: u64 = 4;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum Id { Text(String), Number(i64) }
@@ -39,6 +39,7 @@ pub struct PermissionResponse { pub session_id: String, pub call_id: String, pub
 pub struct SandboxResponse {
     pub session_id: String, pub call_id: String, pub output: String,
     #[serde(skip_serializing_if = "Option::is_none")] pub error: Option<String>,
+    pub exit_code: Option<i32>, pub signal: Option<i32>, pub timed_out: bool,
 }
 #[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -116,11 +117,16 @@ pub enum Frame {
     #[serde(rename = "event", rename_all = "camelCase")]
     Event { session_id: String, turn_id: String, #[serde(flatten)] event: Event },
 }
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionResolution { Responded, Expired, Cancelled }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
     #[serde(rename = "permission.request", rename_all = "camelCase")]
-    PermissionRequest { target_session_id: String, call_id: String, tool: String, summary: String, parent_call_id: Option<String> },
+    PermissionRequest { target_session_id: String, call_id: String, tool: String, summary: String, expires_at: u64, parent_call_id: Option<String> },
+    #[serde(rename = "permission.resolved", rename_all = "camelCase")]
+    PermissionResolved { target_session_id: String, call_id: String, reason: PermissionResolution },
     #[serde(rename = "sandbox.request", rename_all = "camelCase")]
     SandboxRequest { target_session_id: String, call_id: String, operation: String, args: Value },
     #[serde(rename = "turn.started")] Started,

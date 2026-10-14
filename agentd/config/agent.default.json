@@ -93,6 +93,8 @@
     "summaryChars": 2000
   },
   "sandbox": {
+    "probeTimeoutMs": 5000,
+    "probeCacheMs": 10000,
     "timeoutMs": 120000,
     "shell": "sh",
     "maxOutputBytes": 262144

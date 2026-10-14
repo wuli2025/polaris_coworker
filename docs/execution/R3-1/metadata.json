@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-14T08:07:25.334179+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "bb6258470436243a27725564e735b7879e7f9eb28f6b5a2955af154f1f8e2fff",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": "?? docs/execution/R3-1/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M agentd/config/agent.default.json\n M agentd/src/config/schema.ts\n M agentd/src/daemon.ts\n M agentd/src/extensions/permissions.ts\n M agentd/src/extensions/sandbox.ts\n M agentd/src/protocol/events.ts\n M agentd/src/protocol/schema.ts\n M agentd/src/sessions/registry.ts\n M agentd/test/permissions.test.ts\n M agentd/test/protocol-extension.test.ts\n M agentd/test/sandbox.test.ts\n M agentd/test/subagents.test.ts\n M docs/feature-tree.md\n M docs/pi-migration/agent-events.md\n M src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/extension_tests.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs\n M src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs\n M src-tauri/crates/polaris-kernel/tests/fixtures/protocol-samples.jsonl\n M src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256\n M src/features/permissions/PermissionDialog.vue\n M src/features/permissions/queue.test.ts\n M src/features/permissions/queue.ts\n?? agentd/test/sandbox-status.test.ts\n?? docs/execution/R3-1/\n?? docs/pi-migration/r3-result.md\n?? src-tauri/crates/polaris-kernel/src/chat/backend/sandbox_command.sh\n?? src-tauri/crates/polaris-kernel/src/chat/backend/sandbox_process.rs\n",
+    "diff_stat": " agentd/config/agent.default.json                   |   2 +\n agentd/src/config/schema.ts                        |   2 +-\n agentd/src/daemon.ts                               |   2 +-\n agentd/src/extensions/permissions.ts               |  37 ++++--\n agentd/src/extensions/sandbox.ts                   |  76 ++++++++++---\n agentd/src/protocol/events.ts                      |   4 +-\n agentd/src/protocol/schema.ts                      |  10 +-\n agentd/src/sessions/registry.ts                    |  12 +-\n agentd/test/permissions.test.ts                    |  35 ++++++\n agentd/test/protocol-extension.test.ts             |   2 +\n agentd/test/sandbox.test.ts                        |   4 +-\n agentd/test/subagents.test.ts                      |  43 +++++--\n docs/feature-tree.md                               |  11 +-\n docs/pi-migration/agent-events.md                  |  14 +++\n .../src/chat/backend/docker_tools.rs               | 126 +++++++++++++++++----\n .../polaris-kernel/src/chat/backend/host_tools.rs  |  23 +++-\n .../crates/polaris-kernel/src/chat/backend/mod.rs  |   1 +\n .../src/chat/backend/pi/extension_tests.rs         |  12 +-\n .../polaris-kernel/src/chat/backend/pi/protocol.rs |  10 +-\n .../polaris-kernel/src/chat/backend/pi/tests.rs    |   4 +-\n .../src/chat/backend/pi/translate.rs               |   9 +-\n .../polaris-kernel/tests/fixtures/fake-agentd.mjs  |   5 +-\n .../tests/fixtures/protocol-samples.jsonl          |  13 ++-\n .../tests/fixtures/protocol-schema.sha256          |   4 +-\n src/features/permissions/PermissionDialog.vue      |  16 ++-\n src/features/permissions/queue.test.ts             |  13 ++-\n src/features/permissions/queue.ts                  |  13 ++-\n 27 files changed, 396 insertions(+), 107 deletions(-)\n"
+  },
+  "finished_at": "2026-10-14T08:24:04.893971+00:00"
+}

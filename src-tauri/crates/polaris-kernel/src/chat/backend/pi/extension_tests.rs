@@ -78,7 +78,7 @@ fn model_profile_image_and_idle_reconfiguration_are_on_the_wire() -> anyhow::Res
 
 #[test]
 fn missing_or_noninteger_protocol_version_is_a_named_mismatch() {
-    for version in [Value::Null, json!(1), json!("2"), json!(2.1)] {
+    for version in [Value::Null, json!(3), json!(1), json!("2"), json!(2.1)] {
         let result = protocol::check_ping(json!({"status":"ok","protocolVersion":version}));
         assert!(result.err().is_some_and(|e| e.to_string().contains("AgentdProtocolMismatch")));
     }
@@ -102,11 +102,21 @@ fn permission_confirmation_round_trip_preserves_call_and_parent() -> anyhow::Res
             call_id: "approve-call".into(), decision: decision.clone(),
         })?;
         let mut text = String::new();
+        let mut resolved = false;
         loop {
             let event = stream.recv_timeout(Duration::from_secs(3))?;
+            if event.kind == "permission.resolved" {
+                let body: Value = serde_json::from_str(event.text.as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("missing resolution"))?)?;
+                assert_eq!(body["sessionId"], payload["sessionId"]);
+                assert_eq!(body["callId"], "approve-call");
+                assert_eq!(body["reason"], "responded");
+                resolved = true;
+            }
             if event.kind == "delta" { text.push_str(event.text.as_deref().unwrap_or_default()); }
             if event.kind == "done" { break; }
         }
+        assert!(resolved, "resolution must reach frontend before done");
         assert_eq!(Value::String(text), serde_json::to_value(decision)?);
         backend.shutdown();
     }

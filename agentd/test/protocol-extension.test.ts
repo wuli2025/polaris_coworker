@@ -4,6 +4,7 @@ import { Value } from "typebox/value";
 import { readFileSync } from "node:fs";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { harness, result, until } from "./helpers.ts";
+import { EventSchema } from "../src/protocol/events.ts";
 import { RequestSchema, PingSchema, type ImageAttachment } from "../src/protocol/schema.ts";
 
 const image: ImageAttachment = { type: "image", mimeType: "image/png",
@@ -24,6 +25,7 @@ test("shared request samples validate against the authoritative TypeScript schem
   for (const line of readFileSync(path, "utf8").trim().split("\n")) {
     const sample = JSON.parse(line);
     if (sample.method) assert.ok(Value.Check(RequestSchema, sample), line);
+    if (sample.type === "event") assert.ok(Value.Check(EventSchema, sample), line);
   }
 });
 test("ping versions, default options, idle configure and isolated tool/model changes", async () => {

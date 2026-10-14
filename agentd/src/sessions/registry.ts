@@ -1,4 +1,5 @@
 import { Permissions, type Decision } from "../extensions/permissions.ts";
+import type { SandboxResult } from "../protocol/schema.ts";
 import { Sandbox } from "../extensions/sandbox.ts";
 import { webFactory } from "../extensions/web.ts";
 import { subagentFactory } from "../extensions/subagent.ts";
@@ -69,7 +70,8 @@ export class SessionRegistry {
       const assemble = (actualCwd: string): ExtensionFactory[] => {
         permissions = new Permissions(options.permissionMode ?? config.permissions.defaultMode,
           actualCwd, config.permissions.timeoutMs, config.permissions.summaryChars,
-          (approval) => this.extensionEvent(state.id, { event: "permission.request", targetSessionId: state.id, ...approval }));
+          (approval) => this.extensionEvent(state.id, { event: "permission.request", targetSessionId: state.id, ...approval }),
+          (resolution) => this.extensionEvent(state.id, { event: "permission.resolved", targetSessionId: state.id, ...resolution }));
         sandbox = new Sandbox(options.sandbox ?? false, actualCwd, config.sandbox,
           (request) => this.extensionEvent(state.id, { event: "sandbox.request", targetSessionId: state.id, ...request }));
         const factories: ExtensionFactory[] = [sandbox.factory(), webFactory(config.web, this.models.credentials),
@@ -273,13 +275,13 @@ export class SessionRegistry {
   }
   private extensionEvent(id: string, payload: Parameters<EventMapper["emit"]>[0]): void {
     const run = this.get(id).run;
-    if (!run || run.stopped) throw new DaemonError("TURN_CANCELLED", "No active turn");
+    if (!run || (run.stopped && payload.event !== "permission.resolved")) throw new DaemonError("TURN_CANCELLED", "No active turn");
     run.mapper.emit(payload);
   }
   private emitEvent(id: string, event: ProtocolEvent): void {
     const parent = this.entries.get(id)?.parent;
     if (parent) {
-      if (!["tool.started", "tool.completed", "permission.request", "sandbox.request"].includes(event.event)) return;
+      if (!["tool.started", "tool.completed", "permission.request", "permission.resolved", "sandbox.request"].includes(event.event)) return;
       const run = this.entries.get(parent.id)?.run;
       if (run) this.emitEvent(parent.id, { ...event, sessionId: parent.id,
         turnId: run.id, parentCallId: event.parentCallId ?? parent.callId });
@@ -289,8 +291,8 @@ export class SessionRegistry {
     if (!this.get(id).permissions.respond(callId, decision)) throw new DaemonError("APPROVAL_NOT_FOUND", "Approval expired or does not belong to this session");
     return { accepted: true };
   }
-  respondSandbox(id: string, callId: string, output: string, error?: string) {
-    if (!this.get(id).sandbox.respond(callId, output, error)) throw new DaemonError("SANDBOX_REQUEST_NOT_FOUND", "Sandbox request expired");
+  respondSandbox(id: string, callId: string, result: SandboxResult) {
+    if (!this.get(id).sandbox.respond(callId, result)) throw new DaemonError("SANDBOX_REQUEST_NOT_FOUND", "Sandbox request expired");
     return { accepted: true };
   }
   async subagent(id: string, callId: string, task: string, signal?: AbortSignal): Promise<string> {

@@ -10,7 +10,9 @@ export const UsageSchema = Type.Object({
   cost: Type.Object({ input: tokens, output: tokens, cacheRead: tokens, cacheWrite: tokens, total: tokens }),
 });
 export const EventSchema = Type.Union([
-  event("permission.request", { targetSessionId: text, callId: text, tool: text, summary: text }),
+  event("permission.request", { targetSessionId: text, callId: text, tool: text, summary: text, expiresAt: Type.Integer({ minimum: 0 }) }),
+  event("permission.resolved", { targetSessionId: text, callId: text,
+    reason: Type.Union([Type.Literal("responded"), Type.Literal("expired"), Type.Literal("cancelled")]) }),
   event("sandbox.request", { targetSessionId: text, callId: text, operation: text, args: Type.Record(text, Type.Unknown()) }),
   event("turn.started", {}), event("text.delta", { text }), event("reasoning.delta", { text }),
   event("tool.started", { callId: text, tool: text, args: Type.Unknown(), parentCallId: Type.Optional(text) }),
