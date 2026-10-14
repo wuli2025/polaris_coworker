@@ -1,0 +1,1019 @@
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+index 8363cd9..634013e 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+@@ -13,15 +13,18 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
+         &crate::chat::attach::uploads_dir(conv.as_deref()),
+         claude_cli::pipeline::effective_cwd(None), &config.agentd.attachments)
+         .map_err(|e| e.to_string())?;
++    let mut tool_options = ToolOptions::default();
+     let mut snapshot = None;
+     let mut notice = None;
+-    if legacy { input.legacy = Some((app.clone(), args)); }
+-    else {
+-        if args.use_sandbox { return Err(BackendError::UnsupportedInput("sandbox requires P3 tool routing").to_string()); }
++    if legacy {
++        if args.use_sandbox { return Err("SANDBOX_UNAVAILABLE: legacy backend has no tool routing".into()); }
++        input.legacy = Some((app.clone(), args));
++    } else {
+         if args.provider_id.as_deref().is_some_and(|p| !p.is_empty() && p != "auto") {
+             return Err(BackendError::UnsupportedInput("provider selection requires P4 mapping").to_string());
+         }
+-        let prepared = claude_cli::pipeline::prepare(args);
++        tool_options = ToolOptions { sandbox: args.use_sandbox, expert_prompt: host_tools::expert_prompt(&args) };
++        let prepared = claude_cli::pipeline::prepare_pi(args);
+         input.model = claude_cli::pipeline::model_for_mode(prepared.work_full).map(serde_json::Value::String);
+         input.prompt = prepared.plan.full_text();
+         input.cwd = claude_cli::pipeline::effective_cwd(prepared.project_work_dir.as_deref().map(std::path::Path::new));
+@@ -32,7 +35,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
+         emit(app, event(req, conv.as_deref(), "done", None));
+         return Ok(());
+     }
+-    let stream = backend.start(input).map_err(|e| e.to_string())?;
++    let stream = backend.start_with_tools(input, tool_options).map_err(|e| e.to_string())?;
+     let mut finalizer = None;
+     let timeout = Duration::from_millis(config.agentd.request_timeout_ms);
+     loop {
+@@ -43,6 +46,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
+             Err(error) if matches!(error.downcast_ref(), Some(stream::StreamError::Timeout)) => continue,
+             Err(error) => { let _ = backend.cancel(req); return Err(error.to_string()); }
+         };
++        if host_tools::handle_sandbox(backend.as_ref(), &ev).map_err(|e| e.to_string())? { continue; }
+         if ev.kind == "done" {
+             if let (Some(finalizer), Some((artifacts, before))) = (finalizer.take(), snapshot.take()) {
+                 let finalizer: claude_cli::pipeline::TurnStream = finalizer;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/finish.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/finish.rs
+index 3b4cadd..199dbb5 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/finish.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/finish.rs
+@@ -36,6 +36,7 @@ impl TurnStream {
+                 emit_event(
+                     &app,
+                     ChatStreamEvent {
++                        call_id: None, parent_call_id: None,
+                         req_id: req_id.clone(),
+                         kind: "artifact".into(),
+                         text: Some(s),
+@@ -72,6 +73,7 @@ impl TurnStream {
+         emit_event(
+             &app,
+             ChatStreamEvent {
++                call_id: None, parent_call_id: None,
+                 req_id: req_id.clone(),
+                 kind: "done".into(),
+                 text: None,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/mod.rs
+index 94550e7..5da5dce 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/mod.rs
+@@ -175,6 +175,7 @@ pub(crate) fn send(app: &AppHandle, req_id: &str, args: ChatSendArgs) -> Result<
+     emit_event(
+         app,
+         ChatStreamEvent {
++            call_id: None, parent_call_id: None,
+             req_id: req_id.to_string(),
+             kind: "meta".into(),
+             text: Some(est_tokens.to_string()),
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/parser.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/parser.rs
+index 81cb090..e4b87dc 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/parser.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/parser.rs
+@@ -65,6 +65,7 @@ pub(crate) fn handle_stream_event(
+                                     emit_event(
+                                         app,
+                                         ChatStreamEvent {
++                                            call_id: None, parent_call_id: None,
+                                             req_id: req_id.into(),
+                                             kind: "delta".into(),
+                                             text: Some(txt.to_string()),
+@@ -85,6 +86,7 @@ pub(crate) fn handle_stream_event(
+                             emit_event(
+                                 app,
+                                 ChatStreamEvent {
++                                    call_id: None, parent_call_id: None,
+                                     req_id: req_id.into(),
+                                     kind: "tool".into(),
+                                     text: summary,
+@@ -112,6 +114,7 @@ pub(crate) fn handle_stream_event(
+                                         emit_event(
+                                             app,
+                                             ChatStreamEvent {
++                                                call_id: None, parent_call_id: None,
+                                                 req_id: req_id.into(),
+                                                 kind: "artifact".into(),
+                                                 text: Some(norm),
+@@ -145,6 +148,7 @@ pub(crate) fn handle_stream_event(
+                         emit_event(
+                             app,
+                             ChatStreamEvent {
++                                call_id: None, parent_call_id: None,
+                                 req_id: req_id.into(),
+                                 kind: "delta".into(),
+                                 text: Some(txt.to_string()),
+@@ -166,6 +170,7 @@ pub(crate) fn handle_stream_event(
+                     emit_event(
+                         app,
+                         ChatStreamEvent {
++                            call_id: None, parent_call_id: None,
+                             req_id: req_id.into(),
+                             kind: "error".into(),
+                             text: Some(format!("[result error: {}] {}", subtype, msg)),
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/prepare.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/prepare.rs
+index 5e41d39..b7c6bbb 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/prepare.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/prepare.rs
+@@ -1,6 +1,8 @@
+ use super::*;
+ 
+-pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
++pub(crate) fn prepare(args: ChatSendArgs) -> Prepared { prepare_impl(args, false) }
++pub(crate) fn prepare_pi(args: ChatSendArgs) -> Prepared { prepare_impl(args, true) }
++fn prepare_impl(args: ChatSendArgs, pi: bool) -> Prepared {
+     // 产物目录 (每个会话一份): claude 把成品文件写到这里 → 侧边栏可预览
+     let art_dir = artifacts_dir(args.conversation_id.as_deref());
+     let _ = std::fs::create_dir_all(&art_dir);
+@@ -21,7 +23,7 @@ pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
+     // CLAUDE.md 渲染(读盘 + wiki 地图)与下面的 KB 召回(SQLite 检索, 可能还带 AI 扩写),
+     // 否则算完再在末尾丢弃, 白付一次延迟。
+     let raw = raw_mode();
+-    let cm_ctx = if raw {
++    let cm_ctx = if raw || pi {
+         String::new()
+     } else {
+         claude_md::render_for_project(current_project_id.as_deref(), &args.prompt, args.use_kb)
+@@ -229,7 +231,9 @@ pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
+         // with_task 已入常驻指纹(工具面不同), 该段在会话内稳定; 仍用门控 key 表达。
+         plan.keyed(
+             "conv:dynwf",
+-            format!("{}\n\n---\n\n", dynamic_workflow_directive()),
++            format!("{}\n\n---\n\n", if pi {
++                dynamic_workflow_directive().replace("Task", "subagent")
++            } else { dynamic_workflow_directive().to_string() }),
+         );
+     }
+ 
+@@ -241,7 +245,7 @@ pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
+     //   此前专家块排在第 6 段, 与用户问题之间隔着 KB 概览/召回/记忆地图/对话历史数千 token,
+     //   专家准则在注意力上被淹没; 约束贴着问题放才最有效。
+     // 专家团一律走内核桥(引擎未拼装时 expert_bridge()=None → 不注入, 语义同无命中)。
+-    let expert_block: Option<String> = match args.agent_mode.as_deref() {
++    let expert_block: Option<String> = if pi { None } else { match args.agent_mode.as_deref() {
+         Some("expert-team") => crate::chat::bridges::expert_bridge().and_then(|eb| {
+             if eb.detect_multi_expert_task(&args.prompt) {
+                 current_project_id.clone().and_then(|project_id| {
+@@ -258,7 +262,7 @@ pub(crate) fn prepare(args: ChatSendArgs) -> Prepared {
+             crate::chat::bridges::expert_bridge().and_then(|eb| eb.route_block(&args.prompt))
+         }
+         _ => None,
+-    };
++    } };
+ 
+     // 2.7 生图能力检测: 用户想生成图片, 但供应商坞里全是文本/代码大模型, 没有一个能真生图。
+     //     注入「当前供应商 + 能否真生图」的事实, 让 image-gen 技能据此决定:
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/process.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/process.rs
+index b69101a..b51e334 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/process.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/process.rs
+@@ -205,6 +205,7 @@ pub(crate) fn run_process(
+                         emit_event(
+                             &wd_app,
+                             ChatStreamEvent {
++                                call_id: None, parent_call_id: None,
+                                 req_id: wd_req.clone(),
+                                 kind: "error".into(),
+                                 text: Some(reason),
+@@ -245,6 +246,7 @@ pub(crate) fn run_process(
+             emit_event(
+                 &app_err,
+                 ChatStreamEvent {
++                    call_id: None, parent_call_id: None,
+                     req_id: req_err.clone(),
+                     kind: "error".into(),
+                     text: Some(format!("[stderr] {}", line)),
+@@ -346,6 +348,7 @@ pub(crate) fn run_process(
+             emit_event(
+                 &app_out,
+                 ChatStreamEvent {
++                    call_id: None, parent_call_id: None,
+                     req_id: req_out.clone(),
+                     kind: "error".into(),
+                     text: Some(msg),
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/spawn.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/spawn.rs
+index 75d9c1a..aad2138 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/spawn.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/spawn.rs
+@@ -1,52 +1,5 @@
+ use super::*;
+ 
+-// Docker-in-Docker 沙箱仅桌面构建可用 (依赖 polaris_sandbox crate)；
+-// server(容器内)本期降级，不编译此路径。
+-#[cfg(feature = "desktop")]
+-#[allow(dead_code)]
+-fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
+-    let perm_flag = format!("--permission-mode={}", perm);
+-    // 联网 + (非只读档位)本地读写执行, 让成品能真正产出
+-    let allowed = allowed_tools_for(perm, false);
+-    // 沙箱内 KB 永远挂在 /kb (sandbox_start 时挂载),
+-    // 这里让 claude 把 /kb 也加进可读目录,并以 /workspace 为 cwd
+-    let mut cmd = Command::new("docker");
+-    cmd.args([
+-        "exec",
+-        "-i",
+-        "-w",
+-        "/workspace",
+-        // 与 polaris_sandbox::CONTAINER_NAME 同值。字面内联以斩断 kernel→sandbox 的
+-        // 向上依赖(红线 R3);本函数是 dead_code 保留路径,真启用时应经壳层桥接注入。
+-        "polaris-sandbox",
+-        "claude",
+-        "--print",
+-        "--output-format",
+-        "stream-json",
+-        "--verbose",
+-    ]);
+-    // token 级部分流(同 spawn_on_host);flag 必须在 prompt 位置参数之前。
+-    if partial_stream_enabled() {
+-        cmd.arg("--include-partial-messages");
+-    }
+-    cmd.args([
+-        "--add-dir",
+-        "/kb",
+-        "--allowedTools",
+-        &allowed,
+-        &perm_flag,
+-        prompt,
+-    ])
+-    .stdin(Stdio::null())
+-    .stdout(Stdio::piped())
+-    .stderr(Stdio::piped());
+-    no_window(&mut cmd); // 隐藏式: 不弹控制台窗口
+-    let child = cmd
+-        .spawn()
+-        .map_err(|e| format!("在沙箱内调起 claude 失败: {}", e))?;
+-    Ok(child)
+-}
+-
+ /// 本轮 claude CLI 的实际工作目录(cwd)。优先用项目绑定的工作目录(用户选定的真实文件夹,
+ /// 等同终端 `cd <dir> && claude`), 否则回落编译期仓库根(开发)/进程当前目录(装机)。
+ /// 抽出来让 spawn、extra_claude_dirs、常驻会话指纹三处对 cwd 的口径**完全一致** —— 否则
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/stream.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/stream.rs
+index ba26440..2607855 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/stream.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/stream.rs
+@@ -60,6 +60,7 @@ impl DeltaBatcher {
+         emit_event(
+             app,
+             ChatStreamEvent {
++                call_id: None, parent_call_id: None,
+                 req_id: req_id.into(),
+                 kind: "delta".into(),
+                 text: Some(text),
+@@ -113,6 +114,7 @@ impl TurnStream {
+             emit_event(
+                 &ts.app,
+                 ChatStreamEvent {
++                    call_id: None, parent_call_id: None,
+                     req_id: ts.req_id.clone(),
+                     kind: "delta".into(),
+                     text: Some(notice),
+@@ -177,6 +179,7 @@ impl TurnStream {
+                 emit_event(
+                     &self.app,
+                     ChatStreamEvent {
++                        call_id: None, parent_call_id: None,
+                         req_id: self.req_id.clone(),
+                         kind: "delta".into(),
+                         text: Some(line.to_string()),
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader.rs
+index 3a515fe..e3ce166 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pool/reader.rs
+@@ -56,6 +56,7 @@ fn read_jobs(mut lines: impl Iterator<Item = std::io::Result<String>>,
+                 pipeline::emit_event(
+                     &job.app,
+                     ChatStreamEvent {
++                        call_id: None, parent_call_id: None,
+                         req_id: job.req_id.clone(),
+                         kind: "error".into(),
+                         text: Some(format!(
+@@ -99,6 +100,7 @@ pub(crate) fn stderr_loop(stderr: ChildStderr, shared: Arc<SessionShared>, app:
+             pipeline::emit_event(
+                 &app,
+                 ChatStreamEvent {
++                    call_id: None, parent_call_id: None,
+                     req_id: req,
+                     kind: "error".into(),
+                     text: Some(format!("[stderr] {line}")),
+@@ -197,6 +199,7 @@ pub(crate) fn spawn_turn_watchdog(
+                 pipeline::emit_event(
+                     &app,
+                     ChatStreamEvent {
++                        call_id: None, parent_call_id: None,
+                         req_id: req_id.clone(),
+                         kind: "error".into(),
+                         text: Some(reason),
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+index e28c68d..ad06dcc 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+@@ -56,6 +56,8 @@ pub struct Agentd {
+     pub delta_batch_ms: u64,
+     pub write_tools: Vec<String>,
+     pub readonly_tools: Vec<String>,
++    /// Existing container managed by polaris-sandbox (or the server operator).
++    pub sandbox_container: String,
+     pub supervisor_tick_ms: u64,
+     pub shutdown_timeout_ms: u64,
+     pub control_poll_ms: u64,
+@@ -74,7 +76,8 @@ impl Default for Agentd {
+             failure_threshold: 5, stable_reset_ms: 60_000, channel_capacity: 64,
+             max_line_bytes: 1_048_576, delta_batch_ms: 30,
+             write_tools: vec!["write".into(), "edit".into()],
+-            readonly_tools: vec!["read".into(), "grep".into(), "find".into(), "ls".into()],
++            readonly_tools: vec!["read".into(), "grep".into(), "find".into(), "ls".into(), "web_fetch".into(), "web_search".into(), "subagent".into()],
++            sandbox_container: "polaris-sandbox".into(),
+             supervisor_tick_ms: 10, shutdown_timeout_ms: 1000, control_poll_ms: 1,
+             session_map: crate::runtime::paths::data_dir().join("agent-session-map"),
+             attachments: super::images::ImageLimits::default(),
+@@ -105,6 +108,9 @@ impl Config {
+         BackendKind::parse(&self.agent.backend)?;
+         let c = &self.agentd;
+         c.attachments.validate()?;
++        anyhow::ensure!(!c.sandbox_container.is_empty() && !c.sandbox_container.starts_with('-')
++            && c.sandbox_container.chars().all(|ch| ch.is_ascii_alphanumeric() || "_.-".contains(ch)),
++            "InvalidAgentConfig: sandboxContainer must be a Docker container name");
+         anyhow::ensure!(matches!(c.isolation.as_str(), "shared" | "per-account"), "InvalidIsolation: {}", c.isolation);
+         anyhow::ensure!(c.channel_capacity > 0 && c.max_line_bytes > 0 && c.max_processes > 0,
+             "InvalidAgentConfig: capacities must be positive");
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs
+new file mode 100644
+index 0000000..d9efaa9
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs
+@@ -0,0 +1,148 @@
++//! Tool-only execution in an already managed container. Never spawns a host shell.
++use super::host_tools::SandboxExecutor;
++use serde_json::Value;
++use std::{path::{Path, PathBuf}, process::Command};
++
++pub struct DockerTools {
++    pub container: String,
++    pub host_root: PathBuf,
++    pub guest_root: String,
++}
++/// Reuses a container managed by polaris-sandbox, inspecting its actual mounts.
++/// Old containers mounting all of ~/Polaris are rejected because they expose keys.
++pub struct ManagedSandbox {
++    pub container: String,
++    pub protected_paths: Vec<PathBuf>,
++}
++impl ManagedSandbox {
++    pub fn route(&self, mounts: &Value, cwd: &Path) -> anyhow::Result<DockerTools> {
++        let mounts = mounts.as_array().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_MOUNTS"))?;
++        let cwd = std::fs::canonicalize(cwd)?;
++        let mut selected: Option<(PathBuf, String)> = None;
++        for mount in mounts {
++            anyhow::ensure!(mount["Type"] == "bind", "SANDBOX_UNVERIFIED_VOLUME");
++            let source = std::fs::canonicalize(text(mount, "Source")?)?;
++            let destination = text(mount, "Destination")?;
++            for protected in &self.protected_paths {
++                let protected = std::fs::canonicalize(protected).unwrap_or_else(|_| protected.clone());
++                anyhow::ensure!(!protected.starts_with(&source) && !source.starts_with(&protected),
++                    "SANDBOX_UNSAFE_MOUNT: container exposes protected host data");
++            }
++            anyhow::ensure!(!source.starts_with("/var/run") && !source.starts_with("/run")
++                && !source.starts_with("/proc") && !source.starts_with("/sys") && !source.starts_with("/dev"),
++                "SANDBOX_UNSAFE_MOUNT: host control endpoint");
++            if cwd.starts_with(&source) && mount["RW"] == true
++                && selected.as_ref().is_none_or(|(previous, _)| source.components().count() > previous.components().count()) {
++                selected = Some((source, destination.into()));
++            }
++        }
++        let (host_root, guest_root) = selected.ok_or_else(|| anyhow::anyhow!("SANDBOX_PATH_UNMOUNTED"))?;
++        Ok(DockerTools { container: self.container.clone(), host_root, guest_root })
++    }
++}
++impl SandboxExecutor for ManagedSandbox {
++    fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<String> {
++        let output = Command::new("docker").args(["inspect", &self.container]).output()
++            .map_err(|e| anyhow::anyhow!("SANDBOX_UNAVAILABLE: {e}"))?;
++        anyhow::ensure!(output.status.success(), "SANDBOX_UNAVAILABLE: managed container not found");
++        let info: Vec<Value> = serde_json::from_slice(&output.stdout)?;
++        let info = info.first().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_CONTAINER"))?;
++        anyhow::ensure!(info["State"]["Running"] == true, "SANDBOX_UNAVAILABLE: container is stopped");
++        anyhow::ensure!(info["HostConfig"]["Privileged"] != true
++            && info["HostConfig"]["PidMode"] != "host"
++            && info["HostConfig"]["NetworkMode"] != "host", "SANDBOX_UNSAFE_CONTAINER");
++        self.route(&info["Mounts"], Path::new(text(args, "cwd")?))?.execute(operation, args)
++    }
++}
++fn quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
++fn text<'a>(args: &'a Value, key: &str) -> anyhow::Result<&'a str> {
++    args.get(key).and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("SandboxMissingArgument: {key}"))
++}
++impl DockerTools {
++    fn map_path(&self, path: &Path) -> anyhow::Result<String> {
++        // Absolute host paths are only accepted under the existing managed mount.
++        let root = std::fs::canonicalize(&self.host_root)?;
++        let relative = path.strip_prefix(&root).map_err(|_| anyhow::anyhow!("SANDBOX_PATH_UNMOUNTED: {}", path.display()))?;
++        anyhow::ensure!(!relative.components().any(|c| matches!(c, std::path::Component::ParentDir)), "SANDBOX_PATH_ESCAPE");
++        Ok(format!("{}/{}", self.guest_root.trim_end_matches('/'), relative.to_string_lossy().replace('\\', "/")))
++    }
++    pub fn script(&self, operation: &str, args: &Value) -> anyhow::Result<(String, String)> {
++        let cwd = self.map_path(Path::new(text(args, "cwd")?))?;
++        let path = if operation == "bash" { String::new() } else {
++            self.map_path(Path::new(text(args, "path")?))?
++        };
++        let path = quote(&path);
++        let script = match operation {
++            "bash" => text(args, "command")?.to_owned(),
++            "mkdir" => format!("mkdir -p -- {path}"),
++            "access" => format!("test -r {path} && test -w {path}"),
++            "read" => format!("base64 < {path}"),
++            "write" => {
++                use base64::Engine;
++                let content = base64::engine::general_purpose::STANDARD.encode(text(args, "content")?);
++                format!("printf %s {} | base64 -d > {path}", quote(&content))
++            }
++            _ => anyhow::bail!("SANDBOX_OPERATION_UNSUPPORTED"),
++        };
++        Ok((cwd, script))
++    }
++}
++impl SandboxExecutor for DockerTools {
++    fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<String> {
++        let (cwd, script) = self.script(operation, args)?;
++        let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64)
++            .filter(|n| *n > 0 && *n <= 2_147_483_647).ok_or_else(|| anyhow::anyhow!("SandboxInvalidTimeout"))?;
++        let requested = args.get("timeout").and_then(Value::as_f64);
++        let seconds = requested.filter(|n| n.is_finite() && *n > 0.0)
++            .map_or(timeout_ms.div_ceil(1000), |n| (n.ceil() as u64).min(timeout_ms.div_ceil(1000)));
++        let shell = text(args, "shell")?;
++        anyhow::ensure!(["sh", "bash"].contains(&shell), "SandboxInvalidShell");
++        let limit = args.get("maxOutputBytes").and_then(Value::as_u64)
++            .filter(|n| *n > 0 && *n <= 1_048_576).ok_or_else(|| anyhow::anyhow!("SandboxInvalidOutputLimit"))?;
++        // No -e flags: model keys and the agentd environment stay on the host.
++        // Container timeout also applies after a lost daemon or cancelled host turn.
++        let output = Command::new("docker").args(["exec", "-w", &cwd, &self.container,
++            "timeout", "-s", "KILL", &seconds.to_string(), shell, "-c", &script]).output()
++            .map_err(|e| anyhow::anyhow!("SANDBOX_UNAVAILABLE: {e}"))?;
++        anyhow::ensure!(output.stdout.len() as u64 <= limit && output.stderr.len() as u64 <= limit, "SANDBOX_OUTPUT_LIMIT");
++        anyhow::ensure!(output.status.success(), "SANDBOX_EXEC_FAILED: {}", String::from_utf8_lossy(&output.stderr));
++        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn maps_mount_and_quotes_file_content_without_host_execution() -> anyhow::Result<()> {
++        let root = std::fs::canonicalize(std::env::temp_dir())?;
++        let executor = DockerTools { container: "test".into(), host_root: root.clone(), guest_root: "/workspace".into() };
++        let args = serde_json::json!({"cwd":root,"path":root.join("file with 'quote"),"content":"$(touch /host)"});
++        let (cwd, script) = executor.script("write", &args)?;
++        assert_eq!(cwd, "/workspace/");
++        assert!(!script.contains("$(touch"));
++        assert!(script.contains("'\\''"));
++        assert!(executor.map_path(&root.join("../outside")).is_err());
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod mount_tests {
++    use super::*;
++    #[test]
++    fn old_whole_app_mount_is_rejected_and_project_mount_is_routed() -> anyhow::Result<()> {
++        let base = std::env::temp_dir().join(format!("sandbox-mount-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
++        let project = base.join("project");
++        std::fs::create_dir_all(&project)?;
++        let root = std::fs::canonicalize(&base)?;
++        let managed = ManagedSandbox { container: "managed".into(), protected_paths: vec![root.join("data/providers.json")] };
++        let old = serde_json::json!([{"Type":"bind","Source":root,"Destination":"/workspace","RW":true}]);
++        assert!(managed.route(&old, &project).err().is_some_and(|e| e.to_string().contains("SANDBOX_UNSAFE_MOUNT")));
++        let safe = serde_json::json!([{"Type":"bind","Source":project,"Destination":"/workspace","RW":true}]);
++        let route = managed.route(&safe, &project)?;
++        assert_eq!(route.host_root, std::fs::canonicalize(&project)?);
++        assert_eq!(route.guest_root, "/workspace");
++        std::fs::remove_dir_all(base)?;
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs
+new file mode 100644
+index 0000000..1b3842b
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs
+@@ -0,0 +1,78 @@
++//! Host ports: the kernel cannot depend on the sandbox or expert crates.
++use super::{AgentBackend, pi::protocol::{PermissionResponse, SandboxResponse}};
++use crate::chat::{ChatSendArgs, ChatStreamEvent};
++use serde::Deserialize;
++use serde_json::Value;
++use std::sync::{Arc, OnceLock};
++
++pub trait SandboxExecutor: Send + Sync {
++    fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<String>;
++}
++static SANDBOX: OnceLock<Arc<dyn SandboxExecutor>> = OnceLock::new();
++pub fn set_sandbox_executor(executor: Arc<dyn SandboxExecutor>) { let _ = SANDBOX.set(executor); }
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct Request { session_id: String, call_id: String, operation: String, args: Value }
++
++pub fn sandbox_response(executor: Option<&dyn SandboxExecutor>, payload: &str) -> anyhow::Result<SandboxResponse> {
++    let request: Request = serde_json::from_str(payload)?;
++    let result = executor.ok_or_else(|| anyhow::anyhow!("SANDBOX_UNAVAILABLE: host executor is not installed"))
++        .and_then(|executor| executor.execute(&request.operation, &request.args));
++    let (output, error) = match result { Ok(output) => (output, None), Err(error) => (String::new(), Some(error.to_string())) };
++    Ok(SandboxResponse { session_id: request.session_id, call_id: request.call_id, output, error })
++}
++pub fn handle_sandbox(backend: &dyn AgentBackend, event: &ChatStreamEvent) -> anyhow::Result<bool> {
++    if event.kind != "sandbox.request" { return Ok(false); }
++    let payload = event.text.as_deref().ok_or_else(|| anyhow::anyhow!("SandboxMissingRequest"))?;
++    if let Err(error) = backend.sandbox_respond(sandbox_response(SANDBOX.get().map(|e| e.as_ref()), payload)?) {
++        // Cancellation can finish the daemon request while Docker is winding down.
++        // Preserve the queued terminal event instead of losing it on a stale reply.
++        if !error.to_string().starts_with("SANDBOX_REQUEST_NOT_FOUND:") { return Err(error); }
++    }
++    Ok(true)
++}
++/// Minimal host confirmation API, bound to authenticated shell IPC.
++/// Without a response, agentd denies on timeout; headless callers never auto-approve.
++#[cfg_attr(feature = "desktop", tauri::command(async))]
++pub fn chat_permission_respond(response: PermissionResponse) -> Result<(), String> {
++    super::selected().and_then(|backend| backend.permission_respond(response)).map_err(|error| error.to_string())
++}
++pub fn expert_prompt(args: &ChatSendArgs) -> Option<String> {
++    let bridge = crate::chat::bridges::expert_bridge()?;
++    match args.agent_mode.as_deref() {
++        Some("single-agent") | Some("single-expert") => None,
++        Some("expert-team") if bridge.detect_multi_expert_task(&args.prompt) => {
++            let project = args.conversation_id.as_deref().and_then(crate::conv::project_id_of_conversation)?;
++            bridge.team_block_spawn(project, args.prompt.clone())
++        }
++        _ => bridge.route_block(&args.prompt),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    struct Fake(std::sync::atomic::AtomicUsize);
++    impl SandboxExecutor for Fake {
++        fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<String> {
++            assert_eq!(operation, "bash");
++            assert_eq!(args["command"], "touch /host-marker");
++            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            Ok("container-only".into())
++        }
++    }
++    #[test]
++    fn sandbox_routes_only_through_injected_executor_and_fails_closed() -> anyhow::Result<()> {
++        let payload = serde_json::json!({"sessionId":"s","callId":"c", "operation":"bash",
++            "args":{"command":"touch /host-marker"}}).to_string();
++        let fake = Fake(std::sync::atomic::AtomicUsize::new(0));
++        let response = sandbox_response(Some(&fake), &payload)?;
++        assert_eq!(response.output, "container-only");
++        assert!(response.error.is_none());
++        assert_eq!(fake.0.load(std::sync::atomic::Ordering::SeqCst), 1);
++        let unavailable = sandbox_response(None, &payload)?;
++        assert!(unavailable.error.is_some_and(|e| e.contains("SANDBOX_UNAVAILABLE")));
++        assert!(unavailable.output.is_empty());
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+index cf793ed..dc2cad8 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+@@ -8,6 +8,8 @@ pub mod claude_cli;
+ pub mod pi;
+ pub mod stream;
+ mod bridge;
++pub mod host_tools;
++pub mod docker_tools;
+ use std::{path::PathBuf, sync::Arc, time::Duration};
+ use serde::Serialize;
+ use crate::chat::{ChatSendArgs, PermissionMode};
+@@ -39,6 +41,11 @@ impl std::fmt::Display for BackendError {
+ }
+ impl std::error::Error for BackendError {}
+ 
++#[derive(Default)]
++pub struct ToolOptions {
++    pub sandbox: bool,
++    pub expert_prompt: Option<String>,
++}
+ pub struct TurnRequest {
+     pub req_id: String,
+     /// Polaris session key; the Pi adapter maps it to the daemon's UUID.
+@@ -73,7 +80,17 @@ impl BackendStatus {
+     }
+ }
+ pub trait AgentBackend: Send + Sync {
++    fn permission_respond(&self, _response: pi::protocol::PermissionResponse) -> anyhow::Result<()> {
++        anyhow::bail!("PermissionResponseUnsupported")
++    }
++    fn sandbox_respond(&self, _response: pi::protocol::SandboxResponse) -> anyhow::Result<()> {
++        anyhow::bail!("SandboxResponseUnsupported")
++    }
+     fn start(&self, input: TurnRequest) -> anyhow::Result<EventStream>;
++    fn start_with_tools(&self, input: TurnRequest, options: ToolOptions) -> anyhow::Result<EventStream> {
++        anyhow::ensure!(!options.sandbox && options.expert_prompt.is_none(), "BackendToolOptionsUnsupported");
++        self.start(input)
++    }
+     fn cancel(&self, req_id: &str) -> anyhow::Result<()>;
+     fn close(&self, session_id: &str) -> anyhow::Result<()>;
+     fn models(&self) -> anyhow::Result<serde_json::Value>;
+@@ -120,6 +137,7 @@ pub fn collect<F: FnMut(&str, &str)>(
+                 && deadline.is_none_or(|d| std::time::Instant::now() < d) => continue,
+             Err(e) => { let _ = backend.cancel(&req); return Err(e); }
+         };
++        if host_tools::handle_sandbox(backend, &event)? { continue; }
+         match event.kind.as_str() {
+             "delta" => { let text = event.text.as_deref().unwrap_or_default(); result.push_str(text); on_event("delta", text); }
+             "tool" => on_event("tool", event.tool.as_deref().unwrap_or_default()),
+@@ -130,5 +148,5 @@ pub fn collect<F: FnMut(&str, &str)>(
+     }
+ }
+ pub(crate) fn event(req: &str, conv: Option<&str>, kind: &str, text: Option<String>) -> crate::chat::ChatStreamEvent {
+-    crate::chat::ChatStreamEvent { req_id: req.into(), conversation_id: conv.map(str::to_owned), kind: kind.into(), text, tool: None }
++    crate::chat::ChatStreamEvent { call_id: None, parent_call_id: None, req_id: req.into(), conversation_id: conv.map(str::to_owned), kind: kind.into(), text, tool: None }
+ }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs
+index a01392f..28567a3 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs
+@@ -24,5 +24,11 @@ pub fn options(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionOp
+         anyhow::ensure!(!model.provider.is_empty() && !model.id.is_empty(), "AgentdInvalidModel");
+     }
+     Ok(SessionOptions { model, thinking_level: input.thinking_level.clone(),
++        permission_mode: Some(match input.permission {
++            PermissionMode::Deny => super::protocol::PermissionMode::Deny,
++            PermissionMode::Manual => super::protocol::PermissionMode::Manual,
++            PermissionMode::AutoCurrent => super::protocol::PermissionMode::AutoCurrent,
++            PermissionMode::AutoAll => super::protocol::PermissionMode::AutoAll,
++        }), sandbox: None, expert_prompt: None,
+         tool_profile: Some(match input.permission { PermissionMode::Deny => "readonly", _ => "workspace" }.into()) })
+ }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+index ddce9e3..8b44cb6 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+@@ -52,7 +52,16 @@ impl PiBackend {
+     }
+ }
+ impl AgentBackend for PiBackend {
++    fn permission_respond(&self, response: protocol::PermissionResponse) -> anyhow::Result<()> {
++        self.client()?.call(Command::PermissionRespond(response)).map(|_| ())
++    }
++    fn sandbox_respond(&self, response: protocol::SandboxResponse) -> anyhow::Result<()> {
++        self.client()?.call(Command::SandboxRespond(response)).map(|_| ())
++    }
+     fn start(&self, input: TurnRequest) -> anyhow::Result<EventStream> {
++        self.start_with_tools(input, ToolOptions::default())
++    }
++    fn start_with_tools(&self, input: TurnRequest, options: ToolOptions) -> anyhow::Result<EventStream> {
+         if self.config.isolation == "per-account" {
+             return Err(if input.account_id.is_some() { BackendError::UnsupportedIsolation } else { BackendError::AccountContextRequired }.into());
+         }
+@@ -76,7 +85,7 @@ impl AgentBackend for PiBackend {
+                 sender.push_blocking(event(&req, conv.as_deref(), "meta",
+                     Some(crate::chat::prompt::estimate_tokens(&input.prompt).to_string())));
+                 if cancelled.lock().remove(&req) { sender.finish(None, event(&req, conv.as_deref(), "done", None)); return Ok(()); }
+-                let info = sessions::open(&client, &input)?;
++                let info = sessions::open(&client, &input, options)?;
+                 if matches!(input.permission, PermissionMode::Deny) {
+                     anyhow::ensure!(info.tools.iter().all(|t| client.config.readonly_tools.contains(t)),
+                         BackendError::UnsupportedInput("read-only/manual request cannot use a daemon with write or execution tools"));
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+index 58de1f0..a034d12 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+@@ -2,7 +2,7 @@
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ /// Mirror of agentd/src/protocol/schema.ts; fingerprint test gates changes.
+-pub const PROTOCOL_VERSION: u64 = 2;
++pub const PROTOCOL_VERSION: u64 = 3;
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+ #[serde(untagged)]
+ pub enum Id { Text(String), Number(i64) }
+@@ -12,6 +12,8 @@ pub struct Request { pub id: Id, #[serde(flatten)] pub command: Command }
+ #[derive(Debug, Serialize, Deserialize)]
+ #[serde(tag = "method", content = "params")]
+ pub enum Command {
++    #[serde(rename = "permission.respond")] PermissionRespond(PermissionResponse),
++    #[serde(rename = "sandbox.respond")] SandboxRespond(SandboxResponse),
+     #[serde(rename = "ping")] Ping(Empty),
+     #[serde(rename = "models.list")] Models(Empty),
+     #[serde(rename = "session.open")] Open(Open),
+@@ -23,6 +25,21 @@ pub enum Command {
+     #[serde(rename = "close")] Close(Session),
+     #[serde(rename = "config.apply")] Apply(Apply),
+ }
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "kebab-case")]
++pub enum PermissionMode { Deny, Manual, AutoCurrent, AutoAll }
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub enum Decision { Allow, Deny, AllowAlways }
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct PermissionResponse { pub session_id: String, pub call_id: String, pub decision: Decision }
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct SandboxResponse {
++    pub session_id: String, pub call_id: String, pub output: String,
++    #[serde(skip_serializing_if = "Option::is_none")] pub error: Option<String>,
++}
+ #[derive(Debug, Serialize, Deserialize, Default)]
+ #[serde(deny_unknown_fields)]
+ pub struct Empty {}
+@@ -45,6 +62,9 @@ pub struct SessionOptions {
+     #[serde(skip_serializing_if = "Option::is_none")] pub model: Option<Model>,
+     #[serde(skip_serializing_if = "Option::is_none")] pub thinking_level: Option<ThinkingLevel>,
+     #[serde(skip_serializing_if = "Option::is_none")] pub tool_profile: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")] pub permission_mode: Option<PermissionMode>,
++    #[serde(skip_serializing_if = "Option::is_none")] pub sandbox: Option<bool>,
++    #[serde(skip_serializing_if = "Option::is_none")] pub expert_prompt: Option<String>,
+ }
+ #[derive(Debug, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -99,6 +119,10 @@ pub enum Frame {
+ #[derive(Debug, Clone, Deserialize)]
+ #[serde(tag = "event")]
+ pub enum Event {
++    #[serde(rename = "permission.request", rename_all = "camelCase")]
++    PermissionRequest { target_session_id: String, call_id: String, tool: String, summary: String, parent_call_id: Option<String> },
++    #[serde(rename = "sandbox.request", rename_all = "camelCase")]
++    SandboxRequest { target_session_id: String, call_id: String, operation: String, args: Value },
+     #[serde(rename = "turn.started")] Started,
+     #[serde(rename = "text.delta")] Text { text: String },
+     #[serde(rename = "reasoning.delta")] Reasoning { text: String },
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs
+index 84577eb..3969814 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/sessions.rs
+@@ -10,8 +10,10 @@ pub struct SessionInfo { pub id: String, pub cwd: PathBuf, pub model: Value, pub
+ fn path(client: &Client, key: &str) -> PathBuf {
+     client.config.session_map.join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
+ }
+-pub fn open(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionInfo> {
+-    let options = super::input::options(client, input)?;
++pub fn open(client: &Client, input: &TurnRequest, tools: super::super::ToolOptions) -> anyhow::Result<SessionInfo> {
++    let mut options = super::input::options(client, input)?;
++    options.sandbox = Some(tools.sandbox);
++    options.expert_prompt = Some(tools.expert_prompt.unwrap_or_default());
+     let file = path(client, &input.session_id);
+     let previous: Option<SessionInfo> = match std::fs::read(&file) {
+         Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
+index 8e3a8a7..6dee8b3 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
+@@ -36,12 +36,25 @@ impl Translator {
+         }
+         let mut out = self.flush();
+         match input {
+-            Event::ToolStarted { call_id, tool, args, .. } => {
++            Event::PermissionRequest { target_session_id, call_id, tool, summary, parent_call_id } => {
++                out.push(self.make("permission.request", Some(serde_json::json!({
++                    "sessionId": target_session_id, "callId": call_id, "tool": tool,
++                    "summary": summary, "parentCallId": parent_call_id,
++                }).to_string())));
++            }
++            Event::SandboxRequest { target_session_id, call_id, operation, args } => {
++                out.push(self.make("sandbox.request", Some(serde_json::json!({
++                    "sessionId": target_session_id, "callId": call_id, "operation": operation, "args": args,
++                }).to_string())));
++            }
++            Event::ToolStarted { call_id, tool, args, parent_call_id } => {
+                 let path = args.get("path").and_then(|v| v.as_str());
+                 let summary = path.or_else(|| args.get("command").and_then(|v| v.as_str()))
+                     .or_else(|| args.get("pattern").and_then(|v| v.as_str())).map(str::to_owned);
+                 let mut ev = self.make("tool", summary);
+                 ev.tool = Some(tool.clone());
++                ev.call_id = Some(call_id.clone());
++                ev.parent_call_id = parent_call_id;
+                 out.push(ev);
+                 if self.write_tools.contains(&tool) {
+                     if let Some(path) = path {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/pipeline.rs b/src-tauri/crates/polaris-kernel/src/chat/pipeline.rs
+index 57465df..c0d8dba 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/pipeline.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/pipeline.rs
+@@ -82,6 +82,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
+             emit_event(
+                 &bg_app,
+                 ChatStreamEvent {
++                    call_id: None, parent_call_id: None,
+                     req_id: bg_req.clone(),
+                     kind: "error".into(),
+                     text: Some(msg),
+@@ -92,6 +93,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
+             emit_event(
+                 &bg_app,
+                 ChatStreamEvent {
++                    call_id: None, parent_call_id: None,
+                     req_id: bg_req.clone(),
+                     kind: "done".into(),
+                     text: None,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/types.rs b/src-tauri/crates/polaris-kernel/src/chat/types.rs
+index 06424bd..3dc30a6 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/types.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/types.rs
+@@ -112,6 +112,10 @@ pub struct ChatPrewarmArgs {
+ #[derive(Debug, Clone, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct ChatStreamEvent {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub call_id: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub parent_call_id: Option<String>,
+     pub req_id: String,
+     pub kind: String, // delta | tool | error | done
+     #[serde(skip_serializing_if = "Option::is_none")]
+diff --git a/src-tauri/src/apihub/chat_services.rs b/src-tauri/src/apihub/chat_services.rs
+index 614a72e..1ac78f4 100644
+--- a/src-tauri/src/apihub/chat_services.rs
++++ b/src-tauri/src/apihub/chat_services.rs
+@@ -3,6 +3,11 @@ fn dispatch_chat_and_services(cmd: &str, a: &Args, app: AppHandle) -> Result<Val
+     use crate::*;
+     match cmd {
+         // ── Chat (sync 部分) ──
++        "chat_permission_respond" => {
++            let response = serde_json::from_value(a.get("response").cloned()
++                .ok_or("缺少参数 response")?).map_err(|e| format!("授权参数解析失败: {e}"))?;
++            ok(chat::backend::host_tools::chat_permission_respond(response)?)
++        }
+         "chat_cancel" => ok(chat::chat_cancel(req_str(a, "reqId")?)?),
+         "chat_is_running" => ok(chat::chat_is_running(req_str(a, "reqId")?)),
+         "chat_build_manifest" => ok(chat::chat_build_manifest(opt_str(a, "conversationId"))),
+diff --git a/src-tauri/src/apihub/desktop.rs b/src-tauri/src/apihub/desktop.rs
+index 6b277eb..cd7b6e0 100644
+--- a/src-tauri/src/apihub/desktop.rs
++++ b/src-tauri/src/apihub/desktop.rs
+@@ -45,6 +45,11 @@ async fn dispatch_desktop(cmd: &str, a: &Args, _app: AppHandle) -> Result<Value,
+         "app_open" => ok(crate::appproxy::app_open(req_str(a, "slug")?)?),
+ 
+         // ── 对话辅助(chat_send 在 invoke 里单独特判) ──
++        "chat_permission_respond" => {
++            let response = serde_json::from_value(a.get("response").cloned()
++                .ok_or("缺少参数 response")?).map_err(|e| format!("授权参数解析失败: {e}"))?;
++            ok(chat::backend::host_tools::chat_permission_respond(response)?)
++        }
+         "chat_cancel" => ok(chat::chat_cancel(req_str(a, "reqId")?)?),
+         "chat_is_running" => ok(chat::chat_is_running(req_str(a, "reqId")?)),
+         // 附件路径必须过闸(见 gate_attach_paths 的大注释):它会把给定路径的文件
+diff --git a/src-tauri/src/desktop_commands.rs b/src-tauri/src/desktop_commands.rs
+index d4a5fcf..f7ea0d0 100644
+--- a/src-tauri/src/desktop_commands.rs
++++ b/src-tauri/src/desktop_commands.rs
+@@ -175,6 +175,7 @@ tauri::generate_handler![
+             integrations::nas::nas_disconnect,
+             // Chat
+             chat::chat_send,
++            chat::backend::host_tools::chat_permission_respond,
+             chat::agent_backend_status,
+             chat::chat_prewarm, // 打字期预热常驻 claude 进程(best-effort)
+             chat::chat_cancel,
+diff --git a/src-tauri/src/wiring.rs b/src-tauri/src/wiring.rs
+index 752acbd..eccc7f4 100644
+--- a/src-tauri/src/wiring.rs
++++ b/src-tauri/src/wiring.rs
+@@ -98,4 +98,15 @@ impl ExpertBridge for ShellExpertBridge {
+ pub fn wire_engine_bridges() {
+     bridges::set_kb_bridge(Arc::new(ShellKbBridge));
+     bridges::set_expert_bridge(Arc::new(ShellExpertBridge));
++    if let (Some(dirs), Ok(config)) = (directories::UserDirs::new(), crate::chat::backend::config::Config::load()) {
++        crate::chat::backend::host_tools::set_sandbox_executor(Arc::new(
++            crate::chat::backend::docker_tools::ManagedSandbox {
++                container: config.agentd.sandbox_container,
++                protected_paths: vec![dirs.home_dir().join("Polaris/data"),
++                    dirs.home_dir().join(".polaris"), dirs.home_dir().join(".pi"),
++                    dirs.home_dir().join(".claude"), dirs.home_dir().join(".codex"),
++                    dirs.home_dir().join(".ssh"), dirs.home_dir().join(".aws")],
++            },
++        ));
++    }
+ }
+diff --git a/src/features/permissions/PermissionDialog.vue b/src/features/permissions/PermissionDialog.vue
+new file mode 100644
+index 0000000..dba8d27
+--- /dev/null
++++ b/src/features/permissions/PermissionDialog.vue
+@@ -0,0 +1,62 @@
++<script setup lang="ts">
++import { computed, onMounted, onUnmounted, ref } from "vue";
++import { invoke, listen } from "../../tauri";
++import { consume, type Approval, type Decision, type PermissionEvent } from "./queue";
++
++const queue = ref<Approval[]>([]);
++const current = computed(() => queue.value[0]);
++const busy = ref(false);
++const error = ref("");
++let dispose: (() => void) | undefined;
++let stopped = false;
++onMounted(async () => {
++  try {
++    const stop = await listen<PermissionEvent>("chat:stream", (event) => {
++      queue.value = consume(queue.value, event);
++    });
++    if (stopped) stop(); else dispose = stop;
++  } catch { error.value = "无法连接授权请求；未确认的操作会自动拒绝。"; }
++});
++onUnmounted(() => { stopped = true; dispose?.(); });
++async function respond(decision: Decision) {
++  const approval = current.value;
++  if (!approval || busy.value) return;
++  busy.value = true;
++  error.value = "";
++  try {
++    await invoke("chat_permission_respond", { response: {
++      sessionId: approval.sessionId, callId: approval.callId, decision,
++    } });
++    queue.value = queue.value.filter((item) => item !== approval);
++  } catch (reason) {
++    if (String(reason).includes("APPROVAL_NOT_FOUND") || String(reason).includes("SESSION_NOT_FOUND")) {
++      queue.value = queue.value.filter((item) => item !== approval);
++    } else error.value = "授权发送失败，请重试；未确认的操作会自动拒绝。";
++  } finally { busy.value = false; }
++}
++</script>
++
++<template>
++  <div v-if="current" class="permission-backdrop">
++    <section role="dialog" aria-modal="true" aria-labelledby="permission-title" class="permission-dialog">
++      <h2 id="permission-title">允许此操作？</h2>
++      <p>{{ current.tool }}<span v-if="current.parentCallId"> · 子任务</span></p>
++      <pre>{{ current.summary }}</pre>
++      <p v-if="error" role="alert">{{ error }}</p>
++      <div class="permission-actions">
++        <button :disabled="busy" @click="respond('deny')">拒绝</button>
++        <button :disabled="busy" @click="respond('allow')">允许一次</button>
++        <button :disabled="busy" @click="respond('allowAlways')">本会话相同调用总是允许</button>
++      </div>
++    </section>
++  </div>
++</template>
++
++<style scoped>
++.permission-backdrop { position: fixed; inset: 0; z-index: 10000; background: #0008; display: grid; place-items: center; }
++.permission-dialog { background: var(--bg-primary, #fff); color: var(--text-primary, #222); width: min(90vw, 640px); padding: 24px; border-radius: 12px; }
++.permission-dialog h2 { margin: 0 0 12px; font-size: 20px; }
++.permission-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 45vh; overflow: auto; padding: 12px; background: #8881; }
++.permission-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
++.permission-actions button { padding: 8px 12px; border: 1px solid #8886; border-radius: 6px; cursor: pointer; }
++</style>
+diff --git a/src/features/permissions/queue.ts b/src/features/permissions/queue.ts
+new file mode 100644
+index 0000000..6e3090e
+--- /dev/null
++++ b/src/features/permissions/queue.ts
+@@ -0,0 +1,25 @@
++export type Decision = "allow" | "deny" | "allowAlways";
++export interface Approval {
++  reqId: string;
++  sessionId: string;
++  callId: string;
++  tool: string;
++  summary: string;
++  parentCallId?: string;
++}
++export interface PermissionEvent { kind: string; reqId: string; text?: string | null }
++export function consume(queue: Approval[], event: PermissionEvent): Approval[] {
++  if (event.kind === "done") return queue.filter((item) => item.reqId !== event.reqId);
++  if (event.kind !== "permission.request" || !event.text) return queue;
++  try {
++    const value: unknown = JSON.parse(event.text);
++    if (!value || typeof value !== "object") return queue;
++    const approval = value as Record<string, unknown>;
++    if (!["sessionId", "callId", "tool", "summary"].every((key) => typeof approval[key] === "string")) return queue;
++    const item: Approval = { reqId: event.reqId, sessionId: String(approval.sessionId), callId: String(approval.callId),
++      tool: String(approval.tool), summary: String(approval.summary),
++      parentCallId: typeof approval.parentCallId === "string" ? approval.parentCallId : undefined };
++    if (queue.some((entry) => entry.callId === item.callId && entry.sessionId === item.sessionId)) return queue;
++    return [...queue, item];
++  } catch { return queue; }
++}
+diff --git a/src/main.ts b/src/main.ts
+index 9a351f2..ffe7c7c 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -1,6 +1,7 @@
+ import { createApp } from "vue";
+ import { createPinia } from "pinia";
+ import App from "./App.vue";
++import PermissionDialog from "./features/permissions/PermissionDialog.vue";
+ import "./style.css";
+ import { toast } from "./composables/useToast";
+ import { humanizeError } from "./lib/humanizeError";
+@@ -27,3 +28,7 @@ window.addEventListener("error", (e) => {
+ 
+ app.use(createPinia());
+ app.mount("#app");
++
++const permissionRoot = document.createElement("div");
++document.body.appendChild(permissionRoot);
++createApp(PermissionDialog).mount(permissionRoot);

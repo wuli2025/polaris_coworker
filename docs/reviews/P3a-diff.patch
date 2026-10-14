@@ -1,0 +1,829 @@
+diff --git a/agentd/config/agent.default.json b/agentd/config/agent.default.json
+index dc4f7dd..4c8e50b 100644
+--- a/agentd/config/agent.default.json
++++ b/agentd/config/agent.default.json
+@@ -37,13 +37,19 @@
+       "read",
+       "grep",
+       "find",
+-      "ls"
++      "ls",
++      "web_fetch",
++      "web_search",
++      "subagent"
+     ],
+     "readonly": [
+       "read",
+       "grep",
+       "find",
+-      "ls"
++      "ls",
++      "web_fetch",
++      "web_search",
++      "subagent"
+     ],
+     "workspace": [
+       "read",
+@@ -51,7 +57,11 @@
+       "find",
+       "ls",
+       "edit",
+-      "write"
++      "write",
++      "web_fetch",
++      "web_search",
++      "subagent",
++      "bash"
+     ],
+     "full": [
+       "read",
+@@ -60,7 +70,10 @@
+       "ls",
+       "edit",
+       "write",
+-      "bash"
++      "bash",
++      "web_fetch",
++      "web_search",
++      "subagent"
+     ]
+   },
+   "attachments": {
+@@ -73,5 +86,39 @@
+       "image/gif",
+       "image/webp"
+     ]
++  },
++  "permissions": {
++    "defaultMode": "manual",
++    "timeoutMs": 60000,
++    "summaryChars": 2000
++  },
++  "sandbox": {
++    "timeoutMs": 120000,
++    "shell": "sh",
++    "maxOutputBytes": 262144
++  },
++  "subagents": {
++    "maxConcurrent": 2,
++    "maxDepth": 2,
++    "summaryChars": 16000
++  },
++  "skills": {
++    "paths": [
++      "~/Polaris/skills"
++    ]
++  },
++  "experts": {
++    "enabled": false,
++    "prompt": ""
++  },
++  "web": {
++    "timeoutMs": 15000,
++    "maxBytes": 1048576,
++    "maxRedirects": 3,
++    "search": {
++      "endpoint": "https://api.search.brave.com/res/v1/web/search",
++      "credential": "web-search",
++      "maxResults": 5
++    }
+   }
+ }
+diff --git a/agentd/src/config/schema.ts b/agentd/src/config/schema.ts
+index 9779704..ccb791f 100644
+--- a/agentd/src/config/schema.ts
++++ b/agentd/src/config/schema.ts
+@@ -16,6 +16,18 @@ export const ProviderSchema = Type.Object({
+   }, { additionalProperties: false }), { minItems: 1 }),
+ }, { additionalProperties: false });
+ export const ConfigSchema = Type.Object({
++  permissions: Type.Object({ defaultMode: Type.Union([
++    Type.Literal("deny"), Type.Literal("manual"), Type.Literal("auto-current"), Type.Literal("auto-all"),
++  ]), timeoutMs: positive, summaryChars: positive }, { additionalProperties: false }),
++  sandbox: Type.Object({ timeoutMs: positive, maxOutputBytes: Type.Integer({ minimum: 1, maximum: 1048576 }),
++    shell: Type.Union([Type.Literal("sh"), Type.Literal("bash")]) }, { additionalProperties: false }),
++  subagents: Type.Object({ maxConcurrent: positive, maxDepth: Type.Integer({ minimum: 0 }),
++    summaryChars: positive }, { additionalProperties: false }),
++  skills: Type.Object({ paths: Type.Array(text) }, { additionalProperties: false }),
++  experts: Type.Object({ enabled: Type.Boolean(), prompt: Type.String() }, { additionalProperties: false }),
++  web: Type.Object({ timeoutMs: positive, maxBytes: positive, maxRedirects: Type.Integer({ minimum: 0 }),
++    search: Type.Object({ endpoint: text, credential: text, maxResults: positive }, { additionalProperties: false }),
++  }, { additionalProperties: false }),
+   sessionDir: text,
+   maxSessions: positive,
+   maxQueuedMessages: Type.Integer({ minimum: 0 }),
+diff --git a/agentd/src/daemon.ts b/agentd/src/daemon.ts
+index 1ca0590..ce62427 100644
+--- a/agentd/src/daemon.ts
++++ b/agentd/src/daemon.ts
+@@ -61,7 +61,7 @@ export class Daemon {
+       sessionId = "sessionId" in request.params ? request.params.sessionId : undefined;
+       this.logger.log("debug", "Request received", { requestId: request.id, sessionId });
+       if (this.stopping) throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
+-      const key = sessionId ? `session:${sessionId}` : request.method === "config.apply" ? "config" : undefined;
++      const key = request.method.endsWith(".respond") ? undefined : sessionId ? `session:${sessionId}` : request.method === "config.apply" ? "config" : undefined;
+       const result = await this.schedule(key, () => this.dispatch(request));
+       this.logger.log("info", "Request completed", { requestId: request.id, sessionId });
+       return { type: "response", id: request.id, ok: true, result };
+@@ -85,6 +85,8 @@ export class Daemon {
+   }
+   private async dispatch(request: Request): Promise<unknown> {
+     switch (request.method) {
++      case "permission.respond": return this.sessions.respondPermission(request.params.sessionId, request.params.callId, request.params.decision);
++      case "sandbox.respond": return this.sessions.respondSandbox(request.params.sessionId, request.params.callId, request.params.output, request.params.error);
+       case "ping": return { status: "ok", sessions: this.sessions.size, ...versions };
+       case "models.list": return { models: this.models.list() };
+       case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd, request.params);
+diff --git a/agentd/src/extensions/index.ts b/agentd/src/extensions/index.ts
+index 59012db..be76bc9 100644
+--- a/agentd/src/extensions/index.ts
++++ b/agentd/src/extensions/index.ts
+@@ -1,4 +1,6 @@
+ import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+ 
+-/** Host-owned assembly point. P3 will add permissions and sandbox factories here. */
++/** Optional trusted host extensions. Mandatory permission/sandbox/web/subagent
++ * factories are assembled per session in SessionRegistry and cannot be disabled
++ * by extensions.enabled. Project executable extensions remain disabled. */
+ export const extensionFactories: ExtensionFactory[] = [];
+diff --git a/agentd/src/extensions/permissions.ts b/agentd/src/extensions/permissions.ts
+new file mode 100644
+index 0000000..efedbcb
+--- /dev/null
++++ b/agentd/src/extensions/permissions.ts
+@@ -0,0 +1,90 @@
++import { homedir } from "node:os";
++import { fileURLToPath } from "node:url";
++import { realpath } from "node:fs/promises";
++import { dirname, resolve, relative, isAbsolute, basename } from "node:path";
++import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
++import type { PermissionMode } from "../protocol/schema.ts";
++
++export type Decision = "allow" | "deny" | "allowAlways";
++export interface Approval { callId: string; tool: string; summary: string }
++const readers = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search", "subagent"]);
++
++// Resolve the closest existing ancestor, including symlinks, for new files.
++async function canonical(path: string): Promise<string> {
++  try { return await realpath(path); }
++  catch (error) {
++    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(path) === path) throw error;
++    return resolve(await canonical(dirname(path)), basename(path));
++  }
++}
++// Match the pinned Pi tool path syntax before the containment check. Pi normalizes
++// these forms at execution, so checking their unexpanded spelling would be unsafe.
++export function toolPath(input: string): string {
++  let path = input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ");
++  if (path.startsWith("@")) path = path.slice(1);
++  if (process.platform === "win32" && path.startsWith("/") && !path.startsWith("//") && !path.includes("\\")) {
++    const drive = path.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
++    if (drive) path = `${drive[1].toUpperCase()}:\\${(drive[2] ?? "").replaceAll("/", "\\")}`;
++  }
++  if (path === "~") return homedir();
++  if (path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"))) return resolve(homedir(), path.slice(2));
++  return path.startsWith("file://") ? fileURLToPath(path) : path;
++}
++export async function withinWorkspace(cwd: string, path: unknown): Promise<boolean> {
++  if (typeof path !== "string" || !path) return false;
++  try {
++    const rel = relative(await realpath(cwd), await canonical(resolve(cwd, toolPath(path))));
++    return !isAbsolute(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("..\\");
++  } catch { return false; }
++}
++export class Permissions {
++  private readonly remembered = new Set<string>();
++  private readonly pending = new Map<string, (decision: Decision) => void>();
++  constructor(public mode: PermissionMode, private readonly cwd: string,
++    private readonly timeoutMs: number, private readonly summaryChars: number,
++    private readonly emit: (approval: Approval) => void) {}
++  configure(mode: PermissionMode): void {
++    this.cancel();
++    this.remembered.clear();
++    this.mode = mode;
++  }
++  respond(callId: string, decision: Decision): boolean {
++    const resolve = this.pending.get(callId);
++    if (!resolve) return false;
++    resolve(decision);
++    return true;
++  }
++  cancel(): void { for (const resolve of this.pending.values()) resolve("deny"); }
++  async check(callId: string, tool: string, args: Record<string, unknown>): Promise<boolean> {
++    if (this.mode === "auto-all" || readers.has(tool)) return true;
++    if (this.mode === "deny") return false;
++    const inside = ["write", "edit"].includes(tool) && await withinWorkspace(this.cwd, args.path);
++    if (this.mode === "auto-current" && inside) return true;
++    // allowAlways is scoped to this exact tool and arguments, in this session.
++    const key = JSON.stringify([tool, args]);
++    if (this.remembered.has(key)) return true;
++    if (this.pending.has(callId)) return false;
++    const decision = await new Promise<Decision>((resolve) => {
++      const timer = setTimeout(() => finish("deny"), this.timeoutMs);
++      const finish = (decision: Decision) => {
++        clearTimeout(timer);
++        this.pending.delete(callId);
++        resolve(decision);
++      };
++      this.pending.set(callId, finish);
++      try { this.emit({ callId, tool, summary: JSON.stringify(args).slice(0, this.summaryChars) }); }
++      catch { finish("deny"); }
++    });
++    if (decision === "allowAlways") this.remembered.add(key);
++    return decision !== "deny";
++  }
++  factory(): ExtensionFactory {
++    return (pi) => {
++      pi.on("tool_call", async (event) => {
++        if (!await this.check(event.toolCallId, event.toolName, event.input)) {
++          return { block: true, reason: "PERMISSION_DENIED: host rejected the operation, approval expired, or the session is read-only." };
++        }
++      });
++    };
++  }
++}
+diff --git a/agentd/src/extensions/resources.ts b/agentd/src/extensions/resources.ts
+new file mode 100644
+index 0000000..ef87124
+--- /dev/null
++++ b/agentd/src/extensions/resources.ts
+@@ -0,0 +1,20 @@
++import { existsSync, readFileSync } from "node:fs";
++import { dirname, join, resolve } from "node:path";
++import { homedir } from "node:os";
++
++export function expandPath(path: string): string {
++  return resolve(path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
++}
++export function contextFiles(cwd: string, base: { agentsFiles: { path: string; content: string }[] }) {
++  const files = new Map(base.agentsFiles.map((file) => [dirname(file.path), file]));
++  const parents: string[] = [];
++  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
++    parents.unshift(dir);
++    if (dirname(dir) === dir) break;
++  }
++  for (const dir of parents) {
++    const path = ["AGENTS.md", "CLAUDE.md"].map((name) => join(dir, name)).find(existsSync);
++    if (path) files.set(dir, { path, content: readFileSync(path, "utf8") });
++  }
++  return { agentsFiles: [...files.values()] };
++}
+diff --git a/agentd/src/extensions/sandbox.ts b/agentd/src/extensions/sandbox.ts
+new file mode 100644
+index 0000000..6f41e0f
+--- /dev/null
++++ b/agentd/src/extensions/sandbox.ts
+@@ -0,0 +1,64 @@
++import type { Config } from "../config/schema.ts";
++import { randomUUID } from "node:crypto";
++import {
++  createBashToolDefinition, createWriteToolDefinition, createEditToolDefinition,
++  type ExtensionFactory,
++} from "@earendil-works/pi-coding-agent";
++
++export interface SandboxRequest { callId: string; operation: string; args: Record<string, unknown> }
++export class Sandbox {
++  private readonly pending = new Map<string, (output: string, error?: string) => void>();
++  constructor(public enabled: boolean, private readonly cwd: string, private readonly config: Config["sandbox"],
++    private readonly emit: (request: SandboxRequest) => void) {}
++  respond(callId: string, output: string, error?: string): boolean {
++    const finish = this.pending.get(callId);
++    if (!finish) return false;
++    finish(output, error);
++    return true;
++  }
++  cancel(): void { for (const finish of this.pending.values()) finish("", "SANDBOX_ABORTED"); }
++  request(operation: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
++    return new Promise((resolve, reject) => {
++      if (signal?.aborted) return reject(new Error("SANDBOX_ABORTED"));
++      const callId = randomUUID();
++      const abort = () => finish("", "SANDBOX_ABORTED");
++      const timer = setTimeout(() => finish("", "SANDBOX_TIMEOUT: no host execution result"), this.config.timeoutMs);
++      const finish = (output: string, error?: string) => {
++        clearTimeout(timer);
++        signal?.removeEventListener("abort", abort);
++        this.pending.delete(callId);
++        if (error) reject(new Error(error)); else resolve(output);
++      };
++      this.pending.set(callId, finish);
++      signal?.addEventListener("abort", abort, { once: true });
++      try { this.emit({ callId, operation, args: { ...args, cwd: this.cwd, ...this.config } }); }
++      catch { finish("", "SANDBOX_UNAVAILABLE"); }
++    });
++  }
++  factory(): ExtensionFactory {
++    return (pi) => {
++      const writeFile = async (path: string, content: string) => { await this.request("write", { path, content }); };
++      const remoteWrite = createWriteToolDefinition(this.cwd, { operations: {
++        writeFile, mkdir: async (path) => { await this.request("mkdir", { path }); },
++      } });
++      const remoteEdit = createEditToolDefinition(this.cwd, { operations: {
++        writeFile,
++        readFile: async (path) => Buffer.from(await this.request("read", { path }), "base64"),
++        access: async (path) => { await this.request("access", { path }); },
++      } });
++      const remoteBash = createBashToolDefinition(this.cwd, { exposeSessionEnvironment: false, operations: {
++        exec: async (command, _cwd, options) => {
++          const result = await this.request("bash", { command, timeout: options.timeout }, options.signal);
++          options.onData(Buffer.from(result));
++          return { exitCode: 0 };
++        },
++      } });
++      const write = createWriteToolDefinition(this.cwd);
++      const edit = createEditToolDefinition(this.cwd);
++      const bash = createBashToolDefinition(this.cwd);
++      pi.registerTool({ ...write, execute: (...args) => (this.enabled ? remoteWrite : write).execute(...args) });
++      pi.registerTool({ ...edit, execute: (...args) => (this.enabled ? remoteEdit : edit).execute(...args) });
++      pi.registerTool({ ...bash, execute: (...args) => (this.enabled ? remoteBash : bash).execute(...args) });
++    };
++  }
++}
+diff --git a/agentd/src/extensions/subagent.ts b/agentd/src/extensions/subagent.ts
+new file mode 100644
+index 0000000..500039d
+--- /dev/null
++++ b/agentd/src/extensions/subagent.ts
+@@ -0,0 +1,9 @@
++import { Type } from "typebox";
++import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
++export function subagentFactory(run: (callId: string, task: string, signal?: AbortSignal) => Promise<string>): ExtensionFactory {
++  return (pi) => pi.registerTool({ name: "subagent", label: "Subagent", description: "Delegate a bounded task to a child session with inherited permissions and sandbox",
++    parameters: Type.Object({ task: Type.String({ minLength: 1 }) }),
++    async execute(callId, args, signal) {
++      return { content: [{ type: "text", text: await run(callId, args.task, signal) }], details: {} };
++    } });
++}
+diff --git a/agentd/src/extensions/web.ts b/agentd/src/extensions/web.ts
+new file mode 100644
+index 0000000..60a7c2d
+--- /dev/null
++++ b/agentd/src/extensions/web.ts
+@@ -0,0 +1,132 @@
++import { lookup } from "node:dns/promises";
++import { isIP, BlockList } from "node:net";
++import { request as httpRequest } from "node:http";
++import { request as httpsRequest } from "node:https";
++import { Type } from "typebox";
++import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
++import type { Config } from "../config/schema.ts";
++import type { CredentialStore } from "../models/credentials.ts";
++
++const blocked = new BlockList();
++for (const [ip, bits] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
++  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16],
++  ["198.18.0.0", 15], ["224.0.0.0", 4], ["240.0.0.0", 4]] as const) blocked.addSubnet(ip, bits, "ipv4");
++// Only ordinary global unicast IPv6 is allowed, excluding transition ranges.
++const global6 = new BlockList();
++global6.addSubnet("2000::", 3, "ipv6");
++for (const [ip, bits] of [["2001::", 32], ["2001:db8::", 32], ["2002::", 16]] as const) blocked.addSubnet(ip, bits, "ipv6");
++export function publicIP(ip: string): boolean {
++  const family = isIP(ip);
++  if (family === 4) return !blocked.check(ip, "ipv4");
++  return family === 6 && global6.check(ip, "ipv6") && !blocked.check(ip, "ipv6");
++}
++export interface HttpReply { status: number; location?: string; contentType: string; body: string }
++export interface HttpAdapter {
++  get(url: URL, headers: Record<string, string>, signal?: AbortSignal): Promise<HttpReply>;
++}
++export class SafeHttp implements HttpAdapter {
++  constructor(private readonly config: Config["web"]) {}
++  async get(url: URL, headers: Record<string, string> = {}, signal?: AbortSignal): Promise<HttpReply> {
++    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("WEB_URL_REJECTED");
++    const hostname = url.hostname.replace(/^\[|\]$/g, "");
++    const addresses = await lookup(hostname, { all: true });
++    if (!addresses.length || addresses.some(({ address }) => !publicIP(address))) throw new Error("WEB_SSRF_REJECTED");
++    const pinned = addresses[0];
++    return new Promise((resolve, reject) => {
++      const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
++        headers, signal, agent: false, family: pinned.family,
++        // Pin DNS validation to the connection, preventing a second lookup/rebinding.
++        lookup: (_hostname, _options, callback) => callback(null, pinned.address, pinned.family),
++      }, (res) => {
++        const chunks: Buffer[] = [];
++        let size = 0;
++        res.on("data", (chunk: Buffer) => {
++          size += chunk.length;
++          if (size > this.config.maxBytes) req.destroy(new Error("WEB_SIZE_LIMIT"));
++          else chunks.push(chunk);
++        });
++        res.on("error", reject);
++        res.on("end", () => resolve({ status: res.statusCode ?? 0, location: res.headers.location,
++          contentType: res.headers["content-type"] ?? "", body: Buffer.concat(chunks).toString("utf8") }));
++      });
++      req.on("error", reject);
++      req.end();
++    });
++  }
++}
++export async function boundedGet(adapter: HttpAdapter, config: Config["web"], input: string,
++  headers: Record<string, string> = {}, signal?: AbortSignal): Promise<HttpReply> {
++  const controller = new AbortController();
++  const abort = () => controller.abort();
++  signal?.addEventListener("abort", abort, { once: true });
++  if (signal?.aborted) controller.abort();
++  let timer: NodeJS.Timeout | undefined;
++  const timeout = new Promise<never>((_, reject) => {
++    timer = setTimeout(() => { controller.abort(); reject(new Error("WEB_TIMEOUT")); }, config.timeoutMs);
++  });
++  const work = async () => {
++    let url = new URL(input);
++    const origin = url.origin;
++    for (let redirects = 0; ; redirects++) {
++      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("WEB_URL_REJECTED");
++      const reply = await adapter.get(url, url.origin === origin ? headers : {}, controller.signal);
++      if (Buffer.byteLength(reply.body) > config.maxBytes) throw new Error("WEB_SIZE_LIMIT");
++      if ([301, 302, 303, 307, 308].includes(reply.status) && reply.location) {
++        if (redirects >= config.maxRedirects) throw new Error("WEB_REDIRECT_LIMIT");
++        url = new URL(reply.location, url);
++        continue;
++      }
++      if (reply.status < 200 || reply.status >= 300) throw new Error(`WEB_HTTP_${reply.status}`);
++      return reply;
++    }
++  };
++  try { return await Promise.race([work(), timeout]); }
++  finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
++}
++export function htmlText(html: string): string {
++  return html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
++    .replace(/<!--[\s\S]*?-->/g, "").replace(/<[^>]+>/g, " ")
++    .replace(/&(?:amp|lt|gt|quot|apos|nbsp);/g, (s) => ({
++      "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'", "&nbsp;": " ",
++    })[s] ?? s).replace(/\s+/g, " ").trim();
++}
++export interface SearchResult { title: string; url: string; description: string }
++export interface SearchAdapter { search(query: string, signal?: AbortSignal): Promise<SearchResult[]> }
++export class BraveSearch implements SearchAdapter {
++  constructor(private readonly config: Config["web"], private readonly credentials: CredentialStore,
++    private readonly http: HttpAdapter = new SafeHttp(config)) {}
++  async search(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
++    const key = await this.credentials.read(this.config.search.credential);
++    if (key?.type !== "api_key" || !key.key) throw new Error("WEB_SEARCH_CREDENTIAL_REQUIRED");
++    const url = new URL(this.config.search.endpoint);
++    url.searchParams.set("q", query);
++    url.searchParams.set("count", String(this.config.search.maxResults));
++    const response = await boundedGet(this.http, this.config, url.href,
++      { "X-Subscription-Token": key.key, Accept: "application/json" }, signal);
++    const value: unknown = JSON.parse(response.body);
++    const rows = (value as { web?: { results?: unknown } })?.web?.results;
++    if (!Array.isArray(rows)) throw new Error("WEB_SEARCH_INVALID_RESPONSE");
++    return rows.slice(0, this.config.search.maxResults).map((row) => {
++      if (!row || typeof row.title !== "string" || typeof row.url !== "string"
++        || typeof row.description !== "string") throw new Error("WEB_SEARCH_INVALID_RESPONSE");
++      if (!["http:", "https:"].includes(new URL(row.url).protocol)) throw new Error("WEB_SEARCH_INVALID_RESPONSE");
++      return { title: row.title, url: row.url, description: htmlText(row.description) };
++    });
++  }
++}
++export function webFactory(config: Config["web"], credentials: CredentialStore): ExtensionFactory {
++  return (pi) => {
++    const search = new BraveSearch(config, credentials);
++    pi.registerTool({ name: "web_fetch", label: "Fetch web page", description: "Fetch a public HTTP/HTTPS page as text",
++      parameters: Type.Object({ url: Type.String() }),
++      async execute(_id, args, signal) {
++        const reply = await boundedGet(new SafeHttp(config), config, args.url, {}, signal);
++        return { content: [{ type: "text", text: reply.contentType.includes("html") ? htmlText(reply.body) : reply.body }], details: {} };
++      } });
++    pi.registerTool({ name: "web_search", label: "Search the web", description: "Search public web pages",
++      parameters: Type.Object({ query: Type.String({ minLength: 1 }) }),
++      async execute(_id, args, signal) {
++        return { content: [{ type: "text", text: JSON.stringify(await search.search(args.query, signal)) }], details: {} };
++      } });
++  };
++}
+diff --git a/agentd/src/protocol/events.ts b/agentd/src/protocol/events.ts
+index 013268f..b50c9bd 100644
+--- a/agentd/src/protocol/events.ts
++++ b/agentd/src/protocol/events.ts
+@@ -2,7 +2,7 @@ import { Type, type Static, type TSchema } from "typebox";
+ const text = Type.String();
+ function event<N extends string, P extends Record<string, TSchema>>(name: N, properties: P) {
+   return Type.Object({ type: Type.Literal("event"), event: Type.Literal(name),
+-    sessionId: text, turnId: text, ...properties });
++    sessionId: text, turnId: text, parentCallId: Type.Optional(text), ...properties });
+ }
+ const tokens = Type.Number({ minimum: 0 });
+ export const UsageSchema = Type.Object({
+@@ -10,6 +10,8 @@ export const UsageSchema = Type.Object({
+   cost: Type.Object({ input: tokens, output: tokens, cacheRead: tokens, cacheWrite: tokens, total: tokens }),
+ });
+ export const EventSchema = Type.Union([
++  event("permission.request", { targetSessionId: text, callId: text, tool: text, summary: text }),
++  event("sandbox.request", { targetSessionId: text, callId: text, operation: text, args: Type.Record(text, Type.Unknown()) }),
+   event("turn.started", {}), event("text.delta", { text }), event("reasoning.delta", { text }),
+   event("tool.started", { callId: text, tool: text, args: Type.Unknown(), parentCallId: Type.Optional(text) }),
+   event("tool.completed", { callId: text, tool: text, result: Type.Unknown(),
+diff --git a/agentd/src/protocol/schema.ts b/agentd/src/protocol/schema.ts
+index 20ee1ef..ef9519f 100644
+--- a/agentd/src/protocol/schema.ts
++++ b/agentd/src/protocol/schema.ts
+@@ -5,15 +5,21 @@ const id = Type.Union([text, Type.Integer()]);
+ const request = <M extends string, P extends Record<string, TSchema>>(method: M, params: P) =>
+   Type.Object({ id, method: Type.Literal(method), params: Type.Object(params, { additionalProperties: false }) },
+     { additionalProperties: false });
+-export const PROTOCOL_VERSION = 2;
++export const PROTOCOL_VERSION = 3;
+ export const ModelSchema = Type.Object({ provider: text, id: text }, { additionalProperties: false });
+ export const ThinkingLevelSchema = Type.Union([
+   Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"),
+   Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"),
+ ]);
++export const PermissionModeSchema = Type.Union([
++  Type.Literal("deny"), Type.Literal("manual"), Type.Literal("auto-current"), Type.Literal("auto-all"),
++]);
++export type PermissionMode = Static<typeof PermissionModeSchema>;
++export const DecisionSchema = Type.Union([Type.Literal("allow"), Type.Literal("deny"), Type.Literal("allowAlways")]);
+ export const SessionOptionsSchema = Type.Object({
+   model: Type.Optional(ModelSchema), thinkingLevel: Type.Optional(ThinkingLevelSchema),
+-  toolProfile: Type.Optional(text),
++  toolProfile: Type.Optional(text), permissionMode: Type.Optional(PermissionModeSchema),
++  sandbox: Type.Optional(Type.Boolean()), expertPrompt: Type.Optional(Type.String()),
+ }, { additionalProperties: false });
+ export const ImageSchema = Type.Object({ type: Type.Literal("image"), mimeType: text, data: text },
+   { additionalProperties: false });
+@@ -23,6 +29,8 @@ export const PingSchema = Type.Object({ status: Type.Literal("ok"), sessions: Ty
+   version: text, piVersion: text, protocolVersion: Type.Literal(PROTOCOL_VERSION) });
+ // Keep every command explicit so unknown fields/methods cannot reach SDK APIs.
+ export const RequestSchema = Type.Union([
++  request("permission.respond", { sessionId: text, callId: text, decision: DecisionSchema }),
++  request("sandbox.respond", { sessionId: text, callId: text, output: Type.String(), error: Type.Optional(text) }),
+   request("ping", {}), request("models.list", {}),
+   request("session.open", { sessionId: Type.Optional(text), cwd: Type.Optional(text), ...SessionOptionsSchema.properties }),
+   request("session.configure", { sessionId: text, ...SessionOptionsSchema.properties }),
+diff --git a/agentd/src/sessions/create.ts b/agentd/src/sessions/create.ts
+index 05ca2ca..98c1726 100644
+--- a/agentd/src/sessions/create.ts
++++ b/agentd/src/sessions/create.ts
+@@ -7,11 +7,12 @@ import {
+ import type { Config } from "../config/schema.ts";
+ import type { Models } from "../models/runtime.ts";
+ import type { SessionOptions } from "../protocol/schema.ts";
++import { contextFiles, expandPath } from "../extensions/resources.ts";
+ import { activateTools, profileTools } from "./options.ts";
+ import { DaemonError } from "../protocol/errors.ts";
+ 
+ export async function createSession(
+-  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string, options: SessionOptions = {},
++  config: Config, models: Models, factories: ExtensionFactory[], sessionId?: string, requestedCwd?: string, options: SessionOptions = {}, mandatoryFactories: (cwd: string) => ExtensionFactory[] = () => [],
+ ) {
+   const runtime = models.runtime;
+   const tools = profileTools(config, options.toolProfile ?? config.defaultToolProfile);
+@@ -40,7 +41,9 @@ export async function createSession(
+     cwd: manager.getCwd(), agentDir, settingsManager,
+     // Only host-assembled executable extensions. Standard AGENTS.md/skills still load.
+     noExtensions: true, noThemes: true,
+-    extensionFactories: config.extensions.enabled ? factories : [],
++    extensionFactories: [...(config.extensions.enabled ? factories : []), ...mandatoryFactories(manager.getCwd())],
++    additionalSkillPaths: config.skills.paths.map(expandPath),
++    agentsFilesOverride: (base) => contextFiles(manager.getCwd(), base),
+   });
+   await resourceLoader.reload();
+   const { session } = await createAgentSession({
+diff --git a/agentd/src/sessions/options.ts b/agentd/src/sessions/options.ts
+index 5904e52..cab7852 100644
+--- a/agentd/src/sessions/options.ts
++++ b/agentd/src/sessions/options.ts
+@@ -26,8 +26,8 @@ export function activateTools(session: AgentSession, tools: string[]): void {
+ }
+ export async function configureSession(session: AgentSession, config: Config, options: SessionOptions): Promise<void> {
+   // The registry also accepts direct callers; validate before any SDK mutation.
+-  const { model: requestedModel, thinkingLevel, toolProfile } = options;
+-  if (!Value.Check(SessionOptionsSchema, { model: requestedModel, thinkingLevel, toolProfile })) {
++  const { model: requestedModel, thinkingLevel, toolProfile, permissionMode, sandbox, expertPrompt } = options;
++  if (!Value.Check(SessionOptionsSchema, { model: requestedModel, thinkingLevel, toolProfile, permissionMode, sandbox, expertPrompt })) {
+     throw new DaemonError("INVALID_REQUEST", "Session options do not match schema");
+   }
+   const tools = options.toolProfile === undefined ? undefined : profileTools(config, options.toolProfile);
+diff --git a/agentd/src/sessions/registry.ts b/agentd/src/sessions/registry.ts
+index 0e14071..51ad7e1 100644
+--- a/agentd/src/sessions/registry.ts
++++ b/agentd/src/sessions/registry.ts
+@@ -1,3 +1,7 @@
++import { Permissions, type Decision } from "../extensions/permissions.ts";
++import { Sandbox } from "../extensions/sandbox.ts";
++import { webFactory } from "../extensions/web.ts";
++import { subagentFactory } from "../extensions/subagent.ts";
+ import { randomUUID } from "node:crypto";
+ import type { AgentSession, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+ import type { Config } from "../config/schema.ts";
+@@ -18,7 +22,14 @@ interface Run {
+ }
+ interface Entry {
+   session: AgentSession;
++  permissions: Permissions;
++  sandbox: Sandbox;
++  options: SessionOptions;
++  parent?: { id: string; callId: string };
++  depth: number;
++  children: Set<string>;
+   run?: Run;
++  lastStatus?: TurnStatus;
+   configuring?: Promise<void>;
+   toolProfile: string;
+   closing?: Promise<void>;
+@@ -31,6 +42,7 @@ export class SessionRegistry {
+   private readonly entries = new Map<string, Entry>();
+   private readonly opening = new Set<string>();
+   private pendingOpens = 0;
++  private runningChildren = 0;
+   private stopped = false;
+   constructor(
+     private readonly config: () => Config,
+@@ -39,7 +51,7 @@ export class SessionRegistry {
+     private readonly emit: (event: ProtocolEvent) => void,
+   ) {}
+   get size(): number { return this.entries.size; }
+-  async open(sessionId?: string, cwd?: string, options: SessionOptions = {}) {
++  async open(sessionId?: string, cwd?: string, options: SessionOptions = {}, parent?: { id: string; callId: string }) {
+     if (this.stopped) throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
+     if (sessionId && (this.entries.has(sessionId) || this.opening.has(sessionId))) {
+       throw new DaemonError("SESSION_ALREADY_OPEN", "Session is already open");
+@@ -51,14 +63,40 @@ export class SessionRegistry {
+     if (sessionId) this.opening.add(sessionId);
+     try {
+       const config = this.config();
+-      const session = await createSession(config, this.models, this.factories, sessionId, cwd, options);
++      const state = { id: "" };
++      let permissions!: Permissions;
++      let sandbox!: Sandbox;
++      const assemble = (actualCwd: string): ExtensionFactory[] => {
++        permissions = new Permissions(options.permissionMode ?? config.permissions.defaultMode,
++          actualCwd, config.permissions.timeoutMs, config.permissions.summaryChars,
++          (approval) => this.extensionEvent(state.id, { event: "permission.request", targetSessionId: state.id, ...approval }));
++        sandbox = new Sandbox(options.sandbox ?? false, actualCwd, config.sandbox,
++          (request) => this.extensionEvent(state.id, { event: "sandbox.request", targetSessionId: state.id, ...request }));
++        const factories: ExtensionFactory[] = [sandbox.factory(), webFactory(config.web, this.models.credentials),
++          subagentFactory((callId, task, signal) => this.subagent(state.id, callId, task, signal)),
++          (pi) => { pi.on("before_agent_start", (event) => {
++            const prompt = this.entries.get(state.id)?.options.expertPrompt ?? options.expertPrompt;
++            if (config.experts.enabled) return { systemPrompt: [event.systemPrompt, config.experts.prompt, prompt].filter(Boolean).join("\n\n") };
++          }); }, permissions.factory()];
++        return factories;
++      };
++      const session = await createSession(config, this.models, this.factories, sessionId, cwd, options, assemble);
++      state.id = session.sessionId;
+       if (this.stopped) {
+         session.dispose();
+         throw new DaemonError("SHUTTING_DOWN", "Daemon is shutting down");
+       }
++      const parentEntry = parent ? this.entries.get(parent.id) : undefined;
++      if (parent && (!parentEntry?.run || parentEntry.run.stopped || parentEntry.closing)) {
++        session.dispose();
++        throw new DaemonError("TURN_CANCELLED", "Parent stopped while opening child");
++      }
+       const id = session.sessionId;
+-      const entry: Entry = { session, toolProfile: options.toolProfile ?? config.defaultToolProfile, lastUsed: Date.now(), queueReservations: 0 };
++      const entry: Entry = { session, permissions, sandbox, options: { ...options }, parent,
++        depth: parentEntry ? parentEntry.depth + 1 : 0, children: new Set(),
++        toolProfile: options.toolProfile ?? config.defaultToolProfile, lastUsed: Date.now(), queueReservations: 0 };
+       this.entries.set(id, entry);
++      if (parent) this.get(parent.id).children.add(id);
+       this.armIdle(id, entry);
+       return { sessionId: id, resumed: !!sessionId, messageCount: session.messages.length,
+         model: { provider: session.model!.provider, id: session.model!.id },
+@@ -83,6 +121,9 @@ export class SessionRegistry {
+     try {
+       await entry.configuring;
+       entry.toolProfile = options.toolProfile ?? entry.toolProfile;
++      entry.options = { ...entry.options, ...options };
++      if (options.permissionMode !== undefined) entry.permissions.configure(options.permissionMode);
++      if (options.sandbox !== undefined) entry.sandbox.enabled = options.sandbox;
+       return { sessionId: id, model: entry.session.model && {
+         provider: entry.session.model.provider, id: entry.session.model.id },
+         thinkingLevel: entry.session.thinkingLevel, toolProfile: entry.toolProfile,
+@@ -101,7 +142,7 @@ export class SessionRegistry {
+       throw new DaemonError("MODEL_IMAGES_UNSUPPORTED", "Selected model does not accept images");
+     }
+     clearTimeout(entry.idle);
+-    const mapper = new EventMapper(id, randomUUID(), this.emit);
++    const mapper = new EventMapper(id, randomUUID(), (event) => this.emitEvent(id, event));
+     const run: Run = { id: mapper.turnId, mapper, done: Promise.resolve() };
+     entry.run = run;
+     // Reserve synchronously; start after the command returns to permit immediate abort.
+@@ -120,6 +161,8 @@ export class SessionRegistry {
+       clearTimeout(idleTimer);
+       clearTimeout(maxTimer);
+       run.mapper.error(code, code === "TURN_IDLE_TIMEOUT" ? "本轮长时间未收到事件，已取消。" : "本轮超过最长运行时间，已取消。");
++      this.cancelTools(entry);
++      void this.stopChildren(entry);
+       session.clearQueue();
+       void session.abort().catch(() => undefined);
+     };
+@@ -152,7 +195,10 @@ export class SessionRegistry {
+       clearTimeout(idleTimer!);
+       clearTimeout(maxTimer);
+       unsubscribe();
++      this.cancelTools(entry);
++      await this.stopChildren(entry);
+       session.clearQueue();
++      entry.lastStatus = run.stopped ?? run.mapper.status;
+       entry.run = undefined;
+       entry.lastUsed = Date.now();
+       run.mapper.emit({ event: "turn.completed", status: run.stopped ?? run.mapper.status });
+@@ -181,6 +227,8 @@ export class SessionRegistry {
+     const run = entry.run;
+     if (!run) return { aborted: false };
+     run.stopped ??= "aborted";
++    this.cancelTools(entry);
++    await this.stopChildren(entry);
+     entry.session.clearQueue();
+     await entry.session.abort();
+     await run.done;
+@@ -192,18 +240,20 @@ export class SessionRegistry {
+     if (!entry) throw new DaemonError("SESSION_NOT_FOUND", "Session is not open");
+     if (entry.closing) return entry.closing;
+     clearTimeout(entry.idle);
++    if (entry.run) entry.run.stopped ??= "aborted";
++    this.cancelTools(entry);
+     entry.closing = (async () => {
+       try {
+         await entry.configuring?.catch(() => undefined);
+-        if (entry.run) {
+-          entry.run.stopped ??= "aborted";
+-          entry.session.clearQueue();
+-          await entry.session.abort();
+-          await entry.run?.done;
+-        }
++        entry.session.clearQueue();
++        const aborted = entry.session.abort();
++        await Promise.all([...entry.children].map((child) => this.close(child)));
++        await aborted;
++        await entry.run?.done;
+       } finally {
+         entry.session.dispose();
+         this.entries.delete(id);
++        if (entry.parent) this.entries.get(entry.parent.id)?.children.delete(id);
+       }
+     })();
+     return entry.closing;
+@@ -214,6 +264,70 @@ export class SessionRegistry {
+     entry.idle = setTimeout(() => { void this.close(id).catch(() => undefined); }, remaining);
+     entry.idle.unref();
+   }
++  private cancelTools(entry: Entry): void {
++    entry.permissions.cancel();
++    entry.sandbox.cancel();
++  }
++  private async stopChildren(entry: Entry): Promise<void> {
++    await Promise.all([...entry.children].map((child) => this.abort(child).catch(() => undefined)));
++  }
++  private extensionEvent(id: string, payload: Parameters<EventMapper["emit"]>[0]): void {
++    const run = this.get(id).run;
++    if (!run || run.stopped) throw new DaemonError("TURN_CANCELLED", "No active turn");
++    run.mapper.emit(payload);
++  }
++  private emitEvent(id: string, event: ProtocolEvent): void {
++    const parent = this.entries.get(id)?.parent;
++    if (parent) {
++      if (!["tool.started", "tool.completed", "permission.request", "sandbox.request"].includes(event.event)) return;
++      const run = this.entries.get(parent.id)?.run;
++      if (run) this.emitEvent(parent.id, { ...event, sessionId: parent.id,
++        turnId: run.id, parentCallId: event.parentCallId ?? parent.callId });
++    } else this.emit(event);
++  }
++  respondPermission(id: string, callId: string, decision: Decision) {
++    if (!this.get(id).permissions.respond(callId, decision)) throw new DaemonError("APPROVAL_NOT_FOUND", "Approval expired or does not belong to this session");
++    return { accepted: true };
++  }
++  respondSandbox(id: string, callId: string, output: string, error?: string) {
++    if (!this.get(id).sandbox.respond(callId, output, error)) throw new DaemonError("SANDBOX_REQUEST_NOT_FOUND", "Sandbox request expired");
++    return { accepted: true };
++  }
++  async subagent(id: string, callId: string, task: string, signal?: AbortSignal): Promise<string> {
++    const entry = this.get(id);
++    const limits = this.config().subagents;
++    if (entry.depth >= limits.maxDepth) throw new DaemonError("SUBAGENT_DEPTH_LIMIT", "Maximum subagent depth reached");
++    if (this.runningChildren >= limits.maxConcurrent) throw new DaemonError("SUBAGENT_CONCURRENCY_LIMIT", "Maximum concurrent subagents reached");
++    if (signal?.aborted || !entry.run || entry.run.stopped) throw new DaemonError("TURN_CANCELLED", "Parent turn is not active");
++    this.runningChildren++;
++    let childId: string | undefined;
++    const abort = () => { if (childId) void this.abort(childId).catch(() => undefined); };
++    signal?.addEventListener("abort", abort, { once: true });
++    try {
++      const child = await this.open(undefined, entry.session.sessionManager.getCwd(), {
++        ...entry.options, toolProfile: entry.toolProfile,
++        model: entry.session.model && { provider: entry.session.model.provider, id: entry.session.model.id },
++        thinkingLevel: entry.options.thinkingLevel, permissionMode: entry.permissions.mode, sandbox: entry.sandbox.enabled,
++      }, { id, callId });
++      childId = child.sessionId;
++      if (signal?.aborted || entry.run?.stopped || entry.closing) throw new DaemonError("TURN_CANCELLED", "Parent cancelled while opening child");
++      this.prompt(childId, task);
++      await this.wait(childId);
++      if (signal?.aborted || entry.run?.stopped) throw new DaemonError("TURN_CANCELLED", "Parent cancelled");
++      const childEntry = this.get(childId);
++      if (childEntry.lastStatus !== "completed") throw new DaemonError("SUBAGENT_FAILED", "Child did not complete successfully");
++      const messages = childEntry.session.messages;
++      const last = [...messages].reverse().find((message) => message.role === "assistant");
++      if (!last || last.role !== "assistant" || last.stopReason === "error" || last.stopReason === "aborted") {
++        throw new DaemonError("SUBAGENT_FAILED", "Child did not complete successfully");
++      }
++      return last.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").slice(0, limits.summaryChars);
++    } finally {
++      signal?.removeEventListener("abort", abort);
++      if (childId) await this.close(childId).catch(() => undefined);
++      this.runningChildren--;
++    }
++  }
+   reopenRequired(): string[] {
+     return [...this.entries].filter(([, entry]) => entry.session.modelRuntime !== this.models.runtime)
+       .map(([id]) => id);
