@@ -24,3 +24,6 @@
 - 无新依赖；≤500 行、≤500 字符；新 Rust 代码无 unwrap/expect；可变值进配置。
 - 必须通过：agentd `npm run typecheck && npm test`；两壳 `cargo check --offline`；`cargo test -p polaris-kernel --lib --tests --offline`（基线与沙箱 TCP 项除外并列出）；`npx vue-tsc --noEmit`。不 commit。
 - 结束时输出：方案选择与证据、各目标完成情况、改动文件与行数、命令结果、需要前端配合的点。
+
+## 附带小修（来自 P3 第 2 轮审查次要意见）
+`agentd/src/extensions/permissions.ts` 中 `permission.resolved` 等通知类事件发送失败时只记日志，不得影响本地授权决策的返回（允许修改该文件，补一个发送失败的测试）。
