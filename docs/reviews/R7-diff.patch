@@ -1,0 +1,31 @@
+diff --git a/src-tauri/crates/polaris-wiki/src/wiki/compile/tests.rs b/src-tauri/crates/polaris-wiki/src/wiki/compile/tests.rs
+index cdb8d70..c4551eb 100644
+--- a/src-tauri/crates/polaris-wiki/src/wiki/compile/tests.rs
++++ b/src-tauri/crates/polaris-wiki/src/wiki/compile/tests.rs
+@@ -185,6 +185,26 @@ fn backend_guard_and_configuration_fail_closed() -> anyhow::Result<()> {
+     }
+     Ok(())
+ }
++#[test]
++fn page_path_rejects_combined_parent_directory_traversal() -> anyhow::Result<()> {
++    let root = Temp::new()?;
++    let wiki = root.0.join("wiki");
++    for path in [
++        "a/../b",
++        "概念/../../etc/passwd",
++        "概念/嵌套/../穿透.md",
++        r"a\..\b",
++    ] {
++        let error = progress::page_path(&wiki, path)
++            .expect_err(&format!("parent directory traversal must be rejected: {path:?}"));
++        assert!(
++            error.to_string().starts_with("WikiWriteOutsideRoot:"),
++            "unexpected rejection for {path:?}: {error}",
++        );
++    }
++    Ok(())
++}
++
+ #[cfg(unix)]
+ #[test]
+ fn symlink_escapes_and_dangling_links_fail_closed() -> anyhow::Result<()> {
