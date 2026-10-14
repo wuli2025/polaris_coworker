@@ -28,3 +28,7 @@
 - 完成前必须运行并通过：`cd agentd && npm run typecheck && npm test`。
 - 更新 `docs/feature-tree.md` 加入 agentd 节点（入口、协议、配置入口、测试命令）。
 - 结束时输出：新增文件及行数、测试结果原文摘要、未完成或有疑问的点。不要声称做了没做的事。
+
+## 续做说明（第 2 次运行）
+上一次运行被中途停止，`agentd/src/`（config、protocol、models、log）和 `agentd/config/` 已有部分实现，未经验证。先通读这些文件，保留正确的部分、修正有问题的部分，然后完成剩余模块与全部测试。不要因为文件已存在就默认它是对的。
+完成前额外运行行数检查：`python3 "/mnt/c/Users/mi/Desktop/项目skill/scripts/check_lines.py" agentd --limit 500`，确认无超限。
