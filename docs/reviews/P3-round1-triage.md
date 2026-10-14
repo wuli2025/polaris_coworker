@@ -30,3 +30,9 @@
 | 7 中 | Pi 模式 expert_prompt 逻辑矛盾 | **驳回** | 设计如此：Pi 模式不把专家块拼进用户正文（`prepare.rs` 中 `pi` 时为 None），改由 `SessionOptions.expert_prompt` 作为系统提示附加段装载，正是 P3 第 5 部分的要求。 |
 | 8 低 | 授权弹窗无超时提示 | **采纳** | agentd 超时按拒绝后，前端弹窗仍停留会误导。修：弹窗显示剩余时间；agentd 在请求过期/轮次结束时发 `permission.resolved`（或等价）事件，前端据此关闭弹窗。 |
 | 9 低 | `set_sandbox_executor` 结果被忽略 | **采纳** | 失败时记录警告日志。 |
+
+## 第 2 轮（复审 `P3-round2/`）
+- Pi 结论 **PASS**：C1、P3a-1、P3a-2、P3b-8、P3b-9、协议 v4 均确认修复正确。
+- 次要观察处置：#1 `permission.resolved` 发送失败可能传播——记入 P4 前的小修清单（通知类事件发送失败应只记日志）；#2 Windows `~` 路径分支——跨平台实测留待 P7 Windows 演练；#3 无需处理。
+- Claude 轻量自检：`probeCacheMs` 默认 10000（≤30s，满足 Pi 建议）；主控复现用例 `link/../x` 已作为回归测试固化于 `agentd/test/permissions.test.ts:103`（另含 Windows 分隔符、悬挂链接等变体）。
+- 结论：P3 **标记完成**（2 轮，无剩余阻塞）。P3b 另行验收。

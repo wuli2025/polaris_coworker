@@ -1,0 +1,858 @@
+diff --git a/agentd/src/config/schema.ts b/agentd/src/config/schema.ts
+index ccb791f..baf3515 100644
+--- a/agentd/src/config/schema.ts
++++ b/agentd/src/config/schema.ts
+@@ -19,7 +19,7 @@ export const ConfigSchema = Type.Object({
+   permissions: Type.Object({ defaultMode: Type.Union([
+     Type.Literal("deny"), Type.Literal("manual"), Type.Literal("auto-current"), Type.Literal("auto-all"),
+   ]), timeoutMs: positive, summaryChars: positive }, { additionalProperties: false }),
+-  sandbox: Type.Object({ timeoutMs: positive, maxOutputBytes: Type.Integer({ minimum: 1, maximum: 1048576 }),
++  sandbox: Type.Object({ probeTimeoutMs: positive, probeCacheMs: positive, timeoutMs: positive, maxOutputBytes: Type.Integer({ minimum: 1, maximum: 1048576 }),
+     shell: Type.Union([Type.Literal("sh"), Type.Literal("bash")]) }, { additionalProperties: false }),
+   subagents: Type.Object({ maxConcurrent: positive, maxDepth: Type.Integer({ minimum: 0 }),
+     summaryChars: positive }, { additionalProperties: false }),
+diff --git a/agentd/src/daemon.ts b/agentd/src/daemon.ts
+index ce62427..eab3f88 100644
+--- a/agentd/src/daemon.ts
++++ b/agentd/src/daemon.ts
+@@ -86,7 +86,7 @@ export class Daemon {
+   private async dispatch(request: Request): Promise<unknown> {
+     switch (request.method) {
+       case "permission.respond": return this.sessions.respondPermission(request.params.sessionId, request.params.callId, request.params.decision);
+-      case "sandbox.respond": return this.sessions.respondSandbox(request.params.sessionId, request.params.callId, request.params.output, request.params.error);
++      case "sandbox.respond": return this.sessions.respondSandbox(request.params.sessionId, request.params.callId, request.params);
+       case "ping": return { status: "ok", sessions: this.sessions.size, ...versions };
+       case "models.list": return { models: this.models.list() };
+       case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd, request.params);
+diff --git a/agentd/src/extensions/permissions.ts b/agentd/src/extensions/permissions.ts
+index efedbcb..0b86c5f 100644
+--- a/agentd/src/extensions/permissions.ts
++++ b/agentd/src/extensions/permissions.ts
+@@ -1,12 +1,13 @@
+ import { homedir } from "node:os";
+ import { fileURLToPath } from "node:url";
+-import { realpath } from "node:fs/promises";
+-import { dirname, resolve, relative, isAbsolute, basename } from "node:path";
++import { realpath, lstat } from "node:fs/promises";
++import { dirname, resolve, relative, isAbsolute, basename, sep } from "node:path";
+ import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+ import type { PermissionMode } from "../protocol/schema.ts";
+ 
+ export type Decision = "allow" | "deny" | "allowAlways";
+-export interface Approval { callId: string; tool: string; summary: string }
++export interface Approval { callId: string; tool: string; summary: string; expiresAt: number }
++export interface Resolution { callId: string; reason: "responded" | "expired" | "cancelled" }
+ const readers = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search", "subagent"]);
+ 
+ // Resolve the closest existing ancestor, including symlinks, for new files.
+@@ -14,6 +15,9 @@ async function canonical(path: string): Promise<string> {
+   try { return await realpath(path); }
+   catch (error) {
+     if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(path) === path) throw error;
++    // A dangling symlink exists even though realpath reports ENOENT. Never treat it as a new component.
++    try { await lstat(path); throw new Error("Unresolved existing path"); }
++    catch (missing) { if ((missing as NodeJS.ErrnoException).code !== "ENOENT") throw missing; }
+     return resolve(await canonical(dirname(path)), basename(path));
+   }
+ }
+@@ -27,22 +31,30 @@ export function toolPath(input: string): string {
+     if (drive) path = `${drive[1].toUpperCase()}:\\${(drive[2] ?? "").replaceAll("/", "\\")}`;
+   }
+   if (path === "~") return homedir();
+-  if (path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"))) return resolve(homedir(), path.slice(2));
++  if (path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"))) return `${homedir()}${sep}${path.slice(2)}`;
+   return path.startsWith("file://") ? fileURLToPath(path) : path;
+ }
+ export async function withinWorkspace(cwd: string, path: unknown): Promise<boolean> {
+   if (typeof path !== "string" || !path) return false;
+   try {
+-    const rel = relative(await realpath(cwd), await canonical(resolve(cwd, toolPath(path))));
++    // Reject parent segments before URL conversion or any lexical normalization.
++    if (path.split(/[\\/]/).includes("..")) return false;
++    const expanded = toolPath(path);
++    if (expanded.split(/[\\/]/).includes("..")) return false;
++    // On POSIX a backslash is a literal filename character; do not reinterpret a foreign path.
++    if (process.platform !== "win32" && (expanded.includes("\\") || /^[a-z]:/i.test(expanded))) return false;
++    const absolute = isAbsolute(expanded) ? expanded : `${cwd}${sep}${expanded}`;
++    const rel = relative(await realpath(cwd), await canonical(absolute));
+     return !isAbsolute(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("..\\");
+   } catch { return false; }
+ }
+ export class Permissions {
+   private readonly remembered = new Set<string>();
+-  private readonly pending = new Map<string, (decision: Decision) => void>();
++  private readonly pending = new Map<string, (decision: Decision, reason?: Resolution["reason"]) => void>();
+   constructor(public mode: PermissionMode, private readonly cwd: string,
+     private readonly timeoutMs: number, private readonly summaryChars: number,
+-    private readonly emit: (approval: Approval) => void) {}
++    private readonly emit: (approval: Approval) => void,
++    private readonly resolved: (resolution: Resolution) => void = () => {}) {}
+   configure(mode: PermissionMode): void {
+     this.cancel();
+     this.remembered.clear();
+@@ -54,7 +66,7 @@ export class Permissions {
+     resolve(decision);
+     return true;
+   }
+-  cancel(): void { for (const resolve of this.pending.values()) resolve("deny"); }
++  cancel(): void { for (const resolve of this.pending.values()) resolve("deny", "cancelled"); }
+   async check(callId: string, tool: string, args: Record<string, unknown>): Promise<boolean> {
+     if (this.mode === "auto-all" || readers.has(tool)) return true;
+     if (this.mode === "deny") return false;
+@@ -65,14 +77,15 @@ export class Permissions {
+     if (this.remembered.has(key)) return true;
+     if (this.pending.has(callId)) return false;
+     const decision = await new Promise<Decision>((resolve) => {
+-      const timer = setTimeout(() => finish("deny"), this.timeoutMs);
+-      const finish = (decision: Decision) => {
++      const timer = setTimeout(() => finish("deny", "expired"), this.timeoutMs);
++      const finish = (decision: Decision, reason: Resolution["reason"] = "responded") => {
++        if (!this.pending.has(callId)) return;
+         clearTimeout(timer);
+         this.pending.delete(callId);
+-        resolve(decision);
++        try { this.resolved({ callId, reason }); } finally { resolve(decision); }
+       };
+       this.pending.set(callId, finish);
+-      try { this.emit({ callId, tool, summary: JSON.stringify(args).slice(0, this.summaryChars) }); }
++      try { this.emit({ callId, tool, summary: JSON.stringify(args).slice(0, this.summaryChars), expiresAt: Date.now() + this.timeoutMs }); }
+       catch { finish("deny"); }
+     });
+     if (decision === "allowAlways") this.remembered.add(key);
+diff --git a/agentd/src/extensions/sandbox.ts b/agentd/src/extensions/sandbox.ts
+index 6f41e0f..dc5deee 100644
+--- a/agentd/src/extensions/sandbox.ts
++++ b/agentd/src/extensions/sandbox.ts
+@@ -1,4 +1,5 @@
+ import type { Config } from "../config/schema.ts";
++import type { SandboxResult } from "../protocol/schema.ts";
+ import { randomUUID } from "node:crypto";
+ import {
+   createBashToolDefinition, createWriteToolDefinition, createEditToolDefinition,
+@@ -6,51 +7,90 @@ import {
+ } from "@earendil-works/pi-coding-agent";
+ 
+ export interface SandboxRequest { callId: string; operation: string; args: Record<string, unknown> }
++const failure = (error: string): SandboxResult => ({ output: "", exitCode: null, signal: null, timedOut: false, error });
+ export class Sandbox {
+-  private readonly pending = new Map<string, (output: string, error?: string) => void>();
++  private readonly pending = new Map<string, (result: SandboxResult) => void>();
++  private probe?: Promise<void>;
++  private cached?: { until: number; error?: Error };
+   constructor(public enabled: boolean, private readonly cwd: string, private readonly config: Config["sandbox"],
+     private readonly emit: (request: SandboxRequest) => void) {}
+-  respond(callId: string, output: string, error?: string): boolean {
++  respond(callId: string, result: SandboxResult): boolean {
+     const finish = this.pending.get(callId);
+     if (!finish) return false;
+-    finish(output, error);
++    finish(result);
+     return true;
+   }
+-  cancel(): void { for (const finish of this.pending.values()) finish("", "SANDBOX_ABORTED"); }
+-  request(operation: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
++  cancel(): void {
++    for (const finish of this.pending.values()) finish(failure("SANDBOX_ABORTED"));
++  }
++  async available(): Promise<void> {
++    if (this.cached && Date.now() < this.cached.until) {
++      if (this.cached.error) throw this.cached.error;
++      return;
++    }
++    if (!this.probe) {
++      this.probe = this.exchange("probe", {}, undefined, this.config.probeTimeoutMs).then((result) => {
++        if (result.exitCode !== 0 || result.timedOut || result.signal) throw new Error("Probe failed");
++        this.cached = { until: Date.now() + this.config.probeCacheMs };
++      }).catch((cause: unknown) => {
++        const error = new Error(`SANDBOX_UNAVAILABLE: ${String(cause)}`);
++        this.cached = { until: Date.now() + this.config.probeCacheMs, error };
++        throw error;
++      }).finally(() => { this.probe = undefined; });
++    }
++    return this.probe;
++  }
++  async request(operation: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<SandboxResult> {
++    await this.available();
++    return this.exchange(operation, args, signal, this.config.timeoutMs);
++  }
++  private exchange(operation: string, args: Record<string, unknown>, signal: AbortSignal | undefined,
++    timeoutMs: number): Promise<SandboxResult> {
+     return new Promise((resolve, reject) => {
+       if (signal?.aborted) return reject(new Error("SANDBOX_ABORTED"));
+       const callId = randomUUID();
+-      const abort = () => finish("", "SANDBOX_ABORTED");
+-      const timer = setTimeout(() => finish("", "SANDBOX_TIMEOUT: no host execution result"), this.config.timeoutMs);
+-      const finish = (output: string, error?: string) => {
++      const abort = () => finish(failure("SANDBOX_ABORTED"));
++      const timer = setTimeout(() => finish(failure("SANDBOX_TIMEOUT: no host execution result")), timeoutMs);
++      const finish = (result: SandboxResult) => {
+         clearTimeout(timer);
+         signal?.removeEventListener("abort", abort);
+         this.pending.delete(callId);
+-        if (error) reject(new Error(error)); else resolve(output);
++        if (result.error) reject(new Error(result.error)); else resolve(result);
+       };
+       this.pending.set(callId, finish);
+       signal?.addEventListener("abort", abort, { once: true });
+-      try { this.emit({ callId, operation, args: { ...args, cwd: this.cwd, ...this.config } }); }
+-      catch { finish("", "SANDBOX_UNAVAILABLE"); }
++      try { this.emit({ callId, operation, args: { ...args, cwd: this.cwd, ...this.config, timeoutMs } }); }
++      catch { finish(failure("SANDBOX_UNAVAILABLE")); }
+     });
+   }
+   factory(): ExtensionFactory {
+     return (pi) => {
+-      const writeFile = async (path: string, content: string) => { await this.request("write", { path, content }); };
++      // Probe even before read-only/custom tools in a sandbox-enabled session.
++      pi.on("tool_call", async () => {
++        if (!this.enabled) return;
++        try { await this.available(); }
++        catch (error) { return { block: true, reason: String(error) }; }
++      });
++      const file = async (operation: string, args: Record<string, unknown>) => {
++        const result = await this.request(operation, args);
++        if (result.timedOut || result.signal || result.exitCode !== 0) throw new Error("SANDBOX_EXEC_FAILED");
++        return result.output;
++      };
++      const writeFile = async (path: string, content: string) => { await file("write", { path, content }); };
+       const remoteWrite = createWriteToolDefinition(this.cwd, { operations: {
+-        writeFile, mkdir: async (path) => { await this.request("mkdir", { path }); },
++        writeFile, mkdir: async (path) => { await file("mkdir", { path }); },
+       } });
+       const remoteEdit = createEditToolDefinition(this.cwd, { operations: {
+-        writeFile,
+-        readFile: async (path) => Buffer.from(await this.request("read", { path }), "base64"),
+-        access: async (path) => { await this.request("access", { path }); },
++        writeFile, readFile: async (path) => Buffer.from(await file("read", { path }), "base64"),
++        access: async (path) => { await file("access", { path }); },
+       } });
+       const remoteBash = createBashToolDefinition(this.cwd, { exposeSessionEnvironment: false, operations: {
+         exec: async (command, _cwd, options) => {
+           const result = await this.request("bash", { command, timeout: options.timeout }, options.signal);
+-          options.onData(Buffer.from(result));
+-          return { exitCode: 0 };
++          options.onData(Buffer.from(result.output));
++          if (result.timedOut) options.onData(Buffer.from("\nSANDBOX_TIMEOUT\n"));
++          if (result.signal) options.onData(Buffer.from(`\nSANDBOX_SIGNAL: ${result.signal}\n`));
++          return result;
+         },
+       } });
+       const write = createWriteToolDefinition(this.cwd);
+diff --git a/agentd/src/protocol/events.ts b/agentd/src/protocol/events.ts
+index b50c9bd..6c34d83 100644
+--- a/agentd/src/protocol/events.ts
++++ b/agentd/src/protocol/events.ts
+@@ -10,7 +10,9 @@ export const UsageSchema = Type.Object({
+   cost: Type.Object({ input: tokens, output: tokens, cacheRead: tokens, cacheWrite: tokens, total: tokens }),
+ });
+ export const EventSchema = Type.Union([
+-  event("permission.request", { targetSessionId: text, callId: text, tool: text, summary: text }),
++  event("permission.request", { targetSessionId: text, callId: text, tool: text, summary: text, expiresAt: Type.Integer({ minimum: 0 }) }),
++  event("permission.resolved", { targetSessionId: text, callId: text,
++    reason: Type.Union([Type.Literal("responded"), Type.Literal("expired"), Type.Literal("cancelled")]) }),
+   event("sandbox.request", { targetSessionId: text, callId: text, operation: text, args: Type.Record(text, Type.Unknown()) }),
+   event("turn.started", {}), event("text.delta", { text }), event("reasoning.delta", { text }),
+   event("tool.started", { callId: text, tool: text, args: Type.Unknown(), parentCallId: Type.Optional(text) }),
+diff --git a/agentd/src/protocol/schema.ts b/agentd/src/protocol/schema.ts
+index ef9519f..cd20623 100644
+--- a/agentd/src/protocol/schema.ts
++++ b/agentd/src/protocol/schema.ts
+@@ -5,7 +5,7 @@ const id = Type.Union([text, Type.Integer()]);
+ const request = <M extends string, P extends Record<string, TSchema>>(method: M, params: P) =>
+   Type.Object({ id, method: Type.Literal(method), params: Type.Object(params, { additionalProperties: false }) },
+     { additionalProperties: false });
+-export const PROTOCOL_VERSION = 3;
++export const PROTOCOL_VERSION = 4;
+ export const ModelSchema = Type.Object({ provider: text, id: text }, { additionalProperties: false });
+ export const ThinkingLevelSchema = Type.Union([
+   Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"),
+@@ -28,9 +28,15 @@ export type ImageAttachment = Static<typeof ImageSchema>;
+ export const PingSchema = Type.Object({ status: Type.Literal("ok"), sessions: Type.Integer({ minimum: 0 }),
+   version: text, piVersion: text, protocolVersion: Type.Literal(PROTOCOL_VERSION) });
+ // Keep every command explicit so unknown fields/methods cannot reach SDK APIs.
++export const SandboxResultSchema = Type.Object({
++  output: Type.String(), error: Type.Optional(text),
++  exitCode: Type.Union([Type.Integer(), Type.Null()]),
++  signal: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]), timedOut: Type.Boolean(),
++});
++export type SandboxResult = Static<typeof SandboxResultSchema>;
+ export const RequestSchema = Type.Union([
+   request("permission.respond", { sessionId: text, callId: text, decision: DecisionSchema }),
+-  request("sandbox.respond", { sessionId: text, callId: text, output: Type.String(), error: Type.Optional(text) }),
++  request("sandbox.respond", { sessionId: text, callId: text, ...SandboxResultSchema.properties }),
+   request("ping", {}), request("models.list", {}),
+   request("session.open", { sessionId: Type.Optional(text), cwd: Type.Optional(text), ...SessionOptionsSchema.properties }),
+   request("session.configure", { sessionId: text, ...SessionOptionsSchema.properties }),
+diff --git a/agentd/src/sessions/registry.ts b/agentd/src/sessions/registry.ts
+index 51ad7e1..1a2eb32 100644
+--- a/agentd/src/sessions/registry.ts
++++ b/agentd/src/sessions/registry.ts
+@@ -1,4 +1,5 @@
+ import { Permissions, type Decision } from "../extensions/permissions.ts";
++import type { SandboxResult } from "../protocol/schema.ts";
+ import { Sandbox } from "../extensions/sandbox.ts";
+ import { webFactory } from "../extensions/web.ts";
+ import { subagentFactory } from "../extensions/subagent.ts";
+@@ -69,7 +70,8 @@ export class SessionRegistry {
+       const assemble = (actualCwd: string): ExtensionFactory[] => {
+         permissions = new Permissions(options.permissionMode ?? config.permissions.defaultMode,
+           actualCwd, config.permissions.timeoutMs, config.permissions.summaryChars,
+-          (approval) => this.extensionEvent(state.id, { event: "permission.request", targetSessionId: state.id, ...approval }));
++          (approval) => this.extensionEvent(state.id, { event: "permission.request", targetSessionId: state.id, ...approval }),
++          (resolution) => this.extensionEvent(state.id, { event: "permission.resolved", targetSessionId: state.id, ...resolution }));
+         sandbox = new Sandbox(options.sandbox ?? false, actualCwd, config.sandbox,
+           (request) => this.extensionEvent(state.id, { event: "sandbox.request", targetSessionId: state.id, ...request }));
+         const factories: ExtensionFactory[] = [sandbox.factory(), webFactory(config.web, this.models.credentials),
+@@ -273,13 +275,13 @@ export class SessionRegistry {
+   }
+   private extensionEvent(id: string, payload: Parameters<EventMapper["emit"]>[0]): void {
+     const run = this.get(id).run;
+-    if (!run || run.stopped) throw new DaemonError("TURN_CANCELLED", "No active turn");
++    if (!run || (run.stopped && payload.event !== "permission.resolved")) throw new DaemonError("TURN_CANCELLED", "No active turn");
+     run.mapper.emit(payload);
+   }
+   private emitEvent(id: string, event: ProtocolEvent): void {
+     const parent = this.entries.get(id)?.parent;
+     if (parent) {
+-      if (!["tool.started", "tool.completed", "permission.request", "sandbox.request"].includes(event.event)) return;
++      if (!["tool.started", "tool.completed", "permission.request", "permission.resolved", "sandbox.request"].includes(event.event)) return;
+       const run = this.entries.get(parent.id)?.run;
+       if (run) this.emitEvent(parent.id, { ...event, sessionId: parent.id,
+         turnId: run.id, parentCallId: event.parentCallId ?? parent.callId });
+@@ -289,8 +291,8 @@ export class SessionRegistry {
+     if (!this.get(id).permissions.respond(callId, decision)) throw new DaemonError("APPROVAL_NOT_FOUND", "Approval expired or does not belong to this session");
+     return { accepted: true };
+   }
+-  respondSandbox(id: string, callId: string, output: string, error?: string) {
+-    if (!this.get(id).sandbox.respond(callId, output, error)) throw new DaemonError("SANDBOX_REQUEST_NOT_FOUND", "Sandbox request expired");
++  respondSandbox(id: string, callId: string, result: SandboxResult) {
++    if (!this.get(id).sandbox.respond(callId, result)) throw new DaemonError("SANDBOX_REQUEST_NOT_FOUND", "Sandbox request expired");
+     return { accepted: true };
+   }
+   async subagent(id: string, callId: string, task: string, signal?: AbortSignal): Promise<string> {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs
+index d9efaa9..c4185d9 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs
+@@ -1,5 +1,6 @@
+ //! Tool-only execution in an already managed container. Never spawns a host shell.
+-use super::host_tools::SandboxExecutor;
++use super::{host_tools::{SandboxExecutor, SandboxOutput}, sandbox_process};
++use std::time::{Duration, Instant};
+ use serde_json::Value;
+ use std::{path::{Path, PathBuf}, process::Command};
+ 
+@@ -41,17 +42,22 @@ impl ManagedSandbox {
+     }
+ }
+ impl SandboxExecutor for ManagedSandbox {
+-    fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<String> {
+-        let output = Command::new("docker").args(["inspect", &self.container]).output()
+-            .map_err(|e| anyhow::anyhow!("SANDBOX_UNAVAILABLE: {e}"))?;
+-        anyhow::ensure!(output.status.success(), "SANDBOX_UNAVAILABLE: managed container not found");
+-        let info: Vec<Value> = serde_json::from_slice(&output.stdout)?;
++    fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<SandboxOutput> {
++        let start = Instant::now();
++        let budget = timeout(args)?;
++        let output = sandbox_process::run(Command::new("docker").args(["inspect", &self.container]), budget, output_limit(args)?)?;
++        anyhow::ensure!(output.exit_code == Some(0) && !output.timed_out, "SANDBOX_UNAVAILABLE: managed container not found or inspect timed out");
++        let info: Vec<Value> = serde_json::from_str(&output.output)?;
+         let info = info.first().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_CONTAINER"))?;
+         anyhow::ensure!(info["State"]["Running"] == true, "SANDBOX_UNAVAILABLE: container is stopped");
+         anyhow::ensure!(info["HostConfig"]["Privileged"] != true
+             && info["HostConfig"]["PidMode"] != "host"
+             && info["HostConfig"]["NetworkMode"] != "host", "SANDBOX_UNSAFE_CONTAINER");
+-        self.route(&info["Mounts"], Path::new(text(args, "cwd")?))?.execute(operation, args)
++        let mut remaining = args.clone();
++        let left = budget.saturating_sub(start.elapsed()).as_millis();
++        anyhow::ensure!(left > 0, "SANDBOX_UNAVAILABLE: probe budget exhausted");
++        remaining["timeoutMs"] = serde_json::json!(left);
++        self.route(&info["Mounts"], Path::new(text(args, "cwd")?))?.execute(operation, &remaining)
+     }
+ }
+ fn quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
+@@ -68,11 +74,12 @@ impl DockerTools {
+     }
+     pub fn script(&self, operation: &str, args: &Value) -> anyhow::Result<(String, String)> {
+         let cwd = self.map_path(Path::new(text(args, "cwd")?))?;
+-        let path = if operation == "bash" { String::new() } else {
++        let path = if ["bash", "probe"].contains(&operation) { String::new() } else {
+             self.map_path(Path::new(text(args, "path")?))?
+         };
+         let path = quote(&path);
+         let script = match operation {
++            "probe" => "command -v setsid >/dev/null && command -v mktemp >/dev/null && command -v sleep >/dev/null".into(),
+             "bash" => text(args, "command")?.to_owned(),
+             "mkdir" => format!("mkdir -p -- {path}"),
+             "access" => format!("test -r {path} && test -w {path}"),
+@@ -87,26 +94,50 @@ impl DockerTools {
+         Ok((cwd, script))
+     }
+ }
++fn timeout(args: &Value) -> anyhow::Result<Duration> {
++    args.get("timeoutMs").and_then(Value::as_u64).filter(|n| *n > 0 && *n <= 2_147_483_647)
++        .map(Duration::from_millis).ok_or_else(|| anyhow::anyhow!("SandboxInvalidTimeout"))
++}
++fn output_limit(args: &Value) -> anyhow::Result<usize> {
++    args.get("maxOutputBytes").and_then(Value::as_u64).filter(|n| *n > 0 && *n <= 1_048_576)
++        .map(|n| n as usize).ok_or_else(|| anyhow::anyhow!("SandboxInvalidOutputLimit"))
++}
++const SUPERVISOR: &str = include_str!("sandbox_command.sh");
++fn decode(mut output: SandboxOutput, marker: &str) -> anyhow::Result<SandboxOutput> {
++    if output.timed_out || output.signal.is_some() { return Ok(output); }
++    anyhow::ensure!(output.exit_code == Some(0), "SANDBOX_UNAVAILABLE: {}", output.output);
++    let prefix = format!("\n{marker}:");
++    let (body, trailer) = output.output.rsplit_once(&prefix)
++        .ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_RESULT"))?;
++    let fields: Vec<_> = trailer.trim().split(':').collect();
++    anyhow::ensure!(fields.len() == 3, "SANDBOX_INVALID_RESULT");
++    let code: i32 = fields[0].parse()?;
++    let signal: i32 = fields[1].parse()?;
++    let timed_out: bool = fields[2].parse()?;
++    output = SandboxOutput { output: body.into(), exit_code: Some(code),
++        signal: if signal > 0 { Some(signal) } else { None }, timed_out };
++    Ok(output)
++}
+ impl SandboxExecutor for DockerTools {
+-    fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<String> {
++    fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<SandboxOutput> {
+         let (cwd, script) = self.script(operation, args)?;
+-        let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64)
+-            .filter(|n| *n > 0 && *n <= 2_147_483_647).ok_or_else(|| anyhow::anyhow!("SandboxInvalidTimeout"))?;
++        let budget = timeout(args)?;
+         let requested = args.get("timeout").and_then(Value::as_f64);
+         let seconds = requested.filter(|n| n.is_finite() && *n > 0.0)
+-            .map_or(timeout_ms.div_ceil(1000), |n| (n.ceil() as u64).min(timeout_ms.div_ceil(1000)));
++            .map_or(budget.as_secs_f64(), |n| n.min(budget.as_secs_f64()));
+         let shell = text(args, "shell")?;
+         anyhow::ensure!(["sh", "bash"].contains(&shell), "SandboxInvalidShell");
+-        let limit = args.get("maxOutputBytes").and_then(Value::as_u64)
+-            .filter(|n| *n > 0 && *n <= 1_048_576).ok_or_else(|| anyhow::anyhow!("SandboxInvalidOutputLimit"))?;
+-        // No -e flags: model keys and the agentd environment stay on the host.
+-        // Container timeout also applies after a lost daemon or cancelled host turn.
+-        let output = Command::new("docker").args(["exec", "-w", &cwd, &self.container,
+-            "timeout", "-s", "KILL", &seconds.to_string(), shell, "-c", &script]).output()
+-            .map_err(|e| anyhow::anyhow!("SANDBOX_UNAVAILABLE: {e}"))?;
+-        anyhow::ensure!(output.stdout.len() as u64 <= limit && output.stderr.len() as u64 <= limit, "SANDBOX_OUTPUT_LIMIT");
+-        anyhow::ensure!(output.status.success(), "SANDBOX_EXEC_FAILED: {}", String::from_utf8_lossy(&output.stderr));
+-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
++        let limit = output_limit(args)?;
++        let mut nonce = [0u8; 16];
++        getrandom::getrandom(&mut nonce).map_err(|e| anyhow::anyhow!("SandboxRandomFailed: {e}"))?;
++        let marker = format!("polaris-{:x}", u128::from_le_bytes(nonce));
++        // Merge command stderr inside the container; the supervisor trailer remains last.
++        let script = format!("exec 2>&1\n{script}");
++        let mut command = Command::new("docker");
++        command.args(["exec", "-w", &cwd, &self.container, "sh", "-c", SUPERVISOR,
++            "polaris-supervisor", shell, &script, &seconds.to_string(), &marker]);
++        let output = sandbox_process::run(&mut command, budget, limit)?;
++        decode(output, &marker)
+     }
+ }
+ #[cfg(test)]
+@@ -146,3 +177,54 @@ mod mount_tests {
+         Ok(())
+     }
+ }
++
++#[cfg(all(test, unix))]
++mod status_tests {
++    use super::*;
++    // Execute the identical container supervisor locally, never requiring Docker in unit tests.
++    fn execute(command: &str, seconds: &str, shell: &str) -> anyhow::Result<SandboxOutput> {
++        let mut process = Command::new("sh");
++        process.args(["-c", SUPERVISOR, "test", shell, command, seconds, "test-marker"]);
++        decode(sandbox_process::run(&mut process, Duration::from_secs(3), 4096)?, "test-marker")
++    }
++    #[test]
++    fn preserves_failure_output_normal_exit_and_signal() -> anyhow::Result<()> {
++        for shell in ["sh", "bash"] {
++            for code in [0, 7, 124, 137, 143] {
++                let result = execute(&format!("printf output; printf error >&2; exit {code}"), "2", shell)?;
++                assert_eq!(result.exit_code, Some(code));
++                assert_eq!(result.signal, None);
++                assert!(!result.timed_out);
++                assert!(result.output.contains("outputerror"));
++            }
++            let replaced = execute("exec sh -c 'exit 137'", "2", shell)?;
++            assert_eq!(replaced.exit_code, Some(137));
++            assert_eq!(replaced.signal, None);
++            assert!(!replaced.timed_out);
++            for (signal, code) in [(9, 137), (15, 143)] {
++                let result = execute(&format!("kill -{signal} $$"), "2", shell)?;
++                assert_eq!(result.exit_code, Some(code));
++                assert_eq!(result.signal, Some(signal));
++                assert!(!result.timed_out);
++            }
++        }
++        Ok(())
++    }
++    #[test]
++    fn timeout_is_distinct_from_failure_and_signal() -> anyhow::Result<()> {
++        let result = execute("sleep 5", "0.05", "sh")?;
++        assert!(result.timed_out);
++        assert_eq!(result.exit_code, Some(137));
++        assert_eq!(result.signal, Some(9));
++        Ok(())
++    }
++    #[test]
++    fn unresponsive_transport_has_bounded_wait() -> anyhow::Result<()> {
++        let start = Instant::now();
++        let result = sandbox_process::run(Command::new("sleep").arg("5"), Duration::from_millis(20), 1024)?;
++        assert!(result.timed_out);
++        assert!(start.elapsed() < Duration::from_millis(500));
++        assert_eq!(result.exit_code, None);
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs
+index 1b3842b..448a2af 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs
+@@ -5,11 +5,20 @@ use serde::Deserialize;
+ use serde_json::Value;
+ use std::sync::{Arc, OnceLock};
+ 
++#[derive(Debug, Default)]
++pub struct SandboxOutput {
++    pub output: String, pub exit_code: Option<i32>, pub signal: Option<i32>, pub timed_out: bool,
++}
+ pub trait SandboxExecutor: Send + Sync {
+-    fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<String>;
++    fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<SandboxOutput>;
+ }
+ static SANDBOX: OnceLock<Arc<dyn SandboxExecutor>> = OnceLock::new();
+-pub fn set_sandbox_executor(executor: Arc<dyn SandboxExecutor>) { let _ = SANDBOX.set(executor); }
++pub fn set_sandbox_executor(executor: Arc<dyn SandboxExecutor>) {
++    if SANDBOX.set(executor).is_err() {
++        eprintln!("{}", serde_json::json!({"level":"warn", "component":"sandbox",
++            "message":"set_sandbox_executor failed: executor is already installed"}));
++    }
++}
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ struct Request { session_id: String, call_id: String, operation: String, args: Value }
+@@ -18,8 +27,9 @@ pub fn sandbox_response(executor: Option<&dyn SandboxExecutor>, payload: &str) -
+     let request: Request = serde_json::from_str(payload)?;
+     let result = executor.ok_or_else(|| anyhow::anyhow!("SANDBOX_UNAVAILABLE: host executor is not installed"))
+         .and_then(|executor| executor.execute(&request.operation, &request.args));
+-    let (output, error) = match result { Ok(output) => (output, None), Err(error) => (String::new(), Some(error.to_string())) };
+-    Ok(SandboxResponse { session_id: request.session_id, call_id: request.call_id, output, error })
++    let (output, error) = match result { Ok(output) => (output, None), Err(error) => (SandboxOutput::default(), Some(error.to_string())) };
++    Ok(SandboxResponse { session_id: request.session_id, call_id: request.call_id, output: output.output, error,
++        exit_code: output.exit_code, signal: output.signal, timed_out: output.timed_out })
+ }
+ pub fn handle_sandbox(backend: &dyn AgentBackend, event: &ChatStreamEvent) -> anyhow::Result<bool> {
+     if event.kind != "sandbox.request" { return Ok(false); }
+@@ -54,11 +64,11 @@ mod tests {
+     use super::*;
+     struct Fake(std::sync::atomic::AtomicUsize);
+     impl SandboxExecutor for Fake {
+-        fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<String> {
++        fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<SandboxOutput> {
+             assert_eq!(operation, "bash");
+             assert_eq!(args["command"], "touch /host-marker");
+             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+-            Ok("container-only".into())
++            Ok(SandboxOutput { output: "container-only".into(), exit_code: Some(7), signal: None, timed_out: false })
+         }
+     }
+     #[test]
+@@ -68,6 +78,7 @@ mod tests {
+         let fake = Fake(std::sync::atomic::AtomicUsize::new(0));
+         let response = sandbox_response(Some(&fake), &payload)?;
+         assert_eq!(response.output, "container-only");
++        assert_eq!(response.exit_code, Some(7));
+         assert!(response.error.is_none());
+         assert_eq!(fake.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+         let unavailable = sandbox_response(None, &payload)?;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+index dc2cad8..8f5c7a9 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+@@ -10,6 +10,7 @@ pub mod stream;
+ mod bridge;
+ pub mod host_tools;
+ pub mod docker_tools;
++mod sandbox_process;
+ use std::{path::PathBuf, sync::Arc, time::Duration};
+ use serde::Serialize;
+ use crate::chat::{ChatSendArgs, PermissionMode};
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+index a034d12..1316442 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+@@ -2,7 +2,7 @@
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ /// Mirror of agentd/src/protocol/schema.ts; fingerprint test gates changes.
+-pub const PROTOCOL_VERSION: u64 = 3;
++pub const PROTOCOL_VERSION: u64 = 4;
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+ #[serde(untagged)]
+ pub enum Id { Text(String), Number(i64) }
+@@ -39,6 +39,7 @@ pub struct PermissionResponse { pub session_id: String, pub call_id: String, pub
+ pub struct SandboxResponse {
+     pub session_id: String, pub call_id: String, pub output: String,
+     #[serde(skip_serializing_if = "Option::is_none")] pub error: Option<String>,
++    pub exit_code: Option<i32>, pub signal: Option<i32>, pub timed_out: bool,
+ }
+ #[derive(Debug, Serialize, Deserialize, Default)]
+ #[serde(deny_unknown_fields)]
+@@ -116,11 +117,16 @@ pub enum Frame {
+     #[serde(rename = "event", rename_all = "camelCase")]
+     Event { session_id: String, turn_id: String, #[serde(flatten)] event: Event },
+ }
++#[derive(Debug, Clone, Deserialize, Serialize)]
++#[serde(rename_all = "lowercase")]
++pub enum PermissionResolution { Responded, Expired, Cancelled }
+ #[derive(Debug, Clone, Deserialize)]
+ #[serde(tag = "event")]
+ pub enum Event {
+     #[serde(rename = "permission.request", rename_all = "camelCase")]
+-    PermissionRequest { target_session_id: String, call_id: String, tool: String, summary: String, parent_call_id: Option<String> },
++    PermissionRequest { target_session_id: String, call_id: String, tool: String, summary: String, expires_at: u64, parent_call_id: Option<String> },
++    #[serde(rename = "permission.resolved", rename_all = "camelCase")]
++    PermissionResolved { target_session_id: String, call_id: String, reason: PermissionResolution },
+     #[serde(rename = "sandbox.request", rename_all = "camelCase")]
+     SandboxRequest { target_session_id: String, call_id: String, operation: String, args: Value },
+     #[serde(rename = "turn.started")] Started,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
+index 6dee8b3..598af3e 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
+@@ -36,10 +36,15 @@ impl Translator {
+         }
+         let mut out = self.flush();
+         match input {
+-            Event::PermissionRequest { target_session_id, call_id, tool, summary, parent_call_id } => {
++            Event::PermissionRequest { target_session_id, call_id, tool, summary, expires_at, parent_call_id } => {
+                 out.push(self.make("permission.request", Some(serde_json::json!({
+                     "sessionId": target_session_id, "callId": call_id, "tool": tool,
+-                    "summary": summary, "parentCallId": parent_call_id,
++                    "summary": summary, "expiresAt": expires_at, "parentCallId": parent_call_id,
++                }).to_string())));
++            }
++            Event::PermissionResolved { target_session_id, call_id, reason } => {
++                out.push(self.make("permission.resolved", Some(serde_json::json!({
++                    "sessionId": target_session_id, "callId": call_id, "reason": reason,
+                 }).to_string())));
+             }
+             Event::SandboxRequest { target_session_id, call_id, operation, args } => {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/sandbox_command.sh b/src-tauri/crates/polaris-kernel/src/chat/backend/sandbox_command.sh
+new file mode 100644
+index 0000000..e1dad22
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/sandbox_command.sh
+@@ -0,0 +1,38 @@
++# Container supervisor. Only BusyBox/POSIX utilities; no host shell execution.
++# Arguments: shell, command, timeout seconds, unique response marker.
++exec 2>&1
++shell=$1
++command=$2
++duration=$3
++marker=$4
++state=$(mktemp -d) || exit 125
++trap 'rm -rf "$state"' EXIT
++# EXIT runs for normal exits (including explicit exit 137), but not SIGKILL.
++# A separate session allows the watchdog to terminate descendants too.
++setsid "$shell" -c '
++  trap '\''code=$?; printf "%s" "$code" > "$2"'\'' EXIT
++  eval "$1"
++' polaris-command "$command" "$state/exited" &
++child=$!
++setsid sh -c '
++  sleep "$1"
++  : > "$2/timeout"
++  kill -KILL "-$3" 2>/dev/null
++' polaris-watchdog "$duration" "$state" "$child" </dev/null >/dev/null 2>&1 &
++watchdog=$!
++wait "$child" 2>"$state/wait"
++code=$?
++kill -KILL "-$watchdog" 2>/dev/null
++kill -KILL "$watchdog" 2>/dev/null
++wait "$watchdog" 2>/dev/null
++signal=0
++timed_out=false
++if [ -f "$state/timeout" ]; then
++  timed_out=true
++  signal=9
++# wait reports signal death separately from a normal high exit code. The
++# EXIT marker also covers shells that run EXIT while handling a signal.
++elif [ "$(cat "$state/exited" 2>/dev/null)" != "$code" ] && [ "$code" -gt 128 ] && [ -s "$state/wait" ]; then
++  signal=$((code - 128))
++fi
++printf '\n%s:%s:%s:%s\n' "$marker" "$code" "$signal" "$timed_out"
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/sandbox_process.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/sandbox_process.rs
+new file mode 100644
+index 0000000..b67fede
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/sandbox_process.rs
+@@ -0,0 +1,48 @@
++//! Bounded Docker transport. Reads pipes concurrently so a full pipe cannot stall probing.
++use std::{io::Read, process::{Command, Stdio}, time::{Duration, Instant}};
++use super::host_tools::SandboxOutput;
++
++pub fn run(command: &mut Command, timeout: Duration, limit: usize) -> anyhow::Result<SandboxOutput> {
++    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
++        .map_err(|e| anyhow::anyhow!("SANDBOX_UNAVAILABLE: {e}"))?;
++    let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("SandboxMissingStdout"))?;
++    let stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("SandboxMissingStderr"))?;
++    let read = move |pipe: Box<dyn Read + Send>| -> std::io::Result<Vec<u8>> {
++        let mut bytes = Vec::new();
++        pipe.take((limit + 1) as u64).read_to_end(&mut bytes)?;
++        Ok(bytes)
++    };
++    let (tx, rx) = std::sync::mpsc::channel();
++    let err_tx = tx.clone();
++    std::thread::spawn(move || { let _ = tx.send((true, read(Box::new(stdout)))); });
++    std::thread::spawn(move || { let _ = err_tx.send((false, read(Box::new(stderr)))); });
++    let start = Instant::now();
++    let (status, timed_out) = loop {
++        if let Some(status) = child.try_wait()? { break (status, false); }
++        if start.elapsed() >= timeout {
++            let _ = child.kill();
++            break (child.wait()?, true);
++        }
++        std::thread::sleep(Duration::from_millis(2).min(timeout.saturating_sub(start.elapsed())));
++    };
++    // A stuck Docker descendant may hold a pipe after the client dies. Never join it on timeout.
++    if timed_out {
++        return Ok(SandboxOutput { timed_out: true, exit_code: None, signal: None, output: String::new() });
++    }
++    let mut stdout = Vec::new();
++    let mut stderr = Vec::new();
++    for _ in 0..2 {
++        match rx.recv_timeout(timeout.saturating_sub(start.elapsed())) {
++            Ok((true, bytes)) => stdout = bytes?,
++            Ok((false, bytes)) => stderr = bytes?,
++            Err(_) => return Ok(SandboxOutput { timed_out: true, ..SandboxOutput::default() }),
++        }
++    }
++    anyhow::ensure!(stdout.len() <= limit && stderr.len() <= limit, "SANDBOX_OUTPUT_LIMIT");
++    #[cfg(unix)]
++    let signal = { use std::os::unix::process::ExitStatusExt; status.signal() };
++    #[cfg(not(unix))]
++    let signal = None;
++    Ok(SandboxOutput { output: format!("{}{}", String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr)),
++        exit_code: status.code().or_else(|| signal.map(|n| 128 + n)), signal, timed_out: false })
++}
+diff --git a/src/features/permissions/PermissionDialog.vue b/src/features/permissions/PermissionDialog.vue
+index dba8d27..d1b8d3d 100644
+--- a/src/features/permissions/PermissionDialog.vue
++++ b/src/features/permissions/PermissionDialog.vue
+@@ -1,15 +1,19 @@
+ <script setup lang="ts">
+ import { computed, onMounted, onUnmounted, ref } from "vue";
+ import { invoke, listen } from "../../tauri";
+-import { consume, type Approval, type Decision, type PermissionEvent } from "./queue";
++import { consume, remainingSeconds, type Approval, type Decision, type PermissionEvent } from "./queue";
+ 
+ const queue = ref<Approval[]>([]);
+ const current = computed(() => queue.value[0]);
+ const busy = ref(false);
++const now = ref(Date.now());
++const remaining = computed(() => current.value ? remainingSeconds(current.value, now.value) : 0);
++let tick: ReturnType<typeof setInterval> | undefined;
+ const error = ref("");
+ let dispose: (() => void) | undefined;
+ let stopped = false;
+ onMounted(async () => {
++  tick = setInterval(() => { now.value = Date.now(); }, 1000);
+   try {
+     const stop = await listen<PermissionEvent>("chat:stream", (event) => {
+       queue.value = consume(queue.value, event);
+@@ -17,7 +21,7 @@ onMounted(async () => {
+     if (stopped) stop(); else dispose = stop;
+   } catch { error.value = "无法连接授权请求；未确认的操作会自动拒绝。"; }
+ });
+-onUnmounted(() => { stopped = true; dispose?.(); });
++onUnmounted(() => { stopped = true; dispose?.(); clearInterval(tick); });
+ async function respond(decision: Decision) {
+   const approval = current.value;
+   if (!approval || busy.value) return;
+@@ -42,11 +46,13 @@ async function respond(decision: Decision) {
+       <h2 id="permission-title">允许此操作？</h2>
+       <p>{{ current.tool }}<span v-if="current.parentCallId"> · 子任务</span></p>
+       <pre>{{ current.summary }}</pre>
++      <p aria-live="polite">{{ remaining > 0 ? `剩余 ${remaining} 秒；超时自动拒绝。` : "授权已过期，等待关闭。" }}</p>
++      <p>总是允许仅适用于同一会话、完全相同的工具与参数。</p>
+       <p v-if="error" role="alert">{{ error }}</p>
+       <div class="permission-actions">
+-        <button :disabled="busy" @click="respond('deny')">拒绝</button>
+-        <button :disabled="busy" @click="respond('allow')">允许一次</button>
+-        <button :disabled="busy" @click="respond('allowAlways')">本会话相同调用总是允许</button>
++        <button :disabled="busy || remaining === 0" @click="respond('deny')">拒绝</button>
++        <button :disabled="busy || remaining === 0" @click="respond('allow')">允许一次</button>
++        <button :disabled="busy || remaining === 0" @click="respond('allowAlways')">本会话相同调用总是允许</button>
+       </div>
+     </section>
+   </div>
+diff --git a/src/features/permissions/queue.test.ts b/src/features/permissions/queue.test.ts
+index a961fe0..4dcd268 100644
+--- a/src/features/permissions/queue.test.ts
++++ b/src/features/permissions/queue.test.ts
+@@ -1,8 +1,8 @@
+ import { describe, expect, it } from "vitest";
+-import { consume } from "./queue";
++import { consume, remainingSeconds } from "./queue";
+ describe("permission confirmation queue", () => {
+   const approval = { kind: "permission.request", reqId: "request", text: JSON.stringify({
+-    sessionId: "child-session", callId: "call", tool: "bash", summary: "pwd", parentCallId: "parent",
++    sessionId: "child-session", callId: "call", tool: "bash", summary: "pwd", expiresAt: 60000, parentCallId: "parent",
+   }) };
+   it("retains child identity, deduplicates and removes requests on terminal events", () => {
+     const queue = consume([], approval);
+@@ -12,6 +12,15 @@ describe("permission confirmation queue", () => {
+     expect(consume(queue, { kind: "done", reqId: "unrelated" })).toHaveLength(1);
+     expect(consume(queue, { kind: "done", reqId: "request" })).toEqual([]);
+   });
++  it("closes only the resolved session/call and counts down to zero", () => {
++    const queue = consume([], approval);
++    expect(remainingSeconds(queue[0], 58500)).toBe(2);
++    expect(remainingSeconds(queue[0], 61000)).toBe(0);
++    const resolution = (sessionId: string) => ({ kind: "permission.resolved", reqId: "request",
++      text: JSON.stringify({ sessionId, callId: "call", reason: "expired" }) });
++    expect(consume(queue, resolution("other"))).toHaveLength(1);
++    expect(consume(queue, resolution("child-session"))).toEqual([]);
++  });
+   it("ignores malformed requests and unrelated chat events", () => {
+     for (const text of ["invalid JSON", "null", "{}", '{"tool":5}']) {
+       expect(consume([], { ...approval, text })).toEqual([]);
+diff --git a/src/features/permissions/queue.ts b/src/features/permissions/queue.ts
+index 6e3090e..7cfbb74 100644
+--- a/src/features/permissions/queue.ts
++++ b/src/features/permissions/queue.ts
+@@ -5,21 +5,30 @@ export interface Approval {
+   callId: string;
+   tool: string;
+   summary: string;
++  expiresAt: number;
+   parentCallId?: string;
+ }
+ export interface PermissionEvent { kind: string; reqId: string; text?: string | null }
+ export function consume(queue: Approval[], event: PermissionEvent): Approval[] {
+   if (event.kind === "done") return queue.filter((item) => item.reqId !== event.reqId);
+-  if (event.kind !== "permission.request" || !event.text) return queue;
++  if (!["permission.request", "permission.resolved"].includes(event.kind) || !event.text) return queue;
+   try {
+     const value: unknown = JSON.parse(event.text);
+     if (!value || typeof value !== "object") return queue;
+     const approval = value as Record<string, unknown>;
++    if (event.kind === "permission.resolved") {
++      return queue.filter((item) => item.sessionId !== approval.sessionId || item.callId !== approval.callId);
++    }
++    if (typeof approval.expiresAt !== "number" || !Number.isSafeInteger(approval.expiresAt) || approval.expiresAt < 0) return queue;
+     if (!["sessionId", "callId", "tool", "summary"].every((key) => typeof approval[key] === "string")) return queue;
+     const item: Approval = { reqId: event.reqId, sessionId: String(approval.sessionId), callId: String(approval.callId),
+-      tool: String(approval.tool), summary: String(approval.summary),
++      tool: String(approval.tool), summary: String(approval.summary), expiresAt: approval.expiresAt,
+       parentCallId: typeof approval.parentCallId === "string" ? approval.parentCallId : undefined };
+     if (queue.some((entry) => entry.callId === item.callId && entry.sessionId === item.sessionId)) return queue;
+     return [...queue, item];
+   } catch { return queue; }
+ }
++
++export function remainingSeconds(approval: Approval, now: number): number {
++  return Math.max(0, Math.ceil((approval.expiresAt - now) / 1000));
++}
