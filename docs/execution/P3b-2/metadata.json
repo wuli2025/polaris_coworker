@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-14T08:40:38.556831+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "e6d42b97b2b6b98f413105f29c4e0d29eb073f78d6988a1fc4244b1f2590ca95",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": " M docs/feature-tree.md\n M src-tauri/crates/polaris-sandbox/src/commands.rs\n M src-tauri/crates/polaris-sandbox/src/lib.rs\n M src-tauri/crates/polaris-sandbox/src/templates/Dockerfile.sandbox\n M vite.config.ts\n?? docs/execution/P3b-1/\n?? docs/execution/P3b-2/\n?? docs/pi-migration/p3b-result.md\n?? src-tauri/crates/polaris-sandbox/sandbox.schema.json\n?? src-tauri/crates/polaris-sandbox/src/config.rs\n?? src-tauri/crates/polaris-sandbox/src/lifecycle.rs\n?? src-tauri/crates/polaris-sandbox/src/policy.rs\n?? src-tauri/crates/polaris-sandbox/src/policy_tests.rs\n"
+  },
+  "git_after": {
+    "status_porcelain": " M docs/feature-tree.md\n M src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/docker_tools.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/host_tools.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/extension_tests.rs\n M src-tauri/crates/polaris-kernel/src/chat/types.rs\n M src-tauri/crates/polaris-kernel/src/integrations/feishu.rs\n M src-tauri/crates/polaris-sandbox/src/commands.rs\n M src-tauri/crates/polaris-sandbox/src/lib.rs\n M src-tauri/crates/polaris-sandbox/src/templates/Dockerfile.sandbox\n M src-tauri/src/wiring.rs\n M src/components/chat/ChatComposer.vue\n M src/components/chat/shared.ts\n M src/features/sandbox/api.ts\n M src/features/sandbox/components/SandboxStatus.vue\n M src/stores/chat.ts\n M vite.config.ts\n?? docs/execution/P3b-1/\n?? docs/execution/P3b-2/\n?? docs/pi-migration/p3b-result.md\n?? src-tauri/crates/polaris-kernel/src/chat/backend/expert_selection.rs\n?? src-tauri/crates/polaris-sandbox/sandbox.schema.json\n?? src-tauri/crates/polaris-sandbox/src/config.rs\n?? src-tauri/crates/polaris-sandbox/src/lifecycle.rs\n?? src-tauri/crates/polaris-sandbox/src/policy.rs\n?? src-tauri/crates/polaris-sandbox/src/policy_tests.rs\n?? src/features/sandbox/components/SandboxProject.vue\n?? src/features/sandbox/project.test.ts\n?? src/features/sandbox/project.ts\n?? src/lib/expertSelection.ts\n?? src/stores/chatArtifacts.test.ts\n?? src/stores/chatArtifacts.ts\n?? src/stores/chatDeltas.test.ts\n?? src/stores/chatDeltas.ts\n?? src/stores/chatTypes.ts\n?? tests/\n",
+    "diff_stat": " docs/feature-tree.md                               |  34 +++-\n .../polaris-kernel/src/chat/backend/bridge.rs      |   2 +-\n .../src/chat/backend/docker_tools.rs               |  84 ++++-----\n .../polaris-kernel/src/chat/backend/host_tools.rs  |  22 ++-\n .../crates/polaris-kernel/src/chat/backend/mod.rs  |   1 +\n .../src/chat/backend/pi/extension_tests.rs         |  43 +++++\n src-tauri/crates/polaris-kernel/src/chat/types.rs  |   2 +\n .../polaris-kernel/src/integrations/feishu.rs      |   1 +\n src-tauri/crates/polaris-sandbox/src/commands.rs   | 126 ++++---------\n src-tauri/crates/polaris-sandbox/src/lib.rs        |   5 +\n .../src/templates/Dockerfile.sandbox               |   6 +-\n src-tauri/src/wiring.rs                            |  33 +++-\n src/components/chat/ChatComposer.vue               |   7 +-\n src/components/chat/shared.ts                      |   1 +\n src/features/sandbox/api.ts                        |   3 +-\n src/features/sandbox/components/SandboxStatus.vue  |  16 +-\n src/stores/chat.ts                                 | 210 ++-------------------\n vite.config.ts                                     |   3 +-\n 18 files changed, 225 insertions(+), 374 deletions(-)\n"
+  },
+  "finished_at": "2026-10-14T08:54:17.165075+00:00"
+}

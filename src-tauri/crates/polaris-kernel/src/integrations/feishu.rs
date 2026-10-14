@@ -850,6 +850,7 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
                 use_kb: false,
                 batch_build: false,
                 batch_size: None,
+                expert_selection: None,
                 agent_mode: None,
                 work_mode: Some(if unsafe_host_tools { "work" } else { "fast" }.into()),
                 // 飞书走应用全局当前供应商(Auto 档), 不按对话钉死

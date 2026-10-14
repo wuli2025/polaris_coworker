@@ -20,7 +20,8 @@ export interface SandboxStatus {
 export const sandbox = {
   status: () => invoke<SandboxStatus>("sandbox_status"),
   build: () => invoke<string>("sandbox_build_image"),
-  start: () => invoke<string>("sandbox_start"),
+  start: (projectDir: string, rebuild = false) =>
+    invoke<string>("sandbox_start", { projectDir, rebuild }),
   stop: () => invoke<string>("sandbox_stop"),
   exec: (cmd: string) => invoke<string>("sandbox_exec", { cmd }),
 };

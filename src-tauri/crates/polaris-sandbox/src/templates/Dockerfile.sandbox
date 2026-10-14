@@ -7,9 +7,9 @@
 #
 # 安全策略 (容器运行时由 docker run 注入):
 #   --memory=4g --cpus=2
-#   --security-opt=no-new-privileges
-#   -v ~/Polaris:/workspace        (读写)
-#   -v ~/Polaris/PolarisKB:/kb:ro  (只读)
+#   --cap-drop=ALL --security-opt=no-new-privileges
+#   --mount type=bind,src=<目标项目>,dst=/workspace (读写)
+#   --mount type=bind,src=<知识库>,dst=/kb,readonly (只读)
 
 FROM alpine:3.20
 

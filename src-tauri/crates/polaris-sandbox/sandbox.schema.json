@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Polaris Docker sandbox policy",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mounts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "default": [
+        {"source": "${project}", "destination": "/workspace", "readOnly": false},
+        {"source": "${kb}", "destination": "/kb", "readOnly": true}
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "destination", "readOnly"],
+        "properties": {
+          "source": {"type": "string", "minLength": 1},
+          "destination": {"enum": ["/workspace", "/kb"]},
+          "readOnly": {"type": "boolean"}
+        },
+        "allOf": [
+          {"if": {"properties": {"destination": {"const": "/workspace"}}},
+           "then": {"properties": {"readOnly": {"const": false}}}},
+          {"if": {"properties": {"destination": {"const": "/kb"}}},
+           "then": {"properties": {"readOnly": {"const": true}}}}
+        ]
+      },
+      "allOf": [
+        {"contains": {"properties": {"destination": {"const": "/workspace"}}}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"destination": {"const": "/kb"}}}, "minContains": 1, "maxContains": 1}
+      ]
+    },
+    "protectedPaths": {"type": "array", "items": {"type": "string", "minLength": 1}, "default": []},
+    "memoryBytes": {"type": "integer", "minimum": 6291456, "maximum": 9223372036854775807, "default": 4294967296},
+    "cpus": {"type": "number", "minimum": 0.01, "maximum": 1024, "default": 2.0},
+    "capAdd": {
+      "type": "array",
+      "items": {"enum": ["CHOWN", "FOWNER", "DAC_OVERRIDE", "NET_BIND_SERVICE"]},
+      "default": []
+    },
+    "workdirChange": {"enum": ["reject", "rebuild"], "default": "reject"}
+  }
+}

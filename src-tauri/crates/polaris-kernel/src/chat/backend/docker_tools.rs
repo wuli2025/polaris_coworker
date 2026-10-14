@@ -1,5 +1,5 @@
 //! Tool-only execution in an already managed container. Never spawns a host shell.
-use super::{host_tools::{SandboxExecutor, SandboxOutput}, sandbox_process};
+use super::{host_tools::{SandboxExecutor, SandboxOutput, SandboxPolicy}, sandbox_process};
 use std::time::{Duration, Instant};
 use serde_json::Value;
 use std::{path::{Path, PathBuf}, process::Command};
@@ -13,32 +13,12 @@ pub struct DockerTools {
 /// Old containers mounting all of ~/Polaris are rejected because they expose keys.
 pub struct ManagedSandbox {
     pub container: String,
-    pub protected_paths: Vec<PathBuf>,
+    pub policy: std::sync::Arc<dyn SandboxPolicy>,
 }
 impl ManagedSandbox {
-    pub fn route(&self, mounts: &Value, cwd: &Path) -> anyhow::Result<DockerTools> {
-        let mounts = mounts.as_array().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_MOUNTS"))?;
-        let cwd = std::fs::canonicalize(cwd)?;
-        let mut selected: Option<(PathBuf, String)> = None;
-        for mount in mounts {
-            anyhow::ensure!(mount["Type"] == "bind", "SANDBOX_UNVERIFIED_VOLUME");
-            let source = std::fs::canonicalize(text(mount, "Source")?)?;
-            let destination = text(mount, "Destination")?;
-            for protected in &self.protected_paths {
-                let protected = std::fs::canonicalize(protected).unwrap_or_else(|_| protected.clone());
-                anyhow::ensure!(!protected.starts_with(&source) && !source.starts_with(&protected),
-                    "SANDBOX_UNSAFE_MOUNT: container exposes protected host data");
-            }
-            anyhow::ensure!(!source.starts_with("/var/run") && !source.starts_with("/run")
-                && !source.starts_with("/proc") && !source.starts_with("/sys") && !source.starts_with("/dev"),
-                "SANDBOX_UNSAFE_MOUNT: host control endpoint");
-            if cwd.starts_with(&source) && mount["RW"] == true
-                && selected.as_ref().is_none_or(|(previous, _)| source.components().count() > previous.components().count()) {
-                selected = Some((source, destination.into()));
-            }
-        }
-        let (host_root, guest_root) = selected.ok_or_else(|| anyhow::anyhow!("SANDBOX_PATH_UNMOUNTED"))?;
-        Ok(DockerTools { container: self.container.clone(), host_root, guest_root })
+    pub fn route(&self, info: &Value, cwd: &Path) -> anyhow::Result<DockerTools> {
+        let host_root = self.policy.validate(info, cwd)?;
+        Ok(DockerTools { container: self.container.clone(), host_root, guest_root: "/workspace".into() })
     }
 }
 impl SandboxExecutor for ManagedSandbox {
@@ -50,14 +30,12 @@ impl SandboxExecutor for ManagedSandbox {
         let info: Vec<Value> = serde_json::from_str(&output.output)?;
         let info = info.first().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_CONTAINER"))?;
         anyhow::ensure!(info["State"]["Running"] == true, "SANDBOX_UNAVAILABLE: container is stopped");
-        anyhow::ensure!(info["HostConfig"]["Privileged"] != true
-            && info["HostConfig"]["PidMode"] != "host"
-            && info["HostConfig"]["NetworkMode"] != "host", "SANDBOX_UNSAFE_CONTAINER");
+        let route = self.route(info, Path::new(text(args, "cwd")?))?;
         let mut remaining = args.clone();
         let left = budget.saturating_sub(start.elapsed()).as_millis();
         anyhow::ensure!(left > 0, "SANDBOX_UNAVAILABLE: probe budget exhausted");
         remaining["timeoutMs"] = serde_json::json!(left);
-        self.route(&info["Mounts"], Path::new(text(args, "cwd")?))?.execute(operation, &remaining)
+        route.execute(operation, &remaining)
     }
 }
 fn quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
@@ -157,27 +135,6 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod mount_tests {
-    use super::*;
-    #[test]
-    fn old_whole_app_mount_is_rejected_and_project_mount_is_routed() -> anyhow::Result<()> {
-        let base = std::env::temp_dir().join(format!("sandbox-mount-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
-        let project = base.join("project");
-        std::fs::create_dir_all(&project)?;
-        let root = std::fs::canonicalize(&base)?;
-        let managed = ManagedSandbox { container: "managed".into(), protected_paths: vec![root.join("data/providers.json")] };
-        let old = serde_json::json!([{"Type":"bind","Source":root,"Destination":"/workspace","RW":true}]);
-        assert!(managed.route(&old, &project).err().is_some_and(|e| e.to_string().contains("SANDBOX_UNSAFE_MOUNT")));
-        let safe = serde_json::json!([{"Type":"bind","Source":project,"Destination":"/workspace","RW":true}]);
-        let route = managed.route(&safe, &project)?;
-        assert_eq!(route.host_root, std::fs::canonicalize(&project)?);
-        assert_eq!(route.guest_root, "/workspace");
-        std::fs::remove_dir_all(base)?;
-        Ok(())
-    }
-}
-
 #[cfg(all(test, unix))]
 mod status_tests {
     use super::*;
@@ -226,5 +183,32 @@ mod status_tests {
         assert!(start.elapsed() < Duration::from_millis(500));
         assert_eq!(result.exit_code, None);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod policy_port_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    struct Reject(AtomicUsize);
+    impl SandboxPolicy for Reject {
+        fn validate(&self, info: &Value, project: &Path) -> anyhow::Result<PathBuf> {
+            assert_eq!(info["HostConfig"]["Memory"], 0);
+            assert!(info["Mounts"].is_array());
+            assert_eq!(project, Path::new("project"));
+            self.0.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("SANDBOX_UNSAFE_CONTAINER: rebuild required")
+        }
+    }
+    #[test]
+    fn every_route_passes_full_inspection_to_policy_and_propagates_rejection() {
+        let policy = Arc::new(Reject(AtomicUsize::new(0)));
+        let managed = ManagedSandbox { container: "managed".into(), policy: policy.clone() };
+        let info = serde_json::json!({"Mounts":[],"HostConfig":{"Memory":0}});
+        for _ in 0..2 {
+            assert!(managed.route(&info, Path::new("project")).err()
+                .is_some_and(|e| e.to_string().starts_with("SANDBOX_UNSAFE_CONTAINER")));
+        }
+        assert_eq!(policy.0.load(Ordering::SeqCst), 2);
     }
 }

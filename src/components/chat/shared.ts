@@ -417,6 +417,7 @@ export type WorkMode = "fast" | "work";
 
 /** 发送选项(重新生成 / 今日建议 与主发送共用同一份形状) */
 export interface ChatSendOptions {
+  expertSelection?: import("../../lib/expertSelection").ExpertSelection;
   permissionMode: PermissionMode;
   skillIds: string[];
   useKb?: boolean;

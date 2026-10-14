@@ -150,15 +150,20 @@ Pi `useSandbox` 在 P3 路由 bash/write/edit 到宿主容器桥；不可用或�
 
 ## polaris-sandbox
 
-入口 `S/lib.rs:16`；测试 S。`polaris-core::KbLocator` 由宿主注入 KB 根，sandbox 不依赖 fable（`S/commands.rs:21,209`；`src-tauri/crates/polaris-core/src/lib.rs:44`）。
+入口 `S/lib.rs`；测试 S。`polaris-core::KbLocator` 由宿主注入 KB 根，sandbox 不依赖 fable。
+P3b 已接入桌面路由校验、请求级专家选择和项目迁移 UI；服务端沙箱策略依赖仍待确认，完整边界见 [P3b 执行报告](pi-migration/p3b-result.md)。
 
-| 分支 → 入口 | 职责与公开接口 | 配置与迁移处理 |
+| 子模块 → 入口 | 职责 / 公开接口 | 配置、迁移与验证 |
 | --- | --- | --- |
-| Docker → `S/commands.rs:32,61,136,178,259,277` | init/status/build_image/start/stop/exec，封装 docker CLI | 固定 image/container（`:27`），材料写 `~/Polaris/sandbox/Dockerfile`（`:33`）；工作目录/KB 挂载（`:205`） |
-| 镜像 → `S/templates/Dockerfile.sandbox:23` | Alpine 安装 Claude 原生包；不是 Node agentd 镜像 | P3 调整工具环境；旧 Claude 镜像可配置保留 |
-| E2B/Cube → `S/e2b.rs:23,59,75,80,89` | CubeConfig、配置读写、curl 状态探测 | `~/Polaris/sandbox/cube-sandbox.json`，backend/endpoint/apiKey；无 Agent exec 路由实现（`:13,130`） |
-| 对话连接点 → `K/chat/backend/{host_tools,docker_tools}.rs`、`H/wiring.rs` | Pi 工具经协议进入容器；检查实际挂载，禁止宿主回退 | 旧整目录挂载含 Key，拒绝使用，需手工准备项目级挂载；见 P3 记录 |
-| UI → `src/features/sandbox/components/SandboxStatus.vue:1` | 构建、启动、状态及后端配置面板 | →sandbox/cube 命令；UI；与真实 chat 路由一起验收 |
+| Docker → `S/commands.rs` | status/build/start/stop/exec；start 要求 projectDir，缺失报 SANDBOX_PROJECT_REQUIRED | 保留固定镜像/容器名；status/诊断 exec 检查当前挂载与安全属性；S |
+| 策略 → `S/config.rs`、`S/policy.rs` | Config::load/resolve_mounts/run_args/validate_container；只允许项目 RW + KB RO | POLARIS_SANDBOX_CONFIG；schema=`polaris-sandbox/sandbox.schema.json`；兜底保护路径只能追加；默认 4GiB/2CPU、drop ALL/no-new-privileges |
+| 生命周期 → `S/lifecycle.rs` | start/inspect；安全同项目复用，工作目录变化按 reject/rebuild 配置处理 | 默认 reject；旧宽挂载总是显式迁移；rebuild:true 停止并改名保留旧容器，无自动删除；13 项沙箱测试通过 |
+| 镜像 → `S/templates/Dockerfile.sandbox` | Alpine + Claude 原生包；不是 Node agentd 镜像 | 注释同步最小挂载与 cap-drop；未构建或启动真实 Docker |
+| E2B/Cube → `S/e2b.rs` | CubeConfig、配置读写、curl 状态探测 | 原有行为保留；无 Agent exec 路由实现 |
+| 对话连接点 → `K/chat/backend/{host_tools,docker_tools}.rs`、`H/wiring.rs` | SandboxPolicy 公开端口；桌面每次执行前检查完整 inspect，委托 S::Config::validate_container | 同一份追加保护名单、目标目录/目的地/RW、CPU/内存/cap-drop/NNP；服务端未安装 executor，显式 SANDBOX_UNAVAILABLE，不回退旧校验 |
+| UI → `src/features/sandbox/{api.ts,project.ts,components/SandboxProject.vue}` | 默认当前项目已绑定目录；选择/输入绝对路径，确认启动后绑定；异常显示保留旧容器并一键重建 | SandboxStatus 引入组件，净减 12 行；空路径不发起请求；project.test.ts；未做真实 Docker/浏览器点击验收 |
+
+默认值、配置切换示例、迁移命令、完整失败/豁免项与修改清单见 [P3b 执行报告](pi-migration/p3b-result.md)。
 
 ## 其他引擎与工作台功能
 
@@ -283,3 +288,18 @@ Rust 入口路径以 `src-tauri/crates/polaris-kernel/src/chat/` 为前缀。
 P3 初始协议 v3、所有默认值/切换示例、旧容器挂载风险、手工上下文迁移与命令结果见 [P3 执行报告](pi-migration/p3-result.md)。
 新增资源配置需重开会话；不自动改名用户文件、不新增依赖、不修改图片/思考档位协议。
 基线豁免仍仅 4 项；端口测试与真实安全容器验证未通过前，P3 整体验收为 BLOCKED。
+
+
+## P3b 请求级专家与验证
+
+| 入口 | 行为、依赖与迁移 | 验证 |
+| --- | --- | --- |
+| `src/lib/expertSelection.ts`、ChatComposer、`src/stores/{chat,chatTypes}.ts`、`src/components/chat/shared.ts` | 检测 agent_backend_status；Pi 跳过 apply/teamApply，通过 expertSelection={kind,id} 随本轮发送；claude-cli 保留旧写文件行为；基础模式清除选择 | tests/frontend/expertSelection.test.ts 覆盖两种选择、旧后端、状态失败、真实临时目录文件不变与 store 请求字段 |
+| `K/chat/types.rs`、`K/chat/backend/{expert_selection,host_tools,bridge}.rs`、`H/wiring.rs` | 可选字段默认 None；ExpertLoader 调只读 expert_export/team_export；失败终止本轮；复用 expertPrompt，未知 kind/类型拒绝；feishu 仅补 None | kernel Pi wire 测试验证本轮 prompt 与 CLAUDE.md/AGENTS.md 内容不变；专家默认 experts.enabled=false 不变 |
+| `src/stores/{chatArtifacts,chatDeltas}.ts` | 为满足 500 行上限，从 chat.ts 按职责搬出原有产物处理和 token 缓冲；公开 Bubble/parseArtifacts 导出兼容 | chat.ts 483 行；产物焦点/过滤与 delta 顺序/错误气泡测试；delta 默认 40ms，可显式 createDeltaBuffer(ensureArr, 20) 切换，非有限/负数拒绝 |
+| `vite.config.ts` | 保留 Vitest 默认排除规则，追加 agentd/**；node:test 仍用 agentd 自身命令 | 根 Vitest 8 文件/23 测试；vue-tsc；两壳 cargo check；sandbox 13 测试通过 |
+
+专家配置示例：agentd 配置 `{"experts":{"enabled":true,"prompt":""}}` 后重开会话；默认关闭时 expertPrompt 仍传输，但不追加到模型系统提示。此任务未绕过 P3 的显式启用闸。
+内核全量 170 通过、10 失败、2 忽略；排除既有基线/端口项后 170 单测 + 4 集成测试通过。
+agentd typecheck 通过，npm test 18 文件通过、2 失败（web EPERM；e2e ping 超时）。服务端无 polaris-sandbox 依赖，当前 fail closed；共享策略依赖调整未获批。
+当前报告仍为 **BLOCKED**，不代表 Claude / Pi 最终验收；完整命令、失败列表和未运行项见 [P3b 执行报告](pi-migration/p3b-result.md)。

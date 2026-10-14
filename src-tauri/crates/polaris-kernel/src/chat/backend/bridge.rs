@@ -23,7 +23,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
         if args.provider_id.as_deref().is_some_and(|p| !p.is_empty() && p != "auto") {
             return Err(BackendError::UnsupportedInput("provider selection requires P4 mapping").to_string());
         }
-        tool_options = ToolOptions { sandbox: args.use_sandbox, expert_prompt: host_tools::expert_prompt(&args) };
+        tool_options = ToolOptions { sandbox: args.use_sandbox, expert_prompt: host_tools::expert_prompt(&args).map_err(|e| e.to_string())? };
         let prepared = claude_cli::pipeline::prepare_pi(args);
         input.model = claude_cli::pipeline::model_for_mode(prepared.work_full).map(serde_json::Value::String);
         input.prompt = prepared.plan.full_text();

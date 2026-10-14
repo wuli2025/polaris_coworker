@@ -7,6 +7,7 @@ import {
   type CubeConfig,
   type CubeStatus,
 } from "../api";
+import SandboxProject from "./SandboxProject.vue";
 import Workstations from "../../coworker/components/Workstations.vue";
 
 // KeepAlive 的 include 按组件 name 匹配 → 显式命名，确保本视图被缓存
@@ -81,17 +82,6 @@ async function build() {
     log.value.unshift(out);
   } catch (e: any) {
     log.value.unshift(`[build error] ${e?.message ?? e}`);
-  } finally {
-    busy.value = false;
-    await refresh();
-  }
-}
-async function start() {
-  busy.value = true;
-  try {
-    log.value.unshift(await sandbox.start());
-  } catch (e: any) {
-    log.value.unshift(`[start error] ${e?.message ?? e}`);
   } finally {
     busy.value = false;
     await refresh();
@@ -222,12 +212,10 @@ async function runCmd() {
       <div v-for="(n, i) in status.notes" :key="i" class="note">▸ {{ n }}</div>
     </div>
 
+    <SandboxProject :disabled="busy" :notes="status?.notes" @log="log.unshift($event)" @changed="refresh" />
     <div class="actions">
       <button class="primary-btn" :disabled="busy" @click="build">
         构建镜像
-      </button>
-      <button class="primary-btn" :disabled="busy" @click="start">
-        启动容器
       </button>
       <button class="secondary-btn" :disabled="busy" @click="stop">
         停止容器

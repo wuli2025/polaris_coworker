@@ -33,6 +33,7 @@ import {
   Eraser,
   Check,
 } from "@lucide/vue";
+import { applyExpertSelection, selectedExpert as requestExpert } from "../../lib/expertSelection";
 import SearchGlass from "../icons/SearchGlass.vue";
 import OrbitSpinner from "../icons/OrbitSpinner.vue";
 import {
@@ -436,7 +437,7 @@ async function summon(kind: SummonKind, id: string) {
     agentMode.value = "expert-team";
     if (pid) {
       try {
-        await expert.teamApply(pid, id, true);
+        await applyExpertSelection(pid, "team", id);
       } catch (e) {
         console.error("team.apply 失败", e);
       }
@@ -455,7 +456,7 @@ async function summon(kind: SummonKind, id: string) {
     agentMode.value = "single-expert";
     if (pid) {
       try {
-        await expert.apply(pid, id, true);
+        await applyExpertSelection(pid, "expert", id);
       } catch (e) {
         console.error("expert.apply 失败", e);
       }
@@ -628,6 +629,7 @@ function sendOptions(convId?: string | null): ChatSendOptions {
     skillIds: Array.from(skillsStore.enabledSkills),
     useKb: kbMode.value || undefined,
     agentMode: agentMode.value,
+    expertSelection: requestExpert(agentMode.value, selectedExpertId.value, selectedTeamId.value),
     workMode: workMode.value,
     providerId: providerForConv(convId),
   };
@@ -893,6 +895,7 @@ async function send() {
     dynamicWorkflow: orchestrateMode.value || undefined,
     useKb: kbMode.value || undefined,
     agentMode: agentMode.value,
+    expertSelection: requestExpert(agentMode.value, selectedExpertId.value, selectedTeamId.value),
     workMode: workMode.value,
     providerId: sendProviderId,
   });

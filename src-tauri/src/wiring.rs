@@ -98,15 +98,38 @@ impl ExpertBridge for ShellExpertBridge {
 pub fn wire_engine_bridges() {
     bridges::set_kb_bridge(Arc::new(ShellKbBridge));
     bridges::set_expert_bridge(Arc::new(ShellExpertBridge));
-    if let (Some(dirs), Ok(config)) = (directories::UserDirs::new(), crate::chat::backend::config::Config::load()) {
+    crate::chat::backend::host_tools::set_expert_loader(Arc::new(ShellExpertLoader));
+    // The server shell has no sandbox crate; leave its executor absent (fail closed)
+    // until a shared policy dependency is approved. Never retain the old partial validator.
+    #[cfg(feature = "desktop")]
+    if let Ok(config) = crate::chat::backend::config::Config::load() {
         crate::chat::backend::host_tools::set_sandbox_executor(Arc::new(
             crate::chat::backend::docker_tools::ManagedSandbox {
                 container: config.agentd.sandbox_container,
-                protected_paths: vec![dirs.home_dir().join("Polaris/data"),
-                    dirs.home_dir().join(".polaris"), dirs.home_dir().join(".pi"),
-                    dirs.home_dir().join(".claude"), dirs.home_dir().join(".codex"),
-                    dirs.home_dir().join(".ssh"), dirs.home_dir().join(".aws")],
+                policy: Arc::new(ShellSandboxPolicy),
             },
         ));
+    }
+}
+
+#[cfg(feature = "desktop")]
+struct ShellSandboxPolicy;
+#[cfg(feature = "desktop")]
+impl crate::chat::backend::host_tools::SandboxPolicy for ShellSandboxPolicy {
+    fn validate(&self, info: &serde_json::Value, project: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+        let dirs = directories::UserDirs::new().ok_or_else(|| anyhow::anyhow!("SANDBOX_HOME_UNAVAILABLE"))?;
+        polaris_sandbox::config::Config::load()?.validate_container(
+            info, project, std::path::Path::new(&crate::kb::kb_root()), dirs.home_dir())
+    }
+}
+
+struct ShellExpertLoader;
+impl crate::chat::backend::host_tools::ExpertLoader for ShellExpertLoader {
+    fn load(&self, selection: &crate::chat::backend::expert_selection::ExpertSelection) -> anyhow::Result<String> {
+        use crate::chat::backend::expert_selection::ExpertSelection;
+        match selection {
+            ExpertSelection::Expert { id } => crate::expert::expert_export(id.clone()),
+            ExpertSelection::Team { id } => crate::expert::team_export(id.clone()),
+        }.map_err(anyhow::Error::msg)
     }
 }

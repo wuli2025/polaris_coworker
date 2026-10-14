@@ -70,6 +70,8 @@ pub struct ChatSendArgs {
     /// 专家团模式下自动检测任务复杂度，必要时注入多专家召集信息。
     #[serde(default)]
     pub agent_mode: Option<String>,
+    #[serde(default)]
+    pub expert_selection: Option<super::backend::expert_selection::ExpertSelection>,
     /// 工作模式: "fast"(默认·快速) | "work"(工作·纯 Claude Code)。
     /// - 快速模式: 强制快速调用知识库(快档召回, 跳重排 ~1.8s→~0.25s)+ 快速回答; 工具精简
     ///   (弃 Task/NotebookEdit)、提示词瘦身(跳「可运行项目」「长任务」约定)、上下文预算调小、

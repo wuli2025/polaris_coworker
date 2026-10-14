@@ -9,6 +9,10 @@ use std::sync::{Arc, OnceLock};
 pub struct SandboxOutput {
     pub output: String, pub exit_code: Option<i32>, pub signal: Option<i32>, pub timed_out: bool,
 }
+/// Host-owned policy validates every mount and the container security baseline.
+pub trait SandboxPolicy: Send + Sync {
+    fn validate(&self, info: &Value, project: &std::path::Path) -> anyhow::Result<std::path::PathBuf>;
+}
 pub trait SandboxExecutor: Send + Sync {
     fn execute(&self, operation: &str, args: &Value) -> anyhow::Result<SandboxOutput>;
 }
@@ -47,7 +51,23 @@ pub fn handle_sandbox(backend: &dyn AgentBackend, event: &ChatStreamEvent) -> an
 pub fn chat_permission_respond(response: PermissionResponse) -> Result<(), String> {
     super::selected().and_then(|backend| backend.permission_respond(response)).map_err(|error| error.to_string())
 }
-pub fn expert_prompt(args: &ChatSendArgs) -> Option<String> {
+pub trait ExpertLoader: Send + Sync {
+    fn load(&self, selection: &super::expert_selection::ExpertSelection) -> anyhow::Result<String>;
+}
+static EXPERT_LOADER: OnceLock<Arc<dyn ExpertLoader>> = OnceLock::new();
+pub fn set_expert_loader(loader: Arc<dyn ExpertLoader>) {
+    let _ = EXPERT_LOADER.set(loader);
+}
+pub fn expert_prompt(args: &ChatSendArgs) -> anyhow::Result<Option<String>> {
+    expert_prompt_with(args, EXPERT_LOADER.get().map(|l| l.as_ref()))
+}
+pub(crate) fn expert_prompt_with(args: &ChatSendArgs, loader: Option<&dyn ExpertLoader>) -> anyhow::Result<Option<String>> {
+    if let Some(selection) = &args.expert_selection {
+        return super::expert_selection::load(selection, loader).map(Some);
+    }
+    Ok(automatic_expert_prompt(args))
+}
+fn automatic_expert_prompt(args: &ChatSendArgs) -> Option<String> {
     let bridge = crate::chat::bridges::expert_bridge()?;
     match args.agent_mode.as_deref() {
         Some("single-agent") | Some("single-expert") => None,

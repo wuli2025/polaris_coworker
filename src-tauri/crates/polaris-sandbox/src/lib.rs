@@ -14,6 +14,11 @@
 //! host 端用 `polaris_sandbox::commands::<cmd>` 注册命令 (宏需按定义模块路径解析)。
 
 pub mod commands;
+pub mod config;
+pub mod policy;
+pub mod lifecycle;
+#[cfg(test)]
+mod policy_tests;
 /// CubeSandbox (E2B 兼容) 后端 —— 「替换 Docker」的可选后端 (additive)。
 pub mod e2b;
 

@@ -4,7 +4,7 @@
 //! - 镜像基于 alpine:3.20, 仅装 node + claude-code
 //! - 容器名固定 polaris-sandbox, 长驻 sleep infinity, exec 调起 claude
 //! - 资源限制: memory=4g cpus=2
-//! - 用户家目录的 Polaris/ 整体挂载 /workspace (读写) + PolarisKB 挂载 /kb (只读)
+//! - 仅目标项目挂载 /workspace (读写)，知识库挂载 /kb (只读)
 //!
 //! ## 板块边界 (架构重构 Phase 1)
 //! 本板块已抽离为独立 crate。它**不再** `use crate::kb` —— 挂载 KB 时所需的
@@ -114,8 +114,12 @@ pub fn sandbox_status() -> SandboxStatus {
         ));
     } else if !container_running {
         notes.push("镜像已就绪。点击 \"启动容器\" 拉起长驻沙箱(sleep infinity)。".into());
-    } else {
-        notes.push("沙箱就绪。对话页输入消息时会自动 docker exec 调起 claude CLI。".into());
+    }
+    if docker_running && crate::lifecycle::inspect(CONTAINER_NAME).is_ok_and(|info| info.is_some()) {
+        match validate_current_container() {
+            Ok(()) => notes.push("沙箱挂载与安全基线检查通过。工具路由仍需校验本轮目标项目。".into()),
+            Err(error) => notes.push(error),
+        }
     }
 
     SandboxStatus {
@@ -175,83 +179,15 @@ pub fn sandbox_build_image() -> Result<String, String> {
 /// 仅作为命令被前端调用，故可安全接收注入的 `AppHandle`。
 /// `command(async)`：docker ps/start/run 阻塞调用不进主线程(见 sandbox_status 注)。
 #[tauri::command(async)]
-pub fn sandbox_start(app: tauri::AppHandle) -> Result<String, String> {
-    // 如果已存在(无论 running)先尝试 start
-    let exists = Command::new("docker")
-        .args([
-            "ps",
-            "-a",
-            "--filter",
-            &format!("name=^{}$", CONTAINER_NAME),
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().eq(CONTAINER_NAME))
-        .unwrap_or(false);
-
-    if exists {
-        let out = Command::new("docker")
-            .args(["start", CONTAINER_NAME])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if out.status.success() {
-            return Ok(format!("[start ok] 已启动已存在的容器 {}", CONTAINER_NAME));
-        } else {
-            return Err(String::from_utf8_lossy(&out.stderr).to_string());
-        }
-    }
-
-    let mount_workspace = data_dir().map_err(|e| e.to_string())?;
-    // KB 挂载点跟 host 注入的 KbLocator 走 (可能已被用户改到 polaris-app 内或别处),
-    // 不再写死成 ~/Polaris/PolarisKB
-    let mount_kb = {
-        let locator = app.state::<Arc<dyn KbLocator>>();
-        let raw = locator.kb_root();
-        if raw.as_os_str().is_empty() || !raw.exists() {
-            mount_workspace.join("PolarisKB")
-        } else {
-            raw
-        }
-    };
-    std::fs::create_dir_all(&mount_workspace).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&mount_kb).map_err(|e| e.to_string())?;
-
-    let out = Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--name",
-            CONTAINER_NAME,
-            "--memory=4g",
-            "--cpus=2",
-            "--security-opt=no-new-privileges",
-            "-v",
-            &format!("{}:/workspace", path_for_docker(&mount_workspace)),
-            "-v",
-            &format!("{}:/kb:ro", path_for_docker(&mount_kb)),
-            IMAGE_NAME,
-            "sleep",
-            "infinity",
-        ])
-        .output()
-        .map_err(|e| format!("docker run 启动失败: {}", e))?;
-    if out.status.success() {
-        Ok(format!(
-            "[run ok] 容器 {} 已启动 (id={})",
-            CONTAINER_NAME,
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .chars()
-                .take(12)
-                .collect::<String>()
-        ))
-    } else {
-        Err(format!(
-            "docker run 失败: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ))
-    }
+pub fn sandbox_start(app: tauri::AppHandle, project_dir: Option<String>, rebuild: Option<bool>) -> Result<String, String> {
+    let user = UserDirs::new().ok_or_else(|| "no user dir".to_string())?;
+    let project_dir = project_dir.filter(|p| !p.trim().is_empty())
+        .ok_or_else(|| "SANDBOX_PROJECT_REQUIRED: 请指定目标项目目录 (projectDir)，禁止挂载整个 Polaris。".to_string())?;
+    let kb = app.state::<Arc<dyn KbLocator>>().kb_root();
+    let config = crate::config::Config::load().map_err(|e| e.to_string())?;
+    crate::lifecycle::start(&config, CONTAINER_NAME, IMAGE_NAME,
+        std::path::Path::new(&project_dir), &kb, user.home_dir(), rebuild == Some(true))
+        .map_err(|e| e.to_string())
 }
 
 /// `command(async)`：docker stop -t 5 + rm 可阻塞 5s+,同款不进主线程(见 sandbox_status 注)。
@@ -275,6 +211,7 @@ pub fn sandbox_stop() -> Result<String, String> {
 /// `command(async)`：docker exec 跑任意容器内命令,时长不可控,不进主线程(见 sandbox_status 注)。
 #[tauri::command(async)]
 pub fn sandbox_exec(cmd: String) -> Result<String, String> {
+    validate_current_container()?;
     let parts = shell_split(&cmd);
     if parts.is_empty() {
         return Err("empty command".into());
@@ -302,6 +239,22 @@ pub fn sandbox_exec(cmd: String) -> Result<String, String> {
 
 // ───────────────────────── helpers ───────────────────────
 
+fn validate_current_container() -> Result<(), String> {
+    let user = UserDirs::new().ok_or_else(|| "no user dir".to_string())?;
+    let info = crate::lifecycle::inspect(CONTAINER_NAME).map_err(|e| e.to_string())?
+        .ok_or_else(|| "SANDBOX_UNAVAILABLE".to_string())?;
+    let config = crate::config::Config::load().map_err(|e| e.to_string())?;
+    let mounts = info["Mounts"].as_array().ok_or_else(|| format!("SANDBOX_UNSAFE_MOUNT: missing required mount; {}", crate::policy::REBUILD_HINT))?;
+    let root = |target: &str| -> Result<PathBuf, String> {
+        mounts.iter().find(|m| m["Destination"] == target)
+            .and_then(|m| m["Source"].as_str()).map(PathBuf::from)
+            .ok_or_else(|| format!("SANDBOX_UNSAFE_MOUNT: missing required mount; {}", crate::policy::REBUILD_HINT))
+    };
+    config.validate_container(&info, &root("/workspace")?, &root("/kb")?, user.home_dir())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn tail(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
@@ -312,17 +265,6 @@ fn tail(s: &str, n: usize) -> String {
             start -= 1;
         }
         s[start..].to_string()
-    }
-}
-
-/// Windows 路径 -> Docker 兼容路径 (D:\polaris -> D:/polaris in Docker Desktop)
-fn path_for_docker(p: &std::path::Path) -> String {
-    let s = p.to_string_lossy().to_string();
-    if cfg!(windows) {
-        // Docker Desktop 接受 D:\... 也接受 D:/...; 这里规范化反斜杠为正斜杠
-        s.replace('\\', "/")
-    } else {
-        s
     }
 }
 
@@ -352,7 +294,7 @@ mod tests {
     #[test]
     fn path_for_docker_normalizes_on_windows() {
         let p = std::path::Path::new("D:\\polaris\\PolarisKB");
-        let out = path_for_docker(p);
+        let out = crate::policy::path_for_docker(p);
         if cfg!(windows) {
             assert_eq!(out, "D:/polaris/PolarisKB");
         }

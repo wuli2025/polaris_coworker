@@ -9,6 +9,7 @@ pub mod pi;
 pub mod stream;
 mod bridge;
 pub mod host_tools;
+pub mod expert_selection;
 pub mod docker_tools;
 mod sandbox_process;
 use std::{path::PathBuf, sync::Arc, time::Duration};

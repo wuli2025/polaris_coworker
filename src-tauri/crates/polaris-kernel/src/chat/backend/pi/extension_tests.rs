@@ -143,3 +143,46 @@ fn explicit_tool_options_reach_session_open_without_legacy_context() -> anyhow::
     std::fs::remove_file(record)?;
     Ok(())
 }
+
+#[test]
+fn selected_expert_is_loaded_into_this_turn_without_project_writes() -> anyhow::Result<()> {
+    struct Loader;
+    impl host_tools::ExpertLoader for Loader {
+        fn load(&self, selection: &super::super::expert_selection::ExpertSelection) -> anyhow::Result<String> {
+            use super::super::expert_selection::ExpertSelection;
+            match selection {
+                ExpertSelection::Expert { id } if id == "qa" => Ok("QA full prompt".into()),
+                ExpertSelection::Team { id } if id == "review" => Ok("Review team full prompt".into()),
+                _ => anyhow::bail!("unknown selection"),
+            }
+        }
+    }
+    for (kind, id, prompt) in [("expert", "qa", "QA full prompt"), ("team", "review", "Review team full prompt")] {
+        let mut config = super::tests::config();
+        let project = config.session_map.with_extension("project");
+        let record = config.session_map.with_extension("expert.jsonl");
+        std::fs::create_dir_all(&project)?;
+        for name in ["CLAUDE.md", "AGENTS.md"] { std::fs::write(project.join(name), "user content")?; }
+        config.args = vec!["--record".into(), record.to_string_lossy().into()];
+        let backend = PiBackend::new(config)?;
+        let args: ChatSendArgs = serde_json::from_value(json!({
+            "prompt":"task", "permissionMode":"deny", "agentMode":"single-expert",
+            "expertSelection":{"kind":kind,"id":id}
+        }))?;
+        let expert_prompt = host_tools::expert_prompt_with(&args, Some(&Loader))?;
+        let mut input = super::tests::input("selected-expert", "normal");
+        input.cwd = project.clone();
+        let stream = backend.start_with_tools(input, ToolOptions { sandbox: false, expert_prompt })?;
+        while stream.recv_timeout(Duration::from_secs(3))?.kind != "done" {}
+        let sent: Vec<Value> = std::fs::read_to_string(&record)?.lines()
+            .map(serde_json::from_str).collect::<Result<_, _>>()?;
+        let open = sent.iter().find(|r| r["method"] == "session.open")
+            .ok_or_else(|| anyhow::anyhow!("missing open"))?;
+        assert_eq!(open["params"]["expertPrompt"], prompt);
+        for name in ["CLAUDE.md", "AGENTS.md"] { assert_eq!(std::fs::read_to_string(project.join(name))?, "user content"); }
+        backend.shutdown();
+        std::fs::remove_file(record)?;
+        std::fs::remove_dir_all(project)?;
+    }
+    Ok(())
+}
