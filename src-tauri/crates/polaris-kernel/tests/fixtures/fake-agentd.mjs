@@ -1,7 +1,7 @@
 // Protocol-only fixture. Never launches a child process or calls a model provider.
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
-import { appendFileSync } from 'node:fs';
+import { openSync, writeFileSync, fsyncSync, closeSync } from 'node:fs';
 const recordIndex = process.argv.indexOf('--record');
 const record = recordIndex < 0 ? undefined : process.argv[recordIndex + 1];
 if (process.argv.includes('--crash-start')) process.exit(7);
@@ -41,7 +41,13 @@ async function turn(s, text) {
   if (!s.aborted) await event(s, 'turn.completed', { status: 'completed' });
 }
 async function dispatch({ id, method, params: p }) {
-  if (record) appendFileSync(record, JSON.stringify({id,method,params:p}) + '\n');
+  if (record) {
+    const fd = openSync(record, 'a');
+    try {
+      writeFileSync(fd, JSON.stringify({id,method,params:p}) + '\n');
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+  }
   switch (method) {
     case 'permission.respond': {
       const s = sessions.get(p.sessionId);

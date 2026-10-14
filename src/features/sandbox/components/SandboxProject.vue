@@ -3,13 +3,14 @@ import { computed, ref, watch } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../../../stores/app";
 import { isTauri } from "../../../tauri";
-import { needsSandboxMigration, startProjectSandbox } from "../project";
+import { needsSandboxMigration, projectDirectoryHint, startProjectSandbox } from "../project";
 
 const props = defineProps<{ disabled?: boolean; notes?: string[] }>();
 const emit = defineEmits<{ log: [message: string]; changed: [] }>();
 const app = useAppStore();
 const project = computed(() => app.projects.find(p => p.id === app.currentProjectId));
 const directory = ref("");
+const pathHint = computed(() => projectDirectoryHint(directory.value));
 const busy = ref(false);
 const error = ref("");
 watch(() => [project.value?.id, project.value?.workDir], () => {
@@ -49,10 +50,11 @@ async function start(rebuild = false) {
     <label for="sandbox-project-dir">项目工作目录{{ project ? ` · ${project.name}` : "" }}</label>
     <p>默认使用当前会话所属项目的工作目录。确认后将作为该项目的工作目录；知识库只读挂载。</p>
     <div class="project-actions">
-      <input id="sandbox-project-dir" v-model="directory" :disabled="busy || disabled" placeholder="输入项目目录的绝对路径" />
+      <input id="sandbox-project-dir" v-model="directory" :aria-invalid="!!pathHint" aria-describedby="sandbox-project-path-hint" :disabled="busy || disabled" placeholder="输入项目目录的绝对路径" />
       <button v-if="isTauri" :disabled="busy || disabled" @click="pick">选择文件夹</button>
       <button :disabled="busy || disabled || !directory.trim()" @click="start()">确认目录并启动</button>
     </div>
+    <p id="sandbox-project-path-hint" aria-live="polite">{{ pathHint || "路径格式符合要求；目录是否可用以后端校验为准。" }}</p>
     <div v-if="migration" role="alert">
       <p>当前容器需要迁移。重建会停止旧容器并改名保留，再按所选项目创建安全容器。</p>
       <button :disabled="busy || disabled || !directory.trim()" @click="start(true)">保留旧容器并一键重建</button>

@@ -1,7 +1,6 @@
 use super::*;
 use protocol::{SessionOptions, ThinkingLevel};
 use serde_json::json;
-use std::time::Instant;
 
 #[test]
 fn mismatched_protocol_fuses_before_any_application_request() -> anyhow::Result<()> {
@@ -42,17 +41,19 @@ fn model_profile_image_and_idle_reconfiguration_are_on_the_wire() -> anyhow::Res
     collect(&b, first, |_, _| {})?;
     b.configure_session("wire", SessionOptions { model: None,
         thinking_level: Some(ThinkingLevel::High), tool_profile: Some("full".into()), ..Default::default() })?;
-    let mut second = super::tests::input("wire", "normal");
+    // A new turn has a distinct request ID, but reuses the mapped session.
+    // The old preparation worker may still be cleaning up its request ID.
+    let mut second = super::tests::input("wire-second", "normal");
+    second.session_id = "wire".into();
     second.model = Some(Value::String("test".into()));
     second.permission = PermissionMode::Manual;
     second.thinking_level = Some(ThinkingLevel::Xhigh);
-    // Wait for the previous route to release its session reservation.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while b.preparing.lock().contains("session:wire") {
-        anyhow::ensure!(Instant::now() < deadline, "reservation was not released");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // collect waits for done; Route::drain releases the session before done.
+    assert!(!b.preparing.lock().contains("session:wire"));
     collect(&b, second, |_, _| {})?;
+    // An acknowledged command is a recording barrier: the fixture fsyncs each
+    // request before dispatching it, including both prompts and configurations.
+    b.models()?;
     let sent: Vec<Value> = std::fs::read_to_string(&record)?.lines()
         .map(serde_json::from_str).collect::<Result<_, _>>()?;
     let open = sent.iter().find(|r| r["method"] == "session.open")

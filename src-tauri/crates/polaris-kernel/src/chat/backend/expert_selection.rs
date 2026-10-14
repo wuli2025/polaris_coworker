@@ -10,9 +10,14 @@ pub enum ExpertSelection {
 }
 
 pub fn load(selection: &ExpertSelection, loader: Option<&dyn ExpertLoader>) -> anyhow::Result<String> {
-    let id = match selection { ExpertSelection::Expert { id } | ExpertSelection::Team { id } => id };
-    anyhow::ensure!(!id.trim().is_empty(), "EXPERT_INVALID_SELECTION: id required");
-    loader.ok_or_else(|| anyhow::anyhow!("EXPERT_LOADER_UNAVAILABLE"))?.load(selection)
+    let (kind, id) = match selection {
+        ExpertSelection::Expert { id } => ("expert", id),
+        ExpertSelection::Team { id } => ("team", id),
+    };
+    anyhow::ensure!(!id.trim().is_empty(), "EXPERT_INVALID_SELECTION: kind={kind} id={id:?}; id required");
+    let loader = loader.ok_or_else(|| anyhow::anyhow!("EXPERT_LOADER_UNAVAILABLE: kind={kind} id={id:?}"))?;
+    // Loader diagnostics can contain template text. Expose only selection metadata.
+    loader.load(selection).map_err(|_| anyhow::anyhow!("EXPERT_LOAD_FAILED: kind={kind} id={id:?}"))
 }
 
 #[cfg(test)]
@@ -41,4 +46,27 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn failures_identify_selection_without_exposing_loader_prompt() -> anyhow::Result<()> {
+        struct Failed;
+        impl ExpertLoader for Failed {
+            fn load(&self, _: &ExpertSelection) -> anyhow::Result<String> {
+                anyhow::bail!("private prompt text");
+            }
+        }
+        for kind in ["expert", "team"] {
+            let selection = serde_json::from_value(serde_json::json!({"kind":kind,"id":"missing-id"}))?;
+            for (loader, code) in [(None, "EXPERT_LOADER_UNAVAILABLE"),
+                (Some(&Failed as &dyn ExpertLoader), "EXPERT_LOAD_FAILED")] {
+                let error = load(&selection, loader).err().ok_or_else(|| anyhow::anyhow!("expected load failure"))?;
+                let diagnostic = format!("{error:#}");
+                assert!(diagnostic.contains(code), "{diagnostic}");
+                assert!(diagnostic.contains(&format!("kind={kind}")), "{diagnostic}");
+                assert!(diagnostic.contains("missing-id"), "{diagnostic}");
+                assert!(!diagnostic.contains("private prompt text"));
+            }
+        }
+        Ok(())
+    }
+
 }

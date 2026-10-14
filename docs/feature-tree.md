@@ -157,7 +157,7 @@ P3b 已接入桌面路由校验、请求级专家选择和项目迁移 UI；服�
 | --- | --- | --- |
 | Docker → `S/commands.rs` | status/build/start/stop/exec；start 要求 projectDir，缺失报 SANDBOX_PROJECT_REQUIRED | 保留固定镜像/容器名；status/诊断 exec 检查当前挂载与安全属性；S |
 | 策略 → `S/config.rs`、`S/policy.rs` | Config::load/resolve_mounts/run_args/validate_container；只允许项目 RW + KB RO | POLARIS_SANDBOX_CONFIG；schema=`polaris-sandbox/sandbox.schema.json`；兜底保护路径只能追加；默认 4GiB/2CPU、drop ALL/no-new-privileges |
-| 生命周期 → `S/lifecycle.rs` | start/inspect；安全同项目复用，工作目录变化按 reject/rebuild 配置处理 | 默认 reject；旧宽挂载总是显式迁移；rebuild:true 停止并改名保留旧容器，无自动删除；13 项沙箱测试通过 |
+| 生命周期 → `S/lifecycle.rs` | start/inspect；安全同项目复用，工作目录变化按 reject/rebuild 配置处理 | 默认 reject；旧宽挂载总是显式迁移；rebuild:true 停止并改名保留旧容器，无自动删除；R4 沙箱 17 项测试通过 |
 | 镜像 → `S/templates/Dockerfile.sandbox` | Alpine + Claude 原生包；不是 Node agentd 镜像 | 注释同步最小挂载与 cap-drop；未构建或启动真实 Docker |
 | E2B/Cube → `S/e2b.rs` | CubeConfig、配置读写、curl 状态探测 | 原有行为保留；无 Agent exec 路由实现 |
 | 对话连接点 → `K/chat/backend/{host_tools,docker_tools}.rs`、`H/wiring.rs` | SandboxPolicy 公开端口；桌面每次执行前检查完整 inspect，委托 S::Config::validate_container | 同一份追加保护名单、目标目录/目的地/RW、CPU/内存/cap-drop/NNP；服务端未安装 executor，显式 SANDBOX_UNAVAILABLE，不回退旧校验 |
@@ -303,3 +303,18 @@ P3 初始协议 v3、所有默认值/切换示例、旧容器挂载风险、手�
 内核全量 170 通过、10 失败、2 忽略；排除既有基线/端口项后 170 单测 + 4 集成测试通过。
 agentd typecheck 通过，npm test 18 文件通过、2 失败（web EPERM；e2e ping 超时）。服务端无 polaris-sandbox 依赖，当前 fail closed；共享策略依赖调整未获批。
 当前报告仍为 **BLOCKED**，不代表 Claude / Pi 最终验收；完整命令、失败列表和未运行项见 [P3b 执行报告](pi-migration/p3b-result.md)。
+
+## R4：P3b 审查修复（执行报告，待 Claude / Pi 复核）
+
+仅处理 [P3b2 分流](reviews/P3b2-round1-triage.md) 的 C2、C3、#2、#5、#7、#9，驳回项不改代码。
+
+| 入口 | 行为、公开接口与依赖 | 配置、迁移与验证 |
+| --- | --- | --- |
+| `S/policy.rs`、`S/policy_tests.rs`、`S/lifecycle.rs` | resolve_mounts/run_args/validate_container 保留 canonical 路径与双向保护前缀，显式禁止 HOME 及祖先；删除名称匹配和目录遍历；path_for_docker 注释说明 Windows 前缀/盘符 | 沿用 POLARIS_SANDBOX_CONFIG，protectedPaths 默认 []、仅追加且须绝对路径；无需迁移配置。普通 src/data、sessions、fixtures/x.key 可挂载；17 项测试含假 Docker 创建到路由、保护上下层及 0/2048 文件的禁止枚举验证 |
+| `K/chat/backend/expert_selection.rs` | load 的缺加载器、加载失败、空 id 错误含 kind/id；加载器原始错误可能带提示词，故仅暴露选择元数据 | ExpertLoader 接口不变，无新依赖；默认无选择；expert/team 两类失败与提示词不泄露测试 |
+| `K/chat/backend/pi/extension_tests.rs`、`src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs` | 同 session 的两轮使用不同 request id；done 与命令响应同步；fixture 在派发前 fsync 记录；删除固定间隔预约轮询 | 无生产配置变化；连续 10 次未过滤 kernel lib 全量运行，目标测试 10/10 通过，每次仍有 10 项许可例外失败 |
+| `src/features/sandbox/{project.ts,project.test.ts,components/SandboxProject.vue}` | projectDirectoryHint 经 computed/aria-live 即时显示 POSIX、Windows 盘符绝对路径格式提示；最终仍调用后端校验 | 默认空目录提示选择；/home/me/project、C:/Projects/app 或反斜杠盘符路径；无新配置；vue-tsc、Vitest 25 项通过 |
+
+两壳 offline check 通过；内核排除既有 4 项基线与 6 项 TCP 限制后，171 单测和 4 集成测试通过，2 忽略。
+默认值、配置切换例、全部失败名称、命令/日志、未运行项见 [R4 执行报告](pi-migration/r4-review-fixes.md)。
+历史 P3b 报告的名称黑名单/全树扫描说明已由本节取代；服务端策略依赖和真实 Docker 验收边界仍按历史记录保留。

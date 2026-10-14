@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 pub const REBUILD_HINT: &str = "请调用 sandbox_start({projectDir:目标项目路径,rebuild:true}) 迁移；旧容器将停止并改名保留，不会删除。";
 
+/// Canonical Windows paths may carry the extended-length `\\?\` prefix.
+/// Docker CLI bind sources use drive-letter paths with forward slashes; keep
+/// the drive colon and spaces intact (the argument is passed without a shell).
 pub fn path_for_docker(path: &Path) -> String {
     let text = path.to_string_lossy();
     let text = text.trim_start_matches(r"\\?\");
@@ -13,11 +16,6 @@ pub fn path_for_docker(path: &Path) -> String {
     if cfg!(windows) || (text.as_bytes().get(1) == Some(&b':') && text.as_bytes()[0].is_ascii_alphabetic()) {
         text.replace('\\', "/")
     } else { text.to_owned() }
-}
-fn forbidden_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    ["data", "claude-home", "sessions", "conversations", "providers.json", "collab.db", ".polaris", ".pi",
-        ".claude", ".codex", ".ssh", ".aws", ".gnupg", ".kube"].contains(&name.as_str()) || name.ends_with(".key")
 }
 fn normalized(path: &Path) -> Result<PathBuf> {
     // Resolve existing ancestors even for currently absent protected directories.
@@ -34,20 +32,17 @@ pub fn validate_source(source: &Path, protected: &[PathBuf]) -> Result<PathBuf> 
         ensure!(!source.starts_with(&path) && !path.starts_with(&source),
             "SANDBOX_UNSAFE_MOUNT: protected host data; {REBUILD_HINT}");
     }
-    ensure!(!source.components().any(|p| forbidden_name(&p.as_os_str().to_string_lossy())),
-        "SANDBOX_UNSAFE_MOUNT: forbidden path; {REBUILD_HINT}");
     ensure!(source.is_dir(), "SANDBOX_UNSAFE_MOUNT: directory required");
-    // Binding a parent also exposes its children. Reject sensitive files anywhere in it.
-    let mut pending = vec![source.clone()];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(directory)? {
-            let entry = entry?;
-            ensure!(!forbidden_name(&entry.file_name().to_string_lossy()),
-                "SANDBOX_UNSAFE_MOUNT: directory contains protected files; {REBUILD_HINT}");
-            // Symlinks cannot expose an unmounted host target inside the container.
-            if entry.file_type()?.is_dir() { pending.push(entry.path()); }
-        }
-    }
+    // Only resolve the supplied roots. Never enumerate project contents here:
+    // this policy also runs before every routed tool call.
+    Ok(source)
+}
+fn validate_mount_source(source: &Path, protected: &[PathBuf], home: &Path) -> Result<PathBuf> {
+    let source = validate_source(source, protected)?;
+    // Explicitly forbid HOME and its ancestors even if baseline paths resolve
+    // through symlinks to locations outside HOME.
+    ensure!(!normalized(home)?.starts_with(&source),
+        "SANDBOX_UNSAFE_MOUNT: home or ancestor; {REBUILD_HINT}");
     Ok(source)
 }
 #[derive(Debug)]
@@ -56,14 +51,14 @@ impl Config {
     pub fn resolve_mounts(&self, project: &Path, kb: &Path, home: &Path) -> Result<Vec<ResolvedMount>> {
         self.validate()?;
         let protected = self.protected(home);
-        let project = validate_source(project, &protected)?;
-        let kb = validate_source(kb, &protected)?;
+        let project = validate_mount_source(project, &protected, home)?;
+        let kb = validate_mount_source(kb, &protected, home)?;
         ensure!(!project.starts_with(&kb) && !kb.starts_with(&project),
             "SANDBOX_UNSAFE_MOUNT: workspace and kb must not overlap");
         self.mounts.iter().map(|m| {
             let source = match m.source.as_str() {
                 "${project}" => project.clone(), "${kb}" => kb.clone(),
-                path => validate_source(Path::new(path), &protected)?,
+                path => validate_mount_source(Path::new(path), &protected, home)?,
             };
             let expected = if m.destination == "/workspace" { &project } else { &kb };
             ensure!(&source == expected, "SANDBOX_UNSAFE_MOUNT: source does not match requested root");
@@ -93,7 +88,7 @@ impl Config {
         for mount in mounts {
             ensure!(mount["Type"] == "bind", "SANDBOX_UNSAFE_MOUNT: unverified volume; {REBUILD_HINT}");
             let source = mount["Source"].as_str().ok_or_else(|| anyhow::anyhow!("SANDBOX_INVALID_MOUNTS"))?;
-            validate_source(Path::new(source), &self.protected(home))?;
+            validate_mount_source(Path::new(source), &self.protected(home), home)?;
         }
         ensure!(mounts.len() == expected.len(), "SANDBOX_UNSAFE_MOUNT: unexpected mounts; {REBUILD_HINT}");
         let mut workdir_changed = false;

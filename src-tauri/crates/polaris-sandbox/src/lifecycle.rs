@@ -90,4 +90,43 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
+    #[test]
+    fn ordinary_project_mounts_end_to_end_and_protected_roots_never_reach_docker() -> Result<()> {
+        let f = crate::policy_tests::Fixture::new()?;
+        for suffix in ["src/data", "sessions", "fixtures"] {
+            std::fs::create_dir_all(f.project.join(suffix))?;
+        }
+        std::fs::write(f.project.join("fixtures/x.key"), "fixture")?;
+        let c = Config::default();
+        let mut calls = Vec::<Vec<String>>::new();
+        start_with(&c, "managed", "image", &f.project, &f.kb, &f.home, false, &mut |args| {
+            calls.push(args.to_vec());
+            Ok(if args[0] == "ps" { "" } else { "container-id" }.into())
+        })?;
+        assert_eq!(calls.iter().map(|a| a[0].as_str()).collect::<Vec<_>>(), ["ps", "run"]);
+        let mounts: Vec<_> = calls[1].windows(2).filter(|pair| pair[0] == "--mount")
+            .map(|pair| pair[1].clone()).collect();
+        assert_eq!(mounts, [
+            format!("type=bind,src={},dst=/workspace", crate::policy::path_for_docker(&std::fs::canonicalize(&f.project)?)),
+            format!("type=bind,src={},dst=/kb,readonly", crate::policy::path_for_docker(&std::fs::canonicalize(&f.kb)?)),
+        ]);
+        // Route the generated mount sources back through the same inspect policy.
+        c.validate_container(&f.inspect(), &f.project, &f.kb, &f.home)?;
+        calls.clear();
+        let mut protected_config = c.clone();
+        let protected = f.project.join("private");
+        let child = protected.join("child");
+        std::fs::create_dir_all(&child)?;
+        protected_config.protected_paths.push(protected.clone());
+        let filesystem_root = f.home.ancestors().last().ok_or_else(|| anyhow::anyhow!("missing root"))?;
+        for source in [&f.project, &protected, &child, &f.home, filesystem_root] {
+            assert!(start_with(&protected_config, "managed", "image", source, &f.kb, &f.home, false, &mut |args| {
+                calls.push(args.to_vec());
+                Ok("unexpected Docker call".into())
+            }).is_err(), "{source:?}");
+        }
+        assert!(calls.is_empty());
+        Ok(())
+    }
+
 }

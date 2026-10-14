@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-14T09:01:51.537738+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "59254b44b91cc08889c477a38fef5d89bbf8e73f1b6e210b82330945818cd7ef",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": "?? docs/execution/R4-1/\n?? tests/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M docs/feature-tree.md\n M src-tauri/crates/polaris-kernel/src/chat/backend/expert_selection.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/extension_tests.rs\n M src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs\n M src-tauri/crates/polaris-sandbox/src/lifecycle.rs\n M src-tauri/crates/polaris-sandbox/src/policy.rs\n M src-tauri/crates/polaris-sandbox/src/policy_tests.rs\n M src/features/sandbox/components/SandboxProject.vue\n M src/features/sandbox/project.test.ts\n M src/features/sandbox/project.ts\n?? docs/execution/R4-1/\n?? docs/pi-migration/r4-review-fixes.md\n?? tests/\n",
+    "diff_stat": " docs/feature-tree.md                               | 17 ++++-\n .../src/chat/backend/expert_selection.rs           | 34 ++++++++-\n .../src/chat/backend/pi/extension_tests.rs         | 17 +++--\n .../polaris-kernel/tests/fixtures/fake-agentd.mjs  | 10 ++-\n src-tauri/crates/polaris-sandbox/src/lifecycle.rs  | 39 ++++++++++\n src-tauri/crates/polaris-sandbox/src/policy.rs     | 39 +++++-----\n .../crates/polaris-sandbox/src/policy_tests.rs     | 85 +++++++++++++++++++---\n src/features/sandbox/components/SandboxProject.vue |  6 +-\n src/features/sandbox/project.test.ts               | 19 ++++-\n src/features/sandbox/project.ts                    | 10 +++\n 10 files changed, 224 insertions(+), 52 deletions(-)\n"
+  },
+  "finished_at": "2026-10-14T09:09:37.719515+00:00"
+}

@@ -2,16 +2,21 @@ use crate::{config::{Config, WorkdirChange}, lifecycle::{decide, Action}, policy
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-struct Fixture { root: PathBuf, home: PathBuf, project: PathBuf, kb: PathBuf }
+pub(crate) struct Fixture {
+    pub(crate) root: PathBuf,
+    pub(crate) home: PathBuf,
+    pub(crate) project: PathBuf,
+    pub(crate) kb: PathBuf,
+}
 impl Fixture {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let root = std::env::temp_dir().join(format!("p3b-{}-{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
         let result = Self { home: root.join("home"), project: root.join("project"), kb: root.join("kb"), root };
         for path in [&result.home, &result.project, &result.kb] { std::fs::create_dir_all(path)?; }
         Ok(result)
     }
-    fn inspect(&self) -> Value {
+    pub(crate) fn inspect(&self) -> Value {
         json!({"Mounts":[
             {"Type":"bind","Source":self.project,"Destination":"/workspace","RW":true},
             {"Type":"bind","Source":self.kb,"Destination":"/kb","RW":false}],
@@ -55,15 +60,6 @@ fn forbidden_config_and_parent_mounts_are_rejected() -> Result<()> {
     old["Mounts"][0]["Source"] = json!(f.home.join("Polaris"));
     assert!(f.validate(&Config::default(), &old).err().is_some_and(|e|
         e.to_string().contains("SANDBOX_UNSAFE_MOUNT") && e.to_string().contains("rebuild:true")));
-    for name in ["host.key", "device.key", "providers.json", "collab.db"] {
-        let secret = f.project.join(name);
-        std::fs::write(&secret, "secret")?;
-        assert!(f.validate(&Config::default(), &f.inspect()).is_err());
-        let mut c = Config::default();
-        c.mounts[0].source = secret.to_string_lossy().into_owned();
-        assert!(c.run_args("test", "image", &f.project, &f.kb, &f.home).is_err());
-        std::fs::remove_file(secret)?;
-    }
     Ok(())
 }
 #[test]
@@ -160,5 +156,70 @@ fn published_schema_defaults_match_runtime() -> Result<()> {
     if let Some(fields) = defaults.as_object() {
         for (key, value) in fields { assert_eq!(&schema["properties"][key]["default"], value, "{key}"); }
     } else { anyhow::bail!("config must be an object"); }
+    Ok(())
+}
+
+#[test]
+fn ordinary_names_are_allowed_in_sources_and_contents() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.project = f.project.join("data/sessions");
+    for suffix in ["src/data", "sessions", "fixtures"] {
+        std::fs::create_dir_all(f.project.join(suffix))?;
+    }
+    std::fs::write(f.project.join("fixtures/x.key"), "test fixture")?;
+    let c = Config::default();
+    let args = c.run_args("test", "image", &f.project, &f.kb, &f.home)?;
+    assert!(args.contains(&format!("type=bind,src={},dst=/workspace",
+        path_for_docker(&std::fs::canonicalize(&f.project)?))));
+    assert_eq!(f.validate(&c, &f.inspect())?, std::fs::canonicalize(&f.project)?);
+    Ok(())
+}
+
+#[test]
+fn protected_ancestors_descendants_home_and_root_fail_creation_and_routing() -> Result<()> {
+    let f = Fixture::new()?;
+    let protected = f.project.join("private");
+    let child = protected.join("child");
+    std::fs::create_dir_all(&child)?;
+    let mut c = Config::default();
+    c.protected_paths.push(protected.clone());
+    let safe_kb = f.root.join("safe-kb");
+    std::fs::create_dir(&safe_kb)?;
+    let filesystem_root = f.home.ancestors().last().ok_or_else(|| anyhow::anyhow!("missing root"))?;
+    for source in [&f.project, &protected, &child, &f.home, &f.root, filesystem_root] {
+        assert!(c.run_args("test", "image", source, &f.kb, &f.home).is_err(), "{source:?}");
+        let mut info = f.inspect();
+        info["Mounts"][0]["Source"] = json!(source);
+        assert!(c.validate_container(&info, source, &f.kb, &f.home).is_err(), "{source:?}");
+        // Also reject an unsafe actual mount when the requested project is safe.
+        info["Mounts"][1]["Source"] = json!(safe_kb);
+        let error = c.validate_container(&info, &f.kb, &safe_kb, &f.home)
+            .err().ok_or_else(|| anyhow::anyhow!("unsafe actual mount accepted"))?;
+        assert!(error.to_string().starts_with("SANDBOX_UNSAFE_MOUNT:"), "{error}");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn route_validation_never_requires_directory_enumeration() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    struct Restore(PathBuf, std::fs::Permissions);
+    impl Drop for Restore {
+        fn drop(&mut self) { let _ = std::fs::set_permissions(&self.0, self.1.clone()); }
+    }
+    let f = Fixture::new()?;
+    let c = Config::default();
+    // Search/metadata access remains available; directory enumeration is denied.
+    let _restore = Restore(f.project.clone(), std::fs::metadata(&f.project)?.permissions());
+    for count in [0, 2048] {
+        std::fs::set_permissions(&f.project, std::fs::Permissions::from_mode(0o700))?;
+        for index in 0..count { std::fs::write(f.project.join(format!("fixture-{index}.key")), "fixture")?; }
+        std::fs::set_permissions(&f.project, std::fs::Permissions::from_mode(0o111))?;
+        // Root bypasses DAC, so this test needs an unprivileged test runner.
+        anyhow::ensure!(std::fs::read_dir(&f.project).is_err(), "run this enumeration regression as an unprivileged user");
+        c.run_args("test", "image", &f.project, &f.kb, &f.home)?;
+        f.validate(&c, &f.inspect())?;
+    }
     Ok(())
 }
