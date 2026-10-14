@@ -1,0 +1,266 @@
+diff --git a/agentd/src/sessions/options.ts b/agentd/src/sessions/options.ts
+index f499a52..5904e52 100644
+--- a/agentd/src/sessions/options.ts
++++ b/agentd/src/sessions/options.ts
+@@ -1,7 +1,8 @@
+ import type { AgentSession } from "@earendil-works/pi-coding-agent";
++import { Value } from "typebox/value";
+ import type { Config } from "../config/schema.ts";
+ import { DaemonError } from "../protocol/errors.ts";
+-import type { SessionOptions } from "../protocol/schema.ts";
++import { SessionOptionsSchema, type SessionOptions } from "../protocol/schema.ts";
+ 
+ export function profileTools(config: Config, profile: string): string[] {
+   if (!Object.hasOwn(config.toolProfiles, profile)) {
+@@ -24,14 +25,65 @@ export function activateTools(session: AgentSession, tools: string[]): void {
+   }
+ }
+ export async function configureSession(session: AgentSession, config: Config, options: SessionOptions): Promise<void> {
++  // The registry also accepts direct callers; validate before any SDK mutation.
++  const { model: requestedModel, thinkingLevel, toolProfile } = options;
++  if (!Value.Check(SessionOptionsSchema, { model: requestedModel, thinkingLevel, toolProfile })) {
++    throw new DaemonError("INVALID_REQUEST", "Session options do not match schema");
++  }
+   const tools = options.toolProfile === undefined ? undefined : profileTools(config, options.toolProfile);
+   if (tools) checkTools(session, tools);
+   const model = options.model && session.modelRuntime.getModel(options.model.provider, options.model.id);
+   if (options.model && !model) throw new DaemonError("MODEL_NOT_FOUND", "Requested model does not exist");
++  const previous = { model: session.model, thinkingLevel: session.thinkingLevel, tools: session.getActiveToolNames() };
++  if (!previous.model) throw new DaemonError("MODEL_NOT_FOUND", "Session has no model");
+   if (model) {
+-    try { await session.setModel(model, { persist: false }); }
+-    catch { throw new DaemonError("MODEL_CONFIGURE_FAILED", "SDK could not select the requested model"); }
++    if (!model.input.includes("text")) {
++      throw new DaemonError("MODEL_INPUT_UNSUPPORTED", "Selected model does not accept text");
++    }
++    const hasImages = session.messages.some((message) => "content" in message && Array.isArray(message.content)
++      && message.content.some((part) => part.type === "image"));
++    if (hasImages && !model.input.includes("image")) {
++      throw new DaemonError("MODEL_IMAGES_UNSUPPORTED", "Selected model does not accept session images");
++    }
++  }
++  let modelAttempted = false;
++  let thinkingAttempted = false;
++  let toolsAttempted = false;
++  try {
++    if (model) {
++      modelAttempted = true;
++      // setModel also changes thinking level, including before a possible failure.
++      thinkingAttempted = true;
++      try { await session.setModel(model, { persist: false }); }
++      catch { throw new DaemonError("MODEL_CONFIGURE_FAILED", "SDK could not select the requested model"); }
++    }
++    if (thinkingLevel !== undefined) {
++      thinkingAttempted = true;
++      session.setThinkingLevel(thinkingLevel, { persist: false });
++    }
++    if (tools) {
++      toolsAttempted = true;
++      activateTools(session, tools);
++    }
++  } catch (error) {
++    // Restore the model before thinking: the SDK clamps thinking to the current model.
++    // Attempt every restoration even if an SDK rollback operation itself fails.
++    let rollbackFailed = false;
++    if (modelAttempted && session.model !== previous.model) {
++      try { await session.setModel(previous.model, { persist: false }); }
++      catch { rollbackFailed = true; }
++    }
++    if (thinkingAttempted) {
++      try { session.setThinkingLevel(previous.thinkingLevel, { persist: false }); }
++      catch { rollbackFailed = true; }
++    }
++    if (toolsAttempted) {
++      try { activateTools(session, previous.tools); }
++      catch { rollbackFailed = true; }
++    }
++    if (rollbackFailed) {
++      throw new DaemonError("SESSION_CONFIGURE_ROLLBACK_FAILED", "SDK could not restore session settings; reopen required");
++    }
++    throw error;
+   }
+-  if (options.thinkingLevel !== undefined) session.setThinkingLevel(options.thinkingLevel, { persist: false });
+-  if (tools) activateTools(session, tools);
+ }
+diff --git a/docs/feature-tree.md b/docs/feature-tree.md
+index 1c93f1d..cd12523 100644
+--- a/docs/feature-tree.md
++++ b/docs/feature-tree.md
+@@ -218,6 +218,9 @@ P2.5 当时缺失的 ChatSendArgs 图片/思考档位入口由下述 P2.5b 接
+ `K/chat/types.rs::ChatSendArgs` 增加 serde 默认的 image_paths/thinking_level；没有现成档位选择器，不新增 UI。
+ `backend/bridge.rs` 经 `attach::uploads_dir` 定位当前会话 uploads，再调用公开 `backend/chat_input.rs::prepare`。
+ 该接口复用 `images.rs::load`，拒绝相对路径、`..`、规范化越界及符号链接逃逸，验证普通文件、数量、字节和 MIME 后编码。
++已知限制（R2 / 审查 #2）：规范化后、打开前，上级目录仍可能被替换为符号链接；攻击者须有会话 uploads 目录的本地写权限。
++远程协作者只能提交路径字符串，不能写本机文件系统，此情形不在当前威胁模型内；fd 的 `file.metadata()` 本身使用 fstat。
++若将来 uploads 对他人可写，应改用 Linux `openat2(RESOLVE_BENEATH)`；本轮仅记录限制，不修改附件代码。
+ `TurnRequest.attachments` 现为 `Vec<protocol::Attachment>`；Pi 直接下发内容，不再重新打开路径。
+ `thinking_level` 校验为 off/minimal/low/medium/high/xhigh，非法字符串报 THINKING_LEVEL_INVALID；Pi 每轮 open/configure 下发。
+ 缺省沿用 daemon 默认/当前档位；Claude CLI 保留 prompt/Read 路径行为，不增加思考档位映射。
+@@ -244,6 +247,18 @@ Pi 安装版 read 工具支持图片内容块，可为仅有路径的 prompt 提
+ Rust 入口路径以 `src-tauri/crates/polaris-kernel/src/chat/` 为前缀。
+ 实际命令、结果、基线/TCP 失败列表与边界阻塞见 [R1 执行报告](pi-migration/r1-review-fixes.md)；R1 不声明完整验收通过。
+ 
++## R2 审查修复（执行报告，完整验证 BLOCKED）
++
++仅实现 [审查处置](reviews/P25-round1-triage.md) 的 #3/#4；#2 限制见上方附件节点，驳回项未改代码。
++
++| 入口 | 行为与依赖 | 配置、迁移与验证 |
++| --- | --- | --- |
++| `K/chat/backend/pi/supervisor.rs`、`client.rs` | State Drop 显式回复全部 deferred/pending；回复通道关闭报 AgentdSupervisorExited，真实等待超时报 AgentdRequestTimeout；保留 actor 显式错误 | 依赖既有 mpsc；requestTimeoutMs=15000、supervisorTickMs=10、channelCapacity=64，均为正整数；无新增配置；`supervisor_tests.rs`、client 内单测及既有 Pi 回归 |
++| `agentd/src/sessions/options.ts`、`registry.ts` | configure 预检字段类型/思考枚举、模型、工具档及模型输入能力；失败按原模型→思考→工具回滚；toolProfile 仍只在成功后更新 | 依赖既有 SDK/TypeBox；沿用 defaultModel/thinkingLevel/defaultToolProfile/toolProfiles，缺省保持原行为；无需配置/协议迁移；`agentd/test/configure-transaction.test.ts` 与 `protocol-extension.test.ts` |
++
++配置切换示例、回滚边界、实际命令、失败清单及未运行项见 [R2 执行报告](pi-migration/r2-review-fixes.md)。
++无新依赖、未提交；最终完成状态由 Claude 复核决定。
++
+ ## 后续边界与待确认
+ 
+ - P2 shared Pi 接线已落地但未完成验收：per-account OS/账号隔离未实现；完整内核测试有 6 项额外的沙箱端口失败。配置、限制与结果见 [P2 记录](pi-migration/p2-result.md)。
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
+index e4472b8..ef7ef1b 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
+@@ -58,12 +58,10 @@ impl Client {
+         let timeout = self.config.request_timeout_ms.saturating_mul(2)
+             .saturating_add(self.config.supervisor_tick_ms.saturating_mul(2));
+         rx.recv_timeout(Duration::from_millis(timeout)).map_err(|error| {
+-            let status = self.status.lock();
+-            let message = if !status.healthy { status.last_error.clone() } else { None };
+-            anyhow::anyhow!(message.unwrap_or_else(|| match error {
+-                mpsc::RecvTimeoutError::Disconnected => "AgentdSupervisorStopped".into(),
+-                mpsc::RecvTimeoutError::Timeout => "AgentdRequestTimeout".into(),
+-            }))
++            anyhow::anyhow!(match error {
++                mpsc::RecvTimeoutError::Disconnected => super::routes::SUPERVISOR_EXITED,
++                mpsc::RecvTimeoutError::Timeout => "AgentdRequestTimeout",
++            })
+         })?.map_err(anyhow::Error::msg)
+     }
+     pub fn cancel(&self, req: &str) -> anyhow::Result<()> {
+@@ -74,3 +72,33 @@ impl Client {
+     pub fn stop(&self) { let _ = self.send(Control::Stop); }
+ }
+ impl Drop for Client { fn drop(&mut self) { let _ = self.tx.try_send(Control::Stop); } }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn reply_disconnect_and_timeout_have_distinct_errors() -> anyhow::Result<()> {
++        let mut config = super::super::tests::config();
++        config.request_timeout_ms = 1;
++        config.supervisor_tick_ms = 1;
++        let (tx, _control) = tokio::sync::mpsc::channel(1);
++        let client = Client { config, tx,
++            status: Arc::new(Mutex::new(BackendStatus::new("pi"))),
++            active: Arc::new(Mutex::new(Default::default())) };
++        // A stale actor failure must not mask why recv_timeout returned.
++        client.status.lock().last_error = Some("AgentdRestarting".into());
++        let (reply, rx) = mpsc::sync_channel(1);
++        drop(reply);
++        let error = client.wait(rx).err().ok_or_else(|| anyhow::anyhow!("expected exit"))?;
++        assert_eq!(error.to_string(), super::super::routes::SUPERVISOR_EXITED);
++        let (_reply, rx) = mpsc::sync_channel(1);
++        let error = client.wait(rx).err().ok_or_else(|| anyhow::anyhow!("expected timeout"))?;
++        assert_eq!(error.to_string(), "AgentdRequestTimeout");
++        let (reply, rx) = mpsc::sync_channel(1);
++        reply.send(Err("AgentdWriterBackpressure".into()))?;
++        let error = client.wait(rx).err().ok_or_else(|| anyhow::anyhow!("expected actor error"))?;
++        assert_eq!(error.to_string(), "AgentdWriterBackpressure");
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+index c3a7339..6122b19 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+@@ -4,6 +4,9 @@ use parking_lot::Mutex;
+ use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
+ use tokio::sync::mpsc;
+ use serde_json::{Value, json};
++#[cfg(test)]
++#[path = "supervisor_tests.rs"]
++mod tests;
+ struct Pending { reply: Option<Reply>, since: Instant, ping: bool }
+ struct State {
+     config: Agentd,
+@@ -202,6 +205,14 @@ impl Drop for State {
+         // Publish failure before waking stream consumers and control callers.
+         self.routes.clear();
+         self.active.lock().clear();
++        for (_, reply, _) in self.deferred.drain(..) {
++            let _ = reply.send(Err(super::routes::SUPERVISOR_EXITED.into()));
++        }
++        for (_, pending) in self.pending.drain() {
++            if let Some(reply) = pending.reply {
++                let _ = reply.send(Err(super::routes::SUPERVISOR_EXITED.into()));
++            }
++        }
+     }
+ }
+ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mutex<BackendStatus>>,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor_tests.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor_tests.rs
+new file mode 100644
+index 0000000..6da95c0
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor_tests.rs
+@@ -0,0 +1,42 @@
++use super::*;
++
++#[test]
++fn drop_replies_to_every_deferred_and_pending_request_immediately() -> anyhow::Result<()> {
++    for panic in [false, true] {
++        let now = Instant::now();
++        let status = Arc::new(Mutex::new(BackendStatus::new("pi")));
++        let mut state = State {
++            config: super::super::tests::config(), status: status.clone(),
++            active: Arc::new(Mutex::new(HashMap::new())), routes: HashMap::new(),
++            pending: HashMap::new(), deferred: Vec::new(), counter: 0, failures: 0,
++            next_start: now, last_ping: now, started: now, last_used: now, stopping: false,
++        };
++        let mut receivers = Vec::new();
++        // Keep sender clones alive: channel disconnection cannot pass this test.
++        let mut senders = Vec::new();
++        for index in 0..3 {
++            let (reply, rx) = std::sync::mpsc::sync_channel(1);
++            senders.push(reply.clone());
++            receivers.push(rx);
++            state.deferred.push((Command::Ping(Empty {}), reply, now));
++            let (reply, rx) = std::sync::mpsc::sync_channel(1);
++            senders.push(reply.clone());
++            receivers.push(rx);
++            state.pending.insert(Id::Text(format!("pending-{index}")),
++                Pending { reply: Some(reply), since: now, ping: false });
++        }
++        state.pending.insert(Id::Text("health-ping".into()),
++            Pending { reply: None, since: now, ping: true });
++        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
++            let _state = state;
++            assert!(!panic, "injected supervisor unwind");
++        }));
++        assert_eq!(outcome.is_err(), panic);
++        for rx in receivers {
++            assert_eq!(rx.try_recv()?, Err(super::super::routes::SUPERVISOR_EXITED.into()));
++        }
++        assert_eq!(status.lock().last_error.as_deref(), Some(super::super::routes::SUPERVISOR_EXITED));
++        drop(senders);
++    }
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs
+index edcd9f5..e09b573 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs
+@@ -221,7 +221,11 @@ fn config_apply_is_not_busy_after_circuit_or_thread_exit() {
+         }
+         let error = b.apply_config(None, None).unwrap_err().to_string();
+         assert!(!error.contains("AgentdConfigBusy"), "{error}");
+-        assert!(error.contains(if shutdown { "AgentdSupervisorStopped" } else { "AgentdCircuitOpen" }), "{error}");
++        // Shutdown may close the control queue before send, or the reply after send.
++        let expected = if shutdown {
++            error.contains("AgentdSupervisorStopped") || error.contains(routes::SUPERVISOR_EXITED)
++        } else { error.contains("AgentdCircuitOpen") };
++        assert!(expected, "{error}");
+     }
+ }
+ 

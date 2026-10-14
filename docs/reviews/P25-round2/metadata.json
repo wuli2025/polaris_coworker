@@ -1,0 +1,52 @@
+{
+  "started_at": "2026-10-14T06:15:06.237604+00:00",
+  "status": "REVIEW_RECEIVED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/R2-rereview-brief.md",
+        "bytes": 930,
+        "lines": 11,
+        "sha256": "2fd3779f1e4f691da9243b86c43c4f6149e7d949f44aa158d9dcafa429973f33"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P25-round1-triage.md",
+        "bytes": 2213,
+        "lines": 10,
+        "sha256": "6f902a2d582952b6610839110d3b6738b1a6e1be2e0b3de72ad212d9613c97c8"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/R2-diff.patch",
+        "bytes": 15222,
+        "lines": 266,
+        "sha256": "6c694ca2f3d607939c947fb5a925061531d40d48772864e8c3f698bc0cb2d235"
+      }
+    ],
+    "prompt_sha256": "da064b9952d553a896b38b831188263a0e83a5b07f8c2f39c1d162c702a4609a",
+    "prompt_bytes": 21877
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "provider": "minimax",
+  "model": "MiniMax-M2.7",
+  "usage": {
+    "input": 6374,
+    "output": 2571,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 8945,
+    "cost": {
+      "input": 0.0019122,
+      "output": 0.0030851999999999997,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.0049974
+    }
+  },
+  "session_id": "01a1390e-88cf-7fe1-b757-a3731868fab5",
+  "finished_at": "2026-10-14T06:17:55.302616+00:00"
+}
