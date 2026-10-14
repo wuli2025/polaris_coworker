@@ -1,0 +1,377 @@
+   Compiling polaris-fable v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-fable)
+warning: unused import: `super::*`
+    --> crates/polaris-fable/src/fable/scan.rs:1016:9
+     |
+1016 |     use super::*;
+     |         ^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling polaris-wiki v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-wiki)
+warning: `polaris-fable` (lib test) generated 1 warning (run `cargo fix --lib -p polaris-fable --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.84s
+     Running unittests src/lib.rs (target/debug/deps/polaris_fable-051a54426ae37283)
+
+running 112 tests
+test fable::eval::tests::aggregate_recall_mrr_ndcg ... ok
+test fable::files::tests::cluster_eval_run ... ok
+test fable::files::tests::b64_roundtrip_basic ... ok
+test fable::eval::tests::rank_handles_backslash_paths ... ok
+test fable::eval::tests::rank_substring_case_insensitive ... ok
+test fable::files::tests::clean_title_strips_noise_keeps_meaning ... ok
+test fable::files::tests::digest_directive_includes_ids_and_samples ... ok
+test fable::files::tests::extract_gist_prefers_title_and_first_para ... ok
+test fable::files::tests::human_size_scales ... ok
+test fable::files::tests::loose_i64_accepts_num_and_str ... ok
+test fable::files::tests::maximal_roots_keeps_siblings_and_prefix_lookalikes ... ok
+test fable::files::tests::maximal_roots_drops_nested ... ok
+test fable::index::build::tests::build_index_lex_only_e2e ... ignored
+test fable::files::tests::name_rel_json_parses_mixed_id_types ... ok
+test fable::index::build::tests::chunk_header_builds_bracketed_context ... ok
+test fable::index::build::tests::doc_key_folds_version_noise ... ok
+test fable::index::build::tests::content_fingerprint_is_stable_and_content_sensitive ... ok
+test fable::index::dedupe::tests::dedupe_scan_e2e ... ignored
+test fable::files::tests::tokenize_splits_cjk_and_ascii ... ok
+test fable::index::ivf::tests::ivf_majority_and_nearest_centroid ... ok
+test fable::index::client::tests::routing_skips_data_dumps_within_size ... ok
+test fable::files::tests::source_tag_recognizes_download_dirs ... ok
+test fable::index::math::tests::chunk_build_index_demo ... ignored
+test fable::index::math::tests::bits_pack_and_hamming ... ok
+test fable::index::math::tests::atx_heading_requires_space_after_hashes ... ok
+test fable::index::math::tests::chunk_carries_page_marker_into_crumb_without_fragmenting ... ok
+test fable::index::math::tests::chunk_heading_plus_page_combined_crumb ... ok
+test fable::index::math::tests::chunk_no_structure_still_works_without_crumb ... ok
+test fable::index::ivf::tests::ivf_train_separates_two_clusters ... ok
+test fable::index::math::tests::chunk_short_body_under_heading_still_emitted ... ok
+test fable::index::math::tests::chunk_long_paragraph_hardsplit_keeps_crumb_and_overlap ... ok
+test fable::index::math::tests::dot_blob_matches_blob_to_vec_path ... ok
+test fable::inventory::tests::fable_audit_e2e ... ignored
+test fable::inventory::tests::incremental_rescan_e2e ... ignored
+test fable::index::math::tests::normalize_makes_unit_length ... ok
+test fable::index::math::tests::chunk_splits_on_heading_and_prefixes_breadcrumb ... ok
+test fable::inventory::tests::covered_by_respects_pruned_path ... ok
+test fable::index::math::tests::query_cache_lru_evicts_oldest ... ok
+test fable::inventory::tests::is_os_disk_root_only_whole_disks ... ok
+test fable::inventory::tests::macos_packages_always_skipped_but_dotted_user_dirs_kept ... ok
+test fable::inventory::tests::natural_lang_detects_script ... ok
+test fable::inventory::tests::parent_rel_walks_up_one_level ... ok
+test fable::inventory::tests::path_tests::rel_of_is_root_relative_slash_path ... ok
+test fable::inventory::tests::prog_lang_maps_extensions ... ok
+test fable::inventory::tests::quick_lang_code_and_media ... ok
+test fable::inventory::tests::rename_move_reuses_index ... ignored
+test fable::inventory::tests::remote_disk_root_skips_heavy_prune ... ok
+test fable::inventory::tests::skipped_subtree_self_heals ... ignored
+test fable::inventory::tests::skip_dir_scan_prunes_system_and_appdata ... ok
+test fable::inventory::tests::strips_unc_extended_prefix ... ok
+test fable::inventory::tests::two_tier_prune_keeps_user_named_dirs ... ok
+test fable::ontology::tests::empty_fields_rejected ... ok
+test fable::ontology::tests::schemas_have_chinese_names_and_types ... ok
+test fable::ontology::tests::validate_rejects_out_of_frame ... ok
+test fable::retrieve::ai::tests::worth_ai_expand_skips_long_exact_phrases ... ok
+test fable::retrieve::ai::tests::fuse_multi_query_anchors_to_original_and_fuses ... ok
+test fable::retrieve::params::tests::coverage_phrase_boost_rewards_full_term_coverage_and_exact_phrase ... ok
+test fable::retrieve::ai::tests::parse_expansions_handles_json_and_lines ... ok
+test fable::retrieve::params::tests::path_boost_rewards_filename_and_path_hits ... ok
+test fable::retrieve::params::tests::keyword_query_detection_targets_short_terms ... ok
+test fable::retrieve::params::tests::rerank_gate_default_preserves_behavior ... ok
+test fable::retrieve::params::tests::rrf_params_default_is_eval_tuned_optimum ... ok
+test fable::retrieve::params::tests::vec_min_score_default_off_and_gate_semantics ... ok
+test fable::retrieve::rerank_cache::tests::rerank_sig_changes_with_candidates ... ok
+test fable::retrieve::rerank_cache::tests::rerank_cache_roundtrip ... ok
+test fable::retrieve::search::tests::scope_filter_first_segment ... ok
+test fable::retrieve::text::tests::has_short_terms_detects_bare_cjk_concepts ... ok
+test fable::retrieve::text::tests::fts_expr_uses_trigrams_not_whole_phrase ... ok
+test fable::retrieve::text::tests::split_query_drops_cjk_stopword_bigrams ... ok
+test fable::retrieve::text::tests::split_query_segments_cjk_and_latin ... ok
+test fable::index::ivf::tests::ivf_n_backfill_counts_members_per_cell ... ok
+test fable::sched::tests::all_workers_stuck_does_not_freeze ... ok
+test fable::inventory::tests::skip_bump_touches_only_direct_children ... ok
+test fable::sched::tests::demote_sends_item_to_the_back ... ok
+test fable::files::tests::rename_apply_is_idempotent_rebuild ... ok
+test fable::sched::tests::demote_current_thread_is_safe ... ok
+test fable::files::tests::merge_skips_parent_clusters ... ok
+test fable::files::tests::rename_apply_validates_and_writes ... ok
+test fable::sched::tests::cancel_unblocks_everything ... ok
+test fable::files::tests::merge_consolidates_same_parent_leaves_and_remaps ... ok
+test fable::inventory::tests::dir_state_distinguishes_deleted_from_unreachable ... ok
+test fable::sched::tests::drains_a_tree_without_deadlock ... ok
+test fable::tests::flag_guard_acquire_block_and_release ... ok
+test fable::tests::worker_count_bounded_against_oversubscription ... ok
+test fable::tests::flag_guard_releases_on_panic ... ok
+test kb::access::path_tests::path_contains_uses_posix_components_and_case ... ok
+test kb::access::tests::context_block_map_total_capped_by_global_budget ... ok
+test fable::sched::tests::read_batch_bg_边界批次 ... ok
+test kb::access::tests::context_block_no_surplus_when_nav_fills ... ok
+test kb::access::tests::context_block_surplus_when_nav_is_small ... ok
+test fable::tests::bundled_sqlite_has_fts5_trigram_substring_match ... ok
+test kb::enrich::tests::enrich_links_alias_when_term_differs ... ok
+test kb::enrich::tests::enrich_links_first_occurrence_skips_code_and_existing ... ok
+test kb::enrich::tests::enrich_links_skips_frontmatter_and_already_linked ... ok
+test kb::access::tests::truncate_keeps_short_and_cuts_long ... ok
+test kb::enrich::tests::enrich_links_skips_inline_code ... ok
+test kb::enrich::tests::normalize_title_collapses_punctuation_and_case ... ok
+test kb::enrich::tests::rewrite_wikilink_target_keeps_alias_and_section ... ok
+test kb::ingest::tests::safe_path_accepts_normal_wiki_pages ... ok
+test kb::ingest::tests::safe_path_rejects_escapes_and_absolutes ... ok
+test kb::ingest::tests::safe_path_rejects_reserved_and_outside_wiki ... ok
+test kb::access::tests::resolve_within_kb_rejects_traversal ... ok
+test kb::scan::tests::parallel_scan_all_complete_ordered_no_dupes ... ok
+test kb::threat::tests::injection_scanner_flags_attacks_and_spares_benign ... ok
+test fable::sched::tests::read_batch_bg_对齐且与逐文件读等价 ... ok
+test fable::retrieve::vector::tests::coarse_scan_parallel_matches_bruteforce_on_real_db ... ok
+test fable::files::tests::file_grid_kind_参数不再拼得出_sql ... ok
+test fable::files::tests::overview_ttl_cache_coalesces ... ok
+test fable::tests::concurrent_background_writers_no_lock_errors ... ok
+test fable::files::tests::文件中心路径闸_库外文件一律拒绝 ... ok
+test fable::sched::tests::real_threads_stuck_worker_does_not_freeze ... ok
+test fable::sched::tests::with_deadline_caps_a_hang ... ok
+
+test result: ok. 105 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.00s
+
+     Running unittests src/lib.rs (target/debug/deps/polaris_kernel-cff771834e1fc940)
+
+running 197 tests
+test chat::artifacts::tests::displayable_artifact_whitelists_common_formats_only ... ok
+test chat::artifacts::tests::folder_artifact_repr_appends_single_trailing_slash ... ok
+test chat::artifacts::tests::split_artifacts_malformed_marker_is_safe ... ok
+test chat::artifacts::tests::split_artifacts_no_marker_returns_trimmed_body ... ok
+test chat::artifacts::tests::split_artifacts_parses_marker_and_strips_body ... ok
+test chat::backend::claude_cli::pipeline::tests::collect_tree_gathers_descendants_and_survives_cycles ... ok
+test chat::backend::claude_cli::pipeline::tests::normal_mode_tool_whitelist_intact ... ok
+test chat::backend::claude_cli::pipeline::tests::raw_mode_flag_semantics ... ok
+test chat::backend::claude_cli::completion::tests::finished_worker_does_not_duplicate_done ... ok
+test chat::backend::claude_cli::pool::tests::lru_never_evicts_busy_session ... ok
+test chat::backend::claude_cli::pool::reader::tests::dropped_job_receiver_finishes_queued_turn ... ok
+test chat::backend::claude_cli::pool::reader::tests::rejected_job_keeps_mailbox_open_for_preparation_retry ... ok
+test chat::backend::claude_cli::pool::tests::prompt_plan_split_first_vs_continuation ... ok
+test chat::backend::claude_cli::pool::tests::lru_evicts_least_recently_used ... ok
+test chat::backend::chat_input::tests::chat_json_becomes_encoded_turn_without_removing_prompt_paths ... ok
+test chat::backend::chat_input::tests::omitted_null_and_empty_inputs_preserve_old_text_callers ... ok
+test chat::backend::claude_cli::pool::tests::ttl_sweep_never_reaps_busy_session ... ok
+test chat::backend::claude_cli::pool::tests::reinsert_same_conv_replaces ... ok
+test chat::backend::claude_cli::pool::tests::fingerprint_change_detected ... ok
+test chat::backend::chat_input::tests::validates_all_thinking_levels_and_rejects_unknown_values ... ok
+test chat::backend::claude_cli::pool::tests::并发新建的会话入池即忙碌_不会被彼此逐出 ... ok
+test chat::backend::chat_input::tests::chat_boundary_propagates_named_image_errors_and_configured_limits ... ok
+test chat::backend::claude_cli::pool::tests::ttl_sweep_reaps_idle_sessions ... ok
+test chat::backend::claude_cli::pool::tests::trim_over_cap_converges_after_turns_end ... ok
+test chat::backend::config::tests::backend_selection_is_explicit ... ok
+test chat::backend::claude_cli::completion::tests::stdout_worker_return_and_panic_finish_full_mailbox ... ok
+test chat::backend::claude_cli::pool::reader::tests::persistent_reader_panic_finishes_active_and_queued_jobs ... ok
+test chat::backend::docker_tools::policy_port_tests::every_route_passes_full_inspection_to_policy_and_propagates_rejection ... ok
+test chat::backend::expert_selection::tests::failures_identify_selection_without_exposing_loader_prompt ... ok
+test chat::backend::expert_selection::tests::explicit_selection_loads_exact_id_and_rejects_invalid_input ... ok
+test chat::backend::host_tools::tests::sandbox_routes_only_through_injected_executor_and_fails_closed ... ok
+test chat::backend::docker_tools::tests::maps_mount_and_quotes_file_content_without_host_execution ... ok
+test chat::backend::images::tests::configuration_defaults_match_agentd_and_reject_invalid_types ... ok
+test chat::backend::images::tests::contained_images_use_content_mime_and_base64 ... ok
+test chat::backend::images::tests::enforces_count_single_total_and_configured_mime_limits ... ok
+test chat::backend::pi::extension_tests::missing_or_noninteger_protocol_version_is_a_named_mismatch ... ok
+test chat::backend::images::tests::rejects_outside_sibling_traversal_relative_missing_and_directory ... ok
+test chat::backend::images::tests::rejects_symlink_file_directory_and_uploads_escape ... ok
+test chat::backend::pi::process::tests::full_and_closed_writer_have_distinct_errors ... ok
+test chat::backend::pi::routes::tests::drop_finishes_full_unacknowledged_mailbox_and_preserves_finished_stream ... ok
+test chat::backend::pi::client::tests::reply_disconnect_and_timeout_have_distinct_errors ... ok
+test chat::backend::pi::routes::tests::dropping_undrained_route_releases_active_and_reservation ... ok
+test chat::backend::pi::routes::tests::first_failure_survives_abort_timeout ... ok
+test chat::backend::pi::supervisor::tests::drop_replies_to_every_deferred_and_pending_request_immediately ... ok
+test chat::backend::docker_tools::status_tests::unresponsive_transport_has_bounded_wait ... ok
+test chat::backend::pi::routes::tests::idle_budget_starts_at_registration_and_resets_on_hidden_events ... ok
+test chat::backend::claude_cli::tests::readonly_preserves_text_and_legacy_result_deduplication ... ok
+test chat::backend::pi::extension_tests::mismatched_protocol_fuses_before_any_application_request ... ok
+test chat::backend::docker_tools::status_tests::timeout_is_distinct_from_failure_and_signal ... ok
+test chat::backend::pi::extension_tests::explicit_tool_options_reach_session_open_without_legacy_context ... ok
+test chat::backend::pi::tests::daemon_stream_routing_and_collect ... ok
+test chat::backend::pi::tests::isolation_never_silently_shares ... ok
+test chat::backend::pi::tests::mailbox_reserves_terminals_and_preserves_order ... ok
+test chat::backend::pi::extension_tests::permission_confirmation_round_trip_preserves_call_and_parent ... ok
+test chat::backend::pi::tests::config_apply_is_not_busy_after_circuit_or_thread_exit ... ok
+test chat::backend::pi::tests::protocol_samples_and_source_fingerprint ... ok
+test chat::backend::pi::tests::crash_restarts_and_active_turn_finishes ... ok
+test chat::backend::pi::extension_tests::model_profile_image_and_idle_reconfiguration_are_on_the_wire ... ok
+test chat::backend::pi::tests::malformed_and_oversized_lines_fail_closed ... ok
+test chat::backend::pi::extension_tests::selected_expert_is_loaded_into_this_turn_without_project_writes ... ok
+test chat::backend::docker_tools::status_tests::preserves_failure_output_normal_exit_and_signal ... ok
+test chat::backend::pi::tests::translation_covers_every_event_and_order ... ok
+test chat::backend::pi::tests::usage_and_all_completion_statuses_have_expected_sequences ... ok
+test chat::backend::pi::wiki_tests::detailed_tools_and_abort_status_are_opt_in ... ok
+test chat::backend::pi::tests::supervisor_exit_clears_orphan_active_entries ... ok
+test chat::prompt::tests::execution_delivery_contract_requires_actions_evidence_and_honest_blockers ... ok
+test chat::prompt::tests::format_memory_map_empty_when_no_entries ... ok
+test chat::prompt::tests::format_memory_map_keeps_only_entry_lines_and_wraps ... ok
+test chat::prompt::tests::format_memory_map_respects_budget_but_keeps_at_least_one ... ok
+test chat::prompt::tests::install_requests_hit_script_gate ... ok
+test chat::prompt::tests::intent_gates_hit_and_miss ... ok
+test chat::prompt::tests::truncate_chars_is_char_safe_for_cjk ... ok
+test chat::prompt::tests::ymd_converts_known_epochs ... ok
+test convert::tests::docx_paragraphs_become_newlines ... ok
+test convert::tests::entities_decoded_amp_last ... ok
+test convert::tests::instr_text_field_codes_are_dropped ... ok
+test convert::tests::md_cell_escapes_pipe_and_newline ... ok
+test convert::tests::ooxml_handles_tabs_breaks_entities ... ok
+test convert::tests::slide_index_parses_number ... ok
+test convert::tests::squeeze_collapses_blank_runs ... ok
+test convert::tests::trim_float_drops_trailing_zeros ... ok
+test doctor::autopilot::tests::default_state_is_idle ... ok
+test chat::backend::pi::tests::cancellation_and_abort_timeout_both_finish ... ok
+test doctor::autopilot::tests::start_is_once_per_process ... ok
+test doctor::bundled::tests::dir_with_any_component_is_a_runtime_root ... ok
+test doctor::bundled::tests::empty_dir_is_not_a_runtime_root ... ok
+test doctor::bundled::tests::git_dirs_only_injected_when_bundled_bash_is_used ... ok
+test doctor::bundled::tests::resolved_paths_exist_when_runtime_is_present ... ok
+test chat::backend::pi::wiki_tests::wiki_profile_permission_and_sandbox_reach_session_open ... ok
+test doctor::install::tests::claude_install_is_direct_tgz_not_npm ... ok
+test doctor::install::tests::dump_install_scripts ... ignored
+test doctor::install::tests::r2_source_comes_first ... ok
+test doctor::install::tests::scripts_have_no_unfilled_placeholders ... ok
+test doctor::install::tests::windows_scripts_disable_progress_bar ... ok
+test chat::backend::pi::tests::supervisor_exit_panic_and_channel_close_finish_inflight_turns ... ok
+test doctor::path::tests::path_contains_dir_uses_colon_separated_complete_entries ... ok
+test chat::backend::pi::tests::idle_reaping_and_reopen_after_config_apply ... ok
+test doctor::pi::tests::credential_report_is_boolean_and_rejects_incomplete_entries ... ok
+test chat::backend::pi::tests::repeated_startup_failure_opens_circuit ... ok
+test doctor::pi::tests::readiness_requires_every_runtime_component ... ok
+test doctor::pi::tests::runtime_paths_support_bundle_development_and_explicit ... ok
+test chat::backend::claude_cli::tests::readonly_can_be_cancelled_through_backend ... ok
+test doctor::pi_shell::tests::child_environment_precedes_system_path_without_changing_parent ... ok
+test doctor::pi_shell::tests::explicit_config_matches_doctor_and_invalid_path_does_not_fall_back ... ok
+test doctor::pi_shell::tests::windows_exclusions_normalize_case_separators_and_directory_boundaries ... ok
+test doctor::pi_shell::tests::windows_path_excludes_system_launchers_and_aliases_before_selecting_git ... ok
+test doctor::pi_shell::tests::windows_resolution_bundle_system_git_and_missing ... ok
+test doctor::probe::tests::merge_no_proxy_adds_loopback_to_empty ... ok
+test doctor::probe::tests::merge_no_proxy_is_idempotent_case_insensitive ... ok
+test doctor::probe::tests::merge_no_proxy_preserves_existing_and_appends ... ok
+test doctor::probe::tests::node_and_npm_candidates_are_non_empty ... ok
+test doctor::update::tests::extract_semver_picks_first_triplet ... ok
+test doctor::update::tests::version_from_manifest_reads_latest_manifest ... ok
+test doctor::verify::tests::brief_trims_and_drops_blank_lines ... ok
+test doctor::verify::tests::conflicts_sorted_high_first ... ok
+test doctor::verify::tests::install_root_groups_npm_entries_together ... ok
+test doctor::verify::tests::mask_hides_secret_body ... ok
+test doctor::verify::tests::single_npm_install_reports_no_conflict ... ok
+test doctor::verify::tests::smoke_args_are_read_only ... ok
+test doctor::autopilot::tests::pi_autopilot_never_installs_claude ... ok
+test chat::backend::pi::tests::idle_turn_times_out_even_while_ping_responses_arrive ... ok
+test headless::tests::extract_json_tolerates_fences_and_prose ... ok
+test integrations::codex_proxy::tests::build_chat_body_minimal_and_reasoning ... ok
+test integrations::codex_proxy::tests::build_chat_body_tools_and_tool_round ... ok
+test integrations::codex_proxy::tests::build_responses_body_minimal_ok ... ok
+test integrations::codex_proxy::tests::build_responses_body_pairs_reasoning_with_encrypted_include ... ok
+test integrations::codex_proxy::tests::build_responses_body_rejects_empty_messages ... ok
+test integrations::codex_proxy::tests::build_responses_body_tolerates_malformed_messages ... ok
+test integrations::codex_proxy::tests::drive_openai_chat_error_frame_no_done ... ok
+test integrations::codex_proxy::tests::drive_openai_chat_text_tools_usage ... ok
+test integrations::codex_proxy::tests::extract_system_handles_all_shapes ... ok
+test doctor::path::tests::claude_dir_from_path_picks_parent_or_npm_prefix ... ok
+test integrations::codex_proxy::tests::map_model_passthrough_and_default ... ok
+test integrations::codex_proxy::tests::openai_chat_url_join_rules ... ok
+test integrations::codex_proxy::tests::normalize_gpt_fixes_missing_dash ... ok
+test integrations::feishu::tests::dedup_rejects_repeat_and_evicts ... ok
+test integrations::feishu::tests::dm_policy_gates ... ok
+test integrations::codex_proxy::tests::split_route_variants ... ok
+test integrations::feishu::tests::group_requires_mention ... ok
+test integrations::feishu::tests::lock_format_carries_pid_and_exe ... ok
+test integrations::feishu::tests::never_reply_to_self ... ok
+test integrations::feishu::tests::reply_guard_catches_empty_promise ... ok
+test integrations::feishu::tests::read_lock_parses_pid_line_if_present ... ok
+test integrations::feishu::tests::should_run_gate_starts_false_and_can_be_set ... ok
+test integrations::nas::tests::real_machine_list ... ignored
+test integrations::nas::tests::id_is_stable_and_sanitized ... ok
+test integrations::nas::tests::unc_build_and_split_roundtrip ... ok
+test integrations::nas::tests::unc_key_normalizes ... ok
+test provider::claude_login::tests::b64url_encode_known_vectors ... ok
+test provider::claude_login::tests::loopback_query_param_decode ... ok
+test provider::claude_login::tests::loopback_vs_manual_authorize_url_shape ... ok
+test provider::claude_login::tests::pkce_s256_rfc7636_vector ... ok
+test provider::claude_login::tests::rand_b64url_len_and_uniqueness ... ok
+test provider::claude_login::tests::sha256_known_vector ... ok
+test provider::claude_login::tests::url_encode_query_value ... ok
+test provider::credential_lock::tests::shared_decisions ... ok
+test provider::credential_lock::tests::slow_owner_and_concurrent_reclamation ... ok
+test provider::image_store::tests::borrow_endpoint_matches_key_origin ... ok
+test provider::image_store::tests::flavor_serializes_lowercase ... ok
+test provider::image_store::tests::presets_are_well_formed ... ok
+test provider::image_store::tests::store_roundtrips_and_old_file_without_flavor_still_loads ... ok
+test provider::image_store::tests::usable_needs_all_three_fields ... ok
+test provider::image_store::tests::volc_preset_ranks_first ... ok
+test provider::pi_translate::tests::pi_error_categories_drive_the_existing_sliding_window ... ok
+test provider::pi_translate::tests::protocols_priority_and_missing_metadata ... ok
+test provider::pi_usage::tests::copied_pi_rows_share_legacy_identity_but_other_requests_do_not ... ok
+test provider::store::credential_migration::tests::migration_has_one_key_and_preserves_rotated_oauth ... ok
+test provider::store::tests::key_mask_tests::切换_token_字段时掩码仍能认领旧值 ... ok
+test provider::store::tests::key_mask_tests::列表出口的密钥全是掩码 ... ok
+test chat::backend::pi::tests::ping_timeout_is_bounded ... ok
+test provider::store::tests::key_mask_tests::掩码本身的边界 ... ok
+test provider::store::tests::key_mask_tests::认领不到旧值的掩码一律剔除而非存进去 ... ok
+test provider::store::tests::key_mask_tests::掩码原样回传时保持原_key_不变 ... ok
+test chat::backend::pi::tests::stalled_stdin_reports_backpressure_to_caller_and_status ... ok
+test provider::store::tests::key_mask_tests::重填换_key_清空删_key ... ok
+test provider::store::tests::per_conv_scope_tests::auto_is_passthrough_when_global_official ... ok
+test provider::store::tests::volc_ark_tests::ark_host_takes_configured_host_but_never_the_local_router ... ok
+test provider::store::tests::volc_ark_tests::image_endpoint_uses_v3_not_the_chat_plan_prefix ... ok
+test provider::store::tests::volc_ark_tests::local_route_placeholder_token_is_not_a_real_key ... ok
+test skills::intent::intent_tests::dev_intent_hits_engineering_only ... ok
+test provider::store::tests::per_conv_scope_tests::forced_official_clears_inherited_global_env ... ok
+test skills::intent::intent_tests::web_create_intent_hits_creation_phrases ... ok
+test skills::intent::intent_tests::web_create_intent_hits_redesign_and_typos ... ok
+test skills::intent::intent_tests::web_create_intent_ignores_browsing ... ok
+test skills::intent::intent_tests::ppt_intent_activates_deck_studio ... ok
+test provider::store::tests::local_route_tests::route_target_fallbacks_and_errors ... ok
+test doctor::path::tests::prime_and_prepend_behaviour ... ok
+test provider::credential_lock::tests::killed_node_owner_is_recovered_by_rust ... ok
+test chat::backend::pi::tests::slow_consumer_retains_text_and_terminal ... ok
+test doctor::verify::tests::two_installs_with_different_versions_report_both_conflicts ... ok
+test doctor::pi::tests::ping_handles_success_mismatch_failure_and_timeout ... ok
+test chat::backend::pi::tests::explicit_request_limit_remains_a_hard_limit ... ok
+test doctor::check::tests::image_managed_tracks_flavor ... ok
+test doctor::verify::tests::verify_sync_is_self_consistent ... ok
+test doctor::pi::tests::shell_verification_reports_each_source_and_missing_shell_is_not_ready ... ok
+test chat::backend::pi::tests::hard_limit_stops_active_turn_and_caps_request_override ... ok
+test chat::backend::pi::tests::hidden_agentd_events_keep_long_turn_alive ... ok
+
+test result: ok. 195 passed; 0 failed; 2 ignored; 0 measured; 6 filtered out; finished in 1.58s
+
+     Running tests/backend_config.rs (target/debug/deps/backend_config-dd910b90221bd0ae)
+
+running 4 tests
+test selection_probe ... ok
+test removed_turn_timeout_reports_named_migration_error ... ok
+test turn_timeout_defaults_types_and_serialization ... ok
+test config_file_and_environment_select_both_backends ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/catalog_protocol.rs (target/debug/deps/catalog_protocol-d970ee637402c2c2)
+
+running 1 test
+test v6_samples_and_invalid_catalog ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/credential_lock_interop.rs (target/debug/deps/credential_lock_interop-8492acbd5dd9d3fc)
+
+running 2 tests
+test rust_holder_probe ... ok
+test killed_rust_holder_is_recovered_by_node ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/provider_switch.rs (target/debug/deps/provider_switch-3feff9b58a0bac60)
+
+running 1 test
+test slow_ipc_keeps_queries_available_and_last_selection_wins ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/lib.rs (target/debug/deps/polaris_wiki-e683dffecc2cbc85)
+
+running 6 tests
+test wiki::compile::tests::backend_guard_and_configuration_fail_closed ... ok
+test wiki::compile::tests::successful_write_edit_and_text_preserve_progress_contract ... ok
+test wiki::compile::tests::out_of_directory_writes_are_rejected_and_never_reported_as_pages ... ok
+test wiki::compile::tests::startup_and_terminal_failures_still_close_and_refresh_index ... ok
+test wiki::compile::tests::symlink_escapes_and_dangling_links_fail_closed ... ok
+test wiki::compile::tests::timeout_and_cancel_abort_close_reindex_and_release_maintenance_lock ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s
+

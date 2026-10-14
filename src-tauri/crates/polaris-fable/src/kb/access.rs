@@ -420,41 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn path_contains_handles_verbatim_prefix_and_case() {
-        // 同根, 子在内: 放行
-        assert!(path_contains(
-            Path::new(r"C:\Users\a\Polaris"),
-            Path::new(r"C:\Users\a\Polaris\x.md")
-        ));
-        // 关键回归: 一端带 Windows `\\?\` 扩展长度前缀、一端没有, 仍判为包含 (旧裸 starts_with 会误判越界)
-        assert!(path_contains(
-            Path::new(r"C:\Users\a\Polaris"),
-            Path::new(r"\\?\C:\Users\a\Polaris\x.md")
-        ));
-        assert!(path_contains(
-            Path::new(r"\\?\C:\Users\a\Polaris"),
-            Path::new(r"C:\Users\a\Polaris\x.md")
-        ));
-        // 伪前缀: 组件级比较不应把 `Polaris-bak` 当成 `Polaris` 的子树
-        assert!(!path_contains(
-            Path::new(r"C:\Users\a\Polaris"),
-            Path::new(r"C:\Users\a\Polaris-bak\x.md")
-        ));
-        // 真越界: 不在根下
-        assert!(!path_contains(
-            Path::new(r"C:\Users\a\Polaris"),
-            Path::new(r"C:\Windows\System32\drivers\etc\hosts")
-        ));
-        // Windows 上大小写不敏感: 根与子大小写不一致也应判为包含
-        if cfg!(windows) {
-            assert!(path_contains(
-                Path::new(r"C:\Users\A\Polaris"),
-                Path::new(r"c:\users\a\polaris\x.md")
-            ));
-        }
-    }
-
-    #[test]
     fn context_block_surplus_when_nav_is_small() {
         // 实际库 < 100 字符, 注入应接近原样而不被 55% 上限「闲置」
         // 直接读当前 KB 测 (单元测试跑时若有 KB 才有意义; 跑不过就当 placeholder)
@@ -497,3 +462,7 @@ mod tests {
         assert!(out.chars().count() > 10);
     }
 }
+
+#[cfg(test)]
+#[path = "access_path_tests.rs"]
+mod path_tests;

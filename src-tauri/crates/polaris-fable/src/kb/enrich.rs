@@ -202,7 +202,7 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
 现在开始, 直接输出 JSON 数组。"
         );
 
-        let raw = match run_claude_readonly(&root, &prompt, |kind, text| {
+        let raw = match run_agent_readonly(&root, &prompt, |kind, text| {
             if kind == "tool" {
                 emit("tool", Some(text.to_string()), None);
             } else if kind == "delta" && !text.is_empty() {
@@ -473,7 +473,7 @@ pub fn kb_dedup(app: AppHandle) -> Result<String, String> {
 现在开始, 直接输出 JSON 数组。"
         );
 
-        let raw = match run_claude_readonly(&root, &prompt, |kind, text| {
+        let raw = match run_agent_readonly(&root, &prompt, |kind, text| {
             if kind == "tool" {
                 emit("tool", Some(text.to_string()), None);
             }

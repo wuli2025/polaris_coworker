@@ -1,0 +1,119 @@
+   Compiling digest v0.10.7
+   Compiling serde_core v1.0.228
+   Compiling tokio v1.52.3
+   Compiling cipher v0.4.4
+   Compiling rustls-webpki v0.103.13
+   Compiling url v2.5.8
+   Compiling futures-util v0.3.32
+   Compiling tracing-core v0.1.36
+   Compiling zip v8.6.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling futures-channel v0.3.32
+   Compiling sync_wrapper v1.0.2
+   Compiling rusqlite v0.32.1
+   Compiling universal-hash v0.5.1
+   Compiling password-hash v0.5.0
+   Compiling poly1305 v0.8.0
+   Compiling sha2 v0.10.9
+   Compiling ecb v0.1.2
+   Compiling aes v0.8.4
+   Compiling cbc v0.1.2
+   Compiling md-5 v0.10.6
+   Compiling sha1 v0.10.6
+   Compiling tracing v0.1.44
+   Compiling crossbeam-deque v0.8.6
+   Compiling chacha20 v0.9.1
+   Compiling tungstenite v0.24.0
+   Compiling blake2 v0.10.6
+   Compiling rustls v0.23.40
+   Compiling lopdf v0.38.0
+   Compiling rayon-core v1.13.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling either v1.16.0
+   Compiling argon2 v0.5.3
+   Compiling chacha20poly1305 v0.10.1
+   Compiling include_dir v0.7.4
+   Compiling polaris-app v2.9.0 (/home/mi/work/polaris-pi/src-tauri)
+   Compiling pinyin v0.10.0
+   Compiling rayon v1.12.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.150
+   Compiling serde_path_to_error v0.1.20
+   Compiling axum-core v0.4.5
+   Compiling multer v3.1.0
+   Compiling calamine v0.35.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling polaris-core v0.2.2 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-core)
+   Compiling polaris-protocol v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-protocol)
+   Compiling sysinfo v0.32.1
+   Compiling pdf-extract v0.10.0
+   Compiling ureq v2.12.1
+   Compiling lettre v0.11.22
+   Compiling hyper v1.9.0
+   Compiling tokio-tungstenite v0.24.0
+   Compiling tower v0.5.3
+   Compiling tokio-util v0.7.18
+   Compiling polaris-runtime v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-runtime)
+   Compiling polaris-kernel v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel)
+   Compiling polaris-forge v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-forge)
+   Compiling tower-http v0.6.11
+   Compiling hyper-util v0.1.20
+   Compiling axum v0.7.9
+   Compiling polaris-fable v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-fable)
+   Compiling polaris-collab v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-collab)
+   Compiling polaris-wiki v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-wiki)
+warning: unreachable statement
+   --> src/mesh.rs:473:5
+    |
+470 |         return;
+    |         ------ any code following this expression is unreachable
+...
+473 |     set_phase(node_id, "authenticating");
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+    --> src/mesh.rs:1386:5
+     |
+1381 |         return Err("此构建没有 P2P 隧道(collab-net),连不了".into());
+     |         ----------------------------------------------------------- any code following this expression is unreachable
+...
+1386 |     let me = my_node_id();
+     |     ^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `c`
+   --> src/mesh.rs:329:22
+    |
+329 | async fn ensure_peer(c: &Cfg, node_id: &str, name: &str, uid: &str) {
+    |                      ^ help: if this is intentional, prefix it with an underscore: `_c`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `access`
+    --> src/mesh.rs:1348:10
+     |
+1348 |     let (access, node_id) = parse_device_code(&code)?;
+     |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_access`
+
+warning: `polaris-app` (lib test) generated 4 warnings (run `cargo fix --lib -p polaris-app --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.23s
+     Running unittests src/lib.rs (target/debug/deps/polaris_app_lib-d853594b3c484176)
+
+running 12 tests
+test exec::config::tests::legacy_defaults_and_pi_only_configuration ... ok
+test exec::tests::whitelist_accepts_plain_command ... ok
+test exec::tests::whitelist_rejects_path_escape ... ok
+test exec::tests::whitelist_rejects_unlisted ... ok
+test exec::tests::whitelist_allows_normal_flags_and_paths_in_args ... ok
+test exec::tests::clip_truncates_over_limit ... ok
+test exec::tests::whitelist_rejects_meta_chars_in_args ... ok
+test exec::tests::audit_records_every_attempt ... ok
+test exec::tests::gate1_disabled_by_default_rejects ... ok
+test exec::tests::whitelist_mode_runs_listed_and_blocks_rest ... ok
+test exec::tests::timeout_kills_runaway_command ... ok
+test exec::tests::shell_mode_unlocks_then_expires ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out; finished in 2.59s
+

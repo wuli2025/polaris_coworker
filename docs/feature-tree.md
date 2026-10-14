@@ -173,7 +173,7 @@ P3b 已接入桌面路由校验、请求级专家选择和项目迁移 UI；服�
 | AI 检索与知识抽取 → `F/fable/retrieve/ai.rs:205`、`F/fable/ontology.rs:476` | 查询扩写、本体三元组，复用 headless | →kernel；保持只读推理与 Rust 校验边界；F |
 | 文件中心模型 → `F/fable/files/llm.rs:243,262,891,997`、`F/fable/files/profile.rs:404` | 独立 HTTP 分类模型或聊天模型 fallback；画像、标题、归类 | →headless/独立模型配置；F；真实模型评测开关在 files/tests.rs `:254` |
 | echo → `F/fable/echo.rs:125,300,660,993` | 做梦/对话记忆、资料分析与晨报 | →conv/headless/KB；业务事件 echo:dream；F/UI |
-| wiki → `W/lib.rs:6,9`、`W/wiki/compile.rs:105` | wiki 知识网编译、进度事件与重扫索引 | →fable/kernel/runtime；当前独立 Claude 进程；W |
+| wiki → `W/lib.rs`、`W/wiki/compile.rs` | wiki 知识网编译、进度事件与重扫索引 | →fable/kernel/runtime；Pi AgentBackend，claude-cli 守卫兼容；见 P5b |
 | forge → `src-tauri/crates/polaris-forge/src/lib.rs:8,11` | 演示/PPT、截图/视频/TTS/Figma 桥 | →runtime；与 Agent 工具调用者分离；CI `.github/workflows/ci.yml:81` 的 forge 测试命令 |
 | forge CLI → `src-tauri/crates/polaris-cli/src/main.rs:1` | 脚本可调用的渲染引擎，polaris-forge | →app server 形态；不会因 Agent 换 Pi 而失去用途；CI `:85` 检查 |
 | 语音 → `H/voice/mod.rs:534,569`、`H/voice/asr.rs:64`、`H/voice/live.rs:96` | 本地识别、热词纠错、HTTP 润色、录音与输入 | →sense/provider 借 Key；voice.json/voice_lexicon.json（mod `:6`）；voice-asr / voice-live 特性（`src-tauri/Cargo.toml:190`）；H，ASR 冒烟命令见 asr.rs `:98` |
@@ -385,3 +385,30 @@ Node 镜像示例：`POLARIS_NODE_MIRROR=https://npmmirror.com/mirrors/node node
 验证：agentd typecheck 通过，npm test 24/26 文件通过（E2E 管道、HTTP 沙箱失败）；vue-tsc 通过；Vitest 32 测试通过；runtime 7 测试通过。
 Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列出的 6 项后单元 189 + 集成 8 通过。
 详见 [P5a-2 执行报告](pi-migration/p5a2-closeout.md)：完整文件、命令、失败名、警告口径及未运行项。不能作为 Claude/Pi 最终验收结论。
+
+## R6：P5a 审查修复
+
+| 入口 | 依赖与行为 | 配置、迁移与验证 |
+| --- | --- | --- |
+| `K/doctor/pi_shell.rs` → resolve/configure | 依赖 bundled/probe；解析返回路径与 ShellSource；Windows PATH 排除 SystemRoot（含 System32/SysWOW64/Sysnative）及 WindowsApps，再选后续候选；无可用 shell 阻止启动 | 既有显式→随包→Program Files→PATH 顺序；SystemRoot/windir/默认 C:/Windows；无新依赖；pi_shell_tests 注入根目录和候选验证 |
+| `K/doctor/pi.rs` → report/verify | 同一次解析保留来源；detail 显示 bundled/program_files/path/explicit 及路径；全部排除时 shellReady/ready=false、shell 步骤 fail | 外部报告字段不变；pi_tests 验证四种来源及缺失报告 |
+| `K/doctor/path_tests.rs` | 非 Windows 用例覆盖冒号分隔、完整目录匹配、空值与尾斜杠 | 只补测试；驳回项不改代码 |
+
+配置沿用 shellPath（string/null，默认 null；非法类型拒绝）和 POLARIS_AGENTD_SHELL_PATH；空环境变量视同未设置。
+显式切换示例：`{"shellPath":"C:/Tools/Git/bin/bash.exe"}`；恢复自动选择：`{"shellPath":null}` 并清空或移除 shell 环境变量。
+无需配置迁移；Unix `/bin/bash` 优先级不变，来源记为 path。详见 [配置文档](pi-migration/p5a2-closeout.md#配置与迁移)。
+验证命令、真实结果、TCP 例外及未运行项见 [R6 执行报告](pi-migration/r6-result.md)，由 Claude 重跑、Pi 独立审查后决定验收。
+
+
+## P5b 间接调用方迁移
+
+| 入口 / 依赖 | 配置与行为 | 迁移与验证 |
+| --- | --- | --- |
+| `W/wiki/compile.rs`、`compile/{runner,progress,legacy}.rs` → kernel AgentBackend、fable 维护锁/索引 | cwd=KB/wiki；auto-current；成功 write/edit→page；超时/取消→abort/close；error/done/重扫 | Pi 不启动 Claude；兼容分支有后端守卫；假后端验证失败收尾与越界拒绝 |
+| `W/wiki/compile/config.rs`、`prompt-pi.md` | POLARIS_WIKI_CONFIG：toolProfile=workspace、sandbox=false、timeoutSecs=3600、abortGraceMs=5000；旧 CAP_SECS 优先 | 严格类型/范围校验；compile_with_config 传用户沙箱选择；cancel_compile 公共入口 |
+| `K/chat/backend/{mod,pi/sessions,pi/translate}.rs` | TurnRequest::headless；ToolOptions 档位与详细事件 opt-in | 假 agentd 检查 session.open；chat 默认事件契约不变 |
+| `K/headless.rs`、fable 原调用点 | run_agent_readonly*；旧名 deprecated 转发一版本 | 只更名；inventory/access 两项 Windows 断言按平台修复，逻辑不变 |
+| `H/exec.rs`、`H/exec/{config.rs,defaults.json,tests.rs}` | POLARIS_EXEC_CONFIG.allowedPrograms；默认名单保持；Pi 可移除 claude | 配置错误拒绝执行；测试兼容/Pi 两组名单及原执行闸门 |
+
+详细配置切换、迁移边界见 [P5b 报告](pi-migration/p5b-indirect-callers.md)；
+真实命令、未运行项、行数与技术债见 [P5b 验证清单](pi-migration/p5b-files-and-validation.md)。

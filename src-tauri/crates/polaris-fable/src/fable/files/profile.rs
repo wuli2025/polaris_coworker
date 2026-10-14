@@ -401,7 +401,7 @@ pub fn suggest_workflows(root: Option<String>) -> Result<Vec<SuggestedFlow>, Str
                 std::env::temp_dir()
             };
             // 墙钟超时:向导收尾的建议卡死不能钉住阻塞线程池(挂了就用本地兜底卡)。
-            crate::kb::run_claude_readonly_timeout(
+            crate::kb::run_agent_readonly_timeout(
                 &cwd,
                 &prompt,
                 |_k, _t| {},

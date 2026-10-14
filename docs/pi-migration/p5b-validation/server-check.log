@@ -1,0 +1,7 @@
+    Checking polaris-kernel v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel)
+    Checking polaris-fable v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-fable)
+    Checking polaris-collab v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-collab)
+    Checking polaris-wiki v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-wiki)
+    Checking polaris-app v2.9.0 (/home/mi/work/polaris-pi/src-tauri)
+    Checking polaris-cli v2.8.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.30s

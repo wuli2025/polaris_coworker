@@ -202,7 +202,7 @@ fn ai_expand_query(query: &str) -> Result<Vec<String>, String> {
     );
     // 墙钟超时 10 分钟:claude 卡住也能放手(上层 unwrap_or_default 退回 base),
     // 不把 server 有限的阻塞线程池永久钉死、不泄漏子进程(长任务铁律:整树回收)。
-    let raw = crate::kb::run_claude_readonly_timeout(
+    let raw = crate::kb::run_agent_readonly_timeout(
         root_path,
         &prompt,
         |_, _| {},

@@ -1,0 +1,26 @@
+    Checking lopdf v0.38.0
+    Checking ureq v2.12.1
+    Checking zip v8.6.0
+   Compiling polaris-kernel v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel)
+    Checking calamine v0.35.0
+    Checking rusqlite v0.32.1
+    Checking polaris-runtime v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-runtime)
+    Checking pdf-extract v0.10.0
+error[E0599]: the method `as_deref` exists for enum `std::option::Option<ResolvedShell>`, but its trait bounds were not satisfied
+   --> crates/polaris-kernel/src/doctor/pi.rs:141:31
+    |
+141 |     let shell_bundled = shell.as_deref().is_some_and(super::bundled::is_bundled);
+    |                               ^^^^^^^^
+    |
+   ::: crates/polaris-kernel/src/doctor/pi_shell.rs:29:1
+    |
+ 29 | pub(crate) struct ResolvedShell {
+    | ------------------------------- doesn't satisfy `ResolvedShell: Deref`
+    |
+    = note: the following trait bounds were not satisfied:
+            `ResolvedShell: Deref`
+note: the trait `Deref` must be implemented
+   --> /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/deref.rs:139:0
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `polaris-kernel` (lib) due to 1 previous error

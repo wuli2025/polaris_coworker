@@ -473,7 +473,7 @@ pub fn ontology_extract(app: AppHandle, schema_id: String) -> Result<String, Str
             json!({ "kind": "phase", "text": "在框内读资料、抽关系三元组…" }),
         );
         // 墙钟超时:子进程挂死会把 EXTRACTING 闸永久钉死(构建知识体系此后一直拒绝)。
-        let collected = match crate::kb::run_claude_readonly_timeout(
+        let collected = match crate::kb::run_agent_readonly_timeout(
             &cwd,
             &prompt,
             |kind, _t| {

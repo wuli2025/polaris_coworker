@@ -251,7 +251,7 @@ fn digest_directive_includes_ids_and_samples() {
 //   ③ 命名准确度(AI 簇名是否命中该簇主导主题 + 是否亲切中文)
 //   ④ 关系边数量
 // 隔离:用临时 db,绝不碰用户真实 ~/Polaris/data/fable.db。
-// 触发:仅当置 POLARIS_CLUSTER_EVAL=1 才跑(普通 cargo test 跳过);真大模型走 run_claude_readonly
+// 触发:仅当置 POLARIS_CLUSTER_EVAL=1 才跑(普通 cargo test 跳过);真大模型走 run_agent_readonly
 //   (置 EVAL_NO_LLM=1 则只测 T0,不调模型)。结果按 EVAL_OUT 追加一行 JSON。
 
 fn env_u64(k: &str, d: u64) -> u64 {
@@ -615,7 +615,7 @@ fn cluster_eval_run() {
         let digests = collect_cluster_digests(&conn, &[]).unwrap();
         let prompt = digest_directive(&digests);
         let cwd = std::env::temp_dir();
-        match crate::kb::run_claude_readonly(&cwd, &prompt, |_, _| {}) {
+        match crate::kb::run_agent_readonly(&cwd, &prompt, |_, _| {}) {
             Ok(text) => match crate::kb::extract_balanced_json(&text) {
                 Some(raw) => match serde_json::from_str::<LlmNameRel>(&raw) {
                     Ok(parsed) => {

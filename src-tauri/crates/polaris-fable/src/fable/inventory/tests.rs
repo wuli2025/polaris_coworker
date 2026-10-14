@@ -417,13 +417,8 @@ fn parent_rel_walks_up_one_level() {
     assert_eq!(parent_rel("资料/项目/稿"), "资料/项目"); // CJK 同样按 '/' 分段
 }
 
-#[test]
-fn rel_of_is_root_relative_slash_path() {
-    let root = Path::new(r"C:\kb");
-    assert_eq!(rel_of(Path::new(r"C:\kb"), root), ""); // 根自身 = ""
-    assert_eq!(rel_of(Path::new(r"C:\kb\a"), root), "a");
-    assert_eq!(rel_of(Path::new(r"C:\kb\a\b"), root), "a/b"); // 反斜杠归一成 '/'
-}
+#[path = "path_tests.rs"]
+mod path_tests;
 
 /// 增量「跳过没变目录」最易错的一步:把某目录的**直属**文件 seen 刷成本轮代际,
 /// 而**不**波及它的子目录文件(那些由各自目录处理)、也不碰兄弟目录。这里用内存 SQLite

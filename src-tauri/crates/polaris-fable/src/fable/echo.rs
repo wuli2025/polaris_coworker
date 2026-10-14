@@ -657,7 +657,7 @@ fn distill_and_write(
 
     // 墙钟超时:子进程挂死(网络/供应商卡住)时无超时版会让本线程永不返回 → DREAMING 闸
     // 永远不复位,「做梦/清空上下文」全线报「正在做梦中」直到重启。到点 kill 整树回收。
-    let collected = crate::kb::run_claude_readonly_timeout(
+    let collected = crate::kb::run_agent_readonly_timeout(
         &kb_root,
         &prompt,
         |kind, text| {
@@ -990,7 +990,7 @@ fn generate_briefing(
     let day = local_day();
     let prompt = suggest_directive(&day, &material);
     // 墙钟超时同上:晨报建议卡死不能钉住 DREAMING 闸。
-    let collected = crate::kb::run_claude_readonly_timeout(
+    let collected = crate::kb::run_agent_readonly_timeout(
         &kb_root,
         &prompt,
         |kind, text| {

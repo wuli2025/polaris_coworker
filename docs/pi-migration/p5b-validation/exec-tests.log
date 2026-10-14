@@ -1,0 +1,77 @@
+   Compiling tokio v1.52.3
+   Compiling zopfli v0.8.3
+   Compiling curve25519-dalek v5.0.0-rc.0
+   Compiling ureq v2.12.1
+   Compiling lopdf v0.38.0
+   Compiling num_enum v0.7.6
+   Compiling crossbeam-deque v0.8.6
+   Compiling curve25519-dalek v4.1.3
+   Compiling polaris-protocol v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-protocol)
+   Compiling polaris-app v2.9.0 (/home/mi/work/polaris-pi/src-tauri)
+   Compiling polaris-core v0.2.2 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-core)
+   Compiling rayon-core v1.13.0
+   Compiling zip v8.6.0
+   Compiling zip v7.2.0
+   Compiling rayon v1.12.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling ed25519-dalek v3.0.0-rc.0
+   Compiling calamine v0.35.0
+   Compiling iroh-base v1.0.1
+   Compiling sysinfo v0.32.1
+   Compiling pdf-extract v0.10.0
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling netlink-sys v0.8.8
+   Compiling tower v0.5.3
+   Compiling polaris-runtime v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-runtime)
+   Compiling acto v0.8.2
+   Compiling backon v1.6.0
+   Compiling tokio-tungstenite v0.24.0
+   Compiling netlink-proto v0.12.0
+   Compiling netdev v0.45.0
+   Compiling polaris-kernel v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel)
+   Compiling polaris-forge v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-forge)
+   Compiling swarm-discovery v0.6.3
+   Compiling h2 v0.4.15
+   Compiling n0-future v0.3.2
+   Compiling tower-http v0.6.11
+   Compiling tokio-stream v0.1.18
+   Compiling tokio-websockets v0.13.3
+   Compiling n0-watcher v1.0.0
+   Compiling netwatch v0.19.1
+   Compiling noq v1.0.1
+   Compiling hyper v1.9.0
+   Compiling hickory-net v0.26.1
+   Compiling hyper-util v0.1.20
+   Compiling hickory-resolver v0.26.1
+   Compiling iroh-dns v1.0.1
+   Compiling hyper-rustls v0.27.9
+   Compiling igd-next v0.17.1
+   Compiling axum v0.7.9
+   Compiling reqwest v0.13.3
+   Compiling portmapper v0.19.1
+   Compiling polaris-fable v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-fable)
+   Compiling iroh-relay v1.0.1
+   Compiling iroh v1.0.1
+   Compiling polaris-wiki v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-wiki)
+   Compiling iroh-mdns-address-lookup v0.4.0
+   Compiling polaris-collab v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-collab)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 43.65s
+     Running unittests src/lib.rs (target/debug/deps/polaris_app_lib-aaca4c63070ea9bc)
+
+running 12 tests
+test exec::tests::whitelist_accepts_plain_command ... ok
+test exec::tests::whitelist_allows_normal_flags_and_paths_in_args ... ok
+test exec::config::tests::legacy_defaults_and_pi_only_configuration ... ok
+test exec::tests::clip_truncates_over_limit ... ok
+test exec::tests::whitelist_rejects_unlisted ... ok
+test exec::tests::whitelist_rejects_path_escape ... ok
+test exec::tests::whitelist_rejects_meta_chars_in_args ... ok
+test exec::tests::audit_records_every_attempt ... ok
+test exec::tests::shell_mode_unlocks_then_expires ... ok
+test exec::tests::gate1_disabled_by_default_rejects ... ok
+test exec::tests::timeout_kills_runaway_command ... ok
+test exec::tests::whitelist_mode_runs_listed_and_blocks_rest ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out; finished in 2.60s
+

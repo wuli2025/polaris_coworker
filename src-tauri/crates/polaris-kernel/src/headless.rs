@@ -1,12 +1,24 @@
 //! Read-only no-UI calls use the same selected backend as chat.
 use std::{path::Path, time::Duration};
 use crate::chat::backend::{self, TurnRequest};
-pub fn run_claude_readonly<F: FnMut(&str, &str)>(root: &Path, prompt: &str, on_event: F) -> Result<String, String> {
+pub fn run_agent_readonly<F: FnMut(&str, &str)>(root: &Path, prompt: &str, on_event: F) -> Result<String, String> {
     run(root, prompt, on_event, None)
 }
-pub fn run_claude_readonly_timeout<F: FnMut(&str, &str)>(root: &Path, prompt: &str, on_event: F, timeout: Duration) -> Result<String, String> {
+pub fn run_agent_readonly_timeout<F: FnMut(&str, &str)>(root: &Path, prompt: &str, on_event: F, timeout: Duration) -> Result<String, String> {
     run(root, prompt, on_event, Some(timeout))
 }
+/// Compatibility for one migration release; use the backend-neutral entry point.
+#[deprecated(note = "use run_agent_readonly")]
+pub fn run_claude_readonly<F: FnMut(&str, &str)>(root: &Path, prompt: &str, on_event: F) -> Result<String, String> {
+    run_agent_readonly(root, prompt, on_event)
+}
+#[deprecated(note = "use run_agent_readonly_timeout")]
+pub fn run_claude_readonly_timeout<F: FnMut(&str, &str)>(
+    root: &Path, prompt: &str, on_event: F, timeout: Duration,
+) -> Result<String, String> {
+    run_agent_readonly_timeout(root, prompt, on_event, timeout)
+}
+
 fn run<F: FnMut(&str, &str)>(root: &Path, prompt: &str, mut on_event: F, timeout: Option<Duration>) -> Result<String, String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let req = format!("headless-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));

@@ -56,7 +56,7 @@ doctor 读取 `--config <path>` 或 POLARIS_AGENTD_CONFIG，与 agentd 启动路
 | 参数 | 默认与校验 | 示例 |
 | --- | --- | --- |
 | agentd shellPath | 可省略、null 或字符串；空串视为未配置 | `{"shellPath":"C:/Tools/Git/bin/bash.exe"}` |
-| POLARIS_AGENTD_SHELL_PATH | 未设置；宿主 Windows 自动注入解析结果；JSON 非空值优先 | 独立 agentd 可设 `C:/MinGit/usr/bin/bash.exe` |
+| POLARIS_AGENTD_SHELL_PATH | 默认未设置；空环境变量视同未设置；宿主 Windows 自动注入解析结果；JSON 非空值优先 | 独立 agentd 可设 `C:/MinGit/usr/bin/bash.exe` |
 | POLARIS_RUNTIME_DIR | 沿用已有随包定位 | `C:/Polaris/runtime` |
 | POLARIS_DEPS_BASE | `https://llmwiki.cloud/downloads/deps`；HTTPS 基址；空串禁用 | `https://downloads.example.com/deps` |
 | POLARIS_NODE_MIRROR | 未设置；HTTPS Node dist 基址；空串禁用 | `https://npmmirror.com/mirrors/node` |
@@ -65,6 +65,12 @@ Node 下载顺序：官方 `https://nodejs.org/dist/v<version>/<asset>` → R2 �
 GitHub 资源维持 R2 → ghfast.top → ghproxy.net → GitHub；两种列表不交叉。
 SHA256 清单仍只取官方；官方清单不可用会失败，不会以镜像清单替代官方校验。
 无需迁移旧配置；已有 shellPath 非空值优先；改回 null 恢复启动时默认选择。
+Shell 自动选择还需清空或移除 `POLARIS_AGENTD_SHELL_PATH`；例如 Bash 中 `POLARIS_AGENTD_SHELL_PATH='' <宿主程序>`。
+R6：Windows PATH 回落排除 `%SystemRoot%` 下的 bash（含 System32、SysWOW64、Sysnative）及 WindowsApps 别名，继续寻找后续候选。
+SystemRoot 默认读取系统环境，空值回落 windir，再回落 `C:/Windows`；测试可注入其他根目录和候选列表。
+没有可用 shell 时 doctor 报不就绪，Windows 启动返回 `AgentShellMissing`，不再交给 Pi 二次自动回落。
+doctor shell detail 显示 `source=bundled/program_files/path/explicit` 中的实际来源及路径；Unix 的 `/bin/bash` 归为 `path`，选择优先级不变。
+上述空值约定针对 shell 环境变量；下载镜像变量的空串禁用语义仍按表中约定。
 下载切换：`POLARIS_NODE_MIRROR=https://npmmirror.com/mirrors/node node scripts/fetch-runtimes.mjs`。
 旧 Claude Node 安装模板的 npmmirror 列表原本没有 GitHub 代理，本次未改其版本或下载安装行为。
 

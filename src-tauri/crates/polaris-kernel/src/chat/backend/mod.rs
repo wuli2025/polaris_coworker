@@ -46,6 +46,10 @@ impl std::error::Error for BackendError {}
 #[derive(Default)]
 pub struct ToolOptions {
     pub sandbox: bool,
+    /// Session profile selected by the caller; validated by agentd.
+    pub tool_profile: Option<String>,
+    /// Preserve tool arguments/completions for non-UI consumers.
+    pub detailed_events: bool,
     pub expert_prompt: Option<String>,
 }
 pub struct TurnRequest {
@@ -63,6 +67,14 @@ pub struct TurnRequest {
     pub account_id: Option<String>,
     pub timeout: Option<Duration>,
     pub(crate) legacy: Option<(AppHandle, ChatSendArgs)>,
+}
+impl TurnRequest {
+    /// Independent non-UI session; callers explicitly choose permissions and tools.
+    pub fn headless(req_id: String, cwd: PathBuf, prompt: String, permission: PermissionMode) -> Self {
+        Self { session_id: req_id.clone(), req_id, cwd, prompt, permission,
+            conversation_id: None, model: None, attachments: vec![], thinking_level: None,
+            account_id: None, timeout: None, legacy: None }
+    }
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,7 +109,7 @@ pub trait AgentBackend: Send + Sync {
     }
     fn start(&self, input: TurnRequest) -> anyhow::Result<EventStream>;
     fn start_with_tools(&self, input: TurnRequest, options: ToolOptions) -> anyhow::Result<EventStream> {
-        anyhow::ensure!(!options.sandbox && options.expert_prompt.is_none(), "BackendToolOptionsUnsupported");
+        anyhow::ensure!(!options.sandbox && options.expert_prompt.is_none() && options.tool_profile.is_none() && !options.detailed_events, "BackendToolOptionsUnsupported");
         self.start(input)
     }
     fn cancel(&self, req_id: &str) -> anyhow::Result<()>;

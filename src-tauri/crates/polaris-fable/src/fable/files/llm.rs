@@ -4,7 +4,7 @@ use super::*;
 //
 // 用户没有硅基嵌入 key,但聊天大模型(claude/配置的供应商)已经接通 → 直接让它读
 // 文件清单、按主题归类,Rust 写回 cluster_id + clusters 表。
-// 复用回声层「做梦」同一套:run_claude_readonly(无头跑已连接模型)+ extract_balanced_json。
+// 复用回声层「做梦」同一套:run_agent_readonly(无头跑已连接模型)+ extract_balanced_json。
 
 // ── 归类专用模型(可选):独立于「对话供应商」,可指向便宜/免费的 OpenAI 兼容端点 ──
 // 不配 → AI 归类沿用你聊天那个大模型;配了 → 走这个(例:硅基流动免费对话模型,省钱)。
@@ -240,7 +240,7 @@ pub(crate) fn cluster_llm_run(
     }
 
     let prompt = llm_cluster_directive(&files);
-    // 配了独立归类模型 → 直连它(省钱);否则用聊天那个大模型(run_claude_readonly)。
+    // 配了独立归类模型 → 直连它(省钱);否则用聊天那个大模型(run_agent_readonly)。
     let collected = if let Some(cfg) = active_cluster_model() {
         emit_llm(
             app,
@@ -259,7 +259,7 @@ pub(crate) fn cluster_llm_run(
             std::env::temp_dir()
         };
         // 墙钟超时:无超时版挂死会把 CLUSTERS_TABLE_WRITE 一类一次性闸永久钉死(归类此后一直拒绝)。
-        crate::kb::run_claude_readonly_timeout(
+        crate::kb::run_agent_readonly_timeout(
             &cwd,
             &prompt,
             |kind, _text| {
@@ -888,7 +888,7 @@ pub(crate) fn cluster_rename_llm(
             std::env::temp_dir()
         };
         // 墙钟超时同上:命名卡死不能钉死后续归类。
-        crate::kb::run_claude_readonly_timeout(
+        crate::kb::run_agent_readonly_timeout(
             &cwd,
             &prompt,
             |kind, _t| {
@@ -920,7 +920,7 @@ pub(crate) fn cluster_rename_llm(
 //
 // 「本地档」清洗名(clean_title)救不了的(纯哈希/纯乱码/纯时间戳图片名),交给已连接的大模型
 // 按目录+类型+名字线索起个可读中文标题,写进 titles 表覆盖显示(磁盘文件名不动)。复用归类那套
-// (独立归类模型 or run_claude_readonly + extract_balanced_json)。
+// (独立归类模型 or run_agent_readonly + extract_balanced_json)。
 
 pub(crate) static LLM_TITLING: AtomicBool = AtomicBool::new(false);
 
@@ -994,7 +994,7 @@ pub(crate) fn titles_llm_run(app: &AppHandle, root: Option<String>) -> Result<us
             std::env::temp_dir()
         };
         // 墙钟超时同上。
-        crate::kb::run_claude_readonly_timeout(
+        crate::kb::run_agent_readonly_timeout(
             &cwd,
             &prompt,
             |kind, _text| {

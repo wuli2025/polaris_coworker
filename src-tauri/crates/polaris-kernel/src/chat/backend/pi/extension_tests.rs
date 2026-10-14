@@ -131,7 +131,7 @@ fn explicit_tool_options_reach_session_open_without_legacy_context() -> anyhow::
     config.args = vec!["--record".into(), record.to_string_lossy().into()];
     let backend = PiBackend::new(config)?;
     let stream = backend.start_with_tools(super::tests::input("tools", "normal"), ToolOptions {
-        sandbox: true, expert_prompt: Some("expert-section".into()),
+        sandbox: true, expert_prompt: Some("expert-section".into()), ..Default::default()
     })?;
     while stream.recv_timeout(Duration::from_secs(3))?.kind != "done" {}
     let sent: Vec<Value> = std::fs::read_to_string(&record)?.lines()
@@ -173,7 +173,7 @@ fn selected_expert_is_loaded_into_this_turn_without_project_writes() -> anyhow::
         let expert_prompt = host_tools::expert_prompt_with(&args, Some(&Loader))?;
         let mut input = super::tests::input("selected-expert", "normal");
         input.cwd = project.clone();
-        let stream = backend.start_with_tools(input, ToolOptions { sandbox: false, expert_prompt })?;
+        let stream = backend.start_with_tools(input, ToolOptions { sandbox: false, expert_prompt, ..Default::default() })?;
         while stream.recv_timeout(Duration::from_secs(3))?.kind != "done" {}
         let sent: Vec<Value> = std::fs::read_to_string(&record)?.lines()
             .map(serde_json::from_str).collect::<Result<_, _>>()?;

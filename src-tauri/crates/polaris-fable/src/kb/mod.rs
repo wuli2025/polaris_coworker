@@ -27,9 +27,9 @@ pub mod search;
 pub mod threat;
 
 // headless claude 只读管线已下沉 polaris-kernel::headless(fable/wiki 共用);
-// 此处转发保住 `kb::run_claude_readonly` 等全部旧调用路径(含 enrich 的 `use super::*`)。
+// 此处转发保住 `kb::run_agent_readonly` 等全部旧调用路径(含 enrich 的 `use super::*`)。
 pub use polaris_kernel::headless::{
-    extract_balanced_json, run_claude_readonly, run_claude_readonly_timeout,
+    extract_balanced_json, run_agent_readonly, run_agent_readonly_timeout,
 };
 
 // 共享依赖统一在此升为 pub(crate) 供子模块 `use super::*` 取用(与原单文件同一作用域语义)。
@@ -60,3 +60,7 @@ pub use packs::*;
 pub use scan::*;
 pub use search::*;
 pub use threat::*;
+
+// One-release compatibility for external consumers; internal callers use neutral names.
+#[allow(deprecated)]
+pub use polaris_kernel::headless::{run_claude_readonly, run_claude_readonly_timeout};

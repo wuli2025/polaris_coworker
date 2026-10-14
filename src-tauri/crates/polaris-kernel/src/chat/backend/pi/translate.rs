@@ -7,15 +7,16 @@ pub struct Translator {
     req: String, conv: Option<String>, cwd: PathBuf,
     tools: HashMap<String, String>, write_tools: Vec<String>,
     delta: String, last_flush: Instant, window: Duration, max_bytes: usize,
-    error_seen: bool, done: bool,
+    error_seen: bool, done: bool, detailed: bool,
     provider: Option<String>, failure_code: Option<String>,
 }
 impl Translator {
     pub fn new(req: String, conv: Option<String>, cwd: PathBuf, config: &Agentd) -> Self {
         Self { req, conv, cwd, tools: HashMap::new(), write_tools: config.write_tools.clone(),
             delta: String::new(), last_flush: Instant::now(), window: Duration::from_millis(config.delta_batch_ms),
-            max_bytes: config.max_line_bytes, error_seen: false, done: false, provider: None, failure_code: None }
+            max_bytes: config.max_line_bytes, error_seen: false, done: false, detailed: false, provider: None, failure_code: None }
     }
+    pub fn with_details(mut self, detailed: bool) -> Self { self.detailed = detailed; self }
     pub fn with_provider(mut self, id: &str) -> Self { self.provider = Some(id.into()); self }
     pub fn make(&self, kind: &str, text: Option<String>) -> ChatStreamEvent { event(&self.req, self.conv.as_deref(), kind, text) }
     pub fn flush(&mut self) -> Vec<ChatStreamEvent> {
@@ -55,6 +56,11 @@ impl Translator {
                 }).to_string())));
             }
             Event::ToolStarted { call_id, tool, args, parent_call_id } => {
+                if self.detailed {
+                    out.push(self.make("tool.started", Some(serde_json::json!({
+                        "callId": call_id, "tool": tool, "args": args, "parentCallId": parent_call_id,
+                    }).to_string())));
+                }
                 let path = args.get("path").and_then(|v| v.as_str());
                 let summary = path.or_else(|| args.get("command").and_then(|v| v.as_str()))
                     .or_else(|| args.get("pattern").and_then(|v| v.as_str())).map(str::to_owned);
@@ -70,6 +76,11 @@ impl Translator {
                 }
             }
             Event::ToolCompleted { call_id, tool, is_error, .. } => {
+                if self.detailed {
+                    out.push(self.make("tool.completed", Some(serde_json::json!({
+                        "callId": call_id, "tool": tool, "isError": is_error,
+                    }).to_string())));
+                }
                 let path = self.tools.remove(&call_id);
                 if is_error {
                     // A tool failure is visible, but the agent may recover and finish successfully.
@@ -96,7 +107,8 @@ impl Translator {
                     out.push(self.make("error", Some(format!("AgentdTurnFailed: {status:?}"))));
                 }
                 self.done = true;
-                out.push(self.make("done", None));
+                let status = self.detailed.then(|| format!("{status:?}"));
+                out.push(self.make("done", status));
             }
             // The current frontend contract has no reasoning/usage event. Future
             // support should extend it with optional fields, preserving existing consumers.

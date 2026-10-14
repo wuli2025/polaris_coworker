@@ -13,6 +13,7 @@ fn path(client: &Client, key: &str) -> PathBuf {
 pub fn open(client: &Client, input: &TurnRequest, tools: super::super::ToolOptions) -> anyhow::Result<SessionInfo> {
     let mut options = super::input::options(client, input)?;
     options.sandbox = Some(tools.sandbox);
+    if let Some(profile) = tools.tool_profile { options.tool_profile = Some(profile); }
     options.expert_prompt = Some(tools.expert_prompt.unwrap_or_default());
     let file = path(client, &input.session_id);
     let previous: Option<SessionInfo> = match std::fs::read(&file) {

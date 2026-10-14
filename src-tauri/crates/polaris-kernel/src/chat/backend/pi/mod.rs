@@ -7,6 +7,7 @@ mod routes;
 mod sessions;
 mod input;
 #[cfg(test)] mod extension_tests;
+#[cfg(test)] mod wiki_tests;
 mod supervisor;
 mod translate;
 #[cfg(windows)] mod windows_job;
@@ -116,6 +117,7 @@ impl AgentBackend for PiBackend {
                 sender.push_blocking(event(&req, conv.as_deref(), "meta",
                     Some(crate::chat::prompt::estimate_tokens(&input.prompt).to_string())));
                 if cancelled.lock().remove(&req) { sender.finish(None, event(&req, conv.as_deref(), "done", None)); return Ok(()); }
+                let detailed_events = options.detailed_events;
                 let info = sessions::open(&client, &input, options)?;
                 if matches!(input.permission, PermissionMode::Deny) {
                     anyhow::ensure!(info.tools.iter().all(|t| client.config.readonly_tools.contains(t)),
@@ -133,6 +135,7 @@ impl AgentBackend for PiBackend {
                 };
                 client.send(Control::Register { session: info.id.clone(), req: req.clone(),
                     translator: translate::Translator::new(req.clone(), conv.clone(), input.cwd.clone(), &client.config)
+                        .with_details(detailed_events)
                         .with_provider(info.model.get("provider").and_then(Value::as_str).unwrap_or_default()),
                     stream: sender.clone(), timeout, reservation: (preparing.clone(), key.clone()), reply: tx })?;
                 client.wait(rx)?;

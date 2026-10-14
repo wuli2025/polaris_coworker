@@ -1,0 +1,48 @@
+   Compiling polaris-kernel v0.1.0 (/home/mi/work/polaris-pi/src-tauri/crates/polaris-kernel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.86s
+     Running unittests src/lib.rs (target/debug/deps/polaris_kernel-92b45c61d617863d)
+
+running 40 tests
+test doctor::autopilot::tests::start_is_once_per_process ... ok
+test doctor::autopilot::tests::default_state_is_idle ... ok
+test doctor::install::tests::dump_install_scripts ... ignored
+test doctor::bundled::tests::git_dirs_only_injected_when_bundled_bash_is_used ... ok
+test doctor::bundled::tests::resolved_paths_exist_when_runtime_is_present ... ok
+test doctor::install::tests::claude_install_is_direct_tgz_not_npm ... ok
+test doctor::install::tests::scripts_have_no_unfilled_placeholders ... ok
+test doctor::install::tests::r2_source_comes_first ... ok
+test doctor::bundled::tests::empty_dir_is_not_a_runtime_root ... ok
+test doctor::install::tests::windows_scripts_disable_progress_bar ... ok
+test doctor::bundled::tests::dir_with_any_component_is_a_runtime_root ... ok
+test doctor::path::tests::path_contains_dir_uses_colon_separated_complete_entries ... ok
+test doctor::pi::tests::credential_report_is_boolean_and_rejects_incomplete_entries ... ok
+test doctor::pi::tests::readiness_requires_every_runtime_component ... ok
+test doctor::pi_shell::tests::windows_exclusions_normalize_case_separators_and_directory_boundaries ... ok
+test doctor::probe::tests::merge_no_proxy_is_idempotent_case_insensitive ... ok
+test doctor::pi_shell::tests::child_environment_precedes_system_path_without_changing_parent ... ok
+test doctor::probe::tests::merge_no_proxy_adds_loopback_to_empty ... ok
+test doctor::probe::tests::merge_no_proxy_preserves_existing_and_appends ... ok
+test doctor::pi_shell::tests::explicit_config_matches_doctor_and_invalid_path_does_not_fall_back ... ok
+test doctor::pi::tests::runtime_paths_support_bundle_development_and_explicit ... ok
+test doctor::probe::tests::node_and_npm_candidates_are_non_empty ... ok
+test doctor::update::tests::extract_semver_picks_first_triplet ... ok
+test doctor::update::tests::version_from_manifest_reads_latest_manifest ... ok
+test doctor::verify::tests::conflicts_sorted_high_first ... ok
+test doctor::verify::tests::install_root_groups_npm_entries_together ... ok
+test doctor::pi_shell::tests::windows_resolution_bundle_system_git_and_missing ... ok
+test doctor::verify::tests::brief_trims_and_drops_blank_lines ... ok
+test doctor::verify::tests::smoke_args_are_read_only ... ok
+test doctor::verify::tests::mask_hides_secret_body ... ok
+test doctor::pi_shell::tests::windows_path_excludes_system_launchers_and_aliases_before_selecting_git ... ok
+test doctor::verify::tests::single_npm_install_reports_no_conflict ... ok
+test doctor::autopilot::tests::pi_autopilot_never_installs_claude ... ok
+test doctor::path::tests::claude_dir_from_path_picks_parent_or_npm_prefix ... ok
+test doctor::path::tests::prime_and_prepend_behaviour ... ok
+test doctor::verify::tests::two_installs_with_different_versions_report_both_conflicts ... ok
+test doctor::pi::tests::ping_handles_success_mismatch_failure_and_timeout ... ok
+test doctor::check::tests::image_managed_tracks_flavor ... ok
+test doctor::verify::tests::verify_sync_is_self_consistent ... ok
+test doctor::pi::tests::shell_verification_reports_each_source_and_missing_shell_is_not_ready ... ok
+
+test result: ok. 39 passed; 0 failed; 1 ignored; 0 measured; 161 filtered out; finished in 0.69s
+
