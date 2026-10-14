@@ -1,0 +1,209 @@
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+index 0823e72..2c47c78 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+@@ -82,6 +82,12 @@ impl BackendStatus {
+     }
+ }
+ pub trait AgentBackend: Send + Sync {
++    fn provider_apply(&self, _id: &str) -> anyhow::Result<serde_json::Value> {
++        anyhow::bail!("ProviderApplyUnsupported")
++    }
++    fn auth(&self, _operation: &str, _provider: &str, _input: Option<String>) -> anyhow::Result<serde_json::Value> {
++        anyhow::bail!("ProviderAuthUnsupported")
++    }
+     fn permission_respond(&self, _response: pi::protocol::PermissionResponse) -> anyhow::Result<()> {
+         anyhow::bail!("PermissionResponseUnsupported")
+     }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs
+index 28567a3..a079106 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/input.rs
+@@ -13,10 +13,13 @@ pub fn options(client: &Client, input: &TurnRequest) -> anyhow::Result<SessionOp
+                 .ok_or_else(|| anyhow::anyhow!("AgentdMissingModels"))?
+                 .as_array().ok_or_else(|| anyhow::anyhow!("AgentdInvalidModels"))?
+                 .iter().map(|m| serde_json::json!({"provider":m["provider"], "id":m["id"]})).collect::<Vec<_>>().into())?;
++            let current = crate::provider::current_provider_id();
++            let selected = crate::provider::pi_translate::credential_id(&current);
++            let preferred = models.iter().find(|m| &m.id == id && m.provider == selected).cloned();
+             let mut matches = models.into_iter().filter(|m| &m.id == id);
+             let model = matches.next().ok_or_else(|| anyhow::anyhow!("AgentdModelNotFound: {id}"))?;
+-            anyhow::ensure!(matches.next().is_none(), "AgentdModelAmbiguous: specify provider and id");
+-            Some(model)
++            anyhow::ensure!(preferred.is_some() || matches.next().is_none(), "AgentdModelAmbiguous: specify provider and id");
++            Some(preferred.unwrap_or(model))
+         }
+         Some(value) => Some(serde_json::from_value::<Model>(value.clone())?),
+     };
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+index 8b44cb6..dbe93b4 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+@@ -23,11 +23,13 @@ pub struct PiBackend {
+     client: once_cell::sync::OnceCell<Arc<Client>>,
+     preparing: Arc<Mutex<HashSet<String>>>,
+     cancelled: Arc<Mutex<HashSet<String>>>,
++    provider_config: Mutex<Option<(Option<u32>, Value)>>,
+ }
+ impl PiBackend {
+     pub fn new(config: config::Agentd) -> anyhow::Result<Self> {
+         config::Config { agent: config::Agent::default(), agentd: config.clone() }.validate()?;
+         Ok(Self { config, client: once_cell::sync::OnceCell::new(),
++            provider_config: Mutex::new(None),
+             preparing: Arc::new(Mutex::new(HashSet::new())), cancelled: Arc::new(Mutex::new(HashSet::new())) })
+     }
+     fn client(&self) -> anyhow::Result<Arc<Client>> {
+@@ -41,17 +43,28 @@ impl PiBackend {
+     /// Process-wide configuration; close every session reported by the daemon.
+     pub fn apply_config(&self, config: Option<Value>, credentials: Option<Value>) -> anyhow::Result<Value> {
+         let client = self.client()?;
+-        anyhow::ensure!(client.active.lock().is_empty(), "AgentdConfigBusy");
++        // agentd reopens idle sessions with their existing SessionManager and defers
++        // busy sessions until completion; never abort an in-flight provider switch.
+         let result = client.call(Command::Apply(protocol::Apply { config, credentials }))?;
+-        if let Some(ids) = result.get("reopenRequired").and_then(Value::as_array) {
+-            for id in ids {
+-                if let Some(id) = id.as_str() { client.call(Command::Close(protocol::Session { session_id: id.into() }))?; }
+-            }
+-        }
+         Ok(result)
+     }
+ }
+ impl AgentBackend for PiBackend {
++    fn auth(&self, operation: &str, provider: &str, input: Option<String>) -> anyhow::Result<Value> {
++        self.client()?.call(Command::Auth(protocol::Auth { operation: operation.into(), provider: provider.into(), input }))
++    }
++    fn provider_apply(&self, id: &str) -> anyhow::Result<Value> {
++        let client = self.client()?;
++        let mut last = self.provider_config.lock();
++        let catalog = client.call(Command::Catalog(Empty {}))?;
++        let config = crate::provider::pi_translate::config(id, &catalog).map_err(anyhow::Error::msg)?;
++        let pid = client.status.lock().pid;
++        if last.as_ref() == Some(&(pid, config.clone())) { return Ok(serde_json::json!({"applied":true})); }
++        let result = self.apply_config(Some(config.clone()), None)?;
++        *last = Some((pid, config));
++        Ok(result)
++    }
++
+     fn permission_respond(&self, response: protocol::PermissionResponse) -> anyhow::Result<()> {
+         self.client()?.call(Command::PermissionRespond(response)).map(|_| ())
+     }
+@@ -66,6 +79,11 @@ impl AgentBackend for PiBackend {
+             return Err(if input.account_id.is_some() { BackendError::UnsupportedIsolation } else { BackendError::AccountContextRequired }.into());
+         }
+         anyhow::ensure!(!input.prompt.trim().is_empty(), "AgentdEmptyPrompt");
++        if crate::provider::credential_file::provider_store_path().is_some() {
++            let _selection = crate::provider::PROVIDER_MUTATION.lock();
++            let id = crate::provider::current_provider_id();
++            self.provider_apply(if id.is_empty() { "claude-official" } else { &id })?;
++        }
+         let client = self.client()?;
+         if client.status.lock().circuit_open { return Err(BackendError::CircuitOpen.into()); }
+         let (sender, stream) = stream::Mailbox::channel(self.config.channel_capacity, self.config.max_line_bytes);
+@@ -101,7 +119,8 @@ impl AgentBackend for PiBackend {
+                     None => configured_max,
+                 };
+                 client.send(Control::Register { session: info.id.clone(), req: req.clone(),
+-                    translator: translate::Translator::new(req.clone(), conv.clone(), input.cwd.clone(), &client.config),
++                    translator: translate::Translator::new(req.clone(), conv.clone(), input.cwd.clone(), &client.config)
++                        .with_provider(info.model.get("provider").and_then(Value::as_str).unwrap_or_default()),
+                     stream: sender.clone(), timeout, reservation: (preparing.clone(), key.clone()), reply: tx })?;
+                 client.wait(rx)?;
+                 registered = true;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
+index 4df10c8..27c86fc 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
+@@ -25,6 +25,13 @@ impl Process {
+         let mut command = Command::new(&config.node);
+         command.args(&config.node_args).arg(&config.entry).args(&config.args)
+             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
++        if let Some(path) = crate::provider::credential_file::provider_store_path() {
++            let settings = crate::provider::pi_config::load().map_err(anyhow::Error::msg)?;
++            command.env("POLARIS_PROVIDER_STORE", &path)
++                .env("POLARIS_CREDENTIAL_LOCK_TIMEOUT_MS", settings.lock_timeout_ms.to_string())
++                .env("POLARIS_CREDENTIAL_LOCK_POLL_MS", settings.lock_poll_ms.to_string());
++            if let Some(dir) = path.parent() { command.env("POLARIS_USAGE_DIR", dir.join("pi-usage")); }
++        }
+         crate::runtime::procs::no_window(command.as_std_mut());
+         #[cfg(unix)]
+         {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+index 1316442..bd0b6d8 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+@@ -2,7 +2,7 @@
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ /// Mirror of agentd/src/protocol/schema.ts; fingerprint test gates changes.
+-pub const PROTOCOL_VERSION: u64 = 4;
++pub const PROTOCOL_VERSION: u64 = 5;
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+ #[serde(untagged)]
+ pub enum Id { Text(String), Number(i64) }
+@@ -12,10 +12,12 @@ pub struct Request { pub id: Id, #[serde(flatten)] pub command: Command }
+ #[derive(Debug, Serialize, Deserialize)]
+ #[serde(tag = "method", content = "params")]
+ pub enum Command {
++    #[serde(rename = "provider.auth")] Auth(Auth),
+     #[serde(rename = "permission.respond")] PermissionRespond(PermissionResponse),
+     #[serde(rename = "sandbox.respond")] SandboxRespond(SandboxResponse),
+     #[serde(rename = "ping")] Ping(Empty),
+     #[serde(rename = "models.list")] Models(Empty),
++    #[serde(rename = "models.catalog")] Catalog(Empty),
+     #[serde(rename = "session.open")] Open(Open),
+     #[serde(rename = "session.configure")] Configure(Configure),
+     #[serde(rename = "prompt")] Prompt(Prompt),
+@@ -172,3 +174,11 @@ impl Frame {
+         Ok(frame)
+     }
+ }
++
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct Auth {
++    pub provider: String,
++    pub operation: String,
++    #[serde(skip_serializing_if = "Option::is_none")] pub input: Option<String>,
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
+index 598af3e..ba27fbf 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/translate.rs
+@@ -8,13 +8,15 @@ pub struct Translator {
+     tools: HashMap<String, String>, write_tools: Vec<String>,
+     delta: String, last_flush: Instant, window: Duration, max_bytes: usize,
+     error_seen: bool, done: bool,
++    provider: Option<String>, failure_code: Option<String>,
+ }
+ impl Translator {
+     pub fn new(req: String, conv: Option<String>, cwd: PathBuf, config: &Agentd) -> Self {
+         Self { req, conv, cwd, tools: HashMap::new(), write_tools: config.write_tools.clone(),
+             delta: String::new(), last_flush: Instant::now(), window: Duration::from_millis(config.delta_batch_ms),
+-            max_bytes: config.max_line_bytes, error_seen: false, done: false }
++            max_bytes: config.max_line_bytes, error_seen: false, done: false, provider: None, failure_code: None }
+     }
++    pub fn with_provider(mut self, id: &str) -> Self { self.provider = Some(id.into()); self }
+     pub fn make(&self, kind: &str, text: Option<String>) -> ChatStreamEvent { event(&self.req, self.conv.as_deref(), kind, text) }
+     pub fn flush(&mut self) -> Vec<ChatStreamEvent> {
+         self.last_flush = Instant::now();
+@@ -78,8 +80,18 @@ impl Translator {
+                     }
+                 }
+             }
+-            Event::Error { code, message } => { self.error_seen = true; out.push(self.make("error", Some(format!("{code}: {message}")))); }
++            Event::Error { code, message } => {
++                if crate::provider::pi_failure_counts(&code) { self.failure_code = Some(code.clone()); }
++                self.error_seen = true;
++                out.push(self.make("error", Some(format!("{code}: {message}"))));
++            }
+             Event::Completed { status } => {
++                if let Some(provider) = self.provider.take() {
++                    let code = self.failure_code.take();
++                    let success = status == TurnStatus::Completed;
++                    let failed = status == TurnStatus::Error;
++                    std::thread::spawn(move || crate::provider::pi_outcome(&provider, success, failed, code.as_deref()));
++                }
+                 if matches!(status, TurnStatus::Error | TurnStatus::Timeout) && !self.error_seen {
+                     out.push(self.make("error", Some(format!("AgentdTurnFailed: {status:?}"))));
+                 }
