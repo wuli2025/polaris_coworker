@@ -1,0 +1,760 @@
+diff --git a/Dockerfile b/Dockerfile
+index c45e710..434fc6a 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,19 +1,5 @@
+ # ═══════════════════════════════════════════════════════════════
+-# Polaris 服务器镜像（多阶段构建）
+-#
+-# ⚠ 完整三段构建未在开发机跑过（stage2 的 Rust release 编译很慢）。首次构建若报错，见
+-#   DEPLOY-CLOUD.md「构建排错」一节。
+-#   已实测（2026-07-24，Docker 29.4.3）：**stage3 运行层的 Claude Code 安装段**在真
+-#   debian:bookworm-slim 里单独构建通过 —— 四源回落生效（R2 未传→被 gzip 魔数拦下→
+-#   落 npmmirror）、容器内 `claude --version` 正常、**非 root(uid 1000) 下同样正常**、
+-#   `ldd` 确认只依赖基础 glibc（librt/libc/libpthread/libdl/libm），无 libstdc++/libgcc 依赖。
+-#
+-# stage1  node:20        → 前端 dist/
+-# stage2  rust:1.95      → polaris-server 二进制（bin 住在 crates/polaris-cli，
+-#                          经依赖恒开 server feature，无需 tauri/webkit）
+-# stage3  debian:slim    → 运行层：git≥2.38 + node20 + claude CLI + 非 root
+-# ═══════════════════════════════════════════════════════════════
+-
++# Polaris: Node + Pi agentd by default; Claude CLI is an optional legacy backend.
+ # ── 镜像源开关（默认官方源；国内构建机传 --build-arg 切国内源加速）──
+ #   APT_MIRROR=mirrors.ustc.edu.cn
+ #   NPM_REGISTRY=https://registry.npmmirror.com
+@@ -21,7 +7,8 @@
+ #   NODE_DIST_BASE=https://registry.npmmirror.com/-/binary/node
+ 
+ # ── stage 1: 前端 ──────────────────────────────────────────────
+-FROM node:20-bookworm-slim AS web
++ARG NODE_VERSION=22.19.0
++FROM node:${NODE_VERSION}-bookworm-slim AS web
+ ARG NPM_REGISTRY=
+ RUN if [ -n "$NPM_REGISTRY" ]; then npm config set -g registry "$NPM_REGISTRY"; fi
+ WORKDIR /build
+@@ -33,6 +20,22 @@ COPY public ./public
+ # build = vue-tsc --noEmit && vite build → dist/
+ RUN npm run build
+ 
++# Production agent daemon; never run dependency lifecycle scripts.
++FROM node:${NODE_VERSION}-bookworm-slim AS agent
++ARG NPM_REGISTRY=
++RUN apt-get update && apt-get install -y --no-install-recommends libxcb1 && rm -rf /var/lib/apt/lists/*
++WORKDIR /build/agentd
++COPY agentd/package.json agentd/package-lock.json ./
++RUN if [ -n "$NPM_REGISTRY" ]; then npm config set -g registry "$NPM_REGISTRY"; fi
++RUN npm ci --ignore-scripts --no-audit --no-fund
++COPY agentd/tsconfig.json ./
++COPY agentd/src ./src
++COPY agentd/config ./config
++COPY agentd/test ./test
++COPY scripts/pack-agentd.mjs /build/scripts/pack-agentd.mjs
++COPY scripts/runtime/check-wasm.mjs scripts/runtime/node.mjs /build/scripts/runtime/
++RUN node /build/scripts/pack-agentd.mjs /out/agentd
++
+ # ── stage 2: Rust 服务端 ───────────────────────────────────────
+ # 1.85 会被 lock 里 darling@0.23(要 1.88)/icu 2.x(要 1.86)拒编；本机 1.95 实测过,钉同版
+ FROM rust:1.95-bookworm AS server
+@@ -52,6 +55,7 @@ WORKDIR /build
+ # 以及 include_dir!/include_str! 内嵌的 src/templates、assets/、voice-libs 等，
+ # 都在 src-tauri/ 之内，整目录 COPY 一次到位。
+ COPY src-tauri ./src-tauri
++COPY agentd/package.json ./agentd/package.json
+ # ★ src-tauri 之外的内嵌资源:beam.rs 用 include_str!("../../docs/beam-guide.html")
+ #   把这份说明编进二进制。只 COPY src-tauri 会在 stage2 直接编译失败
+ #   (`couldn't read src/../../docs/beam-guide.html`)—— 2026-07-28 实测踩到。
+@@ -68,33 +72,16 @@ RUN cargo build --release -p polaris-cli --bin polaris-server --features collab-
+     && (strip target/release/polaris-server || true)
+ 
+ # ── stage 3: 运行层 ────────────────────────────────────────────
+-FROM debian:bookworm-slim
++FROM node:${NODE_VERSION}-bookworm-slim
+ ARG POLARIS_BUILD_REVISION=local
+ ARG POLARIS_BUILD_VERSION=0.0.0
+ ARG APT_MIRROR=
+ RUN if [ -n "$APT_MIRROR" ]; then sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; fi
+ # bookworm 自带 git 2.39 ≥ 2.38（merge-tree 冲突试算可用）
+ RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+-        git git-lfs ca-certificates curl openssl tini \
++        git git-lfs ca-certificates curl openssl tini libxcb1 \
+     && rm -rf /var/lib/apt/lists/*
+-# Node 20：给 Claude 写的 JS/TS 脚本当运行时。
+-# ⚠ 它**已不是 claude CLI 的运行时** —— claude 自 2.1.198 起是原生二进制，不调 Node
+-#   （官方原话：the installed claude binary does not itself invoke Node）。
+-# 官方 dist 直下 tar.gz（不走 nodesource 脚本，免 gnupg/apt 源注入，
+-# NODE_DIST_BASE 可切 npmmirror 国内加速）。按 uname 选架构 → x64/arm64 都能构建。
+-ARG NODE_VERSION=20.18.1
+-ARG NODE_DIST_BASE=https://nodejs.org/dist
+-ARG NPM_REGISTRY=
+-RUN set -eux; \
+-    case "$(uname -m)" in \
+-      x86_64|amd64)  NARCH=x64 ;; \
+-      aarch64|arm64) NARCH=arm64 ;; \
+-      *) echo "不支持的架构: $(uname -m)"; exit 1 ;; \
+-    esac; \
+-    curl -fsSL "$NODE_DIST_BASE/v$NODE_VERSION/node-v$NODE_VERSION-linux-$NARCH.tar.gz" \
+-      | tar -xz -C /usr/local --strip-components=1; \
+-    if [ -n "$NPM_REGISTRY" ]; then npm config set -g registry "$NPM_REGISTRY"; fi; \
+-    node -v; npm -v
++COPY --from=agent /out/agentd /app/runtime/agentd
+ 
+ # ── Claude Code：直抓 npm 平台包 tgz，**不走 `npm i -g`** ──────────────────────
+ # 为什么换掉 `npm i -g @anthropic-ai/claude-code`（三个实打实的毛病）：
+@@ -107,9 +94,11 @@ RUN set -eux; \
+ # 与桌面端 doctor::install 完全同一套规矩 —— **升级 claude 版本要两边一起改**
+ #   (src-tauri/crates/polaris-kernel/src/doctor/install.rs 的 CLAUDE_VER)。
+ # 注：debian:bookworm-slim 是 glibc，故取 linux-<arch>（非 -musl 包）。
++ARG INSTALL_CLAUDE=false
+ ARG CLAUDE_VERSION=2.1.218
+ ARG DEPS_BASE=https://llmwiki.cloud/downloads/deps
+ RUN set -eu; \
++    case "$INSTALL_CLAUDE" in false) exit 0 ;; true) ;; *) echo "INSTALL_CLAUDE must be true or false"; exit 1 ;; esac; \
+     case "$(uname -m)" in \
+       x86_64|amd64)  CARCH=x64 ;; \
+       aarch64|arm64) CARCH=arm64 ;; \
+@@ -140,7 +129,7 @@ RUN set -eu; \
+ # 非 root 运行；数据根 = $HOME/Polaris（server 用 ~/Polaris 当工作目录，
+ # collab.db 落 ~/Polaris/data/；claude 凭证落 ~/.claude）
+ RUN useradd -m -u 1000 -s /bin/bash polaris \
+-    && mkdir -p /home/polaris/Polaris /home/polaris/.claude /srv/web /app/resources \
++    && mkdir -p /home/polaris/Polaris /home/polaris/.claude /home/polaris/.polaris/agentd /srv/web /app/resources \
+     && printf '%s\n' "$POLARIS_BUILD_REVISION" > /app/polaris-build-revision \
+     && printf '%s\n' "$POLARIS_BUILD_VERSION" > /app/polaris-build-version \
+     && chown -R polaris:polaris /home/polaris /srv/web /app/resources
+@@ -154,7 +143,10 @@ COPY --from=server     --chown=polaris:polaris /build/src-tauri/resources /app/r
+ COPY --chown=polaris:polaris package.json /app/package.json
+ COPY --chmod=0755 docker/update.sh /usr/local/bin/update.sh
+ 
+-ENV POLARIS_PORT=8080 \
++ENV POLARIS_AGENT_BACKEND=pi \
++    POLARIS_AGENTD_NODE=/usr/local/bin/node \
++    POLARIS_AGENTD_ENTRY=/app/runtime/agentd/dist/src/main.js \
++    POLARIS_PORT=8080 \
+     POLARIS_WEB_DIR=/srv/web \
+     POLARIS_RESOURCE_DIR=/app/resources \
+     POLARIS_VERSION_FILE=/app/package.json \
+@@ -165,7 +157,7 @@ ENV POLARIS_PORT=8080 \
+ 
+ USER polaris
+ WORKDIR /home/polaris
+-VOLUME ["/home/polaris/Polaris", "/home/polaris/.claude"]
++VOLUME ["/home/polaris/Polaris", "/home/polaris/.claude", "/home/polaris/.polaris/agentd"]
+ EXPOSE 8080
+ 
+ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+diff --git a/agentd/config/agent.default.json b/agentd/config/agent.default.json
+index 6790eaf..c003c90 100644
+--- a/agentd/config/agent.default.json
++++ b/agentd/config/agent.default.json
+@@ -1,4 +1,5 @@
+ {
++  "shellPath": null,
+   "sessionDir": "~/.polaris/agentd/sessions",
+   "maxSessions": 8,
+   "maxQueuedMessages": 8,
+diff --git a/agentd/package.json b/agentd/package.json
+index b7f3fd7..90a8aa5 100644
+--- a/agentd/package.json
++++ b/agentd/package.json
+@@ -14,7 +14,8 @@
+ 		"build": "tsc -p tsconfig.json",
+ 		"typecheck": "tsc -p tsconfig.json --noEmit",
+ 		"test": "node --import tsx --test \"test/**/*.test.ts\"",
+-		"start": "node dist/main.js"
++		"start": "node dist/main.js",
++		"package": "node ../scripts/pack-agentd.mjs"
+ 	},
+ 	"dependencies": {
+ 		"@earendil-works/pi-ai": "1.0.4",
+diff --git a/agentd/src/config/load.ts b/agentd/src/config/load.ts
+index 937a65b..62ee5bd 100644
+--- a/agentd/src/config/load.ts
++++ b/agentd/src/config/load.ts
+@@ -25,7 +25,7 @@ export function mergeConfig(base: Config, patch: unknown): Config {
+   return result;
+ }
+ 
+-export function loadConfig(path?: string): Config {
++export function loadConfig(path?: string, env: NodeJS.ProcessEnv = process.env): Config {
+   // tsc preserves src/ under dist/; support both source and compiled entrypoints.
+   const candidates = ["../../config/agent.default.json", "../../../config/agent.default.json"];
+   const defaults = candidates.map((p) => fileURLToPath(new URL(p, import.meta.url))).find(existsSync);
+@@ -34,7 +34,9 @@ export function loadConfig(path?: string): Config {
+     const base: unknown = JSON.parse(readFileSync(defaults, "utf8"));
+     validateConfig(ConfigSchema, base);
+     if (!Value.Check(ConfigSchema, base)) throw new Error("Unreachable invalid defaults");
+-    return mergeConfig(base, path ? JSON.parse(readFileSync(path, "utf8")) : {});
++    const config = mergeConfig(base, path ? JSON.parse(readFileSync(path, "utf8")) : {});
++    // The host supplies the bundled shell as a default; explicit JSON wins.
++    return mergeConfig(config, { shellPath: config.shellPath || env.POLARIS_AGENTD_SHELL_PATH || null });
+   } catch (error) {
+     if (error instanceof DaemonError) throw error;
+     throw new DaemonError("INVALID_CONFIG", error instanceof SyntaxError ? "配置文件不是有效的 JSON。" : "无法读取配置文件。", ["/"]);
+diff --git a/agentd/src/config/schema.ts b/agentd/src/config/schema.ts
+index 9d23612..a554dfb 100644
+--- a/agentd/src/config/schema.ts
++++ b/agentd/src/config/schema.ts
+@@ -16,6 +16,7 @@ export const ProviderSchema = Type.Object({
+   }, { additionalProperties: false }), { minItems: 1 }),
+ }, { additionalProperties: false });
+ export const ConfigSchema = Type.Object({
++  shellPath: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+   oauthTimeoutMs: positive,
+   usageDir: Type.String(),
+   permissions: Type.Object({ defaultMode: Type.Union([
+diff --git a/agentd/src/sessions/create.ts b/agentd/src/sessions/create.ts
+index 4334aee..9d97ead 100644
+--- a/agentd/src/sessions/create.ts
++++ b/agentd/src/sessions/create.ts
+@@ -35,6 +35,7 @@ export async function createSession(
+   const model = runtime.getModel((options.model ?? config.defaultModel).provider, (options.model ?? config.defaultModel).id);
+   if (!model) throw new DaemonError("MODEL_NOT_FOUND", "Configured default model does not exist");
+   const settingsManager = SettingsManager.inMemory({
++    shellPath: config.shellPath || undefined,
+     compaction: config.compaction, retry: config.retry, cacheWarming: "off",
+   });
+   const agentDir = join(config.sessionDir, ".resources");
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 3dc1cd8..afdedb0 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -16,7 +16,11 @@ services:
+     # 官方预构建镜像（GitHub Actions 推到 GHCR）。本地有源码想自建时
+     # `docker compose up -d --build` 会用下面的 build 覆盖同一标签。
+     image: ${POLARIS_IMAGE_REPO:-ghcr.io/wuli2025/polaris_coworker}:${POLARIS_IMAGE_TAG:-latest}
+-    build: .
++    build:
++      context: .
++      args:
++        NODE_VERSION: ${POLARIS_NODE_VERSION:-22.19.0}
++        INSTALL_CLAUDE: ${POLARIS_INSTALL_CLAUDE:-false}
+     container_name: polaris-web
+     restart: unless-stopped
+     # 安全默认：只给本机 TLS 反代访问，不把带 owner 能力的明文 HTTP 直接暴露公网。
+@@ -29,6 +33,12 @@ services:
+       # 与 .env 的 POLARIS_IROH_PORT 必须同值;云防火墙/安全组也要放行这个 UDP 口。
+       - "${POLARIS_IROH_PORT:-41641}:${POLARIS_IROH_PORT:-41641}/udp"
+     environment:
++      - POLARIS_AGENT_BACKEND=${POLARIS_AGENT_BACKEND:-pi}
++      - POLARIS_AGENTD_NODE=${POLARIS_AGENTD_NODE:-/usr/local/bin/node}
++      - POLARIS_AGENTD_ENTRY=${POLARIS_AGENTD_ENTRY:-/app/runtime/agentd/dist/src/main.js}
++      - POLARIS_AGENTD_ARGS=${POLARIS_AGENTD_ARGS:-[]}
++      - POLARIS_AGENTD_NODE_ARGS=${POLARIS_AGENTD_NODE_ARGS:-[]}
++      - POLARIS_AGENTD_ISOLATION=${POLARIS_AGENTD_ISOLATION:-per-account}
+       # 留空（默认）= 免口令，谁连上谁能用：家用 NAS 在 NAT 后面公网连不上，
+       # 而口令忘了没有找回入口。只有真做了公网映射/反代域名才在 .env 里填上它。
+       - POLARIS_AUTH_TOKEN=${POLARIS_AUTH_TOKEN:-}
+@@ -86,6 +96,9 @@ services:
+       - POLARIS_TUNNEL_BUF_KB=${POLARIS_TUNNEL_BUF_KB:-}
+       - POLARIS_FS_ZSTD_LEVEL=${POLARIS_FS_ZSTD_LEVEL:-}
+     volumes:
++      # P4 providers.json（含凭据）随应用数据持久化；升级时保留此卷。
++      # agentd 会话独立落 Pi 卷；旧 Claude 卷继续保留，不迁移或删除。
++      - polaris-pi:/home/polaris/.polaris/agentd
+       - polaris-data:/home/polaris/Polaris   # 数据根：知识库/collab.db(data/) 等
+       - polaris-claude:/home/polaris/.claude # claude 凭证与 settings.json
+     # 2G 整机预算(纯中继:无 gitea):polaris 1.6G + relay 128M,留 ~300M 给内核/系统。
+@@ -148,6 +161,7 @@ services:
+           memory: ${RELAY_MEM_LIMIT:-128m}
+ 
+ volumes:
++  polaris-pi:
+   polaris-data:
+   polaris-claude:
+   gitea-data:
+diff --git a/scripts/docker-smoke.ps1 b/scripts/docker-smoke.ps1
+index 8c65e01..7889aa0 100644
+--- a/scripts/docker-smoke.ps1
++++ b/scripts/docker-smoke.ps1
+@@ -21,9 +21,13 @@ Invoke-Cmd "kb_root" @{}
+ Write-Host "`n4) provider_list currentId" -ForegroundColor Cyan
+ (Invoke-Cmd "provider_list" @{}).currentId
+ 
+-Write-Host "`n5) env_check (claude 是否就绪)" -ForegroundColor Cyan
++Write-Host "`n5) env_check (Agent 运行时是否就绪)" -ForegroundColor Cyan
+ $env_ = Invoke-Cmd "env_check" @{}
+-"claude.found=$($env_.claude.found)  version=$($env_.claude.version)  ready=$($env_.ready)"
++$runtime = $env_.agentRuntime
++"backend=$($runtime.backend) node=$($runtime.nodeReady) entry=$($runtime.entryExists) ping=$($runtime.handshake)"
++"protocol=$($runtime.protocolVersion) pi=$($runtime.piVersion) credentials=$($runtime.credentialsConfigured) ready=$($env_.ready)"
++if (-not $env_.ready) { throw "Agent runtime not ready" }
++Invoke-Cmd "agent_backend_status" @{}
+ 
+ Write-Host "`n6) 建项目 + 会话" -ForegroundColor Cyan
+ $proj = Invoke-Cmd "conv_create_project" @{ name = "docker-smoke" }
+diff --git a/scripts/fetch-runtimes.mjs b/scripts/fetch-runtimes.mjs
+index 7ca50a5..f12b534 100644
+--- a/scripts/fetch-runtimes.mjs
++++ b/scripts/fetch-runtimes.mjs
+@@ -17,8 +17,8 @@
+ //      System32 的同名 exe**(语义完全不同)。这个坑在 Rust 侧堵:见
+ //      doctor/bundled.rs 把 usr/bin、mingw64/bin 前插进 claude 子进程的 PATH。
+ //
+-// 下载源顺序与安装脚本(doctor/install.rs)同一套规矩:自家 R2 打头(发版时传上去、
+-// 字节数核对过、出站免费),再公共 GitHub 代理,最后 GitHub 直连。每个源都校验文件头
++// GitHub 资源: 自家 R2 → GitHub 代理 → 官方。Node: 官方 → R2 → POLARIS_NODE_MIRROR。
++// GitHub 代理不能服务 nodejs.org。每个源都校验文件头
+ // 魔数 —— 代理挂掉时常回「200 + HTML 错误页」,只看「文件非空」会把错误页当安装包解压。
+ 
+ import {
+@@ -34,6 +34,9 @@ import {
+   closeSync,
+   statSync,
+ } from "node:fs";
++import { nodeVersion, nodePlan, checksumFor, verifySha256, componentCurrent } from './runtime/node.mjs';
++import { defaultDepsBase, githubUrls } from './runtime/sources.mjs';
++import { packAgentd } from './pack-agentd.mjs';
+ import { writeFile } from "node:fs/promises";
+ import { dirname, join, resolve } from "node:path";
+ import { fileURLToPath } from "node:url";
+@@ -45,7 +48,7 @@ const outRoot = join(srcTauri, "runtime");
+ 
+ const isWin = process.platform === "win32";
+ const isMac = process.platform === "darwin";
+-if (!isWin && !isMac) {
++if (!["win32", "darwin", "linux"].includes(process.platform)) {
+   console.log(`[fetch-runtimes] 平台 ${process.platform} 不打包运行时,跳过`);
+   process.exit(0);
+ }
+@@ -62,15 +65,19 @@ const PY_TAG = "20260718"; // python-build-standalone release tag
+ const GIT_VER = "2.55.0.3"; // MinGit 资产版本号
+ const GIT_TAG = "v2.55.0.windows.3"; // 对应的 release tag
+ 
+-const DEPS_BASE = "https://llmwiki.cloud/downloads/deps";
++const DEPS_BASE = process.env.POLARIS_DEPS_BASE ?? defaultDepsBase;
++const NODE_VER = nodeVersion(JSON.parse(readFileSync(join(here, "../agentd/package.json"))).engines.node, process.env.POLARIS_NODE_VERSION);
+ const ZIP_MAGIC = "504b"; // PK
+ const GZ_MAGIC = "1f8b";
+ 
+-const arch = process.arch === "arm64" ? "arm64" : "x64";
++const arch = process.arch;
+ 
+ /** 本次平台要抓的组件清单。dir=解压目标(runtime/ 下),strip=解压后要不要提层。 */
+ function plan() {
+-  const items = [];
++  const items = [nodePlan(NODE_VER, process.platform, arch, {
++    deps: DEPS_BASE, mirror: process.env.POLARIS_NODE_MIRROR,
++  })];
++  if (!isWin && !isMac) return items;
+ 
+   // uv —— 单文件二进制,zip 里就是 uv.exe/uvx.exe(或 uv/uvx),解压到 runtime/uv
+   const uvAsset = isWin
+@@ -123,13 +130,7 @@ function plan() {
+ 
+ /** 自家 R2 打头,公共代理居中,GitHub 直连兜底 —— 与 doctor/install.rs 同一套顺序。 */
+ function ghUrls(repo, tag, asset) {
+-  const rel = `https://github.com/${repo}/releases/download/${tag}/${asset}`;
+-  return [
+-    `${DEPS_BASE}/${asset}`,
+-    `https://ghfast.top/${rel}`,
+-    `https://ghproxy.net/${rel}`,
+-    rel,
+-  ];
++  return githubUrls(repo, tag, asset, { deps: DEPS_BASE });
+ }
+ 
+ /** 读文件头 n 字节的十六进制 —— 用来识破「200 + HTML 错误页」。 */
+@@ -148,7 +149,7 @@ async function download(item, dest) {
+   for (const url of item.urls) {
+     try {
+       console.log(`[fetch-runtimes] ${item.name} ← ${url}`);
+-      const res = await fetch(url, { redirect: "follow" });
++      const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(120000) });
+       if (!res.ok) {
+         console.log(`[fetch-runtimes]   HTTP ${res.status},换下一个源`);
+         continue;
+@@ -170,6 +171,7 @@ async function download(item, dest) {
+         );
+         continue;
+       }
++      if (item.sha256) verifySha256(readFileSync(dest), item.sha256);
+       console.log(`[fetch-runtimes]   ✓ ${(size / 1048576).toFixed(1)}MB`);
+       return true;
+     } catch (e) {
+@@ -217,18 +219,22 @@ const stampPath = join(outRoot, ".stamp.json");
+ const want = {
+   platform: process.platform,
+   arch,
++  node: NODE_VER,
+   uv: UV_VER,
+   python: `${PY_VER}+${PY_TAG}`,
+   ...(isWin ? { git: GIT_VER } : {}),
+ };
+ 
++await packAgentd();
++let have;
+ // 已抓齐且版本一致 → 秒退
+ if (existsSync(stampPath)) {
+   try {
+-    const have = JSON.parse(readFileSync(stampPath, "utf8"));
++    have = JSON.parse(readFileSync(stampPath, "utf8"));
+     const same = JSON.stringify(have) === JSON.stringify(want);
+     const intact = items.every((it) =>
+       existsSync(join(outRoot, it.dir, it.check))
++        && (it.name !== "git" || existsSync(join(outRoot, "git/usr/bin/bash.exe")))
+     );
+     if (same && intact) {
+       console.log("[fetch-runtimes] 运行时已就绪(版本一致),跳过下载");
+@@ -246,10 +252,16 @@ mkdirSync(tmpDir, { recursive: true });
+ 
+ for (const item of items) {
+   const target = join(outRoot, item.dir);
+-  if (existsSync(join(target, item.check))) {
++  if (componentCurrent(have, want, item.name, existsSync(join(target, item.check)))) {
++    if (item.name === "git" && !existsSync(join(target, "usr/bin/bash.exe"))) materializeBash(target);
+     console.log(`[fetch-runtimes] ${item.name} 已在,跳过`);
+     continue;
+   }
++  if (item.checksumUrl) {
++    const response = await fetch(item.checksumUrl, { signal: AbortSignal.timeout(60000) });
++    if (!response.ok) throw new Error(`Official Node checksums: HTTP ${response.status}`);
++    item.sha256 = checksumFor(await response.text(), item.asset);
++  }
+   const archivePath = join(tmpDir, item.asset);
+   if (!(await download(item, archivePath))) {
+     console.error(
+diff --git a/scripts/pack-agentd.mjs b/scripts/pack-agentd.mjs
+new file mode 100644
+index 0000000..aacac61
+--- /dev/null
++++ b/scripts/pack-agentd.mjs
+@@ -0,0 +1,57 @@
++// Target-native packaging: npm selects optional dependencies for the build host.
++import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, renameSync } from 'node:fs';
++import { createHash } from 'node:crypto';
++import { dirname, join, resolve } from 'node:path';
++import { fileURLToPath, pathToFileURL } from 'node:url';
++import { execFileSync } from 'node:child_process';
++import { nodeVersion } from './runtime/node.mjs';
++const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
++const source = join(repo, 'agentd');
++function files(dir) {
++  return readdirSync(dir, { withFileTypes: true }).flatMap(e => {
++    const path = join(dir, e.name);
++    return e.isDirectory() ? files(path) : [path];
++  }).sort();
++}
++function bytes(dir) { return files(dir).reduce((n, p) => n + statSync(p).size, 0); }
++export async function packAgentd(destination = join(repo, 'src-tauri/runtime/agentd')) {
++  nodeVersion(JSON.parse(readFileSync(join(source, 'package.json'))).engines.node, process.versions.node);
++  const hash = createHash('sha256').update(`${process.platform}/${process.arch}/${process.versions.node}`);
++  for (const path of ['package.json', 'package-lock.json', 'tsconfig.json', 'test/sdk-contract.test.ts', ...files(join(source, 'src')),
++    ...files(join(source, 'config')), fileURLToPath(import.meta.url),
++    join(repo, 'scripts/runtime/node.mjs'), join(repo, 'scripts/runtime/check-wasm.mjs')]) {
++    hash.update(path).update(readFileSync(resolve(source, path)));
++  }
++  const digest = hash.digest('hex');
++  const stamp = join(destination, '.stamp.json');
++  let previous;
++  try { previous = JSON.parse(readFileSync(stamp)); } catch { /* missing or corrupt stamp: rebuild */ }
++  if (previous?.digest === digest
++    && existsSync(join(destination, 'dist/src/main.js')) && existsSync(join(destination, 'node_modules/.package-lock.json'))) {
++    console.log(`[pack-agentd] current: ${bytes(destination)} bytes`);
++    return;
++  }
++  const staging = `${destination}.staging`;
++  rmSync(staging, { recursive: true, force: true });
++  mkdirSync(staging, { recursive: true });
++  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
++  const run = (args, cwd) => execFileSync(npm, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' });
++  run(['run', 'build'], source);
++  for (const name of ['package.json', 'package-lock.json', 'config']) cpSync(join(source, name), join(staging, name), { recursive: true });
++  cpSync(join(source, 'dist/src'), join(staging, 'dist/src'), { recursive: true });
++  run(['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], staging);
++  // Verify the installed production tree, without tsx or TypeScript in the payload.
++  const testDir = join(staging, '.contract-tests');
++  mkdirSync(testDir);
++  cpSync(join(source, 'dist/test/sdk-contract.test.js'), join(testDir, 'sdk-contract.test.mjs'));
++  try {
++    execFileSync(process.execPath, ['--test', join(testDir, 'sdk-contract.test.mjs')], { cwd: staging, stdio: 'inherit' });
++    execFileSync(process.execPath, [join(repo, 'scripts/runtime/check-wasm.mjs'), staging], { stdio: 'inherit' });
++  } finally { rmSync(testDir, { recursive: true, force: true }); }
++  const composition = Object.fromEntries(['dist', 'config', 'node_modules'].map(name => [name, bytes(join(staging, name))]));
++  writeFileSync(join(staging, '.stamp.json'), JSON.stringify({ digest, platform: process.platform, arch: process.arch, composition }, null, 2));
++  rmSync(destination, { recursive: true, force: true });
++  renameSync(staging, destination);
++  console.log(`[pack-agentd] ${bytes(destination)} bytes: ${JSON.stringify(composition)}`);
++}
++if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await packAgentd(process.argv[2]);
+diff --git a/scripts/runtime/check-wasm.mjs b/scripts/runtime/check-wasm.mjs
+new file mode 100644
+index 0000000..209c7ac
+--- /dev/null
++++ b/scripts/runtime/check-wasm.mjs
+@@ -0,0 +1,24 @@
++import { createRequire } from 'node:module';
++import { readFileSync } from 'node:fs';
++import { dirname, resolve } from 'node:path';
++import { pathToFileURL } from 'node:url';
++import assert from 'node:assert/strict';
++const require = createRequire(resolve(process.argv[2], 'package.json'));
++const photon = require('@silvia-odwyer/photon-node');
++const picture = new photon.PhotonImage(new Uint8Array([255, 0, 0, 255]), 1, 1);
++assert.equal(picture.get_width(), 1);
++picture.free();
++const { QuickJS } = await import(pathToFileURL(require.resolve('quickjs-wasi')).href);
++const vm = await QuickJS.create({ wasm: readFileSync(require.resolve('quickjs-wasi/quickjs.wasm')) });
++const result = vm.evalCode('1 + 2');
++assert.equal(result.toNumber(), 3);
++result[Symbol.dispose]();
++vm[Symbol.dispose]();
++console.log(`WASM OK: photon + quickjs-wasi on ${process.platform}/${process.arch}`);
++
++const tui = dirname(require.resolve('@earendil-works/pi-tui/package.json'));
++const target = `${process.platform}-${process.arch}`;
++const name = `${process.platform}-platform${process.platform === 'linux' ? '-x11' : ''}.node`;
++const native = require(resolve(tui, 'native', process.platform, 'prebuilds', target, name));
++assert.ok(Object.keys(native).length > 0);
++console.log(`Native addon load OK: pi-tui ${target}`);
+diff --git a/scripts/runtime/node.mjs b/scripts/runtime/node.mjs
+new file mode 100644
+index 0000000..56b804e
+--- /dev/null
++++ b/scripts/runtime/node.mjs
+@@ -0,0 +1,46 @@
++import { createHash } from 'node:crypto';
++import { nodeUrls } from './sources.mjs';
++
++export function nodeVersion(engine, override) {
++  const match = /^>=(\d+\.\d+\.\d+)$/.exec(engine);
++  if (!match) throw new Error(`Unsupported Node engine: ${engine}`);
++  const version = override ?? match[1];
++  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Node version must be x.y.z');
++  const a = version.split('.').map(Number), b = match[1].split('.').map(Number);
++  const difference = a.map((n, i) => n - b[i]).find(n => n !== 0) ?? 0;
++  if (difference < 0) throw new Error(`Node ${version} does not satisfy ${engine}`);
++  return version;
++}
++
++export function nodePlan(version, platform, arch, sources = {}) {
++  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Node version must be x.y.z');
++  if (!['win32', 'darwin', 'linux'].includes(platform) || !['x64', 'arm64'].includes(arch)) {
++    throw new Error(`Unsupported Node target: ${platform}/${arch}`);
++  }
++  const win = platform === 'win32';
++  const asset = `node-v${version}-${win ? 'win' : platform}-${arch}.${win ? 'zip' : 'tar.gz'}`;
++  const official = `https://nodejs.org/dist/v${version}`;
++  return {
++    name: 'node', dir: 'node', asset, magic: win ? '504b' : '1f8b',
++    minBytes: 10 * 1024 * 1024, strip: 1, check: win ? 'node.exe' : 'bin/node',
++    urls: nodeUrls(version, asset, sources),
++    checksumUrl: `${official}/SHASUMS256.txt`,
++  };
++}
++
++export function checksumFor(manifest, asset) {
++  const matches = manifest.split(/\r?\n/).map(line => /^([a-fA-F0-9]{64})\s+\*?(\S+)$/.exec(line))
++    .filter(match => match?.[2] === asset);
++  if (matches.length !== 1) throw new Error(`Missing or duplicate official SHA256 for ${asset}`);
++  return matches[0][1].toLowerCase();
++}
++
++export function verifySha256(bytes, expected) {
++  if (!/^[a-f0-9]{64}$/.test(expected) || createHash('sha256').update(bytes).digest('hex') !== expected) {
++    throw new Error('Node SHA256 mismatch');
++  }
++}
++
++export function componentCurrent(have, want, name, intact) {
++  return intact && have?.platform === want.platform && have?.arch === want.arch && have?.[name] === want[name];
++}
+diff --git a/scripts/runtime/node.test.mjs b/scripts/runtime/node.test.mjs
+new file mode 100644
+index 0000000..ed201d2
+--- /dev/null
++++ b/scripts/runtime/node.test.mjs
+@@ -0,0 +1,41 @@
++// Keep the same assertions runnable by both required test commands.
++const { test } = await import(process.env.VITEST ? 'vitest' : 'node:test');
++import assert from 'node:assert/strict';
++import { createHash } from 'node:crypto';
++import { nodeVersion, nodePlan, checksumFor, verifySha256, componentCurrent } from './node.mjs';
++test('Node engine minimum and explicit versions are validated', () => {
++  assert.equal(nodeVersion('>=22.19.0'), '22.19.0');
++  assert.equal(nodeVersion('>=22.19.0', '24.1.0'), '24.1.0');
++  for (const v of ['22.18.9', '20.99.0', 'latest', '22.19.0/evil']) {
++    assert.throws(() => nodeVersion('>=22.19.0', v));
++  }
++  assert.throws(() => nodeVersion('^22'));
++});
++test('official artifacts cover six supported targets and ordered mirrors', () => {
++  for (const platform of ['win32', 'darwin', 'linux']) for (const arch of ['x64', 'arm64']) {
++    const plan = nodePlan('22.19.0', platform, arch);
++    assert.ok(plan.urls[0].startsWith('https://nodejs.org/dist/'));
++    assert.ok(plan.urls[1].includes('llmwiki.cloud'));
++    assert.ok(plan.urls.every(url => !/ghfast|ghproxy/.test(url)));
++    assert.ok(plan.asset.includes(arch));
++    assert.equal(plan.check, platform === 'win32' ? 'node.exe' : 'bin/node');
++  }
++  assert.throws(() => nodePlan('22.19.0', 'linux', 'ia32'));
++});
++test('checksum requires exact unique asset and rejects corruption and HTML', () => {
++  const data = Buffer.from('portable node fixture');
++  const hash = createHash('sha256').update(data).digest('hex');
++  assert.equal(checksumFor(`${hash}  node.zip\n`, 'node.zip'), hash);
++  verifySha256(data, hash);
++  assert.throws(() => verifySha256(Buffer.from('<html>proxy failure'), hash));
++  assert.throws(() => checksumFor(`${hash}  node.zip.old`, 'node.zip'));
++  assert.throws(() => checksumFor(`${hash}  node.zip\n${hash}  node.zip`, 'node.zip'));
++});
++test('existing binary cannot hide a version or target change', () => {
++  const want = {platform: 'win32', arch: 'x64', node: '22.19.0'};
++  assert.equal(componentCurrent(want, want, 'node', true), true);
++  for (const have of [undefined, {...want, node: '20.0.0'}, {...want, arch: 'arm64'}]) {
++    assert.equal(componentCurrent(have, want, 'node', true), false);
++  }
++  assert.equal(componentCurrent(want, want, 'node', false), false);
++});
+diff --git a/scripts/runtime/sources.mjs b/scripts/runtime/sources.mjs
+new file mode 100644
+index 0000000..d0ffc85
+--- /dev/null
++++ b/scripts/runtime/sources.mjs
+@@ -0,0 +1,23 @@
++// GitHub release proxies cannot serve nodejs.org assets.
++export const defaultDepsBase = 'https://llmwiki.cloud/downloads/deps';
++
++function baseUrl(value) {
++  if (typeof value !== 'string') throw new TypeError('Runtime source must be a URL string');
++  const url = new URL(value);
++  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
++    throw new Error('Runtime sources must use HTTPS without credentials, query or fragment');
++  }
++  return value.replace(/\/+$/, '');
++}
++
++export function nodeUrls(version, asset, { deps = defaultDepsBase, mirror } = {}) {
++  const official = `https://nodejs.org/dist/v${version}/${asset}`;
++  return [official, ...(deps === '' ? [] : [`${baseUrl(deps)}/${asset}`]),
++    ...(mirror === undefined || mirror === '' ? [] : [`${baseUrl(mirror)}/v${version}/${asset}`])];
++}
++
++export function githubUrls(repo, tag, asset, { deps = defaultDepsBase } = {}) {
++  const official = `https://github.com/${repo}/releases/download/${tag}/${asset}`;
++  return [...(deps === '' ? [] : [`${baseUrl(deps)}/${asset}`]),
++    `https://ghfast.top/${official}`, `https://ghproxy.net/${official}`, official];
++}
+diff --git a/scripts/runtime/sources.test.mjs b/scripts/runtime/sources.test.mjs
+new file mode 100644
+index 0000000..97fe84d
+--- /dev/null
++++ b/scripts/runtime/sources.test.mjs
+@@ -0,0 +1,34 @@
++const { test } = await import(process.env.VITEST ? 'vitest' : 'node:test');
++import assert from 'node:assert/strict';
++import { nodePlan } from './node.mjs';
++import { githubUrls } from './sources.mjs';
++
++test('Node uses official, flat R2 and versioned Node mirror without GitHub proxies', () => {
++  const plan = nodePlan('22.19.0', 'win32', 'x64', {
++    deps: 'https://deps.example.test/packages/', mirror: 'https://mirror.example.test/node///',
++  });
++  assert.deepEqual(plan.urls, [
++    `https://nodejs.org/dist/v22.19.0/${plan.asset}`,
++    `https://deps.example.test/packages/${plan.asset}`,
++    `https://mirror.example.test/node/v22.19.0/${plan.asset}`,
++  ]);
++  assert.equal(plan.checksumUrl, 'https://nodejs.org/dist/v22.19.0/SHASUMS256.txt');
++  assert.equal(nodePlan('22.19.0', 'linux', 'arm64', { deps: '', mirror: '' }).urls.length, 1);
++});
++
++test('runtime sources validate types and HTTPS URL bases', () => {
++  for (const value of [null, 123, {}, 'file:///tmp/node', 'http://mirror.test',
++    'https://user:password@mirror.test', 'https://mirror.test?path=', 'https://mirror.test/#node']) {
++    for (const key of ['deps', 'mirror']) {
++      assert.throws(() => nodePlan('22.19.0', 'linux', 'x64', { [key]: value }));
++    }
++  }
++  assert.throws(() => nodePlan('../escape', 'linux', 'x64'));
++});
++
++test('GitHub assets retain their own proxy fallback order', () => {
++  const official = 'https://github.com/astral-sh/uv/releases/download/v1/uv.zip';
++  assert.deepEqual(githubUrls('astral-sh/uv', 'v1', 'uv.zip', { deps: 'https://deps.test/' }), [
++    'https://deps.test/uv.zip', `https://ghfast.top/${official}`, `https://ghproxy.net/${official}`, official,
++  ]);
++});
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+index ad06dcc..01c2506 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+@@ -67,7 +67,8 @@ pub struct Agentd {
+ impl Default for Agentd {
+     fn default() -> Self {
+         Self {
+-            node: "node".into(), entry: PathBuf::new(), node_args: vec![], args: vec![],
++            node: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).0,
++            entry: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).1, node_args: vec![], args: vec![],
+             isolation: if cfg!(feature = "desktop") { "shared" } else { "per-account" }.into(),
+             max_processes: 8, idle_ms: 600_000, request_timeout_ms: 15_000,
+             turn_idle_timeout_ms: 240_000, turn_max_ms: 0, _legacy_turn_timeout: (),
+@@ -84,6 +85,23 @@ impl Default for Agentd {
+         }
+     }
+ }
++/// Deterministic resolution, shared by host loading and offline path tests.
++/// Explicit values always win, including a bare executable name such as `node`.
++pub fn runtime_paths(
++    node: Option<PathBuf>, entry: Option<PathBuf>,
++    bundled: Option<&std::path::Path>, development: Option<&std::path::Path>,
++) -> (PathBuf, PathBuf) {
++    let node = node.or_else(|| bundled.map(|root| root.join(if cfg!(windows) {
++        "node/node.exe"
++    } else { "node/bin/node" })).filter(|p| p.is_file())).unwrap_or_else(|| "node".into());
++    let entry = entry.or_else(|| bundled.map(|root| root.join("agentd/dist/src/main.js"))
++        .filter(|p| p.is_file())).or_else(|| development.map(|root| root.join("agentd/dist/src/main.js")))
++        .unwrap_or_default();
++    (node, entry)
++}
++fn development_root() -> Option<PathBuf> {
++    cfg!(debug_assertions).then(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
++}
+ fn reject_turn_timeout<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+     Err(serde::de::Error::custom(
+         "InvalidAgentConfig: agentd.turnTimeoutMs was removed; use turnIdleTimeoutMs and turnMaxMs",
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
+index 1ef3764..05f3289 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
+@@ -25,6 +25,8 @@ impl Process {
+         let mut command = Command::new(&config.node);
+         command.args(&config.node_args).arg(&config.entry).args(&config.args)
+             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
++        #[cfg(windows)]
++        crate::doctor::pi_shell::configure(command.as_std_mut(), config).map_err(anyhow::Error::msg)?;
+         if let Some(path) = crate::provider::credential_file::provider_store_path() {
+             let settings = crate::provider::pi_config::load().map_err(anyhow::Error::msg)?;
+             command.env("POLARIS_PROVIDER_STORE", &path)
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+index c52b778..9cf613a 100644
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -5,7 +5,7 @@
+   "identifier": "com.polaris.app",
+   "build": {
+     "beforeDevCommand": "npm run dev",
+-    "beforeBuildCommand": "npm run build",
++    "beforeBuildCommand": "node scripts/fetch-runtimes.mjs && npm run build",
+     "devUrl": "http://127.0.0.1:1421",
+     "frontendDist": "../dist"
+   },
+@@ -47,7 +47,8 @@
+     "targets": "all",
+     "createUpdaterArtifacts": true,
+     "resources": [
+-      "resources/seed-kb/**/*"
++      "resources/seed-kb/**/*",
++      "runtime/**/*"
+     ],
+     "icon": [
+       "icons/32x32.png",
+@@ -58,7 +59,7 @@
+     ],
+     "category": "Productivity",
+     "shortDescription": "本地优先 AI 工作台",
+-    "longDescription": "Polaris 是一个本地优先的 AI 工作台,集成 Claude Code 对话、维基知识库和 Docker 安全沙箱。",
++    "longDescription": "Polaris 是一个本地优先的 AI 工作台,集成 Pi Agent 对话、维基知识库和 Docker 安全沙箱。",
+     "windows": {
+       "webviewInstallMode": {
+         "type": "downloadBootstrapper"

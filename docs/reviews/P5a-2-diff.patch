@@ -1,0 +1,1173 @@
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/autopilot.rs b/src-tauri/crates/polaris-kernel/src/doctor/autopilot.rs
+index 3970174..8345e09 100644
+--- a/src-tauri/crates/polaris-kernel/src/doctor/autopilot.rs
++++ b/src-tauri/crates/polaris-kernel/src/doctor/autopilot.rs
+@@ -1,23 +1,6 @@
+-//! 环境静默托管 (autopilot) —— 缺什么后台自己装好, **不问用户、不用用户点**。
+-//!
+-//! 背景: 以前首启有一道「环境医生」关卡, 把「你缺 uv / 缺 PowerShell 7 / 缺 Claude Code」
+-//! 摊给用户看, 还要他自己点安装。对普通用户这是纯负担 —— 他既不知道 uv 是什么,
+-//! 也不该关心。现在:
+-//!
+-//! - **uv / Python / Git Bash** → 已随安装包内置(见 `doctor::bundled`), 本来就不用装;
+-//! - **Claude Code** → 唯一真需要联网装的东西, 由本模块在后台悄悄装好。
+-//!   **不经 `npm i -g`**(它下 80MB optional 依赖常卡死), 改成直抓平台包 tgz 解压出 claude
+-//!   到 `~/.local/bin`(R2 优先、多源回落; 见 `install::claude_install_command`)。
+-//! - **Node.js** → Claude 直装已**不再依赖它**, 但仍后台装一份(便携版, 免 UAC), 供 Claude
+-//!   写的 JS 脚本有运行时(与内置 uv 之于 Python 同理)。装不上不致命 —— 照样继续装 Claude。
+-//!
+-//! 铁律 —— **全程不弹 UAC**:
+-//! Windows 上装 Node 的老路子(winget / MSI)要写 `Program Files`, 必然 `-Verb RunAs` 弹管理员
+-//! 授权框。后台静默安装时弹一个没有上下文的 UAC 框, 用户根本不知道是谁弹的, 只会点「否」。
+-//! 故这里改用**便携版 Node**(zip 解压到 `~/.local/polaris-node`), 全程零提权。
+-//! macOS 本就走免 sudo 的 tar.gz 路径, 天然满足。
+-//!
+-//! 失败不打扰: 装不上(断网等)只在状态里记一笔, 下次启动再试; 用户仍可去侧栏「环境」页手动看。
++//! Startup diagnostics. Pi only checks the managed runtime; it never installs
++//! Node or Claude. The explicit legacy backend retains its existing unattended
++//! portable installation flow (no administrator elevation).
+ 
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::time::Duration;
+@@ -86,6 +69,11 @@ pub fn start_autopilot(app: AppHandle) {
+ }
+ 
+ fn run(app: AppHandle) {
++    if !super::pi::legacy_enabled() {
++        let report = super::pi::report();
++        finish(&app, report.ready, Vec::new(), if report.ready { "Agent 运行时已就绪" } else { "Agent 运行时未就绪，请检查诊断报告" });
++        return;
++    }
+     let report = env_check_sync();
+ 
+     // 什么都不缺 → 一声不吭 (绝大多数启动都走这条: 零噪音、零事件)
+@@ -194,6 +182,31 @@ fn install_claude_silently() -> bool {
+ mod tests {
+     use super::*;
+ 
++    /// Isolate environment overrides from the rest of the parallel test suite.
++    #[test]
++    #[cfg(not(feature = "desktop"))]
++    fn pi_autopilot_never_installs_claude() -> Result<(), Box<dyn std::error::Error>> {
++        if std::env::var_os("POLARIS_AUTOPILOT_TEST_CHILD").is_some() {
++            let (tx, _) = tokio::sync::broadcast::channel(8);
++            let app = crate::host::AppHandle::new(tx);
++            run(app.clone());
++            let state = env_autopilot_status();
++            assert!(state.finished && !state.running && state.installed.is_empty());
++            assert!(!state.ok); // deliberately missing Node, still no installation
++            assert!(env_install_claude(app.clone(), None).is_err());
++            assert!(super::super::update::env_update_claude(app).is_err());
++            assert!(!super::super::update::env_claude_update_check().checked);
++            return Ok(());
++        }
++        let output = std::process::Command::new(std::env::current_exe()?)
++            .args(["--exact", "doctor::autopilot::tests::pi_autopilot_never_installs_claude", "--nocapture"])
++            .env("POLARIS_AUTOPILOT_TEST_CHILD", "1").env("POLARIS_AGENT_BACKEND", "pi")
++            .env("POLARIS_AGENTD_NODE", "/missing-polaris-test-node")
++            .env_remove("POLARIS_AGENT_CONFIG").output()?;
++        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
++        Ok(())
++    }
++
+     /// 状态默认值必须是「没跑过」——前端据此判断要不要显示提示。
+     #[test]
+     fn default_state_is_idle() {
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/check.rs b/src-tauri/crates/polaris-kernel/src/doctor/check.rs
+index a70c0fa..4de1c79 100644
+--- a/src-tauri/crates/polaris-kernel/src/doctor/check.rs
++++ b/src-tauri/crates/polaris-kernel/src/doctor/check.rs
+@@ -27,6 +27,7 @@ pub fn env_check() -> EnvReport {
+ /// 同步核:server flavor 与本文件内部(修 PATH / 装完复检)直接调用。
+ /// 6 个工具探测互不依赖,用 scoped threads 并行跑 → 总耗时 = 最慢的单个探测。
+ pub(crate) fn env_check_sync() -> EnvReport {
++    if !super::pi::legacy_enabled() { return super::pi::report(); }
+     let os = std::env::consts::OS.to_string();
+ 
+     // 体检顺手把 uv 目录并进本进程 PATH(幂等): 用户刚在本面板装完 uv 后, 前端会立即复检一次,
+@@ -144,6 +145,7 @@ pub(crate) fn env_check_sync() -> EnvReport {
+     let ready = claude.found && shell_ready;
+ 
+     EnvReport {
++        agent_runtime: super::pi::AgentRuntimeReport { backend: "claude-cli".into(), legacy_actions: true, ..Default::default() },
+         os,
+         claude,
+         pwsh,
+@@ -164,6 +166,7 @@ pub(crate) fn env_check_sync() -> EnvReport {
+ /// 修复 PATH: 把 claude 所在目录写进用户 PATH + 当前进程 PATH。
+ #[cfg_attr(feature = "desktop", tauri::command)]
+ pub fn env_fix_path() -> Result<PathFixResult, String> {
++    super::pi::require_legacy()?;
+     let report = env_check_sync();
+     match report.claude_dir {
+         Some(d) => Ok(ensure_dir_on_path(&d)),
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/mod.rs b/src-tauri/crates/polaris-kernel/src/doctor/mod.rs
+index 9f2dc15..163a47d 100644
+--- a/src-tauri/crates/polaris-kernel/src/doctor/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/doctor/mod.rs
+@@ -1,31 +1,12 @@
+-//! 板块 ⑦ 环境医生 (Environment Doctor) — 新用户开箱的「环境监测 + 配置安装」
++//! Environment doctor: Pi runtime diagnostics by default.
+ //!
+-//! 设计目标 (PRD: 新用户点开软件应先过一道环境关):
+-//! - **监测**: Claude Code (`claude.exe`) 与 PowerShell 7 (`pwsh`) 是否就绪;
+-//!   附带 Node.js / npm (Claude Code 的可选安装路径) 的探测。
+-//! - **安装**: Claude Code 没装时一键安装 —— 默认走 **npm + 国内镜像**
+-//!   `npm i -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com`:
+-//!   该包的原生二进制经 `optionalDependencies` (`@anthropic-ai/claude-code-win32-x64`)
+-//!   同源镜像分发, postinstall 只是把它拷成 `bin/claude.exe` —— 整个安装不碰 claude.ai / GCS,
+-//!   故**国内可装**。装出的是真·原生 `claude.exe`, chat.rs 解析其全路径直接 spawn。
+-//!   官方原生脚本 `irm https://claude.ai/install.ps1 | iex` 改作兜底 (国内常被墙, 故不再首选)。
+-//!   npm 方式需要 Node.js —— 缺失时用 winget 装 Node; PowerShell 7 缺失时同样用 winget。
+-//! - **改环境变量 (关键)**: Windows 上原生安装把 `claude.exe` 落到
+-//!   `~/.local/bin`, 但该目录常不在 PATH —— 不修则装了也找不到。这里
+-//!   **双写**: ① 持久化进「用户 PATH」(注册表, `[Environment]::SetEnvironmentVariable`,
+-//!   会广播 WM_SETTINGCHANGE), 让以后开的终端/重启后的 app 都能找到;
+-//!   ② 立刻塞进**当前进程 PATH** (`std::env::set_var`), 让本次会话不重启即可
+-//!   spawn claude。安装成功后自动执行, 对应「你帮他配置一下 / 一定要记得改环境变量」。
+-//!
+-//! 跨平台: 探测两端通用 (Windows 走 where.exe / cmd, 类 Unix 走 which / 直接执行)。
+-//! 安装 Claude Code **两端默认一致走 npm+npmmirror**: 原生二进制 (win32 / darwin-arm64 /
+-//! darwin-x64 …) 经 optionalDependencies 由 npmmirror 同源镜像分发, 安装不碰 claude.ai/GCS,
+-//! 故国内 (含 macOS) 可装; 官方原生脚本 (install.ps1 / install.sh) 因从 claude.ai 拉二进制、
+-//! 国内常被墙, 仅作「境外网络」兜底。npm 方式需要 Node.js —— 缺失时:
+-//! Windows 用 winget / 官方 MSI 装, **macOS 免 sudo 下载官方 darwin tar.gz (npmmirror 镜像)**
+-//! 解压到 `~/.local/polaris-node` 并写 shell 配置。经 `build_install_shell` 选 PowerShell 或 sh。
+-//! 持久化 PATH: Windows 写注册表用户 PATH; macOS·Linux 写 `~/.zshrc` 等 shell 配置。
++//! `pi` checks Node, the daemon entry, protocol/version handshake and P4 shared
++//! credential readiness. It never installs Claude. Legacy CLI probes, installers
++//! and verification are retained behind the explicit `claude-cli` backend.
++//! Optional bundled Python/uv and platform PATH utilities remain shared.
+ 
++pub mod pi;
++pub(crate) mod pi_shell;
+ pub mod autopilot;
+ pub mod bundled;
+ pub mod check;
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/path.rs b/src-tauri/crates/polaris-kernel/src/doctor/path.rs
+index b8c5ec3..6f4a8e7 100644
+--- a/src-tauri/crates/polaris-kernel/src/doctor/path.rs
++++ b/src-tauri/crates/polaris-kernel/src/doctor/path.rs
+@@ -6,6 +6,7 @@ use std::time::Duration;
+ 
+ use super::probe::*;
+ use super::types::*;
++#[cfg(windows)]
+ use crate::runtime::procs::no_window;
+ 
+ // ───────────────────────── 用户 PATH (Windows) ─────────────────────────
+@@ -62,7 +63,7 @@ pub(crate) fn path_contains_dir(path_str: &str, dir: &str) -> bool {
+     if target.is_empty() {
+         return false;
+     }
+-    path_str.split(';').any(|p| norm(p) == target)
++    path_str.split(if cfg!(windows) { ';' } else { ':' }).any(|p| norm(p) == target)
+ }
+ 
+ /// 把 dir 前插进**当前进程 PATH** (若尚不在其中)。仅改本进程、不碰注册表; 返回是否真加了。
+@@ -397,83 +398,5 @@ pub(crate) fn prime_path_for_claude_inner() {
+ }
+ 
+ #[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    #[test]
+-    fn path_contains_dir_is_case_and_slash_insensitive() {
+-        let p = r"C:\Program Files\PowerShell\7;C:\Users\mi\.local\bin";
+-        assert!(path_contains_dir(p, r"c:\program files\powershell\7")); // 大小写不敏感
+-        assert!(path_contains_dir(p, r"C:\Users\mi\.local\bin\")); // 尾斜杠归一
+-        assert!(!path_contains_dir(p, r"C:\Program Files\nodejs"));
+-        assert!(!path_contains_dir(p, "")); // 空目标不误命中
+-    }
+-
+-    #[test]
+-    fn claude_dir_from_path_picks_parent_or_npm_prefix() {
+-        // 普通原生 exe → 取父目录
+-        let native = PathBuf::from(r"C:\Users\mi\.local\bin\claude.exe");
+-        assert_eq!(
+-            claude_dir_from_path(&native),
+-            Some(PathBuf::from(r"C:\Users\mi\.local\bin"))
+-        );
+-        // node_modules 路径 → 永不返回那个内部 bin 目录 (要么 npm 前缀, 要么至少不是 .../bin 自身的误用)
+-        let npmish = PathBuf::from(r"D:\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe");
+-        let dir = claude_dir_from_path(&npmish).expect("应解析出某个目录");
+-        assert!(
+-            !dir.ends_with("claude.exe"),
+-            "返回的应是目录而非文件: {dir:?}"
+-        );
+-    }
+-
+-    /// 所有会改进程 PATH/env 的断言放进同一个测试串行跑, 避免与其他测试并发改 env 抢同一全局态。
+-    #[test]
+-    fn prime_and_prepend_behaviour() {
+-        // prepend 幂等: 首次真加、PATH 命中、再加返回 false
+-        let marker = r"Z:\polaris-test-marker-dir-do-not-exist";
+-        let first = prepend_process_path(marker);
+-        let path_now = std::env::var("PATH").unwrap_or_default();
+-        assert!(first, "首次应真的前插");
+-        assert!(
+-            path_contains_dir(&path_now, marker),
+-            "前插后 PATH 应含该目录"
+-        );
+-        assert!(
+-            !prepend_process_path(marker),
+-            "已在 PATH 中应返回 false (幂等)"
+-        );
+-
+-        // resolve_claude_exe: 若本机装了 claude, 解析出的路径必须真实存在 (Windows 上偏好 .exe)
+-        if let Some(exe) = resolve_claude_exe() {
+-            assert!(exe.exists(), "解析出的 claude 路径应存在: {exe:?}");
+-            #[cfg(windows)]
+-            {
+-                let is_exe = exe
+-                    .extension()
+-                    .map(|e| e.eq_ignore_ascii_case("exe"))
+-                    .unwrap_or(false);
+-                // 本机同时有 .exe 与 .cmd 时, 必须挑 .exe (chat spawn 只认 .exe)
+-                let has_exe_alt = which_all("claude").iter().any(|p| {
+-                    p.extension()
+-                        .map(|e| e.eq_ignore_ascii_case("exe"))
+-                        .unwrap_or(false)
+-                });
+-                if has_exe_alt {
+-                    assert!(is_exe, "存在 .exe 候选时应优先解析为 .exe, 实得: {exe:?}");
+-                }
+-            }
+-        }
+-
+-        // 预热不应 panic; 且 (Windows) 若真身 pwsh 存在, 其目录预热后应在进程 PATH 中 → claude 能找到 shell
+-        prime_path_for_claude_inner();
+-        #[cfg(windows)]
+-        if let Some(pwsh) = pwsh_candidates().into_iter().find(|p| p.exists()) {
+-            let dir = pwsh.parent().unwrap().to_string_lossy().to_string();
+-            let path_after = std::env::var("PATH").unwrap_or_default();
+-            assert!(
+-                path_contains_dir(&path_after, &dir),
+-                "预热后真身 pwsh 目录应在进程 PATH: {dir}"
+-            );
+-        }
+-    }
+-}
++#[path = "path_tests.rs"]
++mod tests;
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/path_tests.rs b/src-tauri/crates/polaris-kernel/src/doctor/path_tests.rs
+new file mode 100644
+index 0000000..7fe6839
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/doctor/path_tests.rs
+@@ -0,0 +1,79 @@
++use super::*;
++
++    #[test]
++    #[cfg(windows)]
++    fn path_contains_dir_is_case_and_slash_insensitive() {
++        let p = r"C:\Program Files\PowerShell\7;C:\Users\mi\.local\bin";
++        assert!(path_contains_dir(p, r"c:\program files\powershell\7")); // 大小写不敏感
++        assert!(path_contains_dir(p, r"C:\Users\mi\.local\bin\")); // 尾斜杠归一
++        assert!(!path_contains_dir(p, r"C:\Program Files\nodejs"));
++        assert!(!path_contains_dir(p, "")); // 空目标不误命中
++    }
++
++    #[test]
++    fn claude_dir_from_path_picks_parent_or_npm_prefix() {
++        // 普通原生 exe → 取父目录
++        let native = PathBuf::from("C:/Users/mi/.local/bin/claude.exe");
++        assert_eq!(
++            claude_dir_from_path(&native),
++            Some(PathBuf::from("C:/Users/mi/.local/bin"))
++        );
++        // node_modules 路径 → 永不返回那个内部 bin 目录 (要么 npm 前缀, 要么至少不是 .../bin 自身的误用)
++        let npmish = PathBuf::from("D:/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe");
++        let dir = claude_dir_from_path(&npmish).expect("应解析出某个目录");
++        assert!(
++            !dir.ends_with("claude.exe"),
++            "返回的应是目录而非文件: {dir:?}"
++        );
++    }
++
++    /// 所有会改进程 PATH/env 的断言放进同一个测试串行跑, 避免与其他测试并发改 env 抢同一全局态。
++    #[test]
++    fn prime_and_prepend_behaviour() {
++        // prepend 幂等: 首次真加、PATH 命中、再加返回 false
++        let marker = if cfg!(windows) { r"Z:\polaris-test-marker-dir-do-not-exist" } else { "/polaris-test-marker-dir-do-not-exist" };
++        let first = prepend_process_path(marker);
++        let path_now = std::env::var("PATH").unwrap_or_default();
++        assert!(first, "首次应真的前插");
++        assert!(
++            path_contains_dir(&path_now, marker),
++            "前插后 PATH 应含该目录"
++        );
++        assert!(
++            !prepend_process_path(marker),
++            "已在 PATH 中应返回 false (幂等)"
++        );
++
++        // resolve_claude_exe: 若本机装了 claude, 解析出的路径必须真实存在 (Windows 上偏好 .exe)
++        if let Some(exe) = resolve_claude_exe() {
++            assert!(exe.exists(), "解析出的 claude 路径应存在: {exe:?}");
++            #[cfg(windows)]
++            {
++                let is_exe = exe
++                    .extension()
++                    .map(|e| e.eq_ignore_ascii_case("exe"))
++                    .unwrap_or(false);
++                // 本机同时有 .exe 与 .cmd 时, 必须挑 .exe (chat spawn 只认 .exe)
++                let has_exe_alt = which_all("claude").iter().any(|p| {
++                    p.extension()
++                        .map(|e| e.eq_ignore_ascii_case("exe"))
++                        .unwrap_or(false)
++                });
++                if has_exe_alt {
++                    assert!(is_exe, "存在 .exe 候选时应优先解析为 .exe, 实得: {exe:?}");
++                }
++            }
++        }
++
++        // 预热不应 panic; 且 (Windows) 若真身 pwsh 存在, 其目录预热后应在进程 PATH 中 → claude 能找到 shell
++        prime_path_for_claude_inner();
++        #[cfg(windows)]
++        if let Some(pwsh) = pwsh_candidates().into_iter().find(|p| p.exists()) {
++            let dir = pwsh.parent().unwrap().to_string_lossy().to_string();
++            let path_after = std::env::var("PATH").unwrap_or_default();
++            assert!(
++                path_contains_dir(&path_after, &dir),
++                "预热后真身 pwsh 目录应在进程 PATH: {dir}"
++            );
++        }
++    }
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/pi.rs b/src-tauri/crates/polaris-kernel/src/doctor/pi.rs
+new file mode 100644
+index 0000000..b759494
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/doctor/pi.rs
+@@ -0,0 +1,168 @@
++//! Pi diagnostics never install software or disclose credential values.
++use super::types::*;
++use crate::chat::backend::{config::{Config, Agentd}, pi::protocol::{check_ping, Ping}};
++use serde::Serialize;
++use serde_json::Value;
++use std::{process::Stdio, time::Duration};
++use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
++
++#[derive(Debug, Clone, Serialize, Default)]
++#[serde(rename_all = "camelCase")]
++pub struct AgentRuntimeReport {
++    pub backend: String,
++    pub node_ready: bool,
++    pub entry_exists: bool,
++    pub handshake: bool,
++    pub protocol_version: Option<u64>,
++    pub pi_version: Option<String>,
++    pub agentd_version: Option<String>,
++    pub credentials_configured: bool,
++    pub legacy_actions: bool,
++    pub error: Option<String>,
++}
++impl AgentRuntimeReport {
++    pub fn ready(&self) -> bool {
++        self.node_ready && self.entry_exists && self.handshake && self.credentials_configured
++    }
++}
++pub fn require_legacy() -> Result<(), String> {
++    let config = Config::load().map_err(|_| "AgentConfigInvalid".to_string())?;
++    if config.agent.backend != "claude-cli" { return Err("LegacyBackendRequired: agent.backend=claude-cli".into()); }
++    Ok(())
++}
++pub fn legacy_enabled() -> bool { require_legacy().is_ok() }
++
++pub(crate) fn credentials_ready(root: &Value) -> bool {
++    root.get("credentials").and_then(Value::as_object).is_some_and(|entries| entries.values().any(|c| {
++        let nonempty = |key| c.get(key).and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty());
++        match c.get("type").and_then(Value::as_str) {
++            Some("api_key") => nonempty("key"),
++            Some("oauth") => nonempty("access") && nonempty("refresh"),
++            _ => false,
++        }
++    }))
++}
++fn store_ready() -> bool {
++    crate::provider::credential_file::provider_store_path()
++        .and_then(|p| crate::provider::credential_file::read_root(&p).ok())
++        .is_some_and(|v| credentials_ready(&v))
++}
++pub(crate) fn node_supported(version: &str) -> bool {
++    let parse = |s: &str| -> Option<Vec<u64>> {
++        let v = s.trim().trim_start_matches('v').split('.').map(str::parse).collect::<Result<Vec<u64>, _>>().ok()?;
++        (v.len() == 3).then_some(v)
++    };
++    let manifest: Result<Value, _> = serde_json::from_str(include_str!("../../../../../agentd/package.json"));
++    let minimum = manifest.ok().and_then(|v| v["engines"]["node"].as_str().map(str::to_owned));
++    match (parse(version), minimum.as_deref().and_then(|s| s.strip_prefix(">=")).and_then(parse)) {
++        (Some(actual), Some(minimum)) => actual >= minimum,
++        _ => false,
++    }
++}
++/// Bounded handshake on a short-lived daemon: no session, model call, or credentials written.
++pub fn ping(config: &Agentd) -> Result<Ping, String> {
++    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
++        .map_err(|_| "AgentdProbeRuntimeFailed")?;
++    runtime.block_on(async {
++        let mut cmd = tokio::process::Command::new(&config.node);
++        cmd.args(&config.node_args).arg(&config.entry).args(&config.args)
++            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
++        #[cfg(windows)]
++        super::pi_shell::configure(cmd.as_std_mut(), config)?;
++        crate::runtime::procs::no_window(cmd.as_std_mut());
++        let mut child = cmd.spawn().map_err(|_| "AgentdSpawnFailed")?;
++        let result = tokio::time::timeout(Duration::from_millis(config.request_timeout_ms), async {
++            let mut input = child.stdin.take().ok_or("AgentdStdinMissing")?;
++            let output = child.stdout.take().ok_or("AgentdStdoutMissing")?;
++            input.write_all(b"{\"id\":\"doctor\",\"method\":\"ping\",\"params\":{}}\n")
++                .await.map_err(|_| "AgentdWriteFailed")?;
++            let mut reader = BufReader::new(output.take(config.max_line_bytes as u64 + 1));
++            let mut line = Vec::new();
++            reader.read_until(b'\n', &mut line).await.map_err(|_| "AgentdReadFailed")?;
++            if line.len() > config.max_line_bytes || line.last() != Some(&b'\n') { return Err("AgentdInvalidFrame"); }
++            let frame: Value = serde_json::from_slice(&line).map_err(|_| "AgentdInvalidFrame")?;
++            if frame["type"] != "response" || frame["id"] != "doctor" || frame["ok"] != true { return Err("AgentdPingFailed"); }
++            check_ping(frame["result"].clone()).map_err(|_| "AgentdProtocolOrVersionMismatch")
++        }).await;
++        let _ = child.start_kill();
++        let _ = tokio::time::timeout(Duration::from_millis(config.shutdown_timeout_ms), child.wait()).await;
++        match result { Ok(r) => r.map_err(str::to_owned), Err(_) => Err("AgentdPingTimeout".into()) }
++    })
++}
++fn absent(key: &str) -> ToolStatus {
++    ToolStatus { key: key.into(), name: key.into(), found: false, version: None, path: None,
++        on_path: false, required: false, hint: "非当前后端必需组件".into(), bundled: false }
++}
++pub(crate) fn inspect(config: &Agentd, credentials: bool) -> (ToolStatus, AgentRuntimeReport) {
++    let mut runtime = AgentRuntimeReport { backend: "pi".into(), ..Default::default() };
++    let mut node = absent("node");
++    node.required = true;
++    let version = super::probe::probe_version_at(&config.node, &["--version"]);
++    runtime.node_ready = version.as_deref().is_some_and(node_supported);
++    node.found = runtime.node_ready;
++    node.version = version;
++    node.path = Some(config.node.to_string_lossy().into());
++    node.bundled = super::bundled::is_bundled(&config.node);
++    node.hint = if node.found { "Node 已就绪" } else { "Node 缺失、不可执行或版本过低" }.into();
++    runtime.entry_exists = config.entry.is_file();
++    runtime.credentials_configured = credentials;
++    if runtime.node_ready && runtime.entry_exists {
++        match ping(config) {
++            Ok(ping) => {
++                let manifest: Option<Value> = serde_json::from_str(include_str!("../../../../../agentd/package.json")).ok();
++                runtime.handshake = manifest.as_ref().and_then(|v| v["dependencies"]["@earendil-works/pi-coding-agent"].as_str())
++                    == Some(ping.pi_version.as_str());
++                if !runtime.handshake { runtime.error = Some("AgentdPiVersionMismatch".into()); }
++                runtime.protocol_version = Some(ping.protocol_version);
++                runtime.pi_version = Some(ping.pi_version);
++                runtime.agentd_version = Some(ping.version);
++            }
++            Err(error) => runtime.error = Some(error),
++        }
++    } else { runtime.error = Some("AgentRuntimeMissing".into()); }
++    (node, runtime)
++}
++pub fn report() -> EnvReport {
++    let mut runtime = AgentRuntimeReport { backend: "pi".into(), ..Default::default() };
++    let mut node = absent("node");
++    node.required = true;
++    let mut shell = None;
++    match Config::load() {
++        Err(_) => runtime.error = Some("AgentConfigInvalid".into()),
++        Ok(config) => {
++            (node, runtime) = inspect(&config.agentd, store_ready());
++            match super::pi_shell::resolve(&config.agentd) {
++                Ok(found) => shell = found,
++                Err(error) => runtime.error = Some(error),
++            }
++        }
++    }
++    let shell_ready = shell.is_some();
++    let shell_bundled = shell.as_deref().is_some_and(super::bundled::is_bundled);
++    if !shell_ready && runtime.error.is_none() { runtime.error = Some("AgentShellMissing".into()); }
++    let ready = runtime.ready() && shell_ready;
++    let uv = super::probe::detect("uv", "uv", "uv", &["--version"], &super::probe::uv_candidates(), false, "可选组件未配置");
++    let python = super::probe::detect("python", "Python", "python", &["--version"], &super::probe::python_candidates(), false, "可选组件未配置");
++    EnvReport { os: std::env::consts::OS.into(), claude: absent("claude"), pwsh: absent("pwsh"), node,
++        npm: absent("npm"), uv, python, claude_dir: None,
++        claude_dir_on_user_path: true, shell_ready, shell_bundled, ready,
++        image_managed: !cfg!(feature = "desktop"), agent_runtime: runtime }
++}
++pub fn verify() -> VerifyReport {
++    let report = report();
++    let r = &report.agent_runtime;
++    let steps = [("node", r.node_ready), ("agentd-entry", r.entry_exists), ("ping", r.handshake),
++        ("credentials", r.credentials_configured), ("shell", report.shell_ready)].into_iter().map(|(key, ok)| VerifyStep {
++            key: key.into(), name: key.into(), status: if ok { "ok" } else { "fail" }.into(),
++            detail: if key == "shell" {
++                if !ok { "未找到 shell；请配置 shellPath、安装 Git Bash 或将 bash 加入 PATH" }
++                else if report.shell_bundled { "使用随包 MinGit Bash" }
++                else { "使用显式配置或系统 shell（Windows：Program Files Git Bash → PATH）" }
++            } else if ok { "已配置" } else { "未配置" }.into(), command: None, output: None, ms: 0,
++        }).collect();
++    VerifyReport { os: report.os, ok: report.ready, app_runnable: r.handshake, terminal_runnable: r.node_ready,
++        deep: false, steps, conflicts: vec![], summary: if report.ready { "Agent 运行时已就绪" } else { "Agent 运行时未就绪" }.into() }
++}
++#[cfg(test)]
++#[path = "pi_tests.rs"]
++mod tests;
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/pi_shell.rs b/src-tauri/crates/polaris-kernel/src/doctor/pi_shell.rs
+new file mode 100644
+index 0000000..caebfa1
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/doctor/pi_shell.rs
+@@ -0,0 +1,81 @@
++//! Pi shell selection shared by spawning and doctor. No process-global PATH writes.
++use crate::chat::backend::config::Agentd;
++use std::path::{Path, PathBuf};
++
++fn configured_shell(config: &Agentd) -> Result<Option<PathBuf>, String> {
++    let file = if config.args.first().is_some_and(|s| s == "--config") {
++        config.args.get(1).map(PathBuf::from)
++    } else {
++        std::env::var_os("POLARIS_AGENTD_CONFIG").map(PathBuf::from)
++    };
++    let explicit = if let Some(file) = file {
++        let bytes = std::fs::read(file).map_err(|_| "AgentdConfigUnreadable")?;
++        let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "AgentdConfigInvalid")?;
++        match json.get("shellPath") {
++            None | Some(serde_json::Value::Null) => None,
++            Some(serde_json::Value::String(s)) => (!s.is_empty()).then(|| s.clone()),
++            _ => return Err("AgentdShellPathInvalid".into()),
++        }
++    } else { None };
++    let value = explicit.or_else(|| std::env::var("POLARIS_AGENTD_SHELL_PATH").ok().filter(|s| !s.is_empty()));
++    value.map(|value| {
++        if value == "~" || value.starts_with("~/") || value.starts_with("~\\") {
++            super::probe::home_dir().map(|home| home.join(value.get(2..).map_or("", |s| s)))
++                .ok_or_else(|| "AgentdShellHomeMissing".into())
++        } else { Ok(PathBuf::from(value)) }
++    }).transpose()
++}
++
++#[cfg(any(windows, test))]
++fn windows_shell(
++    bundled: Option<PathBuf>, program_files: impl IntoIterator<Item = PathBuf>,
++    on_path: impl FnOnce() -> Option<PathBuf>,
++) -> Option<PathBuf> {
++    bundled.or_else(|| program_files.into_iter().map(|p| p.join("Git/bin/bash.exe"))
++        .find(|p| p.is_file())).or_else(|| on_path().filter(|p| p.is_file()))
++}
++
++pub(crate) fn resolve(config: &Agentd) -> Result<Option<PathBuf>, String> {
++    if let Some(explicit) = configured_shell(config)? {
++        // Pi rejects an invalid explicit shell instead of silently falling back.
++        return Ok(explicit.is_file().then_some(explicit));
++    }
++    #[cfg(windows)]
++    { Ok(windows_shell(super::bundled::git_bash(),
++        ["ProgramFiles", "ProgramFiles(x86)"].into_iter().filter_map(std::env::var_os).map(PathBuf::from),
++        || super::probe::which_all("bash.exe").into_iter().next())) }
++    #[cfg(not(windows))]
++    { Ok(if Path::new("/bin/bash").is_file() { Some("/bin/bash".into()) }
++        else { super::probe::which_all("bash").into_iter().next()
++            .or_else(|| super::probe::which_all("sh").into_iter().next()) }) }
++}
++
++#[cfg(any(windows, test))]
++fn apply_environment(
++    command: &mut std::process::Command, shell: &Path, prefix: Vec<PathBuf>,
++    current_path: Option<std::ffi::OsString>,
++) -> Result<(), String> {
++    command.env("POLARIS_AGENTD_SHELL_PATH", shell);
++    if !prefix.is_empty() {
++        let mut paths = prefix.clone();
++        if let Some(current) = current_path {
++            paths.extend(std::env::split_paths(&current).filter(|p| !prefix.contains(p)));
++        }
++        let path = std::env::join_paths(paths).map_err(|_| "AgentdShellPathJoinFailed")?;
++        command.env("PATH", path);
++    }
++    Ok(())
++}
++
++#[cfg(windows)]
++pub(crate) fn configure(command: &mut std::process::Command, config: &Agentd) -> Result<(), String> {
++    if let Some(shell) = resolve(config)? {
++        let bundled = super::bundled::git_bash().as_deref() == Some(shell.as_path());
++        apply_environment(command, &shell, super::bundled::child_path_prefix(bundled), std::env::var_os("PATH"))?;
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++#[path = "pi_shell_tests.rs"]
++mod tests;
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/pi_shell_tests.rs b/src-tauri/crates/polaris-kernel/src/doctor/pi_shell_tests.rs
+new file mode 100644
+index 0000000..5783132
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/doctor/pi_shell_tests.rs
+@@ -0,0 +1,70 @@
++use super::*;
++
++#[test]
++fn windows_resolution_bundle_system_git_and_missing() -> Result<(), Box<dyn std::error::Error>> {
++    let root = std::env::temp_dir().join(format!("polaris-pi-shell-{}", std::process::id()));
++    let bundle = root.join("runtime");
++    let bash = bundle.join("git/usr/bin/bash.exe");
++    let pf = root.join("Program Files");
++    let x86 = root.join("Program Files (x86)");
++    let git = pf.join("Git/bin/bash.exe");
++    let git_x86 = x86.join("Git/bin/bash.exe");
++    for path in [&bash, &git, &git_x86] {
++        std::fs::create_dir_all(path.parent().ok_or("missing parent")?)?;
++        std::fs::write(path, "fixture")?;
++    }
++    let choose = || windows_shell(super::super::bundled::git_bash_at(&bundle),
++        [pf.clone(), x86.clone()], || None);
++    assert_eq!(choose(), Some(bash.clone()));
++    std::fs::remove_file(&bash)?;
++    assert_eq!(choose(), Some(git.clone()));
++    std::fs::remove_file(&git)?;
++    assert_eq!(choose(), Some(git_x86.clone()));
++    std::fs::remove_file(&git_x86)?;
++    assert_eq!(choose(), None);
++    let path_bash = root.join("PATH/bash.exe");
++    assert_eq!(windows_shell(None, [pf.clone()], || Some(path_bash.clone())), None);
++    std::fs::create_dir_all(path_bash.parent().ok_or("missing PATH parent")?)?;
++    std::fs::write(&path_bash, "fixture")?;
++    assert_eq!(windows_shell(None, [pf], || Some(path_bash.clone())), Some(path_bash));
++    std::fs::remove_dir_all(root)?;
++    Ok(())
++}
++
++#[test]
++fn child_environment_precedes_system_path_without_changing_parent() -> Result<(), Box<dyn std::error::Error>> {
++    let root = std::env::temp_dir();
++    let unix = root.join("Min Git/usr/bin");
++    let mingw = root.join("Min Git/mingw64/bin");
++    let system = root.join("Windows/System32");
++    let bash = unix.join("bash.exe");
++    let parent = std::env::var_os("PATH");
++    let current = std::env::join_paths([&system, &unix])?;
++    let mut command = std::process::Command::new("node");
++    apply_environment(&mut command, &bash, vec![unix.clone(), mingw.clone()], Some(current))?;
++    let env: std::collections::HashMap<_, _> = command.get_envs().collect();
++    assert_eq!(env.get(std::ffi::OsStr::new("POLARIS_AGENTD_SHELL_PATH")), Some(&Some(bash.as_os_str())));
++    let path = env.get(std::ffi::OsStr::new("PATH")).copied().flatten().ok_or("missing PATH")?;
++    assert_eq!(std::env::split_paths(path).collect::<Vec<_>>(), vec![unix, mingw, system]);
++    assert_eq!(std::env::var_os("PATH"), parent);
++    Ok(())
++}
++
++#[test]
++fn explicit_config_matches_doctor_and_invalid_path_does_not_fall_back() -> Result<(), Box<dyn std::error::Error>> {
++    let root = std::env::temp_dir().join(format!("polaris-shell-config-{}", std::process::id()));
++    std::fs::create_dir_all(&root)?;
++    let config_file = root.join("agentd.json");
++    let shell = root.join("custom-bash");
++    std::fs::write(&shell, "fixture")?;
++    let mut config = Agentd::default();
++    config.args = vec!["--config".into(), config_file.to_string_lossy().into_owned()];
++    std::fs::write(&config_file, serde_json::to_vec(&serde_json::json!({"shellPath":shell}))?)?;
++    assert_eq!(resolve(&config)?, Some(shell.clone()));
++    std::fs::remove_file(shell)?;
++    assert_eq!(resolve(&config)?, None);
++    std::fs::write(&config_file, r#"{"shellPath":42}"#)?;
++    assert_eq!(resolve(&config).err().as_deref(), Some("AgentdShellPathInvalid"));
++    std::fs::remove_dir_all(root)?;
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/pi_tests.rs b/src-tauri/crates/polaris-kernel/src/doctor/pi_tests.rs
+new file mode 100644
+index 0000000..6e49a8a
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/doctor/pi_tests.rs
+@@ -0,0 +1,83 @@
++use super::*;
++#[test]
++fn credential_report_is_boolean_and_rejects_incomplete_entries() {
++    for credential in [serde_json::json!({"type":"api_key","key":"private-key"}),
++        serde_json::json!({"type":"oauth","access":"private-token","refresh":"private-refresh"})] {
++        assert!(credentials_ready(&serde_json::json!({"credentials":{"p":credential}})));
++    }
++    for credential in [serde_json::json!({"type":"api_key","key":""}), serde_json::json!({"type":"oauth","access":"a"})] {
++        assert!(!credentials_ready(&serde_json::json!({"credentials":{"p":credential}})));
++    }
++    assert!(!credentials_ready(&serde_json::json!({})));
++}
++#[test]
++fn readiness_requires_every_runtime_component() {
++    let ready = AgentRuntimeReport { node_ready: true, entry_exists: true, handshake: true,
++        credentials_configured: true, ..Default::default() };
++    assert!(ready.ready());
++    for i in 0..4 {
++        let mut r = ready.clone();
++        match i { 0 => r.node_ready = false, 1 => r.entry_exists = false,
++            2 => r.handshake = false, _ => r.credentials_configured = false }
++        assert!(!r.ready());
++    }
++    assert!(node_supported("v22.19.0"));
++    assert!(!node_supported("v22.18.9"));
++    assert!(!node_supported("not-node"));
++}
++#[test]
++fn ping_handles_success_mismatch_failure_and_timeout() -> Result<(), Box<dyn std::error::Error>> {
++    let dir = std::env::temp_dir().join(format!("polaris-doctor-ping-{}", std::process::id()));
++    std::fs::create_dir_all(&dir)?;
++    let mut config = Agentd::default();
++    config.node = "node".into();
++    config.entry = dir.join("probe.mjs");
++    config.request_timeout_ms = 1000;
++    let result = serde_json::json!({"status":"ok","sessions":0,"version":"fixture", "piVersion":"1.0.4",
++        "protocolVersion":crate::chat::backend::pi::protocol::PROTOCOL_VERSION,"usagePersistFailures":0});
++    for valid in [true, false] {
++        let mut result = result.clone();
++        if !valid { result["protocolVersion"] = 0.into(); }
++        let frame = serde_json::json!({"type":"response","id":"doctor","ok":true,"result":result});
++        std::fs::write(&config.entry, format!("process.stdin.once('data', () => console.log({:?}));", frame.to_string()))?;
++        assert_eq!(ping(&config).is_ok(), valid);
++        let (_, report) = inspect(&config, true);
++        assert_eq!(report.ready(), valid);
++        assert_eq!(report.credentials_configured, true);
++        assert!(!inspect(&config, false).1.ready());
++        let public = serde_json::to_string(&report)?;
++        assert!(!public.contains("private-token"));
++    }
++    let mut wrong_pi = result.clone();
++    wrong_pi["piVersion"] = "999.0.0".into();
++    let frame = serde_json::json!({"type":"response","id":"doctor","ok":true,"result":wrong_pi});
++    std::fs::write(&config.entry, format!("process.stdin.once('data', () => console.log({:?}));", frame.to_string()))?;
++    assert_eq!(inspect(&config, true).1.error.as_deref(), Some("AgentdPiVersionMismatch"));
++    std::fs::write(&config.entry, "setInterval(() => {}, 1000)")?;
++    config.request_timeout_ms = 100;
++    assert_eq!(ping(&config).err().as_deref(), Some("AgentdPingTimeout"));
++    config.entry = dir.join("missing-entry.mjs");
++    assert!(!inspect(&config, true).1.entry_exists);
++    config.node = dir.join("absent-node");
++    assert!(!inspect(&config, true).1.node_ready);
++    assert_eq!(ping(&config).err().as_deref(), Some("AgentdSpawnFailed"));
++    std::fs::remove_dir_all(dir)?;
++    Ok(())
++}
++#[test]
++fn runtime_paths_support_bundle_development_and_explicit() -> Result<(), Box<dyn std::error::Error>> {
++    use crate::chat::backend::config::runtime_paths;
++    let root = std::env::temp_dir().join(format!("polaris-path-{}", std::process::id()));
++    let node = root.join(if cfg!(windows) { "node/node.exe" } else { "node/bin/node" });
++    let entry = root.join("agentd/dist/src/main.js");
++    std::fs::create_dir_all(node.parent().ok_or("node parent")?)?;
++    std::fs::create_dir_all(entry.parent().ok_or("entry parent")?)?;
++    std::fs::write(&node, "")?;
++    std::fs::write(&entry, "")?;
++    assert_eq!(runtime_paths(None, None, Some(&root), None), (node.clone(), entry));
++    assert_eq!(runtime_paths(None, None, None, Some(&root)), ("node".into(), root.join("agentd/dist/src/main.js")));
++    assert_eq!(runtime_paths(Some("custom-node".into()), Some("custom-entry".into()), Some(&root), Some(&root)),
++        ("custom-node".into(), "custom-entry".into()));
++    std::fs::remove_dir_all(root)?;
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/types.rs b/src-tauri/crates/polaris-kernel/src/doctor/types.rs
+index 4f4714f..deb7ffc 100644
+--- a/src-tauri/crates/polaris-kernel/src/doctor/types.rs
++++ b/src-tauri/crates/polaris-kernel/src/doctor/types.rs
+@@ -19,7 +19,7 @@ pub struct ToolStatus {
+     pub path: Option<String>,
+     /// 是否能通过 PATH 直接发现 (即终端里敲命令能用)
+     pub on_path: bool,
+-    /// 是否是「必须」(claude 必须; 其余推荐)
++    /// 是否是当前后端必需组件（Pi 为 Node；旧后端为 Claude）
+     pub required: bool,
+     /// 一句话状态说明 / 安装建议
+     pub hint: String,
+@@ -31,6 +31,7 @@ pub struct ToolStatus {
+ #[derive(Debug, Clone, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct EnvReport {
++    pub agent_runtime: super::pi::AgentRuntimeReport,
+     /// "windows" | "macos" | "linux" ...
+     pub os: String,
+     pub claude: ToolStatus,
+@@ -51,7 +52,7 @@ pub struct EnvReport {
+     pub shell_ready: bool,
+     /// 当前这个 shell 是不是随应用内置的 Git Bash。true ⇒ 面板据此说明「无需另装 PowerShell 7」。
+     pub shell_bundled: bool,
+-    /// 整体是否就绪 (claude 已装 **且** 有可用 shell 才算真能跑起来)
++    /// 整体是否就绪；Pi 要求 Node/入口/握手/凭据及 shell 全部通过
+     pub ready: bool,
+     /// **运行环境由镜像托管** (server/容器 flavor) —— claude 等组件随镜像预烤, 升级靠
+     /// `docker pull` 换镜像, 而非在面板里点安装/更新。
+diff --git a/src-tauri/src/apihub/server_status.rs b/src-tauri/src/apihub/server_status.rs
+new file mode 100644
+index 0000000..bc69546
+--- /dev/null
++++ b/src-tauri/src/apihub/server_status.rs
+@@ -0,0 +1,161 @@
++use super::*;
++
++// ───────────────────────── /api/status 运维水位(R7)─────────────────────────
++//
++// 给群晖运维/监控用的水位接口: 容器内存(贴近 mem_limit/OOM 风险)、宿主内存、数据盘用量
++// (防写满)、claude 配置在位、推理端点(R3)状态。全部 best-effort: 读不到的项返回
++// available:false 而非报错, 非 Linux 环境(开发机)也能编译运行。详细状态会暴露端点和
++// 宿主资源信息，因此仅 owner 可读；结果短时缓存且单航班采集，避免并发耗尽阻塞线程池。
++
++static STATUS_CACHE: Lazy<tokio::sync::Mutex<Option<(Instant, Value)>>> =
++    Lazy::new(|| tokio::sync::Mutex::new(None));
++
++pub(super) async fn status(
++    State(state): State<AppState>,
++    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
++    headers: HeaderMap,
++) -> Response {
++    // 鉴权复用 apihub 的基础面解析(与 /api/invoke 同语义);role_rank 在 collab::http。
++    let gate = crate::apihub::server_origin_gate(state.open_no_auth, peer.map(|c| c.0), &headers);
++    let Some(ctx) = crate::apihub::app_ctx_headers(&state.auth_token, &headers, gate) else {
++        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"未授权"}))).into_response();
++    };
++    if crate::collab::http::role_rank(&ctx.role) < 3 {
++        return (
++            StatusCode::FORBIDDEN,
++            Json(json!({"error":"状态详情仅主机管理员可读"})),
++        )
++            .into_response();
++    }
++    // 口令可能来自环境变量,也可能是用户在首次访问向导里自己设的 —— 运维水位要如实反映。
++    let auth_set = crate::apihub::effective_token(&state.auth_token).is_some();
++    let init_errors = state.readiness.init_errors.clone();
++    let mut cache = STATUS_CACHE.lock().await;
++    if let Some((at, value)) = cache.as_ref() {
++        if at.elapsed() < Duration::from_secs(15) {
++            return Json(value.clone()).into_response();
++        }
++    }
++    // 含 df 子进程 + 推理端点探测(阻塞/网络), 丢到阻塞线程池, 勿卡 async worker。
++    let v = tokio::task::spawn_blocking(move || collect_status(auth_set, init_errors))
++        .await
++        .unwrap_or_else(|_| json!({ "ok": false, "error": "status 采集失败" }));
++    *cache = Some((Instant::now(), v.clone()));
++    Json(v).into_response()
++}
++
++fn collect_status(auth_set: bool, init_errors: Vec<String>) -> Value {
++    let data_root = directories::UserDirs::new()
++        .map(|u| u.home_dir().join("Polaris"))
++        .unwrap_or_else(|| PathBuf::from("/root/Polaris"));
++    json!({
++        "ok": true,
++        "service": "polaris-server",
++        "auth_token_set": auth_set,
++        "startup": {
++            "ready": init_errors.is_empty(),
++            "errors": init_errors,
++        },
++        "chat_timeout_secs": std::env::var("POLARIS_CHAT_TIMEOUT_SECS")
++            .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0),
++        "container_memory": cgroup_mem(),
++        "host_memory": meminfo_mem(),
++        "data_disk": disk_usage(&data_root),
++        "agent_runtime": crate::chat::backend::agent_backend_status().map_or_else(
++            |_| json!({"healthy":false,"error":"AgentConfigInvalid"}),
++            |status| json!(status)),
++        "infer": crate::infer::status_json(),
++        "forge": crate::forge::forge_preflight(),
++    })
++}
++
++fn pct(used: u64, total: u64) -> Option<f64> {
++    if total == 0 {
++        None
++    } else {
++        Some(((used as f64 / total as f64) * 1000.0).round() / 10.0)
++    }
++}
++
++/// cgroup v2 容器内存(比宿主内存更贴近 mem_limit / OOM 风险)。
++fn cgroup_mem() -> Value {
++    let used = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
++        .ok()
++        .and_then(|s| s.trim().parse::<u64>().ok());
++    // memory.max 为 "max" 表示未设上限 → parse 失败即视为无上限。
++    let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
++        .ok()
++        .and_then(|s| s.trim().parse::<u64>().ok());
++    match (used, limit) {
++        (Some(u), Some(l)) => json!({ "used_bytes": u, "limit_bytes": l, "used_pct": pct(u, l) }),
++        (Some(u), None) => json!({
++            "used_bytes": u, "limit_bytes": null, "used_pct": null,
++            "note": "未设容器内存上限(memory.max=max)，建议设 mem_limit 防泄漏拖垮整机"
++        }),
++        _ => json!({ "available": false, "note": "非 cgroup v2 环境或无权读取" }),
++    }
++}
++
++/// 宿主可用内存(/proc/meminfo)。
++fn meminfo_mem() -> Value {
++    let Ok(txt) = std::fs::read_to_string("/proc/meminfo") else {
++        return json!({ "available": false });
++    };
++    let kb_to_bytes = |line: &str, key: &str| -> Option<u64> {
++        line.strip_prefix(key)
++            .and_then(|r| r.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
++            .map(|k| k * 1024)
++    };
++    let mut total = None;
++    let mut avail = None;
++    for line in txt.lines() {
++        if total.is_none() {
++            if let Some(b) = kb_to_bytes(line, "MemTotal:") {
++                total = Some(b);
++            }
++        }
++        if avail.is_none() {
++            if let Some(b) = kb_to_bytes(line, "MemAvailable:") {
++                avail = Some(b);
++            }
++        }
++    }
++    match (total, avail) {
++        (Some(t), Some(a)) => json!({
++            "total_bytes": t, "available_bytes": a, "used_pct": pct(t.saturating_sub(a), t)
++        }),
++        _ => json!({ "available": false }),
++    }
++}
++
++/// 数据盘用量(df -kP <path>)。防「容器写满 /volume1 卷拖垮 DSM」的水位来源。
++fn disk_usage(path: &Path) -> Value {
++    let Ok(out) = std::process::Command::new("df")
++        .arg("-kP")
++        .arg(path)
++        .output()
++    else {
++        return json!({ "available": false, "note": "df 不可用" });
++    };
++    if !out.status.success() {
++        return json!({ "available": false });
++    }
++    let txt = String::from_utf8_lossy(&out.stdout);
++    if let Some(line) = txt.lines().nth(1) {
++        let f: Vec<&str> = line.split_whitespace().collect();
++        if f.len() >= 4 {
++            let total = f[1].parse::<u64>().ok().map(|k| k * 1024);
++            let used = f[2].parse::<u64>().ok().map(|k| k * 1024);
++            let avail = f[3].parse::<u64>().ok().map(|k| k * 1024);
++            if let (Some(t), Some(u), Some(a)) = (total, used, avail) {
++                return json!({
++                    "path": path.to_string_lossy(),
++                    "total_bytes": t, "used_bytes": u, "available_bytes": a,
++                    "used_pct": pct(u, t)
++                });
++            }
++        }
++    }
++    json!({ "available": false })
++}
++
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 0353aab..7f4fb0b 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -131,6 +131,12 @@ pub fn run() {
+         .plugin(tauri_plugin_updater::Builder::new().build())
+         .plugin(tauri_plugin_process::init())
+         .setup(|app| {
++            // Tauri resolves platform-specific resource layouts (including Linux bundles).
++            if std::env::var_os("POLARIS_RUNTIME_DIR").is_none() {
++                if let Ok(resources) = app.path().resource_dir() {
++                    std::env::set_var("POLARIS_RUNTIME_DIR", resources.join("runtime"));
++                }
++            }
+             // 全局 panic 钩子(24/7 长稳第一道):任何后台线程(盘点/索引/做梦/热键/采集等)
+             // panic 时,不再被默默吞掉成「死掉的子系统」,而是 eprintln + best-effort 追加到
+             // 临时目录下的 polaris-panics.log(留耐久记录便于事后复盘)。链上一手以保留默认行为,
+diff --git a/src-tauri/src/server.rs b/src-tauri/src/server.rs
+index e26c5fa..8a15e78 100644
+--- a/src-tauri/src/server.rs
++++ b/src-tauri/src/server.rs
+@@ -311,187 +311,9 @@ async fn shutdown_signal() {
+     }
+ }
+ 
+-// ───────────────────────── /api/status 运维水位(R7)─────────────────────────
+-//
+-// 给群晖运维/监控用的水位接口: 容器内存(贴近 mem_limit/OOM 风险)、宿主内存、数据盘用量
+-// (防写满)、claude 配置在位、推理端点(R3)状态。全部 best-effort: 读不到的项返回
+-// available:false 而非报错, 非 Linux 环境(开发机)也能编译运行。详细状态会暴露端点和
+-// 宿主资源信息，因此仅 owner 可读；结果短时缓存且单航班采集，避免并发耗尽阻塞线程池。
+-
+-static STATUS_CACHE: Lazy<tokio::sync::Mutex<Option<(Instant, Value)>>> =
+-    Lazy::new(|| tokio::sync::Mutex::new(None));
+-
+-async fn status(
+-    State(state): State<AppState>,
+-    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+-    headers: HeaderMap,
+-) -> Response {
+-    // 鉴权复用 apihub 的基础面解析(与 /api/invoke 同语义);role_rank 在 collab::http。
+-    let gate = crate::apihub::server_origin_gate(state.open_no_auth, peer.map(|c| c.0), &headers);
+-    let Some(ctx) = crate::apihub::app_ctx_headers(&state.auth_token, &headers, gate) else {
+-        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"未授权"}))).into_response();
+-    };
+-    if crate::collab::http::role_rank(&ctx.role) < 3 {
+-        return (
+-            StatusCode::FORBIDDEN,
+-            Json(json!({"error":"状态详情仅主机管理员可读"})),
+-        )
+-            .into_response();
+-    }
+-    // 口令可能来自环境变量,也可能是用户在首次访问向导里自己设的 —— 运维水位要如实反映。
+-    let auth_set = crate::apihub::effective_token(&state.auth_token).is_some();
+-    let init_errors = state.readiness.init_errors.clone();
+-    let mut cache = STATUS_CACHE.lock().await;
+-    if let Some((at, value)) = cache.as_ref() {
+-        if at.elapsed() < Duration::from_secs(15) {
+-            return Json(value.clone()).into_response();
+-        }
+-    }
+-    // 含 df 子进程 + 推理端点探测(阻塞/网络), 丢到阻塞线程池, 勿卡 async worker。
+-    let v = tokio::task::spawn_blocking(move || collect_status(auth_set, init_errors))
+-        .await
+-        .unwrap_or_else(|_| json!({ "ok": false, "error": "status 采集失败" }));
+-    *cache = Some((Instant::now(), v.clone()));
+-    Json(v).into_response()
+-}
+-
+-fn collect_status(auth_set: bool, init_errors: Vec<String>) -> Value {
+-    let data_root = directories::UserDirs::new()
+-        .map(|u| u.home_dir().join("Polaris"))
+-        .unwrap_or_else(|| PathBuf::from("/root/Polaris"));
+-    json!({
+-        "ok": true,
+-        "service": "polaris-server",
+-        "auth_token_set": auth_set,
+-        "startup": {
+-            "ready": init_errors.is_empty(),
+-            "errors": init_errors,
+-        },
+-        "chat_timeout_secs": std::env::var("POLARIS_CHAT_TIMEOUT_SECS")
+-            .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0),
+-        "container_memory": cgroup_mem(),
+-        "host_memory": meminfo_mem(),
+-        "data_disk": disk_usage(&data_root),
+-        "claude_config": claude_config_status(),
+-        "infer": crate::infer::status_json(),
+-        "forge": crate::forge::forge_preflight(),
+-    })
+-}
+-
+-fn pct(used: u64, total: u64) -> Option<f64> {
+-    if total == 0 {
+-        None
+-    } else {
+-        Some(((used as f64 / total as f64) * 1000.0).round() / 10.0)
+-    }
+-}
+-
+-/// cgroup v2 容器内存(比宿主内存更贴近 mem_limit / OOM 风险)。
+-fn cgroup_mem() -> Value {
+-    let used = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
+-        .ok()
+-        .and_then(|s| s.trim().parse::<u64>().ok());
+-    // memory.max 为 "max" 表示未设上限 → parse 失败即视为无上限。
+-    let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+-        .ok()
+-        .and_then(|s| s.trim().parse::<u64>().ok());
+-    match (used, limit) {
+-        (Some(u), Some(l)) => json!({ "used_bytes": u, "limit_bytes": l, "used_pct": pct(u, l) }),
+-        (Some(u), None) => json!({
+-            "used_bytes": u, "limit_bytes": null, "used_pct": null,
+-            "note": "未设容器内存上限(memory.max=max)，建议设 mem_limit 防泄漏拖垮整机"
+-        }),
+-        _ => json!({ "available": false, "note": "非 cgroup v2 环境或无权读取" }),
+-    }
+-}
+-
+-/// 宿主可用内存(/proc/meminfo)。
+-fn meminfo_mem() -> Value {
+-    let Ok(txt) = std::fs::read_to_string("/proc/meminfo") else {
+-        return json!({ "available": false });
+-    };
+-    let kb_to_bytes = |line: &str, key: &str| -> Option<u64> {
+-        line.strip_prefix(key)
+-            .and_then(|r| r.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+-            .map(|k| k * 1024)
+-    };
+-    let mut total = None;
+-    let mut avail = None;
+-    for line in txt.lines() {
+-        if total.is_none() {
+-            if let Some(b) = kb_to_bytes(line, "MemTotal:") {
+-                total = Some(b);
+-            }
+-        }
+-        if avail.is_none() {
+-            if let Some(b) = kb_to_bytes(line, "MemAvailable:") {
+-                avail = Some(b);
+-            }
+-        }
+-    }
+-    match (total, avail) {
+-        (Some(t), Some(a)) => json!({
+-            "total_bytes": t, "available_bytes": a, "used_pct": pct(t.saturating_sub(a), t)
+-        }),
+-        _ => json!({ "available": false }),
+-    }
+-}
+-
+-/// 数据盘用量(df -kP <path>)。防「容器写满 /volume1 卷拖垮 DSM」的水位来源。
+-fn disk_usage(path: &Path) -> Value {
+-    let Ok(out) = std::process::Command::new("df")
+-        .arg("-kP")
+-        .arg(path)
+-        .output()
+-    else {
+-        return json!({ "available": false, "note": "df 不可用" });
+-    };
+-    if !out.status.success() {
+-        return json!({ "available": false });
+-    }
+-    let txt = String::from_utf8_lossy(&out.stdout);
+-    if let Some(line) = txt.lines().nth(1) {
+-        let f: Vec<&str> = line.split_whitespace().collect();
+-        if f.len() >= 4 {
+-            let total = f[1].parse::<u64>().ok().map(|k| k * 1024);
+-            let used = f[2].parse::<u64>().ok().map(|k| k * 1024);
+-            let avail = f[3].parse::<u64>().ok().map(|k| k * 1024);
+-            if let (Some(t), Some(u), Some(a)) = (total, used, avail) {
+-                return json!({
+-                    "path": path.to_string_lossy(),
+-                    "total_bytes": t, "used_bytes": u, "available_bytes": a,
+-                    "used_pct": pct(u, t)
+-                });
+-            }
+-        }
+-    }
+-    json!({ "available": false })
+-}
+-
+-/// claude 全局配置文件在位检测(印证 CLAUDE_CONFIG_DIR 落卷修复)。
+-fn claude_config_status() -> Value {
+-    let (dir, cfg) = match std::env::var("CLAUDE_CONFIG_DIR")
+-        .ok()
+-        .filter(|s| !s.is_empty())
+-    {
+-        // 设了 CONFIG_DIR → .claude.json 落在该目录内。
+-        Some(d) => {
+-            let p = Path::new(&d).join(".claude.json");
+-            (d, p)
+-        }
+-        // 未设 → 默认在 HOME 根。
+-        None => {
+-            let home = directories::UserDirs::new()
+-                .map(|u| u.home_dir().to_path_buf())
+-                .unwrap_or_else(|| PathBuf::from("/root"));
+-            (
+-                home.to_string_lossy().to_string(),
+-                home.join(".claude.json"),
+-            )
+-        }
+-    };
+-    json!({ "config_dir": dir, "config_file_present": cfg.is_file() })
+-}
++#[path = "apihub/server_status.rs"]
++mod runtime_status;
++use runtime_status::status;
+ 
+ /// 公开存活探针必须是常量时间、无外部 IO，避免探针本身成为阻塞池 DoS 放大器。
+ /// 详细依赖/资源状态由 owner-only 且带缓存的 `/api/status` 提供。

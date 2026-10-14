@@ -31,3 +31,9 @@
 ## 环境前提
 
 `build-essential pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev cmake clang protobuf-compiler libopus-dev libasound2-dev`，Node 22.19，Rust stable 1.99。WSL 中 `sudo apt` 需显式传代理 `-o Acquire::http::Proxy=...`。
+
+## 补充基线（2026-10-14，P5b 前记录）
+`cargo test -p polaris-wiki -p polaris-fable --lib --tests`：103 通过、2 失败、7 忽略。2 个失败为重构前即存在（fable 自基线提交 b6d9e38 起未被改动），均为 Windows 路径断言：
+- `fable::inventory::tests::rel_of_is_root_relative_slash_path`
+- `kb::access::tests::path_contains_handles_verbatim_prefix_and_case`
+P5a 已修复内核的 4 个同类失败（内核现 0 失败）。
