@@ -80,9 +80,18 @@ impl AgentBackend for PiBackend {
                     anyhow::ensure!(model == &info.model, BackendError::UnsupportedInput("model selection is process-wide; apply config before opening sessions"));
                 }
                 let (tx, rx) = mpsc::sync_channel(1);
+                // Control::Register.timeout is the hard limit; zero means unlimited.
+                let configured_max = Duration::from_millis(client.config.turn_max_ms);
+                // Preserve an explicit zero request budget as immediate expiry,
+                // rather than confusing it with the configured unlimited sentinel.
+                let timeout = match input.timeout.map(|limit| limit.max(Duration::from_nanos(1))) {
+                    Some(limit) if !configured_max.is_zero() => limit.min(configured_max),
+                    Some(limit) => limit,
+                    None => configured_max,
+                };
                 client.send(Control::Register { session: info.id.clone(), req: req.clone(),
                     translator: translate::Translator::new(req.clone(), conv.clone(), input.cwd.clone(), &client.config),
-                    stream: sender.clone(), timeout: input.timeout.unwrap_or(Duration::from_millis(client.config.turn_timeout_ms)), reservation: (preparing.clone(), key.clone()), reply: tx })?;
+                    stream: sender.clone(), timeout, reservation: (preparing.clone(), key.clone()), reply: tx })?;
                 client.wait(rx)?;
                 registered = true;
                 let result = client.call(Command::Prompt(Text { session_id: info.id.clone(), text: input.prompt }));

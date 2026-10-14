@@ -7,7 +7,7 @@ fn config() -> config::Agentd {
     c.entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agentd.mjs");
     c.isolation = "shared".into();
     c.request_timeout_ms = 1500;
-    c.turn_timeout_ms = 3000;
+    c.turn_idle_timeout_ms = 3000;
     c.abort_timeout_ms = 100;
     c.restart_base_ms = 20;
     c.restart_max_ms = 80;
@@ -157,11 +157,7 @@ fn isolation_never_silently_shares() {
 }
 
 #[test]
-fn turn_and_ping_timeouts_are_bounded() {
-    let mut c = config(); c.turn_timeout_ms = 80;
-    let b = PiBackend::new(c).unwrap(); ready(&b);
-    let events = collect_events(b.start(input("timeout", "hang")).unwrap());
-    assert!(events.iter().any(|e| e.text.as_deref().is_some_and(|s| s.contains("Timeout"))));
+fn ping_timeout_is_bounded() {
     let mut c = config(); c.args = vec!["--ping-hang".into()]; c.request_timeout_ms = 80;
     let b = PiBackend::new(c).unwrap(); let _ = b.models();
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -260,4 +256,98 @@ fn supervisor_exit_clears_orphan_active_entries() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(!b.apply_config(None, None).unwrap_err().to_string().contains("AgentdConfigBusy"));
+}
+
+// Dedicated timed wire fixture stays inside this task's allowed Rust test file.
+// Reasoning and usage deliberately produce no frontend events.
+fn timed_config() -> config::Agentd {
+    let mut c = config();
+    c.turn_idle_timeout_ms = 300;
+    c.ping_interval_ms = 40;
+    c.node_args = vec!["-e".into(), r#"
+const rl = require('node:readline').createInterface({ input: process.stdin });
+const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+const reply = (id, result) => send({type:'response', id, ok:true, result});
+rl.on('line', line => {
+  const {id, method, params:p} = JSON.parse(line);
+  if (method === 'ping') return reply(id, {status:'ok'});
+  if (method === 'models.list') return reply(id, {models:[]});
+  if (method === 'session.open') return reply(id, {
+    sessionId:p.sessionId || 'timed', model:{provider:'fixture', id:'test'}, tools:['read']
+  });
+  if (method !== 'prompt') return reply(id, {});
+  const event = (name, fields={}) => send({
+    type:'event', sessionId:p.sessionId, turnId:'t', event:name, ...fields
+  });
+  reply(id, {turnId:'t'});
+  if (p.text === 'silent') return;
+  event('turn.started');
+  let ticks = 0;
+  const timer = setInterval(() => {
+    if (++ticks === 60) {
+      clearInterval(timer);
+      return event('turn.completed', {status:'completed'});
+    }
+    if (ticks % 2) event('reasoning.delta', {text:'still working'});
+    else event('usage', {usage:{input:1, output:1, cacheRead:0, cacheWrite:0, totalTokens:2,
+      cost:{input:0, output:0, cacheRead:0, cacheWrite:0, total:0}}});
+  }, 25);
+});
+"#.into()];
+    c
+}
+fn timed_events(c: config::Agentd, request: TurnRequest) -> anyhow::Result<Vec<crate::chat::ChatStreamEvent>> {
+    let b = PiBackend::new(c)?;
+    b.models()?;
+    let stream = b.start(request)?;
+    let mut events = Vec::new();
+    loop {
+        let event = stream.recv_timeout(Duration::from_secs(5))?;
+        let done = event.kind == "done";
+        events.push(event);
+        if done { break; }
+    }
+    assert!(stream.recv_timeout(Duration::from_millis(50)).is_err(), "duplicate terminal");
+    Ok(events)
+}
+#[test]
+fn hidden_agentd_events_keep_long_turn_alive() -> anyhow::Result<()> {
+    let now = Instant::now();
+    let events = timed_events(timed_config(), input("long", "active"))?;
+    assert!(now.elapsed() >= Duration::from_millis(1500));
+    assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["meta", "done"]);
+    Ok(())
+}
+#[test]
+fn idle_turn_times_out_even_while_ping_responses_arrive() -> anyhow::Result<()> {
+    let now = Instant::now();
+    let events = timed_events(timed_config(), input("silent", "silent"))?;
+    assert!(now.elapsed() >= Duration::from_millis(300));
+    assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["meta", "error", "done"]);
+    assert_eq!(events[1].text.as_deref(), Some("AgentdTurnIdleTimeout"));
+    Ok(())
+}
+#[test]
+fn hard_limit_stops_active_turn_and_caps_request_override() -> anyhow::Result<()> {
+    for request_limit in [None, Some(Duration::from_secs(5))] {
+        let mut c = timed_config();
+        c.turn_max_ms = 650;
+        let mut request = input("max", "active");
+        request.timeout = request_limit;
+        let now = Instant::now();
+        let events = timed_events(c, request)?;
+        assert!(now.elapsed() >= Duration::from_millis(650));
+        assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["meta", "error", "done"]);
+        assert_eq!(events[1].text.as_deref(), Some("AgentdTurnMaxTimeout"));
+    }
+    Ok(())
+}
+#[test]
+fn explicit_request_limit_remains_a_hard_limit() -> anyhow::Result<()> {
+    let mut request = input("request-max", "active");
+    request.timeout = Some(Duration::from_millis(650));
+    let events = timed_events(timed_config(), request)?;
+    assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["meta", "error", "done"]);
+    assert_eq!(events[1].text.as_deref(), Some("AgentdTurnMaxTimeout"));
+    Ok(())
 }

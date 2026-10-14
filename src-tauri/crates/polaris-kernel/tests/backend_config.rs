@@ -32,3 +32,43 @@ fn config_file_and_environment_select_both_backends() {
     std::fs::remove_dir_all(root).unwrap();
     assert_eq!(Config::default().agent.backend, "pi");
 }
+
+#[test]
+fn turn_timeout_defaults_types_and_serialization() -> anyhow::Result<()> {
+    let defaults = Config::default();
+    assert_eq!(defaults.agentd.turn_idle_timeout_ms, 240_000);
+    assert!(defaults.agentd.turn_idle_timeout_ms > 180_000);
+    assert_eq!(defaults.agentd.turn_max_ms, 0);
+    defaults.validate()?;
+    let configured: Config = serde_json::from_str(r#"{"agentd":{"turnIdleTimeoutMs":450000,"turnMaxMs":900000}}"#)?;
+    configured.validate()?;
+    let value = serde_json::to_value(&configured.agentd)?;
+    assert_eq!(value["turnIdleTimeoutMs"], 450_000);
+    assert_eq!(value["turnMaxMs"], 900_000);
+    assert!(value.get("turnTimeoutMs").is_none());
+    for field in ["turnIdleTimeoutMs", "turnMaxMs"] {
+        for invalid in ["-1", "1.5", "null", "true", "\"300\"", "18446744073709551616"] {
+            let json = format!(r#"{{"agentd":{{"{field}":{invalid}}}}}"#);
+            assert!(serde_json::from_str::<Config>(&json).is_err(), "accepted {json}");
+        }
+    }
+    let zero: Config = serde_json::from_str(r#"{"agentd":{"turnIdleTimeoutMs":0}}"#)?;
+    let error = zero.validate().err().ok_or_else(|| anyhow::anyhow!("accepted zero idle"))?;
+    assert!(error.to_string().contains("turnIdleTimeoutMs"));
+    Ok(())
+}
+
+#[test]
+fn removed_turn_timeout_reports_named_migration_error() -> anyhow::Result<()> {
+    for old in ["600000", "0", "null", "\"old\"", "{}"] {
+        for fields in [String::new(), ",\"turnIdleTimeoutMs\":240000,\"turnMaxMs\":0".into()] {
+            let json = format!(r#"{{"agentd":{{"turnTimeoutMs":{old}{fields}}}}}"#);
+            let error = serde_json::from_str::<Config>(&json).err()
+                .ok_or_else(|| anyhow::anyhow!("accepted removed turnTimeoutMs"))?.to_string();
+            for expected in ["InvalidAgentConfig", "turnTimeoutMs", "turnIdleTimeoutMs", "turnMaxMs"] {
+                assert!(error.contains(expected), "{error}");
+            }
+        }
+    }
+    Ok(())
+}

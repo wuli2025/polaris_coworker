@@ -22,6 +22,8 @@
 ## 配置
 
 宿主配置路径：`POLARIS_AGENT_CONFIG`。启动时选定 backend，修改后需重启宿主。
+R1b 已将旧 `turnTimeoutMs` 替换为下例的空闲超时与可选硬上限；旧字段会具名报错。
+Rust 默认 240000ms 大于 agentd 默认 180000ms，以便 agentd 先自行超时收尾；详见 [R1b 迁移与验证](r1b-idle-timeout.md)。
 完整默认值和校验见 `src-tauri/crates/polaris-kernel/src/chat/backend/config.rs`。
 配置文件顶层是 `agent` / `agentd`，agentd 内字段使用 camelCase。
 
@@ -37,7 +39,8 @@
     "channelCapacity": 64,
     "maxLineBytes": 1048576,
     "requestTimeoutMs": 15000,
-    "turnTimeoutMs": 600000,
+    "turnIdleTimeoutMs": 240000,
+    "turnMaxMs": 0,
     "abortTimeoutMs": 5000,
     "pingIntervalMs": 30000,
     "idleMs": 600000,

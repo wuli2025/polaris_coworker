@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-14T05:07:50.175647+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "b6e13b07bb386a5a9c95b151c901679331a532da6562c9b52a348193ea42a3d2",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": "?? docs/execution/R1b-1/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M docs/feature-tree.md\n M docs/pi-migration/p2-result.md\n M docs/pi-migration/r1-review-fixes.md\n M src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/config.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/routes.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs\n M src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs\n M src-tauri/crates/polaris-kernel/tests/backend_config.rs\n?? docs/execution/R1b-1/\n?? docs/pi-migration/r1b-idle-timeout.md\n?? docs/tasks/P2.5-protocol-extension.md\n",
+    "diff_stat": " docs/feature-tree.md                               |   2 +-\n docs/pi-migration/p2-result.md                     |   5 +-\n docs/pi-migration/r1-review-fixes.md               |   2 +\n .../polaris-kernel/src/chat/backend/bridge.rs      |   6 +-\n .../polaris-kernel/src/chat/backend/config.rs      |  18 +++-\n .../polaris-kernel/src/chat/backend/pi/mod.rs      |  11 ++-\n .../polaris-kernel/src/chat/backend/pi/routes.rs   |  42 ++++++++-\n .../src/chat/backend/pi/supervisor.rs              |  11 ++-\n .../polaris-kernel/src/chat/backend/pi/tests.rs    | 102 +++++++++++++++++++--\n .../crates/polaris-kernel/tests/backend_config.rs  |  40 ++++++++\n 10 files changed, 218 insertions(+), 21 deletions(-)\n"
+  },
+  "finished_at": "2026-10-14T05:13:23.174553+00:00"
+}

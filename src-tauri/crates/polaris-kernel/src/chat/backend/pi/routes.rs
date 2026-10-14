@@ -1,7 +1,7 @@
 use super::{translate::Translator, protocol::{Event, TurnStatus}};
 use super::super::stream::Mailbox;
 use crate::chat::ChatStreamEvent;
-use std::{collections::VecDeque, sync::Arc, time::Instant};
+use std::{collections::VecDeque, sync::Arc, time::{Duration, Instant}};
 pub struct Route {
     pub req: String,
     pub session: String,
@@ -12,7 +12,10 @@ pub struct Route {
     pub turn: Option<String>,
     pub translator: Translator,
     pub stream: Arc<Mailbox>,
-    pub deadline: Instant,
+    pub registered_at: Instant,
+    pub last_event_at: Instant,
+    pub idle_timeout: Duration,
+    pub max_duration: Duration,
     pub abort_deadline: Option<Instant>,
     pub pending: VecDeque<ChatStreamEvent>,
     pub terminal: Option<(Option<ChatStreamEvent>, ChatStreamEvent)>,
@@ -27,6 +30,7 @@ impl Route {
             if self.turn.is_none() { self.turn = Some(turn.clone()); }
         }
         anyhow::ensure!(self.turn.as_deref() == Some(&turn), "AgentdTurnMismatch");
+        self.last_event_at = Instant::now();
         let fatal = matches!(event, Event::Error { .. } | Event::Completed { .. });
         let events = self.translator.accept(event);
         if fatal && self.first_error.is_none() {
@@ -34,6 +38,16 @@ impl Route {
         }
         self.enqueue(events);
         Ok(())
+    }
+    pub fn timeout_error(&self, now: Instant) -> Option<&'static str> {
+        if self.terminal.is_some() || self.stream.is_finished() { return None; }
+        if !self.max_duration.is_zero() && now.duration_since(self.registered_at) >= self.max_duration {
+            return Some("AgentdTurnMaxTimeout");
+        }
+        if now.duration_since(self.last_event_at) >= self.idle_timeout {
+            return Some("AgentdTurnIdleTimeout");
+        }
+        None
     }
     pub fn tick(&mut self) {
         if self.terminal.is_none() { let events = self.translator.tick(); self.enqueue(events); }
@@ -108,7 +122,9 @@ mod tests {
         (Route { req: "r".into(), session: "s".into(), active, acknowledged: true, started: false,
             reservation: (reservations, "s".into()), turn: None,
             translator: Translator::new("r".into(), None, "/tmp".into(), &Agentd::default()), stream,
-            deadline: Instant::now(), abort_deadline: None, pending: VecDeque::new(), terminal: None, first_error: None }, receiver)
+            registered_at: Instant::now(), last_event_at: Instant::now(),
+            idle_timeout: Duration::from_secs(240), max_duration: Duration::ZERO,
+            abort_deadline: None, pending: VecDeque::new(), terminal: None, first_error: None }, receiver)
     }
     #[test]
     fn dropping_undrained_route_releases_active_and_reservation() {
@@ -136,5 +152,25 @@ mod tests {
             assert_eq!(error.text.as_deref(), Some("MODEL_ERROR: original"));
             assert_eq!(receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap().kind, "done");
         }
+    }
+    #[test]
+    fn idle_budget_starts_at_registration_and_resets_on_hidden_events() -> anyhow::Result<()> {
+        let (mut route, _receiver) = route();
+        let idle = Duration::from_millis(300);
+        route.idle_timeout = idle;
+        let before_event = Instant::now() - idle * 5;
+        route.registered_at = before_event;
+        route.last_event_at = before_event;
+        assert_eq!(route.timeout_error(Instant::now()), Some("AgentdTurnIdleTimeout"));
+        route.accept("t".into(), Event::Started)?;
+        route.accept("t".into(), Event::Reasoning { text: "working".into() })?;
+        let last_event = route.last_event_at;
+        assert_eq!(route.timeout_error(last_event + idle - Duration::from_millis(1)), None);
+        assert_eq!(route.timeout_error(last_event + idle), Some("AgentdTurnIdleTimeout"));
+        route.max_duration = idle * 2;
+        assert_eq!(route.timeout_error(last_event), Some("AgentdTurnMaxTimeout"));
+        route.accept("t".into(), Event::Completed { status: TurnStatus::Completed })?;
+        assert_eq!(route.timeout_error(last_event + idle * 10), None);
+        Ok(())
     }
 }

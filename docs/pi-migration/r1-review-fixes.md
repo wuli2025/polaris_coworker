@@ -1,5 +1,7 @@
 # R1：P1/P2 第 1 轮采纳项执行报告
 
+历史记录：下文 P2-5 的范围阻塞已在 R1b 获准解除，后续实现与验证见 [R1b 报告](r1b-idle-timeout.md)。
+
 本报告仅为 Codex 执行证据，由 Claude 重跑验证、Pi 独立审查后决定模块是否完成。
 仅处理 `docs/reviews/P1-P2-round1-triage.md` 的采纳/部分采纳项；未改驳回项、未提交或推送、未新增依赖。
 保留任务开始前已有的未跟踪 `docs/execution/`。

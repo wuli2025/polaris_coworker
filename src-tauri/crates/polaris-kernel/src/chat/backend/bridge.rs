@@ -38,11 +38,13 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
     }
     let stream = backend.start(input).map_err(|e| e.to_string())?;
     let mut finalizer = None;
-    let timeout = Duration::from_millis(config::Config::load().map_err(|e| e.to_string())?.agentd.turn_timeout_ms);
+    let timeout = Duration::from_millis(config::Config::load().map_err(|e| e.to_string())?.agentd.request_timeout_ms);
     loop {
         let ev = match stream.recv_timeout(timeout) {
             Ok(event) => event,
-            Err(error) if legacy && matches!(error.downcast_ref(), Some(stream::StreamError::Timeout)) => continue,
+            // Only the supervisor sees all agentd events (including hidden reasoning/usage).
+            // Let it own turn deadlines and deliver the specific error followed by done.
+            Err(error) if matches!(error.downcast_ref(), Some(stream::StreamError::Timeout)) => continue,
             Err(error) => { let _ = backend.cancel(req); return Err(error.to_string()); }
         };
         if ev.kind == "done" {

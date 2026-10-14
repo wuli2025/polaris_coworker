@@ -85,8 +85,11 @@ impl State {
                     let _ = reply.send(Err(self.unavailable()));
                 } else {
                     self.active.lock().insert(req.clone(), session.clone());
+                    let now = Instant::now();
                     self.routes.insert(session.clone(), Route { req, session, active: self.active.clone(), acknowledged: false, started: false, reservation, turn: None, translator, stream,
-                        deadline: Instant::now() + timeout, abort_deadline: None,
+                        registered_at: now, last_event_at: now,
+                        idle_timeout: Duration::from_millis(self.config.turn_idle_timeout_ms),
+                        max_duration: timeout, abort_deadline: None,
                         pending: Default::default(), terminal: None, first_error: None });
                     let _ = reply.send(Ok(json!({})));
                 }
@@ -151,9 +154,9 @@ impl State {
                 route.aborted();
                 anyhow::bail!("AgentdAbortTimeout: daemon restarted to stop the cancelled turn");
             }
-            if Instant::now() >= route.deadline && route.terminal.is_none() {
-                route.fail("AgentdTurnTimeout");
-                anyhow::bail!("AgentdTurnTimeout");
+            if let Some(error) = route.timeout_error(Instant::now()) {
+                route.fail(error);
+                anyhow::bail!(error);
             }
         }
         if self.pending.values().any(|p| p.since.elapsed().as_millis() >= self.config.request_timeout_ms as u128) {

@@ -203,7 +203,7 @@ Pi `useSandbox` 明确报 UnsupportedInput，等待 P3；旧后端原宿主行�
 | Route 生命周期/首错 → `backend/pi/routes.rs`、`supervisor.rs` | Drop 清理 active/reservation，State Drop 清空孤立 active；首错保留、次错仅日志；依赖既有 Translator/Mailbox | Route 单测及 `pi/tests.rs` 覆盖熔断/退出后 config.apply 不再 ConfigBusy；无配置迁移 |
 | 写入诊断 → `backend/pi/process.rs`、`client.rs`、`supervisor.rs` | WriterBackpressure/WriterClosed 分离；lastError 和日志保留根因；沿用 requestTimeoutMs/supervisorTickMs/channelCapacity | 满队列、关闭管道和真实 stdin 阻塞测试；默认值、校验与切换示例见执行报告 |
 | 前端契约 → `backend/pi/translate.rs` | 注释说明丢弃 reasoning/usage，后续以可选字段扩展 | 无事件行为变化；既有翻译测试通过 |
-| 超时迁移 P2-5 → `backend/config.rs`、`bridge.rs`、`pi/mod.rs:85` | **BLOCKED**：必要调用入口 pi/mod.rs 不在允许清单，范围例外尚未确认 | 未修改当前 turnTimeoutMs；计划的 240000ms idle/0 max 语义及原因见执行报告，尚未实现或测试 |
+| 超时迁移 P2-5 / R1b → `backend/config.rs`、`bridge.rs`、`pi/mod.rs`、`pi/routes.rs`、`pi/supervisor.rs` | 按有效轮次原始事件刷新空闲计时（含 reasoning/usage）；bridge 轮询等待终态；依赖既有 Control/Translator/Mailbox，无新依赖 | turnIdleTimeoutMs 默认 240000（大于 agentd 180000，留出自行收尾时间），turnMaxMs 默认 0 不限；旧 turnTimeoutMs 具名拒绝；迁移示例、行为测试与实际验证见 [R1b 报告](pi-migration/r1b-idle-timeout.md) |
 
 Rust 入口路径以 `src-tauri/crates/polaris-kernel/src/chat/` 为前缀。
 实际命令、结果、基线/TCP 失败列表与边界阻塞见 [R1 执行报告](pi-migration/r1-review-fixes.md)；R1 不声明完整验收通过。

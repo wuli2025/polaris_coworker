@@ -38,7 +38,12 @@ pub struct Agentd {
     pub max_processes: usize,
     pub idle_ms: u64,
     pub request_timeout_ms: u64,
-    pub turn_timeout_ms: u64,
+    /// Lost-daemon fallback: 240000 > agentd's 180000 so agentd can finish first.
+    pub turn_idle_timeout_ms: u64,
+    /// Hard turn limit in milliseconds; zero disables it.
+    pub turn_max_ms: u64,
+    #[serde(rename = "turnTimeoutMs", deserialize_with = "reject_turn_timeout", skip_serializing)]
+    _legacy_turn_timeout: (),
     pub abort_timeout_ms: u64,
     pub ping_interval_ms: u64,
     pub restart_base_ms: u64,
@@ -62,7 +67,8 @@ impl Default for Agentd {
             node: "node".into(), entry: PathBuf::new(), node_args: vec![], args: vec![],
             isolation: if cfg!(feature = "desktop") { "shared" } else { "per-account" }.into(),
             max_processes: 8, idle_ms: 600_000, request_timeout_ms: 15_000,
-            turn_timeout_ms: 600_000, abort_timeout_ms: 5_000, ping_interval_ms: 30_000,
+            turn_idle_timeout_ms: 240_000, turn_max_ms: 0, _legacy_turn_timeout: (),
+            abort_timeout_ms: 5_000, ping_interval_ms: 30_000,
             restart_base_ms: 200, restart_max_ms: 30_000, restart_jitter_ms: 100,
             failure_threshold: 5, stable_reset_ms: 60_000, channel_capacity: 64,
             max_line_bytes: 1_048_576, delta_batch_ms: 30,
@@ -72,6 +78,11 @@ impl Default for Agentd {
             session_map: crate::runtime::paths::data_dir().join("agent-session-map"),
         }
     }
+}
+fn reject_turn_timeout<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "InvalidAgentConfig: agentd.turnTimeoutMs was removed; use turnIdleTimeoutMs and turnMaxMs",
+    ))
 }
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
@@ -94,7 +105,8 @@ impl Config {
         anyhow::ensure!(matches!(c.isolation.as_str(), "shared" | "per-account"), "InvalidIsolation: {}", c.isolation);
         anyhow::ensure!(c.channel_capacity > 0 && c.max_line_bytes > 0 && c.max_processes > 0,
             "InvalidAgentConfig: capacities must be positive");
-        anyhow::ensure!(c.request_timeout_ms > 0 && c.turn_timeout_ms > 0 && c.abort_timeout_ms > 0
+        anyhow::ensure!(c.turn_idle_timeout_ms > 0, "InvalidAgentConfig: agentd.turnIdleTimeoutMs must be positive");
+        anyhow::ensure!(c.request_timeout_ms > 0 && c.abort_timeout_ms > 0
             && c.ping_interval_ms > 0 && c.idle_ms > 0 && c.delta_batch_ms > 0
             && c.supervisor_tick_ms > 0 && c.control_poll_ms > 0 && c.shutdown_timeout_ms > 0
             && c.stable_reset_ms > 0 && c.failure_threshold > 0 && c.restart_base_ms > 0 && c.restart_max_ms >= c.restart_base_ms,
