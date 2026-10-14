@@ -10,3 +10,9 @@
 | 中 3 | 中文/空格路径未规范化 | **驳回** | `chat/backend/pi/process.rs:25-26` 以 `Command::new(&config.node).arg(&config.entry)` 直接传 `PathBuf`，未经字符串化，Rust 的 `Command` 对空格与非 ASCII 正确处理。 |
 | 中 4 | Node 下载源注释与代码 | **无问题** | Pi 自认代码与注释一致，`sources.test.mjs` 断言不含 GitHub 代理。 |
 | 轻 1 | Linux 下 `path_contains_dir` 无测试 | **采纳（低）** | 补 `#[cfg(not(windows))]` 用例。 |
+
+## 第 2 轮（复审 `P5a-round2/`，本次送审含测试）
+- 严重 1、2"Linux 编译失败 / 枚举不一致"：**有证据驳回**。主控在 Linux 上 `cargo check` 两壳通过且 0 警告，`cargo test -p polaris-kernel --lib --tests` 连续 2 次 201 通过 0 失败。
+- 中 3"`SystemRoot` 缺失回退 `C:\Windows`"：**记为文档说明**。`SystemRoot`/`windir` 均缺失属异常环境，回退值为近似；在 `pi_shell.rs` 注释与 feature-tree 写明。
+- 中 4"空路径用例"：**无需处理**，Pi 确认 `path_tests.rs` 已含空 PATH 断言。
+- 结论：P5a **标记完成**（2 轮上限，无阻塞）。

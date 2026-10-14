@@ -1,0 +1,52 @@
+{
+  "started_at": "2026-10-14T11:05:28.489558+00:00",
+  "status": "REVIEW_RECEIVED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P5b-brief.md",
+        "bytes": 1626,
+        "lines": 11,
+        "sha256": "972b9a64bf17d0f2f054ef6c89b92bff657d9942496f1e60fb6c78c2404a8385"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P5b-diff.patch",
+        "bytes": 99564,
+        "lines": 2095,
+        "sha256": "0467878362f1087c74036aef84363730ce877adfbc738a5a755fdb16a943ad36"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P5b-fable.patch",
+        "bytes": 15998,
+        "lines": 331,
+        "sha256": "e7cd761ea9599dc0eff355c8d7f23ce1055fec7877524e3671f4330251aec783"
+      }
+    ],
+    "prompt_sha256": "82949c3675be37500864a2e892adfc3146ba7f9350637cc1e9b894310ce82b3a",
+    "prompt_bytes": 132186
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "provider": "minimax",
+  "model": "MiniMax-M2.7",
+  "usage": {
+    "input": 0,
+    "output": 5018,
+    "cacheRead": 0,
+    "cacheWrite": 38743,
+    "totalTokens": 43761,
+    "cost": {
+      "input": 0,
+      "output": 0.006021599999999999,
+      "cacheRead": 0,
+      "cacheWrite": 0.014528625,
+      "total": 0.020550225
+    }
+  },
+  "session_id": "01a13a16-ff86-79ee-95f0-18941892b50d",
+  "finished_at": "2026-10-14T11:07:49.425444+00:00"
+}
