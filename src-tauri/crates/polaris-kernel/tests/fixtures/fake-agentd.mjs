@@ -1,0 +1,79 @@
+// Protocol-only fixture. Never launches a child process or calls a model provider.
+import { createInterface } from 'node:readline';
+import { once } from 'node:events';
+if (process.argv.includes('--crash-start')) process.exit(7);
+const sessions = new Map();
+let nextSession = 0;
+let nextTurn = 0;
+let tail = Promise.resolve();
+function send(value) {
+  const line = JSON.stringify(value) + '\n';
+  const task = tail.then(async () => {
+    if (!process.stdout.write(line)) await once(process.stdout, 'drain');
+  });
+  tail = task.catch(() => {});
+  return task;
+}
+const response = (id, result) => send({ type: 'response', id, ok: true, result });
+const error = (id, code) => send({ type: 'response', id, ok: false, error: { code, message: code } });
+const event = (s, name, fields = {}) => send({ type: 'event', sessionId: s.id, turnId: s.turn, event: name, ...fields });
+async function turn(s, text) {
+  await event(s, 'turn.started');
+  if (text === 'crash') return process.exit(9);
+  if (text === 'malformed') return process.stdout.write('not-json\n');
+  if (text === 'oversized') return process.stdout.write('x'.repeat(65536) + '\n');
+  if (text === 'hang' || text === 'abort-hang') return;
+  if (text === 'failure') {
+    await event(s, 'error', { code: 'MODEL_ERROR', message: 'fixture failure' });
+    return event(s, 'turn.completed', { status: 'error' });
+  }
+  const count = text === 'flood' ? 1000 : 2;
+  for (let i = 0; i < count && !s.aborted; i++) {
+    await event(s, 'text.delta', { text: text === 'flood' ? 'x'.repeat(128) : ['hello ', 'world'][i] });
+    if (text === 'flood') await event(s, 'tool.started', { callId: `c-${i}`, tool: 'read', args: { path: 'x' } });
+  }
+  if (!s.aborted) await event(s, 'turn.completed', { status: 'completed' });
+}
+async function dispatch({ id, method, params: p }) {
+  switch (method) {
+    case 'ping':
+      if (process.argv.includes('--ping-hang')) return;
+      return response(id, { status: 'ok', sessions: sessions.size });
+    case 'models.list': return response(id, { models: [{ provider: 'fixture', id: 'test' }] });
+    case 'session.open': {
+      if (p.sessionId && sessions.has(p.sessionId)) return error(id, 'SESSION_ALREADY_OPEN');
+      const sid = p.sessionId ?? `fake-${++nextSession}`;
+      sessions.set(sid, { id: sid });
+      return response(id, { sessionId: sid, resumed: !!p.sessionId, messageCount: 0,
+        model: { provider: 'fixture', id: 'test' }, thinkingLevel: 'off', tools: ['read'], reopenRequired: false });
+    }
+    case 'prompt': {
+      const s = sessions.get(p.sessionId);
+      if (!s) return error(id, 'SESSION_NOT_FOUND');
+      s.turn = `turn-${++nextTurn}`;
+      s.text = p.text;
+      s.aborted = false;
+      // Exercise events racing ahead of the prompt response, as real agentd does.
+      void turn(s, p.text);
+      return response(id, { turnId: s.turn, disposition: 'started' });
+    }
+    case 'abort': {
+      const s = sessions.get(p.sessionId);
+      if (!s) return error(id, 'SESSION_NOT_FOUND');
+      if (s.text === 'abort-hang') return;
+      s.aborted = true;
+      await event(s, 'turn.completed', { status: 'aborted' });
+      return response(id, { aborted: true });
+    }
+    case 'close': sessions.delete(p.sessionId); return response(id, { closed: true });
+    case 'config.apply': return response(id, { applied: true, reopenRequired: [...sessions.keys()] });
+    case 'steer': case 'followUp': return response(id, { turnId: sessions.get(p.sessionId)?.turn, disposition: 'queued' });
+    default: return error(id, 'INVALID_REQUEST');
+  }
+}
+const lines = createInterface({ input: process.stdin });
+for await (const line of lines) {
+  try { void dispatch(JSON.parse(line)); }
+  catch { await error(null, 'INVALID_JSON'); }
+}
+await tail;

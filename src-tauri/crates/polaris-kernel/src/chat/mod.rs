@@ -11,6 +11,10 @@
 //! 模块拆分(纯移动): pipeline(主流程) / prompt(提示词) / artifacts(产物) /
 //! attach(附件) / types(类型)。原 `crate::chat::xxx` 公有路径经 re-export 保持零变化。
 
+pub mod backend;
+pub use backend::agent_backend_status;
+#[cfg(feature = "desktop")]
+pub use backend::{__cmd__agent_backend_status, __tauri_command_name_agent_backend_status};
 pub mod artifacts;
 pub mod attach;
 // 内核→引擎桥(kb/fable/expert 依赖倒置端口, 由外壳启动时经 wiring 注入实现)

@@ -1,0 +1,64 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+warning: unused import: `crate::runtime::procs::no_window`
+ --> crates/polaris-kernel/src/doctor/path.rs:9:5
+  |
+9 | use crate::runtime::procs::no_window;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `super::path::*`
+  --> crates/polaris-kernel/src/doctor/verify.rs:28:5
+   |
+28 | use super::path::*;
+   |     ^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> crates/polaris-kernel/src/doctor/install.rs:1038:13
+     |
+1038 |         let mut all = vec![
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `polaris-kernel` (lib test) generated 3 warnings (run `cargo fix --lib -p polaris-kernel --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
+     Running unittests src/lib.rs (target/debug/deps/polaris_kernel-92b45c61d617863d)
+
+running 28 tests
+test chat::backend::claude_cli::pipeline::tests::raw_mode_flag_semantics ... ok
+test chat::backend::claude_cli::pipeline::tests::collect_tree_gathers_descendants_and_survives_cycles ... ok
+test chat::backend::claude_cli::pipeline::tests::normal_mode_tool_whitelist_intact ... ok
+test chat::backend::claude_cli::pool::tests::lru_never_evicts_busy_session ... ok
+test chat::backend::claude_cli::pool::tests::reinsert_same_conv_replaces ... ok
+test chat::backend::claude_cli::pool::tests::trim_over_cap_converges_after_turns_end ... ok
+test chat::backend::claude_cli::pool::tests::lru_evicts_least_recently_used ... ok
+test chat::backend::claude_cli::pool::tests::ttl_sweep_never_reaps_busy_session ... ok
+test chat::backend::claude_cli::pool::tests::fingerprint_change_detected ... ok
+test chat::backend::claude_cli::pool::tests::prompt_plan_split_first_vs_continuation ... ok
+test chat::backend::claude_cli::pool::tests::ttl_sweep_reaps_idle_sessions ... ok
+test chat::backend::claude_cli::pool::tests::并发新建的会话入池即忙碌_不会被彼此逐出 ... ok
+test chat::backend::config::tests::backend_selection_is_explicit ... ok
+test chat::backend::pi::tests::mailbox_reserves_terminals_and_preserves_order ... ok
+test chat::backend::pi::tests::translation_covers_every_event_and_order ... ok
+test chat::backend::pi::tests::isolation_never_silently_shares ... ok
+test chat::backend::pi::tests::usage_and_all_completion_statuses_have_expected_sequences ... ok
+test chat::backend::pi::tests::protocol_samples_and_source_fingerprint ... ok
+test chat::backend::claude_cli::tests::readonly_preserves_text_and_legacy_result_deduplication ... ok
+test chat::backend::pi::tests::daemon_stream_routing_and_collect ... ok
+test chat::backend::pi::tests::malformed_and_oversized_lines_fail_closed ... ok
+test chat::backend::pi::tests::crash_restarts_and_active_turn_finishes ... ok
+test chat::backend::pi::tests::repeated_startup_failure_opens_circuit ... ok
+test chat::backend::pi::tests::idle_reaping_and_reopen_after_config_apply ... ok
+test chat::backend::pi::tests::cancellation_and_abort_timeout_both_finish ... ok
+test chat::backend::claude_cli::tests::readonly_can_be_cancelled_through_backend ... ok
+test chat::backend::pi::tests::turn_and_ping_timeouts_are_bounded ... ok
+test chat::backend::pi::tests::slow_consumer_retains_text_and_terminal ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 112 filtered out; finished in 1.02s
+

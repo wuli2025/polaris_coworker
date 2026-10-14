@@ -1,7 +1,7 @@
-# Polaris 功能树（Pi 改造前基线）
+# Polaris 功能树（P1 + P2 接线进展）
 
-2026-10-14 · `refactor/pi-agent` · HEAD `0be46d7474d4ec29f764cf253036eb79fda482b8`。
-仅从仓库静态取证；下列测试命令是后续验证入口，本次均未执行，不代表通过。
+2026-10-14 · `refactor/pi-agent`。未迁移节点的行号沿用 `0be46d7` 静态基线；P2 节点以当前文件为准。
+原静态基线保留；P2 更新了 chat/headless/壳注册路径，实际检查与未完成项见 [P2 记录](pi-migration/p2-result.md)。
 迁移明细见 [调用点](pi-migration/call-sites.md)、[事件契约](pi-migration/agent-events.md)、[超长文件](pi-migration/oversized-files.md)。
 
 ## 路径、测试与依赖记法
@@ -24,17 +24,17 @@
 
 | 模块 → 目录/入口 | 职责与公开接口 | 依赖方向 / 配置 / 测试 |
 | --- | --- | --- |
-| 桌面壳 → `H/main.rs:1`、`H/lib.rs:15,177,458` | Tauri 初始化、命令注册、托盘、退出回收 | app→各业务 crate；`src-tauri/Cargo.toml:161` desktop 特性，`src-tauri/tauri.conf.json:1`；H/UI |
+| 桌面壳 → `H/main.rs:1`、`H/lib.rs`、`H/desktop_commands.rs` | Tauri 初始化、命令注册、托盘、退出回收 | app→各业务 crate；`src-tauri/Cargo.toml:161` desktop 特性，`src-tauri/tauri.conf.json:1`；H/UI |
 | 服务壳 → `H/server.rs:1,53,84` | HTTP/WS、初始化引擎、运行健康信息 | app→apihub/collab/各引擎；server 特性与 `.env.server.example:1`；H |
 | 服务可执行入口 → `src-tauri/crates/polaris-cli/Cargo.toml:23` | 真正的 `polaris-server` bin 在 CLI crate | cli→app（无默认特性、server）；不能按主 Cargo.toml 注释中的 bin 当现存配置（`src-tauri/Cargo.toml:221`）；`cargo check -p polaris-cli`，CI `:85` |
 | Vue 桌面/Web → `src/App.vue:1`、`src/tauri.ts:445,1130` | 页壳、invoke/listen 适配、状态与组件 | Vue→桥→Tauri 或 HTTP；`package.json:7` dev，`:8` build；UI |
 | 移动端 → `mobile/src/lib/net.ts:315,345`、`mobile/src/lib/chat.ts:208` | HTTP/WS 远程对话、主机/项目切换；不是本地 Agent runtime | mobile→主机 api；`mobile/package.json:6`；移动 |
-| HTTP 应用面 → `H/apihub.rs:2218,2256,2562` | invoke 分发、上传/文件、WS、权限校验 | 壳→chat/provider/KB 等；认证与路由不能下沉成模型 SDK 功能；H |
+| HTTP 应用面 → `H/apihub.rs`、`H/apihub/` | invoke 分发、上传/文件、WS、权限校验 | 壳→chat/provider/KB 等；认证与路由不能下沉成模型 SDK 功能；H |
 | 引擎桥接装配 → `H/wiring.rs:15,82,98` | 实现 KbBridge、ExpertBridge 并注入内核 | 壳认识 fable/expert；kernel 只认识 trait；无独立磁盘配置；H/K |
 
 实际 crate 依赖应以 manifest 为准：kernel→runtime/watchdog/failover（`src-tauri/crates/polaris-kernel/Cargo.toml:17`），collab→kernel/runtime（`src-tauri/crates/polaris-collab/Cargo.toml:16`）。
 fable→kernel/runtime（`F/lib.rs:13`），wiki→fable/kernel/runtime（`W/lib.rs:9`），sandbox→core/Tauri（`src-tauri/crates/polaris-sandbox/Cargo.toml:8`）。
-kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启用它；实际保留函数内联容器名（`K/chat/pipeline.rs:1738`）。
+kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启用它；实际保留函数内联容器名（`K/chat/backend/claude_cli/pipeline/spawn.rs`）。
 
 ## polaris-kernel → chat
 
@@ -42,8 +42,12 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 
 | 子模块 → 入口 | 职责 / 公开接口 | 依赖、配置与迁移边界 |
 | --- | --- | --- |
-| pipeline → `K/chat/pipeline.rs:150,233,1063,1088,1096` | `chat_send/chat_prewarm/chat_cancel/chat_is_running/chat_build_manifest`；拼装上下文、权限/模型、进程、事件、落库 | →conv/skills/provider/doctor/bridges/runtime/watchdog；Pi 替换执行部分，事件维持兼容 |
-| session_pool → `K/chat/session_pool.rs:45,134,150,317,461,551` | 会话指纹、LRU/TTL、预热、JSONL 输入与 result 分轮；取消/回收接口 `:349,380,388` | →pipeline；`POLARIS_PERSISTENT_AGENT`、固定 MAX_SESSIONS=2、IDLE_TTL=10 分钟；归旧后端 |
+| pipeline → `K/chat/pipeline.rs` | chat 命令、用户消息落库、后台错误终态；调用 AgentBackend | 前端六类事件与 camelCase 字段保持不变 |
+| backend → `K/chat/backend/mod.rs`、`config.rs`、`bridge.rs` | AgentBackend / 后端选择 / UI 转发 / delta 收集；Pi 默认，未知值具名错误 | `POLARIS_AGENT_CONFIG` 与环境覆盖；headless 共用接口 |
+| claude_cli → `K/chat/backend/claude_cli/pipeline/`、`pool/` | 原 spawn / parser / pool / 提示拼装 / 产物收尾按职责搬移 | 旧工具/模型/池开关保留；原池和管线单测随迁移 |
+| session_pool → `K/chat/session_pool.rs` | 原公开路径兼容门面；删除会话、退出转交 backend | 保留 conv 和宿主调用路径 |
+| pi → `K/chat/backend/pi/` | JSONL 请求关联、session/turn 路由、有界队列、约 30ms delta 合批、重启/熔断/取消 | 假 daemon 与协议样例测试；shared 已实现；per-account 明确拒绝，尚未实现 |
+| 状态 → `K/chat/backend/mod.rs::agent_backend_status` | 后端类型、PID、重启次数、熔断与健康状态 | Tauri/HTTP 已注册；协议无版本，agentdVersion=null |
 | prompt → `K/chat/prompt.rs:66,252,356,1049,1091,1145` | 历史、记忆、检索、批次、目标与动态工作流指令 | →conv/桥返回的数据；当前预算常量 `:22`、`POLARIS_PROMPT_FULL` 逻辑 `:626`；迁到配置/提示资源 |
 | types → `K/chat/types.rs:10,33,108` | 四档 PermissionMode，ChatSendArgs，ChatStreamEvent | 权限当前是 CLI 值映射；前端字段由 Rust camelCase 序列化；Pi 权限交互尚待实现 |
 | bridges → `K/chat/bridges.rs:48,76,91,96` | KbBridge/ExpertBridge，set_* 一次注入 | 内核不直接依赖 fable 或 expert；装配在 `H/wiring.rs:98`，未注入按 Option 降级 |
@@ -51,8 +55,8 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 | attach → `K/chat/attach.rs:1`、`K/chat/mod.rs:37` | 图片/文件复制到会话 uploads，转换为可用附件 | →convert/会话路径；不能把附件处理误删为 CLI 专属 |
 
 配置入口：`ChatSendArgs` 包含 permissionMode/useSandbox/skillIds/conversationId/goal/dynamicWorkflow/useKb/batchBuild/batchSize/agentMode/workMode/providerId（`K/chat/types.rs:33`）。
-环境入口：raw 模式 `K/chat/pipeline.rs:52`，partial stream `:1269`，快/工作模型 `:1814`，超时 `:1828`；常驻池开关 `K/chat/session_pool.rs:45`。
-当前 useSandbox 不触发容器执行（`K/chat/pipeline.rs:703,728`）；当前仅 workMode="work" 走完整工作模式（`K/chat/pipeline.rs:238,334`）；TS office/coding 注释已偏离实现（`src/tauri.ts:1077`），迁移时修正文档/类型约定。
+旧后端环境入口移至 `backend/claude_cli/pipeline/{mod,stream,spawn}.rs` 和 `pool/plan.rs`，语义保留。
+Pi `useSandbox` 明确报 UnsupportedInput，等待 P3；旧后端原宿主行为保留。Pi 沿用原提示拼装及收尾；默认 daemon 工具面仍只读。
 
 ## polaris-kernel → provider
 
@@ -82,7 +86,7 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 | doctor/install + update → `K/doctor/install.rs:36,58,367,427,555`、`K/doctor/update.rs:102,220` | 安装 Claude/Node/Pwsh/uv、取消、CLI 更新 | →下载源/子进程；日志 env:stream；K；Pi 默认托管对象需替换 |
 | doctor/autopilot + verify → `K/doctor/autopilot.rs:62,81`、`K/doctor/verify.rs:1031` | 静默安装；冲突、认证、shell 与深度真实调用校验 | 启动由 `H/lib.rs:201` 接线；Pi/旧后端须区分检测对象；K |
 | doctor/bundled + uv_cache → `K/doctor/bundled.rs:29,37`、`K/doctor/uv_cache.rs:1` | 内置运行时定位、uv 缓存维护 | POLARIS_RUNTIME_DIR / 安装资源目录；通用工具保留；K |
-| headless → `K/headless.rs:27,37` | run_claude_readonly(_timeout)、extract_balanced_json | →doctor/provider/CLI；被 wiki/fable 间接调用；K；迁为统一无 UI Agent 接口 |
+| headless → `K/headless.rs` | run_claude_readonly(_timeout)、extract_balanced_json | →AgentBackend/collect；被 wiki/fable 间接调用；保留公开函数名和 JSON 提取；K |
 | conv → `K/conv.rs:91,496,538,753,959` | 项目/会话 CRUD、消息历史、绑定 KB scope/工作目录 | →文件系统与 session_pool 回收；`~/Polaris/data/state.json`（`:95`）；K |
 | claude_md → `K/claude_md.rs:65,76,175,185,218` | 项目/KB 上下文 CRUD、渲染 | →conv/KB 桥；项目与 KB 的 CLAUDE.md；Pi 加 AGENTS.md 兼容规则；K |
 | skills → `K/skills/mod.rs:16,23`、`K/skills/store.rs:195` | 内置目录/市场、安装创建、意图匹配、模板分发、find | →磁盘 `~/Polaris/skills` 与编译期模板（mod `:3`）；→chat 注入；K |
@@ -102,10 +106,10 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 | 应用/导出 → `H/expert.rs:407,448,560,617,640` | 手动应用写项目 CLAUDE.md 并记 persona_id；导出返回文本；→conv/文件系统 |
 | persona → `H/persona.rs:170,177` | 预设人格列举、应用，复用上下文/KB scope；同样写项目 CLAUDE.md |
 | avatars → `H/expert/avatars.rs:51,58` | 内嵌头像 data URL 与槽位；与 Agent 后端无关 |
-| 对话接入 → `K/chat/pipeline.rs:508`、`H/wiring.rs:82` | agentMode 选择 expert-team/auto-match 等分支；经 ExpertBridge 注入，不在每轮自动改人格文件 |
+| 对话接入 → `K/chat/backend/claude_cli/pipeline/prepare.rs`、`H/wiring.rs:82` | agentMode 选择 expert-team/auto-match 等分支；经 ExpertBridge 注入，不在每轮自动改人格文件 |
 
 配置入口：会话 `agentMode`（`K/chat/types.rs:66`）、项目 persona_id/KB scope（`K/conv.rs:485`）、编译期卡片/模板。
-`experts.enabled=false` 是规划目标，当前不是已有全局开关（`docs/plans/2026-10-14-pi-refactor.md:39`；实际入口 `K/chat/pipeline.rs:508`）。
+`experts.enabled=false` 是规划目标，当前不是已有全局开关（`docs/plans/2026-10-14-pi-refactor.md:39`；实际入口 `K/chat/backend/claude_cli/pipeline/prepare.rs`）。
 迁移保留能力卡/路由，替换文件写入与提示加载方式；不要把专家列表状态当成真实子 Agent 执行证据。
 
 ## polaris-collab → auth / authority / mesh / tunnel / gateway
@@ -153,7 +157,7 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 | Docker → `S/commands.rs:32,61,136,178,259,277` | init/status/build_image/start/stop/exec，封装 docker CLI | 固定 image/container（`:27`），材料写 `~/Polaris/sandbox/Dockerfile`（`:33`）；工作目录/KB 挂载（`:205`） |
 | 镜像 → `S/templates/Dockerfile.sandbox:23` | Alpine 安装 Claude 原生包；不是 Node agentd 镜像 | P3 调整工具环境；旧 Claude 镜像可配置保留 |
 | E2B/Cube → `S/e2b.rs:23,59,75,80,89` | CubeConfig、配置读写、curl 状态探测 | `~/Polaris/sandbox/cube-sandbox.json`，backend/endpoint/apiKey；无 Agent exec 路由实现（`:13,130`） |
-| 对话连接点 → `K/chat/pipeline.rs:703,728,1726` | useSandbox 跳过池后仍在宿主执行；容器启动函数未调用 | P3 需新工具执行桥；不得把已有 UI 状态当作隔离成立 |
+| 对话连接点 → `K/chat/backend/claude_cli/pipeline/{process,spawn}.rs` | useSandbox 跳过池后仍在宿主执行；容器启动函数未调用 | P3 需新工具执行桥；不得把已有 UI 状态当作隔离成立 |
 | UI → `src/features/sandbox/components/SandboxStatus.vue:1` | 构建、启动、状态及后端配置面板 | →sandbox/cube 命令；UI；与真实 chat 路由一起验收 |
 
 ## 其他引擎与工作台功能
@@ -170,7 +174,7 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 | 语音 → `H/voice/mod.rs:534,569`、`H/voice/asr.rs:64`、`H/voice/live.rs:96` | 本地识别、热词纠错、HTTP 润色、录音与输入 | →sense/provider 借 Key；voice.json/voice_lexicon.json（mod `:6`）；voice-asr / voice-live 特性（`src-tauri/Cargo.toml:190`）；H，ASR 冒烟命令见 asr.rs `:98` |
 | 媒体账号/项目运行 → `H/accounts.rs:136,144`、`H/project.rs:60` | 浏览器 profile 状态/解绑、可运行产物启动 | 非 Claude/Codex OAuth；保留业务接口；H |
 | 自动化/批次/工作流 → `src/stores/automation.ts:323`、`src/stores/longtask.ts:1`、`src/stores/workflows.ts:248` | 调度 chat，多轮续跑及 prompt 模板 | →chat store/tauri 桥；UI；Pi 保留 done 对后续批次的驱动 |
-| 协议 → `src-tauri/crates/polaris-protocol/src/lib.rs:18,31` | InvokeRequest 与 Args 参数访问/严格检查 | 当前不是 agentd JSONL 协议；新协议需另加；`cargo test -p polaris-protocol` |
+| 协议 → `src-tauri/crates/polaris-protocol/src/lib.rs:18,31` | InvokeRequest 与 Args 参数访问/严格检查 | 此 crate 仍是宿主 invoke 协议；agentd 镜像类型在 kernel/backend/pi/protocol.rs；`cargo test -p polaris-protocol` |
 | runtime → `src-tauri/crates/polaris-runtime/src/lib.rs:9` | 路径、HTTP、子进程、host 广播 shim | 最底层无业务依赖；`cargo test -p polaris-runtime` |
 | core → `src-tauri/crates/polaris-core/src/lib.rs:24,44` | SandboxStatus / KbLocator 等共享契约 | sandbox 通过它反转 KB 依赖；`cargo test -p polaris-core` |
 | watchdog / failover → `src-tauri/crates/polaris-watchdog/src/lib.rs:1`、`src-tauri/crates/polaris-failover/src/lib.rs:1` | 超时状态机、供应商失败窗口 | kernel 编译依赖见 `src-tauri/crates/polaris-kernel/Cargo.toml:19`；分别 `cargo test -p polaris-watchdog` / `-p polaris-failover` |
@@ -193,8 +197,8 @@ kernel 当前没有 sandbox 编译依赖，虽有旧注释声称 desktop 会启�
 
 ## 后续边界与待确认
 
-- Pi Backend/config/prompts 仍属目标架构；agentd 已实现 P1 与 R1，宿主接线留待 P2。原目标目录记录（`docs/plans/2026-10-14-pi-refactor.md:35,36,37`）。
+- P2 shared Pi 接线已落地但未完成验收：per-account OS/账号隔离未实现；完整内核测试有 6 项额外的沙箱端口失败。配置、限制与结果见 [P2 记录](pi-migration/p2-result.md)。
 - U1–U4：OAuth/账本合并/上下文优先级/真实沙箱范围，详见 [调用点待确认](pi-migration/call-sites.md#待确认)。
 - U5–U7：取消终态、手机 error 语义、新事件承载，详见 [事件待确认](pi-migration/agent-events.md#后续契约测试清单与待确认)。
 - U8（待确认）：P6 登录后 relay 自动下发需要核对桌面与手机接线；已有 apply_relay_config 只证明接收能力（`C/collab/tunnel.rs:256`）；找到的生产调用是 owner HTTP 配置路由（`C/collab/http.rs:3460`），登录流程没有直接调用它，自动下发与 Endpoint 更新策略留 P6。
-- 本次没有重跑编译/功能测试。已有 [baseline.md](pi-migration/baseline.md) 记录较早提交 b6d9e38 的结果（`:1,12,16`），包括内核 4 项失败；不能把该记录当成本次 HEAD 的已验证结果。
+- [baseline.md](pi-migration/baseline.md) 保留原 4 项失败；P2 实测单独记录，不扩大基线豁免范围。
