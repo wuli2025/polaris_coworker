@@ -12,5 +12,12 @@
     "revocationMaxAgeSecs": 600,
     "newDeviceWindowHours": 24,
     "approvalTimeoutSecs": 300
+  },
+  "rateLimit": {
+    "windowSecs": 60,
+    "readRequests": 120,
+    "writeRequests": 30,
+    "loginRequests": 20,
+    "globalMultiplier": 20
   }
 }

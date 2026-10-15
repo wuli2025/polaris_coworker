@@ -1,3 +1,5 @@
+#[path = "rate_limits.rs"]
+mod rate_limits;
 use super::*;
 
 // ───────────────────────── 路由表 ─────────────────────────
@@ -206,5 +208,6 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
     if with_ws {
         r = r.route("/ws", get(collab_ws_handler));
     }
-    r.layer(axum::middleware::from_fn(risk_middleware)).with_state(state)
+    r.layer(axum::middleware::from_fn(risk_middleware))
+        .layer(axum::middleware::from_fn(rate_limits::middleware)).with_state(state)
 }

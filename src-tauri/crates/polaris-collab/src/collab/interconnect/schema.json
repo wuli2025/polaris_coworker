@@ -75,6 +75,37 @@
           "default": 300
         }
       }
+    },
+    "rateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "windowSecs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "readRequests": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "writeRequests": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "loginRequests": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "globalMultiplier": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      }
     }
   }
 }

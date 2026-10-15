@@ -18,11 +18,12 @@ pub const DEFAULTS: &str = include_str!("defaults.json");
 pub const SCHEMA: &str = include_str!("schema.json");
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     pub authority: Authority,
     pub relay: Relay,
     pub security: Security,
+    pub rate_limit: RateLimit,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -47,6 +48,16 @@ pub struct Security {
     pub revocation_max_age_secs: u64,
     pub new_device_window_hours: u64,
     pub approval_timeout_secs: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RateLimit {
+    pub window_secs: u64,
+    pub read_requests: u64,
+    pub write_requests: u64,
+    pub login_requests: u64,
+    pub global_multiplier: u64,
 }
 
 fn merge(base: &mut serde_json::Value, overlay: serde_json::Value) {
@@ -115,6 +126,15 @@ pub fn resolve(
         ("approvalTimeoutSecs", config.security.approval_timeout_secs, 3600),
     ] {
         if value == 0 || value > max { return Err(format!("security.{name} 须为 1..={max} 的整数")); }
+    }
+    for (name, value, max) in [
+        ("windowSecs", config.rate_limit.window_secs, 3600),
+        ("readRequests", config.rate_limit.read_requests, 10000),
+        ("writeRequests", config.rate_limit.write_requests, 10000),
+        ("loginRequests", config.rate_limit.login_requests, 10000),
+        ("globalMultiplier", config.rate_limit.global_multiplier, 10000),
+    ] {
+        if value == 0 || value > max { return Err(format!("rateLimit.{name} 须为 1..={max} 的整数")); }
     }
     Ok(config)
 }
