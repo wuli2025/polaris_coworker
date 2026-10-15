@@ -1,0 +1,868 @@
+diff --git a/deploy/singapore/.env.example b/deploy/singapore/.env.example
+index 12b18a0..e706295 100644
+--- a/deploy/singapore/.env.example
++++ b/deploy/singapore/.env.example
+@@ -48,8 +48,20 @@ LOG_MAX_SIZE=10m
+ LOG_MAX_FILES=3
+ # 绝对路径或相对 deploy/singapore 的路径；建议位于独立加密盘，不自动上传。
+ BACKUP_DIR=backups
+-# 初始化后填入完整 SHA-256；空值只允许 prepare/init-keys，不允许 smoke/upgrade。
++# 默认 age；仅允许 age/gpg/空值。服务器预装工具，不属于仓库依赖。
++BACKUP_ENCRYPT=age
++# age 公钥或 gpg 完整公钥指纹；空值会拒绝备份，除非明确确认下方例外。
++BACKUP_RECIPIENT=
++# 0/1；1 明确确认 BACKUP_DIR 为加密介质，并允许未配置加密时生成明文 tar。
++BACKUP_PLAINTEXT_ACK=0
++# age 恢复私钥的绝对路径；gpg 恢复使用运维用户的密钥环。
++BACKUP_IDENTITY=
++# 初始化后填入完整 SHA-256；空值禁止 smoke/upgrade，restore 默认也拒绝。
+ EXPECTED_FINGERPRINT=
++# 0/1；仅灾难恢复人工确认时设 1，缺 pin 时仍输出实际指纹，不能宣称身份已核实。
++RESTORE_UNPINNED_ACK=0
++# 恢复后本机公钥接口等待预算（秒，1..300）。
++RESTORE_VERIFY_TIMEOUT_SECS=30
+ # 自检默认只验证只读 API；可选独立测试账号，禁止使用真实管理员账号。
+ SMOKE_USERNAME=
+ SMOKE_PASSWORD=
+diff --git a/deploy/singapore/README.md b/deploy/singapore/README.md
+index 66a7b2f..3879e02 100644
+--- a/deploy/singapore/README.md
++++ b/deploy/singapore/README.md
+@@ -67,6 +67,8 @@ HAProxy 版本发布日期见[官方 3.2 发布目录](https://www.haproxy.org/d
+ ## 主机、DNS 与防火墙
+ 
+ 运行环境最低规划：Linux，2 vCPU、4 GiB 内存、20 GiB 可用持久 SSD，Docker Engine + Compose v2（支持 `--wait`），Bash、Python **3.11+**、`flock`、`realpath`。
++备份宿主还须安装 `age`（默认）或 GnuPG：Debian/Ubuntu 运维可执行 `sudo apt-get install age` 或 `sudo apt-get install gnupg`。
++这些是服务器侧工具，不加入 Cargo/npm/Python 依赖；工具缺失或加密失败不会退回明文。
+ 这是低流量起点，不是压测容量承诺；镜像构建建议在独立构建机完成。relay 流量与出口带宽/流量配额通常更值得监控。
+ 宿主准确同步时间。一个稳定公网地址即可，确认运营商允许入站 TCP/UDP 和出站 SMTP、ACME。
+ 
+@@ -166,14 +168,20 @@ Caddy 从受控 Docker 网络接受 PROXY v2，覆盖 XFF/X-Real-IP，忽略外
+ 
+ ## 备份、恢复、升级与回滚
+ 
+-- `scripts/backup.sh`：互斥锁→记录运行状态→停止 authority→复制数据→SQLite backup API 归并 WAL→校验→原子产出 tar→恢复原运行状态。
++- `scripts/backup.sh`：互斥锁→检查加密配置→记录运行状态→停止 authority→复制数据→SQLite backup API 归并 WAL→校验→加密并原子产出归档→清理明文→恢复原运行状态。
+   备份仅含 `collab.db`、`account_authority.key` 和清单（含实际运行镜像引用与 SHA-256），不包含 SMTP 密码和 TLS 缓存。
+   保存 `.env` 与 ACME volumes 需要独立的加密备份；数据库覆盖账号、吊销等权威状态，不能只备份主 DB 而漏 WAL。
+-  每次调用追加一份快照，不覆盖旧备份。**快照含明文签名私钥，0600 不是加密**，请存入加密介质或按已有密钥托管流程加密后异地保存。
++  每次调用追加一份快照，不覆盖旧备份。默认要求 `BACKUP_ENCRYPT=age` 与 `BACKUP_RECIPIENT`；生成 `.tar.age`，也支持 gpg 的 `.tar.gpg`。
++  未配置时拒绝；仅明确确认 `BACKUP_DIR` 是加密介质后设 `BACKUP_PLAINTEXT_ACK=1` 才允许 `.tar`，stderr 有醒目 WARNING。
+   不默认设置自动删除保留策略；按容量与保留要求自行配置定时任务。
+-- `scripts/restore.sh /absolute/path/authority-....tar`：先校验归档白名单、校验和、SQLite、32 字节种子格式，再备份现状、停机、恢复。
++- `scripts/restore.sh /absolute/path/authority-....tar.age`：先检查预期指纹、解密并校验归档白名单、校验和、SQLite、32 字节种子格式，再备份现状、停机、恢复。
++  接受 `.tar.age`、`.tar.gpg` 与历史 `.tar`；age 需 `BACKUP_IDENTITY`，gpg 用运维用户密钥环（非交互，私钥解锁须事先准备）。
++  有现存数据库时，备份现状同样须配置收件人或明确确认明文例外；解密能力不能代替备份加密配置。
+   拒绝路径穿越、重复成员、链接和未知文件；移除旧 WAL/SHM；失败保持停止，避免半恢复库上线。
+-  无现有库时支持空卷恢复；若原容器停止，恢复后仍停止。再启动并 smoke 核对原指纹。
++  重启后从容器内 `/api/account/pubkey` 获取公钥，调用 `probe.py fingerprint` 比对 `EXPECTED_FINGERPRINT`。
++  不符、无法取得公钥或响应无效均停止 authority 并非零退出；指引核对可信指纹与原备份，不能直接接受新指纹。
++  无现有库时支持空卷恢复；若原容器停止，临时启动核验后恢复停止状态。公网 smoke 仍需运维另跑。
++  缺少预期指纹默认在写入前拒绝；仅灾难恢复人工确认时可设 `RESTORE_UNPINNED_ACK=1`，会告警并输出实际指纹，不能证明身份可信。
+   哈希只检查完整性，不证明备份来源可信，恢复文件应来自受控备份库。
+ - 升级前将 `.env` 的 `AUTHORITY_IMAGE` 改成审核的新版本 digest，再运行 `scripts/upgrade.sh`。
+   脚本拉新权威镜像、备份现状、记录 `.generated/previous-authority-image.txt`、只升级 authority、等待健康并核对公网指纹。
+@@ -185,6 +193,30 @@ Caddy 从受控 Docker 网络接受 PROXY v2，覆盖 XFF/X-Real-IP，忽略外
+ - relay/代理维护另开窗口：先保留旧 digest/配置和证书卷，再 pull、逐个重建、完整 smoke；客户端两端互通仍要另测。
+   避免 `docker compose down -v`，它会删除身份与数据库卷。
+ 
++加密配置切换示例（修改 `.env`，不要仅设置同名 shell 环境变量）：
++
++```dotenv
++BACKUP_ENCRYPT=age
++BACKUP_RECIPIENT=age1替换为可信收件人公钥
++BACKUP_PLAINTEXT_ACK=0
++BACKUP_IDENTITY=/secure/offline-recovery/age-identity.txt
++RESTORE_UNPINNED_ACK=0
++RESTORE_VERIFY_TIMEOUT_SECS=30
++```
++
++age 备份只需公钥，恢复私钥应独立保管，恢复时再提供。切换 GnuPG：`BACKUP_ENCRYPT=gpg`，
++`BACKUP_RECIPIENT` 填已导入密钥环且经独立核对的完整公钥指纹，`BACKUP_IDENTITY` 留空。
++收件人由工具校验密钥格式；配置先拒绝空白/选项形式、未知加密模式，ACK 仅允许 `0/1`，identity 须绝对路径，恢复等待预算为 `1..300` 秒。
++gpg 显式信任指定收件人，所以运维必须核对指纹；不会交互询问信任，也不支持本包传递私钥口令。
++确需加密介质上的明文快照：`BACKUP_ENCRYPT=`、`BACKUP_RECIPIENT=`、`BACKUP_PLAINTEXT_ACK=1`；恢复默认策略时填回加密配置并将 ACK 改为 `0`。
++历史 `.env` 自动合并新增默认值，因此旧部署未补加密配置时 backup/upgrade/恢复前备份会拒绝；历史归档内容格式无迁移。
++
++复制、归并、校验与解密的临时明文放在系统临时目录（可通过 `TMPDIR` 指定），目录 0700、CLI 文件 0600。
++成功和可捕获失败路径都会覆盖、fsync、删除临时文件，部分密文也会删除；备份失败恢复原运行状态，恢复写入失败保持停止。
++CoW、SSD、日志文件系统不保证覆盖能抹除历史块，断电/SIGKILL 也无法执行清理；应使用加密盘或 tmpfs 的 `TMPDIR`，不能把删除当作介质级擦除。
++例如为大库准备足够容量的受控加密临时盘，再执行 `TMPDIR=/mnt/encrypted-tmp ./scripts/backup.sh`（恢复同理）。
++不要把恢复私钥放进快照或版本库；定期在隔离环境使用真实工具演练加密备份及解密恢复。
++
+ ## 排查
+ 
+ - `prepare` 报 BLOCKED：补真实、审核过的镜像 digest。格式校验不能证明该镜像存在，也不替代签名/供应链审核。
+diff --git a/deploy/singapore/VALIDATION.md b/deploy/singapore/VALIDATION.md
+index b6992c0..a83a49e 100644
+--- a/deploy/singapore/VALIDATION.md
++++ b/deploy/singapore/VALIDATION.md
+@@ -2,6 +2,7 @@
+ 
+ 日期：2026-10-15。只产出 `deploy/singapore/` 和功能树入口；未连接用户服务器，未部署，未 commit/push。
+ 执行报告不等于验收，最终由 Claude 重跑、Pi 独立审查后决定。
++本文件保留 P6c 原始执行记录；后续默认加密、恢复指纹核验与 Caddy 清理见 [R10 报告](../../docs/execution/R10/report.md)。
+ 
+ ## 文件与行为
+ 
+diff --git a/deploy/singapore/scripts/backup_crypto.py b/deploy/singapore/scripts/backup_crypto.py
+new file mode 100644
+index 0000000..fa3dbb0
+--- /dev/null
++++ b/deploy/singapore/scripts/backup_crypto.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python3
++"""External encryption tools and private plaintext workspaces; stdlib only."""
++import os
++import shutil
++import stat
++import subprocess
++import sys
++import tempfile
++from contextlib import contextmanager
++from pathlib import Path
++
++
++def clean(folder):
++    """Overwrite/fsync/unlink our private temporary files; never follow symlinks.
++
++    CoW/SSD/journal history still requires encrypted storage or tmpfs (see README).
++    """
++    folder = Path(folder)
++    if not folder.exists():
++        return
++    errors = []
++    for root, dirs, files in os.walk(folder, topdown=False, followlinks=False):
++        for name in files:
++            path = Path(root) / name
++            try:
++                if stat.S_ISREG(path.lstat().st_mode):
++                    fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
++                    with os.fdopen(fd, 'wb') as output:
++                        remaining = os.fstat(output.fileno()).st_size
++                        zeros = b'\0' * (1024 * 1024)
++                        while remaining:
++                            count = output.write(zeros[:min(remaining, len(zeros))])
++                            remaining -= count
++                        output.flush()
++                        os.fsync(output.fileno())
++            except OSError as error:
++                errors.append(error)
++            finally:
++                path.unlink(missing_ok=True)
++        for name in dirs:
++            path = Path(root) / name
++            if path.is_symlink():
++                path.unlink()
++            else:
++                path.rmdir()
++    folder.rmdir()
++    if errors:
++        raise OSError(f'明文覆盖清理失败（已尝试删除）：{errors[0]}')
++
++
++@contextmanager
++def workspace():
++    folder = Path(tempfile.mkdtemp(prefix='polaris-sensitive-'))
++    try:
++        yield folder
++    finally:
++        clean(folder)
++
++
++def tool(name):
++    if not shutil.which(name):
++        raise ValueError(f'BLOCKED: 服务器缺少 {name}，请按 README 安装；不会退回明文')
++    return name
++
++
++def policy(env):
++    mode, recipient = env['BACKUP_ENCRYPT'], env['BACKUP_RECIPIENT']
++    if mode and recipient:
++        tool(mode)
++        return mode
++    if env['BACKUP_PLAINTEXT_ACK'] != '1':
++        raise ValueError('BLOCKED: 配置 BACKUP_ENCRYPT=age|gpg 与 BACKUP_RECIPIENT；'
++                         '仅确认备份目录为加密介质后才能设 BACKUP_PLAINTEXT_ACK=1')
++    print('!!! WARNING: 明文备份含签名私钥；BACKUP_PLAINTEXT_ACK=1 已确认加密介质 !!!',
++          file=sys.stderr)
++    return ''
++
++
++def encrypt(source, destination, mode, recipient):
++    if mode == 'age':
++        command = [tool('age'), '--encrypt', '--recipient', recipient]
++    elif mode == 'gpg':
++        command = [tool('gpg'), '--no-options', '--batch', '--no-tty', '--output', '-',
++                   '--trust-model', 'always',
++                   '--encrypt', '--recipient', recipient]
++    else:
++        raise ValueError('未知加密格式')
++    # Output to a private exclusive file; never expose a successful archive on failure.
++    with Path(source).open('rb') as body, Path(destination).open('xb') as output:
++        subprocess.run(command, stdin=body, stdout=output, check=True)
++
++
++def decrypt(source, destination, env):
++    suffix = Path(source).suffix
++    if suffix == '.age':
++        identity = env['BACKUP_IDENTITY']
++        if not identity or not Path(identity).is_file():
++            raise ValueError('BLOCKED: age 恢复需要 BACKUP_IDENTITY 指向私钥文件')
++        command = [tool('age'), '--decrypt', '--identity', identity]
++    elif suffix == '.gpg':
++        command = [tool('gpg'), '--no-options', '--batch', '--no-tty', '--output', '-', '--decrypt']
++    else:
++        raise ValueError('恢复仅接受 .tar / .tar.age / .tar.gpg')
++    with Path(source).open('rb') as body, Path(destination).open('xb') as output:
++        subprocess.run(command, stdin=body, stdout=output, check=True)
+diff --git a/deploy/singapore/scripts/common.sh b/deploy/singapore/scripts/common.sh
+index 4abf833..e2cf34d 100755
+--- a/deploy/singapore/scripts/common.sh
++++ b/deploy/singapore/scripts/common.sh
+@@ -33,24 +33,34 @@ stop_authority() {
+   [[ $(docker inspect -f '{{.State.Running}}' "$SG_CONTAINER") == false ]]
+ }
+ backup_authority() {
+-  local target scratch
+-  target=$(value BACKUP_DIR)
+-  [[ $target = /* ]] || target="$SG_ROOT/$target"
+-  mkdir -p "$target"
+-  target=$(cd "$target" && pwd)
+-  scratch=$(mktemp -d "$target/.snapshot.XXXXXX")
+-  # 停服务后复制，SQLite backup API 归并 WAL；失败不产出成功标记。
+-  stop_authority
+-  trap 'restart_original' EXIT
+-  if ! docker cp "$SG_CONTAINER:/home/polaris/Polaris/data/." "$scratch/"; then
+-    echo "备份读取失败；临时目录含敏感数据：$scratch" >&2
+-    return 1
+-  fi
+-  python3 "$SG_ROOT/scripts/snapshot.py" pack "$scratch" "$target" \
+-    "$(docker inspect -f '{{.Config.Image}}' "$SG_CONTAINER")"
+-  rm -rf -- "$scratch"
+-  restart_original
+-  SG_WAS_RUNNING=0
+-  trap - EXIT
+-  echo '备份含未加密签名私钥；请立即转存加密介质，勿上传明文。' >&2
++  python3 "$SG_ROOT/scripts/snapshot.py" policy "$SG_ENV_FILE"
++  SG_CONTAINER=$(dc ps -aq authority)
++  # 独立 trap 不覆盖 restore 的明文清理与失败停机 trap。
++  (
++    local target scratch
++    target=$(value BACKUP_DIR)
++    [[ $target = /* ]] || target="$SG_ROOT/$target"
++    mkdir -p "$target"
++    target=$(cd "$target" && pwd)
++    scratch=$(mktemp -d "${TMPDIR:-/tmp}/polaris-snapshot.XXXXXX")
++    SG_WAS_RUNNING=0
++    finish_backup() {
++      local status=$?
++      trap - EXIT
++      python3 "$SG_ROOT/scripts/snapshot.py" clean "$scratch" || status=1
++      restart_original || status=1
++      exit "$status"
++    }
++    trap finish_backup EXIT
++    trap 'exit 130' INT
++    trap 'exit 143' TERM HUP
++    # 停服务后复制，SQLite backup API 归并 WAL；失败不产出成功标记。
++    stop_authority
++    if ! docker cp "$SG_CONTAINER:/home/polaris/Polaris/data/." "$scratch/"; then
++      echo '备份读取失败；清理临时明文并恢复原运行状态。' >&2
++      exit 1
++    fi
++    TMPDIR="$scratch" python3 "$SG_ROOT/scripts/snapshot.py" pack "$scratch" "$target" \
++      "$(docker inspect -f '{{.Config.Image}}' "$SG_CONTAINER")" "$SG_ENV_FILE"
++  )
+ }
+diff --git a/deploy/singapore/scripts/config.py b/deploy/singapore/scripts/config.py
+index 7b04596..8341474 100644
+--- a/deploy/singapore/scripts/config.py
++++ b/deploy/singapore/scripts/config.py
+@@ -70,7 +70,8 @@ def validate(env):
+             raise ValueError(f'{key}: 镜像必须固定版本')
+         if value.split('@')[0].rsplit(':', 1)[1] in ('latest', 'main', 'stable', 'alpine'):
+             raise ValueError(f'{key}: 不允许浮动版本')
+-    for key in ('ACCOUNT_OPEN_SIGNUP', 'SMOKE_SIGNUP'):
++    for key in ('ACCOUNT_OPEN_SIGNUP', 'SMOKE_SIGNUP', 'BACKUP_PLAINTEXT_ACK',
++                'RESTORE_UNPINNED_ACK'):
+         if env[key] not in ('0', '1'):
+             raise ValueError(f'{key}: 仅允许 0/1')
+     if env['RELAY_FALLBACK'] not in ('true', 'false'):
+@@ -78,7 +79,7 @@ def validate(env):
+     limits = {'SMTP_PORT': 65535, 'REVOCATION_POLL_SECS': 3600,
+               'REVOCATION_MAX_AGE_SECS': 86400, 'NEW_DEVICE_WINDOW_HOURS': 720,
+               'APPROVAL_TIMEOUT_SECS': 3600, 'SMOKE_TIMEOUT_SECS': 120,
+-              'LOG_MAX_FILES': 100}
++              'LOG_MAX_FILES': 100, 'RESTORE_VERIFY_TIMEOUT_SECS': 300}
+     for key in ('AUTH_REQUESTS_PER_10S', 'RELAY_ACCEPT_PER_SEC', 'RELAY_ACCEPT_BURST',
+                 'RELAY_RX_BYTES_PER_SEC', 'RELAY_RX_BURST_BYTES'):
+         limits[key] = 2**32 - 1
+@@ -94,6 +95,13 @@ def validate(env):
+         raise ValueError('LOG_MAX_SIZE: 需要正整数 m')
+     if not env['BACKUP_DIR'].strip():
+         raise ValueError('BACKUP_DIR 不能为空')
++    if env['BACKUP_ENCRYPT'] not in ('', 'age', 'gpg'):
++        raise ValueError('BACKUP_ENCRYPT: 仅允许 age/gpg/空值')
++    recipient = env['BACKUP_RECIPIENT']
++    if recipient and (recipient.startswith('-') or any(c.isspace() for c in recipient)):
++        raise ValueError('BACKUP_RECIPIENT: 需要单个公钥/指纹，不允许选项或空白')
++    if env['BACKUP_IDENTITY'] and not Path(env['BACKUP_IDENTITY']).is_absolute():
++        raise ValueError('BACKUP_IDENTITY: 需要绝对文件路径')
+     smtp = [env[k] for k in ('SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM')]
+     if any(smtp) and not all(smtp):
+         raise ValueError('SMTP_HOST/USER/PASS/FROM 必须全部填写或全部留空')
+diff --git a/deploy/singapore/scripts/restore.sh b/deploy/singapore/scripts/restore.sh
+index 5d595f0..328158c 100755
+--- a/deploy/singapore/scripts/restore.sh
++++ b/deploy/singapore/scripts/restore.sh
+@@ -1,12 +1,39 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ source "$(dirname "$0")/common.sh"
+-[[ $# == 1 ]] || { echo '用法：restore.sh /绝对路径/snapshot.tar' >&2; exit 2; }
++[[ $# == 1 ]] || { echo '用法：restore.sh /绝对路径/snapshot.tar[.age|.gpg]' >&2; exit 2; }
+ SG_ARCHIVE=$(realpath "$1")
+-# 在停机前检查完整性、路径、SQLite 与私钥格式。
+-python3 "$SG_ROOT/scripts/snapshot.py" verify "$SG_ARCHIVE"
+ lock
+ prepare
++SG_EXPECTED=$(value EXPECTED_FINGERPRINT)
++if [[ -z $SG_EXPECTED ]]; then
++  if [[ $(value RESTORE_UNPINNED_ACK) != 1 ]]; then
++    echo 'BLOCKED: 恢复须填写 EXPECTED_FINGERPRINT；仅人工确认灾难恢复时可设 RESTORE_UNPINNED_ACK=1。' >&2
++    exit 1
++  fi
++  echo '!!! WARNING: RESTORE_UNPINNED_ACK=1，缺少预期指纹，恢复身份未经可信指纹确认 !!!' >&2
++fi
++SG_RESTORE_PENDING=0
++SG_RESTORE_WORK=$(mktemp -d "${TMPDIR:-/tmp}/polaris-restore.XXXXXX")
++finish_restore() {
++  local status=$?
++  trap - EXIT
++  if [[ $SG_RESTORE_PENDING == 1 ]]; then
++    echo '恢复或公钥核验失败，停止 authority；请核对可信 EXPECTED_FINGERPRINT 与原身份备份，勿直接接受新指纹。' >&2
++    dc stop -t 30 authority >/dev/null || {
++      echo 'BLOCKED: 自动停止失败，请立即人工停止 authority。' >&2
++    }
++    status=1
++  fi
++  python3 "$SG_ROOT/scripts/snapshot.py" clean "$SG_RESTORE_WORK" || status=1
++  exit "$status"
++}
++trap finish_restore EXIT
++trap 'exit 130' INT
++trap 'exit 143' TERM HUP
++# 解密、完整性、路径、SQLite 与私钥格式在停机前验证。
++SG_ARCHIVE=$(TMPDIR="$SG_RESTORE_WORK" python3 "$SG_ROOT/scripts/snapshot.py" unpack \
++  "$SG_ARCHIVE" "$SG_RESTORE_WORK" "$SG_ENV_FILE")
+ require_docker
+ # 先备份现状；空卷恢复允许无现存数据库。
+ if [[ -z $(dc ps -aq authority) ]]; then
+@@ -16,6 +43,7 @@ if dc run --rm -T --no-deps --entrypoint sh authority -ec \
+   'test -s /home/polaris/Polaris/data/collab.db'; then
+   backup_authority
+ fi
++SG_RESTORE_PENDING=1
+ stop_authority
+ # 失败故意保持停止，不能启动半恢复的数据。
+ dc run --rm -T --no-deps --user 0 --entrypoint sh authority -ec '
+@@ -26,5 +54,17 @@ dc run --rm -T --no-deps --user 0 --entrypoint sh authority -ec '
+   chown -R 1000:1000 "$dir"
+   chmod 600 "$dir/collab.db" "$dir/account_authority.key"
+ ' < "$SG_ARCHIVE"
+-restart_original
+-echo '已恢复数据库与原签名身份。若原容器停止，请先启动，再运行 smoke.sh 核对指纹。'
++# 即使原服务停止，也临时启动并从实际恢复的容器取得公钥，再恢复停止状态。
++dc start authority >/dev/null
++SG_TIMEOUT=$(value RESTORE_VERIFY_TIMEOUT_SECS)
++dc exec -T authority curl -fsS --retry "$SG_TIMEOUT" --retry-connrefused \
++  --retry-delay 1 --retry-max-time "$SG_TIMEOUT" --max-time "$SG_TIMEOUT" \
++  http://127.0.0.1:8080/api/account/pubkey \
++  | python3 "$SG_ROOT/scripts/probe.py" fingerprint "$SG_EXPECTED"
++if [[ $SG_WAS_RUNNING == 0 ]]; then dc stop -t 30 authority >/dev/null; fi
++SG_RESTORE_PENDING=0
++if [[ -n $SG_EXPECTED ]]; then
++  echo '已恢复数据库；恢复后公钥与 EXPECTED_FINGERPRINT 一致，原运行状态已保留。'
++else
++  echo '已按显式确认恢复；以上仅为实际公钥指纹，身份尚未核实，请经可信渠道核对并填写 EXPECTED_FINGERPRINT。'
++fi
+diff --git a/deploy/singapore/scripts/snapshot.py b/deploy/singapore/scripts/snapshot.py
+index 420623a..e5abdca 100644
+--- a/deploy/singapore/scripts/snapshot.py
++++ b/deploy/singapore/scripts/snapshot.py
+@@ -4,13 +4,18 @@ import base64
+ import hashlib
+ import json
+ import os
++import shutil
+ import sqlite3
++import subprocess
+ import sys
+ import tarfile
+-import tempfile
++from contextlib import closing
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
++from backup_crypto import clean, decrypt, encrypt, policy, workspace
++from config import load, validate
++
+ PAYLOAD = ('collab.db', 'account_authority.key')
+ MEMBERS = {*PAYLOAD, 'manifest.json'}
+ 
+@@ -23,24 +28,25 @@ def key_check(data):
+ 
+ 
+ def check_db(path):
+-    with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as db:
++    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
+         if db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+             raise ValueError('SQLite 完整性检查失败')
+         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone():
+             raise ValueError('拒绝备份/恢复空数据库')
+ 
+ 
+-def pack(source, destination, image):
++def pack(source, destination, image, env):
++    mode = policy(env)
+     source, destination = Path(source).resolve(), Path(destination).resolve()
+     for name in PAYLOAD:
+         if (source / name).is_symlink() or not (source / name).is_file():
+             raise ValueError(f'缺失或不安全的备份文件: {name}')
+     key_check((source / PAYLOAD[1]).read_bytes())
+-    with tempfile.TemporaryDirectory(dir=destination, prefix='.normalize-') as folder:
++    with workspace() as folder:
+         normalized = Path(folder)
+         # source 是停止后复制的目录；普通读写打开以正确恢复 WAL，不使用 immutable=1。
+-        with sqlite3.connect(source / 'collab.db') as src:
+-            with sqlite3.connect(normalized / 'collab.db') as dst:
++        with closing(sqlite3.connect(source / 'collab.db')) as src:
++            with closing(sqlite3.connect(normalized / 'collab.db')) as dst:
+                 src.backup(dst)
+         check_db(normalized / 'collab.db')
+         (normalized / PAYLOAD[1]).write_bytes((source / PAYLOAD[1]).read_bytes())
+@@ -50,9 +56,12 @@ def pack(source, destination, image):
+         (normalized / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+         target = destination / ('authority-' + stamp + '.tar')
+-        partial = target.with_suffix('.partial')
++        if mode:
++            target = target.with_suffix('.tar.' + mode)
++        partial = target.with_name(target.name + '.partial')
++        plaintext = normalized / 'snapshot.tar'
+         try:
+-            with tarfile.open(partial, 'x') as archive:
++            with tarfile.open(plaintext, 'x') as archive:
+                 for name in sorted(MEMBERS):
+                     info = archive.gettarinfo(str(normalized / name), arcname=name)
+                     info.uid = info.gid = 1000
+@@ -60,9 +69,14 @@ def pack(source, destination, image):
+                     info.mode = 0o600
+                     with (normalized / name).open('rb') as body:
+                         archive.addfile(info, body)
+-            verify(partial)
++            verify(plaintext)
++            if mode:
++                encrypt(plaintext, partial, mode, env['BACKUP_RECIPIENT'])
++            else:
++                with plaintext.open('rb') as body, partial.open('xb') as output:
++                    shutil.copyfileobj(body, output)
+             partial.rename(target)
+-        except Exception:
++        except BaseException:
+             partial.unlink(missing_ok=True)
+             raise
+         print(target)
+@@ -81,7 +95,7 @@ def verify(path):
+         manifest = json.load(meta)
+         if manifest.get('format') != 1 or set(manifest.get('sha256', {})) != set(PAYLOAD):
+             raise ValueError('不支持的备份格式')
+-        with tempfile.TemporaryDirectory(prefix='polaris-verify-') as folder:
++        with workspace() as folder:
+             for name in PAYLOAD:
+                 digest = hashlib.sha256()
+                 target = Path(folder) / name
+@@ -96,15 +110,38 @@ def verify(path):
+     return manifest
+ 
+ 
++def unpack(source, destination, env):
++    if Path(source).suffix == '.tar':
++        # Historic plaintext archives remain readable; new backups require policy().
++        verify(source)
++        return str(source)
++    target = Path(destination) / 'snapshot.tar'
++    decrypt(source, target, env)
++    verify(target)
++    return str(target)
++
++
++def settings(path):
++    env = load(path)
++    validate(env)
++    return env
++
++
+ if __name__ == '__main__':
+     os.umask(0o077)
+     try:
+         if sys.argv[1] == 'pack':
+-            pack(*sys.argv[2:])
++            pack(*sys.argv[2:5], settings(sys.argv[5]))
++        elif sys.argv[1] == 'policy':
++            policy(settings(sys.argv[2]))
++        elif sys.argv[1] == 'unpack':
++            print(unpack(*sys.argv[2:4], settings(sys.argv[4])))
++        elif sys.argv[1] == 'clean':
++            clean(sys.argv[2])
+         elif sys.argv[1] == 'verify':
+             verify(sys.argv[2])
+             print('备份格式、校验和、SQLite、私钥种子格式：PASS')
+         else:
+             raise ValueError('未知动作')
+-    except (OSError, ValueError, sqlite3.Error, tarfile.TarError) as error:
++    except (OSError, ValueError, sqlite3.Error, tarfile.TarError, subprocess.CalledProcessError) as error:
+         sys.exit(str(error))
+diff --git a/deploy/singapore/templates/Caddyfile b/deploy/singapore/templates/Caddyfile
+index 86dd7ef..eabb990 100644
+--- a/deploy/singapore/templates/Caddyfile
++++ b/deploy/singapore/templates/Caddyfile
+@@ -1,30 +1,32 @@
+ {
+-    email @ACME_EMAIL@
+-    servers :443 {
+-        protocols h1 h2
+-        listener_wrappers {
+-            proxy_protocol {
+-                timeout 5s
+-                allow 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+-                fallback_policy reject
+-            }
+-            tls
+-        }
+-    }
++	email @ACME_EMAIL@
++	servers :443 {
++		protocols h1 h2
++		listener_wrappers {
++			proxy_protocol {
++				timeout 5s
++				allow 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
++				fallback_policy reject
++			}
++			tls
++		}
++	}
+ }
++
+ @AUTHORITY_DOMAIN@ {
+-    tls {
+-        issuer acme {
+-            disable_tlsalpn_challenge
+-        }
+-    }
+-    @account path /api/account/* /api/mesh/*
+-    handle @account {
+-        reverse_proxy gateway:8081 {
+-            header_up X-Forwarded-For {remote_host}
+-            header_up X-Real-IP {remote_host}
+-            header_up -CF-Connecting-IP
+-        }
+-    }
+-    respond 404
++	tls {
++		issuer acme {
++			disable_tlsalpn_challenge
++		}
++	}
++
++	@account path /api/account/* /api/mesh/*
++	handle @account {
++		reverse_proxy gateway:8081 {
++			header_up X-Real-IP {remote_host}
++			header_up -CF-Connecting-IP
++		}
++	}
++
++	respond 404
+ }
+diff --git a/deploy/singapore/tests/fake_crypto.py b/deploy/singapore/tests/fake_crypto.py
+new file mode 100644
+index 0000000..dbd855c
+--- /dev/null
++++ b/deploy/singapore/tests/fake_crypto.py
+@@ -0,0 +1,23 @@
++#!/usr/bin/env python3
++"""TEST DOUBLE ONLY: reversible transport, NOT encryption. Never used by production."""
++import base64
++import json
++import os
++import sys
++from pathlib import Path
++
++args = sys.argv[1:]
++with (Path(os.environ['FAKE_DOCKER_ROOT']) / 'crypto.jsonl').open('a') as log:
++    log.write(json.dumps([Path(sys.argv[0]).name, *args]) + '\n')
++if os.environ.get('FAKE_CRYPTO_FAIL') == '1':
++    sys.stdout.buffer.write(b'partial failure')
++    sys.exit(29)
++body = sys.stdin.buffer.read()
++if '--encrypt' in args:
++    sys.stdout.buffer.write(b'TEST-DOUBLE:' + base64.b64encode(body))
++elif '--decrypt' in args:
++    if not body.startswith(b'TEST-DOUBLE:'):
++        sys.exit(30)
++    sys.stdout.buffer.write(base64.b64decode(body.removeprefix(b'TEST-DOUBLE:'), validate=True))
++else:
++    sys.exit(31)
+diff --git a/deploy/singapore/tests/fake_docker.py b/deploy/singapore/tests/fake_docker.py
+index 74ce1d3..fea2512 100644
+--- a/deploy/singapore/tests/fake_docker.py
++++ b/deploy/singapore/tests/fake_docker.py
+@@ -28,6 +28,10 @@ if args[0] == 'compose':
+         state['running'] = False
+     elif action in ('start', 'up'):
+         state['running'] = True
++    elif action == 'exec':
++        if not state['running'] or args[-1] != 'http://127.0.0.1:8080/api/account/pubkey':
++            sys.exit(21)
++        print((root / 'pubkey.json').read_text())
+     elif action == 'run':
+         script = args[-1]
+         if 'test -s' in script:
+@@ -35,6 +39,8 @@ if args[0] == 'compose':
+         elif 'tar -xf' in script:
+             if os.environ.get('FAKE_FAIL') == 'extract':
+                 sys.exit(18)
++            for suffix in ('-wal', '-shm'):
++                (root / 'data' / ('collab.db' + suffix)).unlink(missing_ok=True)
+             with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:
+                 for member in archive:
+                     if member.name in ('collab.db', 'account_authority.key'):
+@@ -55,6 +61,7 @@ elif args[0] == 'inspect':
+         raise RuntimeError('unhandled inspect')
+ elif args[0] == 'cp':
+     if os.environ.get('FAKE_FAIL') == 'cp':
++        shutil.copy(root / 'data/account_authority.key', Path(args[2]) / 'account_authority.key')
+         sys.exit(19)
+     shutil.copytree(root / 'data', args[2], dirs_exist_ok=True)
+ else:
+diff --git a/deploy/singapore/tests/test_backup_security.py b/deploy/singapore/tests/test_backup_security.py
+new file mode 100644
+index 0000000..f379af7
+--- /dev/null
++++ b/deploy/singapore/tests/test_backup_security.py
+@@ -0,0 +1,130 @@
++#!/usr/bin/env python3
++import json
++import shutil
++import sqlite3
++import unittest
++from contextlib import closing
++
++import test_behavior as support
++
++
++class BackupSecurityTests(support.MaintenanceFixture, unittest.TestCase):
++    def crypto(self, mode):
++        shutil.copy(support.ROOT / 'tests/fake_crypto.py', self.bin / mode)
++        (self.bin / mode).chmod(0o755)
++        identity = self.root / 'identity'
++        identity.write_text('test identity')
++        self.configure(BACKUP_ENCRYPT=mode, BACKUP_RECIPIENT='test-recipient',
++                       BACKUP_PLAINTEXT_ACK='0', BACKUP_IDENTITY=str(identity))
++
++    def test_unconfigured_backup_refuses_before_stopping(self):
++        self.configure(BACKUP_PLAINTEXT_ACK='0')
++        result = self.run_script('backup.sh')
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('BACKUP_RECIPIENT', result.stderr)
++        self.assertNotIn('"stop"', (self.fake / 'calls.jsonl').read_text())
++        self.assertFalse((self.root / 'backups').exists())
++        self.assert_no_plaintext_scratch()
++
++    def test_explicit_plaintext_ack_warns(self):
++        result = self.run_script('backup.sh')
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertIn('!!! WARNING: 明文备份含签名私钥', result.stderr)
++        self.assertEqual(len(list((self.root / 'backups').glob('*.tar'))), 1)
++        self.assert_no_plaintext_scratch()
++
++    def test_age_and_gpg_roundtrip_leaves_only_encrypted_archives(self):
++        self.db.close()
++        for mode in ('age', 'gpg'):
++            with self.subTest(mode=mode):
++                self.crypto(mode)
++                result = self.run_script('backup.sh')
++                self.assertEqual(result.returncode, 0, result.stderr)
++                archive = sorted((self.root / 'backups').glob('*.' + mode))[-1]
++                self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
++                self.assert_no_plaintext_scratch()
++                with closing(sqlite3.connect(self.fake / 'data/collab.db')) as db, db:
++                    db.execute("UPDATE accounts SET name='changed'")
++                result = self.run_script('restore.sh', archive)
++                self.assertEqual(result.returncode, 0, result.stderr)
++                with closing(sqlite3.connect(self.fake / 'data/collab.db')) as db:
++                    self.assertEqual(db.execute('SELECT name FROM accounts').fetchone()[0], 'before')
++                self.assert_no_plaintext_scratch()
++                self.assertTrue(json.loads(self.state.read_text())['running'])
++                self.assertFalse(list((self.root / 'backups').glob('*.tar')))
++        calls = [json.loads(line) for line in (self.fake / 'crypto.jsonl').read_text().splitlines()]
++        for mode in ('age', 'gpg'):
++            self.assertTrue(any(c[0] == mode and '--recipient' in c and 'test-recipient' in c for c in calls))
++            self.assertTrue(any(c[0] == mode and '--decrypt' in c for c in calls))
++        self.assertTrue(any(c[0] == 'age' and '--identity' in c for c in calls))
++
++    def test_encryption_failure_cleans_partial_and_restarts(self):
++        self.crypto('age')
++        # Even an explicit plaintext ACK cannot downgrade a failed encryption command.
++        self.configure(BACKUP_PLAINTEXT_ACK='1')
++        self.env['FAKE_CRYPTO_FAIL'] = '1'
++        result = self.run_script('backup.sh')
++        self.assertNotEqual(result.returncode, 0)
++        self.assertTrue(json.loads(self.state.read_text())['running'])
++        self.assertEqual(list((self.root / 'backups').iterdir()), [])
++        self.assert_no_plaintext_scratch()
++
++    def test_decryption_failure_cleans_plaintext_before_docker(self):
++        self.crypto('age')
++        result = self.run_script('backup.sh')
++        self.assertEqual(result.returncode, 0, result.stderr)
++        archive = next((self.root / 'backups').glob('*.age'))
++        before = (self.fake / 'calls.jsonl').read_text()
++        self.env['FAKE_CRYPTO_FAIL'] = '1'
++        result = self.run_script('restore.sh', archive)
++        self.assertNotEqual(result.returncode, 0)
++        self.assertEqual((self.fake / 'calls.jsonl').read_text(), before)
++        self.assert_no_plaintext_scratch()
++
++    def test_restore_missing_pin_refuses_before_docker(self):
++        archive = self.backup()
++        before = (self.fake / 'calls.jsonl').read_text()
++        self.configure(EXPECTED_FINGERPRINT='')
++        result = self.run_script('restore.sh', archive)
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('BLOCKED', result.stderr)
++        self.assertIn('EXPECTED_FINGERPRINT', result.stderr)
++        self.assertEqual((self.fake / 'calls.jsonl').read_text(), before)
++
++    def test_restore_mismatch_stops_authority_even_with_ack(self):
++        archive = self.backup()
++        self.configure(EXPECTED_FINGERPRINT='a' * 64, RESTORE_UNPINNED_ACK='1')
++        result = self.run_script('restore.sh', archive)
++        self.assertNotEqual(result.returncode, 0)
++        self.assertFalse(json.loads(self.state.read_text())['running'])
++        self.assertIn('权威完整指纹与预期不一致', result.stderr)
++        self.assertIn('停止 authority', result.stderr)
++        self.assert_no_plaintext_scratch()
++
++    def test_restore_failed_pubkey_fetch_stops_authority(self):
++        archive = self.backup()
++        result = self.run_script('restore.sh', archive, fail='exec')
++        self.assertNotEqual(result.returncode, 0)
++        self.assertFalse(json.loads(self.state.read_text())['running'])
++        self.assert_no_plaintext_scratch()
++
++    def test_restore_ack_warns_and_prints_actual_fingerprint(self):
++        archive = self.backup()
++        self.configure(EXPECTED_FINGERPRINT='', RESTORE_UNPINNED_ACK='1')
++        result = self.run_script('restore.sh', archive)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertIn('!!! WARNING: RESTORE_UNPINNED_ACK=1', result.stderr)
++        self.assertIn(self.pubkey['fingerprint'], result.stdout)
++        self.assertIn('身份尚未核实', result.stdout)
++
++    def test_restore_checks_previously_stopped_authority(self):
++        archive = self.backup()
++        self.state.write_text(json.dumps({'running': False}))
++        result = self.run_script('restore.sh', archive)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertIn('EXPECTED_FINGERPRINT 一致', result.stdout)
++        self.assertFalse(json.loads(self.state.read_text())['running'])
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/deploy/singapore/tests/test_behavior.py b/deploy/singapore/tests/test_behavior.py
+index 7835e8b..38e4ef5 100644
+--- a/deploy/singapore/tests/test_behavior.py
++++ b/deploy/singapore/tests/test_behavior.py
+@@ -44,6 +44,9 @@ class ConfigurationTests(unittest.TestCase):
+                            ('RELAY_FALLBACK', '1'), ('SMTP_PORT', '65536'),
+                            ('SMTP_USER', 'partial'), ('AUTH_REQUESTS_PER_10S', '0'),
+                            ('REVOCATION_POLL_SECS', '1.5'), ('EXPECTED_FINGERPRINT', 'abcd'),
++                           ('BACKUP_ENCRYPT', 'openssl'), ('BACKUP_RECIPIENT', '--output=x'),
++                           ('BACKUP_PLAINTEXT_ACK', 'true'), ('BACKUP_IDENTITY', 'relative'),
++                           ('RESTORE_UNPINNED_ACK', 'yes'), ('RESTORE_VERIFY_TIMEOUT_SECS', '301'),
+                            ('RELAY_URLS', 'http://relay.example.invalid'),
+                            ('AUTHORITY_CPUS', 'nan'), ('SMOKE_SIGNUP', '1')]:
+             with self.subTest(key=key), self.assertRaises(ValueError):
+@@ -134,7 +137,7 @@ class ProbeTests(unittest.TestCase):
+                 self.assertEqual(request.call_count, count)
+ 
+ 
+-class MaintenanceTests(unittest.TestCase):
++class MaintenanceFixture:
+     def setUp(self):
+         self.temp = tempfile.TemporaryDirectory()
+         self.root = Path(self.temp.name)
+@@ -150,8 +153,15 @@ class MaintenanceTests(unittest.TestCase):
+         shutil.copy(ROOT / 'tests/fake_docker.py', self.bin / 'docker')
+         (self.bin / 'docker').chmod(0o755)
+         self.env = os.environ | {'PATH': str(self.bin) + ':' + os.environ['PATH'],
+-                                'FAKE_DOCKER_ROOT': str(self.fake)}
+-        values = inputs() | {'BACKUP_DIR': str(self.root / 'backups'), 'EXPECTED_FINGERPRINT': 'a' * 64}
++                                'FAKE_DOCKER_ROOT': str(self.fake),
++                                'SG_ENV_FILE': str(self.package / '.env'),
++                                'TMPDIR': str(self.root / 'scratch')}
++        (self.root / 'scratch').mkdir()
++        self.pubkey = ProbeTests().document()
++        (self.fake / 'pubkey.json').write_text(json.dumps(self.pubkey))
++        values = inputs() | {'BACKUP_DIR': str(self.root / 'backups'),
++                             'EXPECTED_FINGERPRINT': self.pubkey['fingerprint'],
++                             'BACKUP_PLAINTEXT_ACK': '1'}
+         (self.package / '.env').write_text(''.join(f'{k}={v}\n' for k, v in values.items()))
+         # Deliberately synthetic invalid-for-production seed; temporary directory only.
+         (self.fake / 'data/account_authority.key').write_bytes(base64.urlsafe_b64encode(b'\x00' * 32).rstrip(b'='))
+@@ -174,6 +184,19 @@ class MaintenanceTests(unittest.TestCase):
+         self.assertEqual(result.returncode, 0, result.stderr)
+         return sorted((self.root / 'backups').glob('*.tar'))[-1]
+ 
++    def configure(self, **updates):
++        path = self.package / '.env'
++        values = config.read_env(path) | updates
++        path.write_text(''.join(f'{k}={v}\n' for k, v in values.items()))
++
++    def assert_no_plaintext_scratch(self):
++        self.assertEqual(list((self.root / 'scratch').iterdir()), [])
++        backups = self.root / 'backups'
++        if backups.exists():
++            self.assertFalse(any(p.is_dir() or p.name.endswith('.partial') for p in backups.iterdir()))
++
++
++class MaintenanceTests(MaintenanceFixture, unittest.TestCase):
+     def test_backup_includes_committed_wal_and_preserves_running_state(self):
+         archive = self.backup()
+         self.assertTrue(json.loads(self.state.read_text())['running'])
+@@ -192,6 +215,7 @@ class MaintenanceTests(unittest.TestCase):
+         self.assertNotEqual(result.returncode, 0)
+         self.assertTrue(json.loads(self.state.read_text())['running'])
+         self.assertEqual(list((self.root / 'backups').glob('*.tar')), [])
++        self.assert_no_plaintext_scratch()
+ 
+     def test_restore_repeated_and_failed_extraction_stays_stopped(self):
+         archive = self.backup()
+@@ -200,9 +224,12 @@ class MaintenanceTests(unittest.TestCase):
+             result = self.run_script('restore.sh', archive)
+             self.assertEqual(result.returncode, 0, result.stderr)
+             self.assertTrue(json.loads(self.state.read_text())['running'])
++            self.assertIn('EXPECTED_FINGERPRINT 一致', result.stdout)
++            self.assert_no_plaintext_scratch()
+         result = self.run_script('restore.sh', archive, fail='extract')
+         self.assertNotEqual(result.returncode, 0)
+         self.assertFalse(json.loads(self.state.read_text())['running'])
++        self.assert_no_plaintext_scratch()
+ 
+     def test_tampered_or_traversal_archive_rejected_before_docker(self):
+         archive = self.backup()
