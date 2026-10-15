@@ -191,7 +191,15 @@ use polaris_protocol::{strict_args_enabled, Args, InvokeRequest};
 
 /// 把命令错误串按「客户端错误 vs 服务端错误」映射到合适的 HTTP 状态码,而非一律 500。
 fn invoke_err_resp(e: String) -> Response {
-    let status = if e.starts_with("未知命令") {
+    let status = if e == "ChatForbidden" {
+        StatusCode::FORBIDDEN
+    } else if ["ChatNotRunning", "ChatTurnNotReady", "ChatBusy", "SESSION_NOT_RUNNING", "TURN_NOT_READY", "QUEUE_LIMIT"]
+        .iter().any(|code| e.starts_with(code)) {
+        StatusCode::CONFLICT
+    } else if ["ChatInvalidInput", "ChatTargetRequired", "ChatTargetMismatch", "ChatEmptyInput", "ChatInputTooLarge"]
+        .iter().any(|code| e.starts_with(code)) {
+        StatusCode::BAD_REQUEST
+    } else if e.starts_with("未知命令") {
         StatusCode::NOT_FOUND
     } else if (e.contains("参数")
         && (e.contains("缺少") || e.contains("解析失败") || e.contains("无效")))

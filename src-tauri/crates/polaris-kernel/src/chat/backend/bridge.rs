@@ -66,4 +66,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
     }
     Ok(())
 }
-pub(crate) fn emit(app: &AppHandle, event: ChatStreamEvent) { let _ = app.emit("chat:stream", event); }
+pub(crate) fn emit(app: &AppHandle, event: ChatStreamEvent) {
+    if event.kind == "done" { crate::chat::live_input::finished(&event.req_id); }
+    let _ = app.emit("chat:stream", event);
+}

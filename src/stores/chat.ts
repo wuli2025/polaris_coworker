@@ -463,6 +463,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
 
   return {
     byConv,
+    reqByConv,
     bubblesFor,
     isSending,
     runningConvIds,

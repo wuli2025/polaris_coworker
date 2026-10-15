@@ -1,6 +1,7 @@
 import { readFile, writeFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { liveInput } from './lib/live-input.mjs';
 import { approvedBash, respondDuring } from './lib/permissions.mjs';
 import { run, Blocked, check, integer } from './lib/harness.mjs';
 import { build, server, conversation, memory, mapping, setModel, sessionFiles, sessionEntries } from './lib/agent.mjs';
@@ -67,8 +68,8 @@ const steps = {
     check(!(await h.api.invoke('chat_is_running', { reqId: t.req })), 'Turn still running after done');
     return { ...r.metrics, cancelToDoneMs: Math.round(r.done.at - cancelAt), ...await memory(h) };
   },
-  async steer() { throw new Blocked('No steer HTTP/IPC entry in apihub; only agentd protocol command exists. See docs/drills/P7a-blockers.md'); },
-  async followup() { throw new Blocked('No followUp HTTP/IPC entry in apihub. Direct daemon calls would bypass the required server chain'); },
+  steer: h => liveInput(h, 'steer'),
+  followup: h => liveInput(h, 'followUp'),
   async switch(h) {
     const next = process.env.DRILL_MODEL_NEXT;
     if (!h.model || !next?.trim() || next.length > 200 || next === h.model) throw new Blocked('switch requires distinct DRILL_MODEL and DRILL_MODEL_NEXT supported by the copied account');
@@ -87,5 +88,5 @@ const steps = {
   },
 };
 await run('D1', steps, async (h, name) => {
-  if (!['build', 'steer', 'followup'].includes(name)) await server(h);
+  if (name !== 'build') await server(h);
 });

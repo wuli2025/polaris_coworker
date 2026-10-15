@@ -170,6 +170,29 @@ impl State {
                 };
                 let _ = reply.send(result);
             }
+            Control::Input { req, text, follow_up, reply } => {
+                // Resolve and write in the actor: a stale request cannot target the next turn.
+                let route = self.routes.values().find(|route| route.req == req);
+                let result = match route {
+                    None => Err("ChatNotRunning"),
+                    Some(route) if route.terminal.is_some() || route.stream.is_finished()
+                        || route.abort_deadline.is_some() => Err("ChatNotRunning"),
+                    Some(route) if !route.started || !route.acknowledged => Err("ChatTurnNotReady"),
+                    Some(route) => Ok(route.session.clone()),
+                };
+                match (result, process) {
+                    (Err(error), _) => { let _ = reply.send(Err(error.into())); }
+                    (Ok(session_id), Some(process)) => {
+                        let text = super::protocol::Text { session_id, text };
+                        let command = if follow_up { Command::FollowUp(text) } else { Command::Steer(text) };
+                        if let Err(error) = self.request(process, command, Some(reply.clone())) {
+                            let _ = reply.send(Err(error.to_string()));
+                            return Err(error);
+                        }
+                    }
+                    (_, None) => { let _ = reply.send(Err(self.unavailable())); }
+                }
+            }
             Control::Cancel(req, reply) => {
                 let session = self.active.lock().get(&req).cloned();
                 if let Some(session) = session {

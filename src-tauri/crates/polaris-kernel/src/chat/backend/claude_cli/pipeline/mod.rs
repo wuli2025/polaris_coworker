@@ -154,6 +154,7 @@ use parser::*;
 
 pub(crate) fn emit_event(app: &AppHandle, ev: ChatStreamEvent) {
     if !crate::chat::backend::claude_cli::capture(&ev) {
+        if ev.kind == "done" { crate::chat::live_input::finished(&ev.req_id); }
         let _ = app.emit("chat:stream", ev);
     }
 }

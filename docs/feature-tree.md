@@ -474,3 +474,11 @@ Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列�
 - 其它参数：DRILL_PI_AGENT_DIR 必须显式 staging 目录；provider 默认 openai-codex；模型默认目录选择，compact/switch 需显式 ID；D6 repeat 默认 5。HOME/XDG/凭据/CA/数据库仅存在本次临时目录，keep 仍清密。
 - 迁移：无产品代码、DB 或用户配置迁移；只新增演练脚本/文档，保留并行用户改动。D1 steer/followUp、D3 server SandboxExecutor、D4 自签 CA 委托信任及未编写的跨主机流程仍阻塞。
 - 验证：仅语法/静态检查、执行器假进程单测、SQLite/tar + 假加密测试；真实模型、Docker、age、D6 产品全量均未运行。命令/数量/限制以执行报告为准，由 Claude/Pi 复核验收。
+
+## P7b：演练产品缺口（执行结果，整体 BLOCKED）
+
+- 入口：生产打包依赖图；`chat::live_input::{chat_steer,chat_follow_up}`；HTTP `/api/invoke` 同名命令；ChatComposer 新 LiveInputActions；D1 steer/followup 真实断言。
+- 依赖/配置：复用 agentd TypeScript 解析器、Pi 协议及现有队列配置，无新依赖；文本入口参数校验、权限归属、busy/done 语义与切换示例见 [实现及边界](pi-migration/p7b-product-gaps.md)。
+- 迁移：运行期 owner/reqId/conversationId → agentd session 绑定，不改数据库；空闲拒绝，不自动新建轮次。前端既有长文件净增分别 4/1 行。
+- 验证：最小生产打包及新回归通过；三构建、Rust/前端实跑与失败项见 [P7b 验证](pi-migration/p7b-validation.md)，真实 D1 未跑。
+- 未完成：私有 CA 追加需要访问 ureq 私有默认根或新增直接依赖；本次未新增依赖/替换默认根/禁用校验，D4 TLS 仍 BLOCKED。由 Claude/Pi 决定验收。

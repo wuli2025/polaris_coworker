@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import LiveInputActions from "./LiveInputActions.vue";
 import { runtimeCopy as copy } from "../../features/runtime/copy";
 // 输入区(自 ChatPanel 拆出,逻辑原样搬移):输入卡片 + 工具条(工作模式/技能/模式/
 // 智能体/供应商弹层) + 授权栏 + 语音听写 + 附件/贴图 + 发送/停止/清空上下文。
@@ -1312,6 +1313,9 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
         @input="autoGrow"
         @paste="onPaste"
       ></textarea>
+      <LiveInputActions v-if="sending" :conversation-id="app.currentConvId" :text="input"
+        :disabled="attachments.length > 0 || pendingAttach.length > 0"
+        @sent="(cid, text) => { if (drafts.get(cid) === text) drafts.delete(cid); if (app.currentConvId === cid && input === text) input = ''; }" />
       <div class="toolbar">
         <div class="toolbar-left">
           <button

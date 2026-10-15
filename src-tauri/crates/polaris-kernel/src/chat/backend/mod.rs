@@ -138,6 +138,9 @@ pub trait AgentBackend: Send + Sync {
         anyhow::ensure!(!options.sandbox && options.expert_prompt.is_none() && options.tool_profile.is_none() && !options.detailed_events, "BackendToolOptionsUnsupported");
         self.start(input)
     }
+    fn live_input(&self, _req: &str, _text: &str, _follow_up: bool) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("ChatLiveInputUnsupported")
+    }
     fn cancel(&self, req_id: &str) -> anyhow::Result<()>;
     fn close(&self, session_id: &str) -> anyhow::Result<()>;
     fn models(&self) -> anyhow::Result<serde_json::Value>;

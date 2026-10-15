@@ -31,6 +31,10 @@ fn next_req_id() -> String {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, String> {
+    chat_send_owned(app, args, "desktop".into()).await
+}
+
+pub async fn chat_send_owned(app: AppHandle, args: ChatSendArgs, owner: String) -> Result<String, String> {
     if args.prompt.trim().is_empty() {
         return Err("消息不能为空".into());
     }
@@ -45,6 +49,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         conv::ensure_writable_or_create(cid)?;
     }
     let req_id = next_req_id();
+    let lease = super::live_input::reserve(&req_id, args.conversation_id.as_deref(), &owner)?;
 
     // 轻量同步部分到此为止: 只做 req_id 生成 + user 消息落历史(便宜, 且保证「先 user
     // 后 assistant」的落库顺序)。其余重活 —— 产物目录快照(WalkDir)、CLAUDE.md 渲染、
@@ -59,6 +64,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     let bg_req = req_id.clone();
     let bg_conv = args.conversation_id.clone();
     std::thread::spawn(move || {
+        let _lease = lease;
         // 后台线程内任何 Err/panic 都必须转成前端已能处理的事件发出去, 绝不能静默吞掉
         // 让气泡永远转圈: 旧同步路径里 spawn 失败 = invoke reject = 前端「[发送失败]」气泡
         // + 结束运行态; 这里等价复刻为 error 事件(错误气泡) + done 事件(唯一终态, 结束

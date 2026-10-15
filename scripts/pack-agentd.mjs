@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { nodeVersion } from './runtime/node.mjs';
+import { contractFiles, copyContract } from './runtime/contract-files.mjs';
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const source = join(repo, 'agentd');
 function files(dir) {
@@ -17,9 +18,9 @@ function bytes(dir) { return files(dir).reduce((n, p) => n + statSync(p).size, 0
 export async function packAgentd(destination = join(repo, 'src-tauri/runtime/agentd')) {
   nodeVersion(JSON.parse(readFileSync(join(source, 'package.json'))).engines.node, process.versions.node);
   const hash = createHash('sha256').update(`${process.platform}/${process.arch}/${process.versions.node}`);
-  for (const path of ['package.json', 'package-lock.json', 'tsconfig.json', 'test/sdk-contract.test.ts', ...files(join(source, 'src')),
+  for (const path of ['package.json', 'package-lock.json', 'tsconfig.json', ...contractFiles(source, 'test/sdk-contract.test.ts'), ...files(join(source, 'src')),
     ...files(join(source, 'config')), fileURLToPath(import.meta.url),
-    join(repo, 'scripts/runtime/node.mjs'), join(repo, 'scripts/runtime/check-wasm.mjs')]) {
+    join(repo, 'scripts/runtime/contract-files.mjs'), join(repo, 'scripts/runtime/node.mjs'), join(repo, 'scripts/runtime/check-wasm.mjs')]) {
     hash.update(path).update(readFileSync(resolve(source, path)));
   }
   const digest = hash.digest('hex');
@@ -43,9 +44,9 @@ export async function packAgentd(destination = join(repo, 'src-tauri/runtime/age
   // Verify the installed production tree, without tsx or TypeScript in the payload.
   const testDir = join(staging, '.contract-tests');
   mkdirSync(testDir);
-  cpSync(join(source, 'dist/test/sdk-contract.test.js'), join(testDir, 'sdk-contract.test.mjs'));
   try {
-    execFileSync(process.execPath, ['--test', join(testDir, 'sdk-contract.test.mjs')], { cwd: staging, stdio: 'inherit' });
+    copyContract(join(source, 'dist'), 'test/sdk-contract.test.js', testDir);
+    execFileSync(process.execPath, ['--test', join(testDir, 'test/sdk-contract.test.js')], { cwd: staging, stdio: 'inherit' });
     execFileSync(process.execPath, [join(repo, 'scripts/runtime/check-wasm.mjs'), staging], { stdio: 'inherit' });
   } finally { rmSync(testDir, { recursive: true, force: true }); }
   const composition = Object.fromEntries(['dist', 'config', 'node_modules'].map(name => [name, bytes(join(staging, name))]));

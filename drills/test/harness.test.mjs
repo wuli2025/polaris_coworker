@@ -1,4 +1,4 @@
-import test from 'node:test';
+const { test } = await import(process.env.VITEST ? 'vitest' : 'node:test');
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';

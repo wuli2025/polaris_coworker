@@ -13,6 +13,7 @@ mod supervisor;
 mod translate;
 #[cfg(windows)] mod windows_job;
 #[cfg(test)] mod tests;
+#[cfg(test)] mod live_input_tests;
 use super::*;
 use client::{Client, Control};
 use protocol::{Command, Empty, Prompt};
@@ -172,6 +173,12 @@ impl AgentBackend for PiBackend {
             cancelled.lock().remove(&req);
         });
         Ok(stream)
+    }
+    fn live_input(&self, req: &str, text: &str, follow_up: bool) -> anyhow::Result<Value> {
+        let client = self.client()?;
+        let (tx, rx) = mpsc::sync_channel(1);
+        client.send(Control::Input { req: req.into(), text: text.into(), follow_up, reply: tx })?;
+        client.wait(rx)
     }
     fn cancel(&self, req: &str) -> anyhow::Result<()> {
         if self.preparing.lock().contains(req) { self.cancelled.lock().insert(req.into()); }

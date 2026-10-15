@@ -8,6 +8,7 @@ pub enum Control {
     Request(Command, Reply),
     Register { session: String, req: String, translator: Translator, stream: Arc<Mailbox>, timeout: Duration, reservation: (Arc<Mutex<std::collections::HashSet<String>>>, String), reply: Reply },
     Cancel(String, Reply),
+    Input { req: String, text: String, follow_up: bool, reply: Reply },
     Bind(String, String, Reply),
     Fail(String, String),
     Stop,

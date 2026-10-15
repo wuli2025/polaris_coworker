@@ -184,6 +184,8 @@ tauri::generate_handler![
             chat::backend::host_tools::chat_permission_respond,
             chat::agent_backend_status,
             chat::chat_prewarm, // 打字期预热常驻 claude 进程(best-effort)
+            chat::live_input::chat_steer,
+            chat::live_input::chat_follow_up,
             chat::chat_cancel,
             chat::chat_is_running, // 前端无声死亡看门狗:熔断前先确认后端真死了
             chat::chat_attach_files,

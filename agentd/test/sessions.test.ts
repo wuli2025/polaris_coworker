@@ -73,8 +73,14 @@ test("steer and followUp share bounded queue and are delivered inside one host t
     assert.ok(!full.ok && full.error.code === "QUEUE_LIMIT");
     release(fauxAssistantMessage("initial"));
     await h.daemon.sessions.wait(id);
-    assert.match(contexts.join(""), /steering/);
-    assert.match(contexts.join(""), /following/);
+    assert.equal(contexts.length, 2);
+    assert.match(contexts[0], /steering/);
+    assert.doesNotMatch(contexts[0], /following/);
+    assert.match(contexts[1], /following/);
+    for (const method of ["steer", "followUp"]) {
+      const idle = await h.request(method, { sessionId: id, text: "too late" });
+      assert.ok(!idle.ok && idle.error.code === "SESSION_NOT_RUNNING");
+    }
     assert.equal(h.events.filter((e) => e.event === "turn.completed").length, 1);
   } finally { await h.close(); }
 });

@@ -20,6 +20,7 @@ pub mod attach;
 // 内核→引擎桥(kb/fable/expert 依赖倒置端口, 由外壳启动时经 wiring 注入实现)
 pub mod bridges;
 pub mod pipeline;
+pub mod live_input;
 pub mod prompt;
 // 常驻 claude agent 进程池(省每消息 ~6.4s CLI 自举; POLARIS_PERSISTENT_AGENT=0 回落旧路径)
 pub mod session_pool;

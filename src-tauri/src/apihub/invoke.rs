@@ -129,12 +129,27 @@ async fn invoke(
         };
     }
 
+    if cmd == "chat_steer" || cmd == "chat_follow_up" {
+        let target = match serde_json::from_value::<crate::chat::live_input::Target>(args) {
+            Ok(target) => target,
+            Err(error) => return invoke_err_resp(format!("ChatInvalidInput: {error}")),
+        };
+        let owner = format!("http:{}:{}", ctx.user_id, ctx.username);
+        return match tokio::task::spawn_blocking(move || {
+            crate::chat::live_input::send(&owner, target, cmd == "chat_follow_up")
+        }).await {
+            Ok(Ok(value)) => Json(value).into_response(),
+            Ok(Err(error)) => invoke_err_resp(error),
+            Err(error) => invoke_err_resp(error.to_string()),
+        };
+    }
+
     // chat_send 是 async（其余皆 sync）。单独处理。
     if cmd == "chat_send" {
         let inner = args.get("args").cloned().unwrap_or(Value::Null);
         let parsed: Result<crate::chat::ChatSendArgs, _> = serde_json::from_value(inner);
         return match parsed {
-            Ok(a) => match crate::chat::chat_send(app, a).await {
+            Ok(a) => match crate::chat::pipeline::chat_send_owned(app, a, format!("http:{}:{}", ctx.user_id, ctx.username)).await {
                 Ok(req_id) => Json(json!(req_id)).into_response(),
                 Err(e) => invoke_err_resp(e),
             },
