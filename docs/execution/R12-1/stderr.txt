@@ -1,0 +1,5 @@
+2026-10-15T11:48:45.969455Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out
+2026-10-15T11:53:20.927837Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out
+2026-10-15T11:57:56.809222Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out
+2026-10-15T12:02:32.429783Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out
+2026-10-15T12:02:50.167663Z ERROR codex_core::tools::router: error=exec_command failed: CreateProcess { message: "Rejected(\"`/bin/bash -lc \\\"rm -rf /tmp/r12-cargo-home\\npython3 - <<'PY'\\nfrom pathlib import Path\\np=Path('docs/execution/R12/report.md');s=p.read_text().replace('复制成功，未用它构建；原缓存锁随后释放。','复制成功，未用它构建且已清理；原缓存锁随后释放。').replace('文件行数/行长和新增 Rust \\\"'`unwrap()` / `expect()` 检查待最终记录；'\\\"','Python 静态审计通过：17 个改动/新增文件均 ≤500 行、每行 ≤500 字符（最大 500 行/445 字符），新增 Rust 无 \\\"'`unwrap()` / `expect()`；'\\\"');p.write_text(s)\\nPY\\\"` rejected: rm -f style commands are not permitted. Use a safer approach\")" }

@@ -71,6 +71,7 @@ pub fn join_with_ticket(
     device_name: &str,
     node_id: &str,
 ) -> Result<(User, String), String> {
+    crate::collab::device_label::validate_characters(device_name)?;
     let claims = verify_assertion(assertion)?;
     let node_id = super::super::interconnect::binding::node(&claims, node_id)?;
     // 已经是成员(或本机主人自己)就不必再烧票据,直接当登录处理 ——

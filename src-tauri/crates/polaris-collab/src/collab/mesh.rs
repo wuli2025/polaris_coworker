@@ -77,6 +77,7 @@ const PEER_COLS: &str = "node_id,name,os,ver,last_seen,first_seen";
 /// 一台机器的身份是它的 NodeId,不是密钥;重登不该在目录里堆出第二个「同一台机器」。
 /// 顺带把 revoked 清零 —— 用户亲自重新登录进来,就是撤回了那次吊销。
 pub fn enroll(uid: &str, node_id: &str, name: &str, os: &str, ver: &str) -> Result<String, String> {
+    super::device_label::validate_characters(name)?;
     let node_id = node_id.trim();
     if node_id.is_empty() {
         return Err("设备缺 NodeId(本机 iroh 还没就绪,稍后重试)".into());
@@ -177,6 +178,7 @@ pub fn devices(uid: &str) -> Result<Vec<(Peer, bool)>, String> {
 /// 改过名的设备打上 named 标记,此后 announce 不再用机器名覆盖它 —— 否则用户改完,
 /// 下一拍心跳就给改回去了。
 pub fn rename(uid: &str, node_id: &str, name: &str) -> Result<(), String> {
+    super::device_label::validate_characters(name)?;
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 40 {
         return Err("设备名长度须为 1–40 个字符".into());
@@ -207,6 +209,7 @@ fn named_key(node_id: &str) -> String {
 
 /// 心跳 + 取清单(一次往返办两件事:设备网的轮询频率不低,能省一趟就省一趟)。
 pub fn announce(key: &str, name: &str, os: &str, ver: &str) -> Result<(String, Vec<Peer>), String> {
+    super::device_label::validate_characters(name)?;
     let (uid, node_id) = resolve_key(key)?;
     let conn = open_db()?;
     // 用户在台账上手工改过名的设备,心跳不许再拿机器名覆盖回去 ——

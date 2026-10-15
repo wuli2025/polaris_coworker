@@ -7,6 +7,7 @@ pub fn auto_grant_self(
     name: &str,
     _is_first_device: bool,
 ) -> Result<(Grant, bool), String> {
+    crate::collab::device_label::validate_characters(name)?;
     let node_id = node_id.trim();
     if node_id.is_empty() {
         return Err("缺 NodeId".into());

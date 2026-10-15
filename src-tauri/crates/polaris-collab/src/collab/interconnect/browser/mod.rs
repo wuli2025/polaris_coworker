@@ -28,6 +28,7 @@ impl Config {
     }
 }
 fn validate_label(value: &str) -> Result<(), String> {
+    crate::collab::device_label::validate_characters(value)?;
     if value.trim().is_empty() || value.chars().count() > 40 || value.chars().any(char::is_control) {
         return Err("device label must contain 1..40 printable characters".into());
     }

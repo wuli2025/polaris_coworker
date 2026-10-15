@@ -53,6 +53,9 @@ pub(super) async fn collab_telemetry_report(
     // 挡住成员用别台 node_id 顶替上报假数据;owner 手机首次上报即补一台设备行,遥测有卡承载。
     let name = {
         let n = s_of(&v, "name");
+        if let Err(error) = crate::collab::device_label::validate_characters(&n) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error":error}))).into_response();
+        }
         if n.is_empty() {
             format!("{} 的设备", ctx.username)
         } else {

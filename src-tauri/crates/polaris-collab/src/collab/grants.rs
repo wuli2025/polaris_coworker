@@ -116,6 +116,7 @@ pub fn update(
     auto_mount: Option<bool>,
     actor: &str,
 ) -> Result<Grant, String> {
+    if let Some(name) = name { super::device_label::validate_characters(name)?; }
     let node_id = node_id.trim();
     let cur = get(node_id)?.ok_or("这台设备还没有信任契约")?;
     let fs = match fs_access {
@@ -274,6 +275,7 @@ pub fn exec_gate(device_id: &str) -> Result<(), String> {
 /// 这里默认最小权限,由本机主人在台账上点「信任这台」再升档。已有契约原样沿用
 /// (用户调过的档不能被对方重连一次冲回默认值),已撤销的直接拒。
 pub fn grant_by_code(node_id: &str, name: &str) -> Result<Grant, String> {
+    super::device_label::validate_characters(name)?;
     let node_id = node_id.trim();
     if node_id.is_empty() {
         return Err("缺 NodeId".into());

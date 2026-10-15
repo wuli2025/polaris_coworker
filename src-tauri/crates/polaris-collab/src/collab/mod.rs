@@ -28,6 +28,7 @@ pub mod http;
 /// 入方向(authority 的准入闸)与出方向(设备网对账循环)都要读它。
 pub mod grants;
 pub mod identity;
+pub mod device_label;
 /// 同账号设备网的设备目录(「登录即成网」)。权威侧的表与判定;不挂 feature ——
 /// 云机要发号,桌面/NAS 侧的客户端循环也要复用这里的类型。
 pub mod mesh;

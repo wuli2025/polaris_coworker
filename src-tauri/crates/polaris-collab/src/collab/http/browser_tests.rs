@@ -215,3 +215,45 @@ async fn caller_cannot_select_an_old_device_or_console_mode_and_logout_removes_r
     assert_eq!(call(&router, "GET", "/api/interconnect/status", token, json!({})).await?.0, StatusCode::FORBIDDEN);
     Ok(())
 }
+
+#[tokio::test]
+async fn browser_login_rejects_html_labels_and_accepts_chinese_names() -> Result<(), String> {
+    let (_env, uid, router) = setup()?;
+    for field in ["deviceName", "platform"] {
+        for bad in ['<', '>', '"', '\'', '`'] {
+            let mut input = json!({"username":"webuser","password":"test-password-123"});
+            input[field] = json!(format!("设备{bad}名称"));
+            let (status, value) = call(&router, "POST", "/api/interconnect/login", "", input).await?;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(value["error"], "interconnect_login_failed");
+        }
+    }
+    assert!(mesh::devices(&uid)?.is_empty());
+    let name = "书房电脑-01_（测试） & + / 😀";
+    let (status, value) = call(&router, "POST", "/api/interconnect/login", "",
+        json!({"username":"webuser","password":"test-password-123","deviceName":name})).await?;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["devices"][0]["name"], name);
+    assert_eq!(mesh::devices(&uid)?[0].0.name, name);
+    Ok(())
+}
+
+#[tokio::test]
+async fn telemetry_checks_full_name_before_existing_48_character_truncation() -> Result<(), String> {
+    let (_env, _uid, router) = setup()?;
+    let output = login(&router).await?;
+    let token = field(&output, "token")?;
+    let node = field(&output, "nodeId")?;
+    let prefix = "中".repeat(48);
+    for bad in ['<', '>', '"', '\'', '`', '\n'] {
+        let (status, _) = call(&router, "POST", "/api/collab/telemetry", token,
+            json!({"deviceId":node,"name":format!("{prefix}{bad}"),"stats":{}})).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = call(&router, "POST", "/api/collab/telemetry", token,
+        json!({"deviceId":node,"name":format!("{prefix}尾"),"stats":{}})).await?;
+    assert_eq!(status, StatusCode::OK);
+    let stored = crate::collab::identity::list_devices()?;
+    assert_eq!(stored.iter().find(|device| device.node_id == node).ok_or("missing device")?.name, prefix);
+    Ok(())
+}
