@@ -57,8 +57,10 @@ dc run --rm -T --no-deps --user 0 --entrypoint sh authority -ec '
 # 即使原服务停止，也临时启动并从实际恢复的容器取得公钥，再恢复停止状态。
 dc start authority >/dev/null
 SG_TIMEOUT=$(value RESTORE_VERIFY_TIMEOUT_SECS)
+# curl 重试预算不截断最后一次请求；请求上限 min(10, 预算)，总请求等待至多预算加该上限。
+SG_REQUEST_TIMEOUT=$((SG_TIMEOUT < 10 ? SG_TIMEOUT : 10))
 dc exec -T authority curl -fsS --retry "$SG_TIMEOUT" --retry-connrefused \
-  --retry-delay 1 --retry-max-time "$SG_TIMEOUT" --max-time "$SG_TIMEOUT" \
+  --retry-delay 1 --retry-max-time "$SG_TIMEOUT" --max-time "$SG_REQUEST_TIMEOUT" \
   http://127.0.0.1:8080/api/account/pubkey \
   | python3 "$SG_ROOT/scripts/probe.py" fingerprint "$SG_EXPECTED"
 if [[ $SG_WAS_RUNNING == 0 ]]; then dc stop -t 30 authority >/dev/null; fi

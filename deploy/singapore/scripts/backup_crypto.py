@@ -76,7 +76,16 @@ def policy(env):
     return ''
 
 
-def encrypt(source, destination, mode, recipient):
+def run_crypto(command, body, output, timeout_secs, operation):
+    try:
+        # run kills and waits for the child on timeout before callers clean plaintext.
+        subprocess.run(command, stdin=body, stdout=output, check=True, timeout=timeout_secs)
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(f'BackupCryptoTimeout: {command[0]} {operation}超时 '
+                         f'(BACKUP_CRYPTO_TIMEOUT_SECS={timeout_secs})') from error
+
+
+def encrypt(source, destination, mode, recipient, timeout_secs):
     if mode == 'age':
         command = [tool('age'), '--encrypt', '--recipient', recipient]
     elif mode == 'gpg':
@@ -87,7 +96,7 @@ def encrypt(source, destination, mode, recipient):
         raise ValueError('未知加密格式')
     # Output to a private exclusive file; never expose a successful archive on failure.
     with Path(source).open('rb') as body, Path(destination).open('xb') as output:
-        subprocess.run(command, stdin=body, stdout=output, check=True)
+        run_crypto(command, body, output, timeout_secs, '加密')
 
 
 def decrypt(source, destination, env):
@@ -102,4 +111,4 @@ def decrypt(source, destination, env):
     else:
         raise ValueError('恢复仅接受 .tar / .tar.age / .tar.gpg')
     with Path(source).open('rb') as body, Path(destination).open('xb') as output:
-        subprocess.run(command, stdin=body, stdout=output, check=True)
+        run_crypto(command, body, output, int(env['BACKUP_CRYPTO_TIMEOUT_SECS']), '解密')

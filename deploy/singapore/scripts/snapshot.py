@@ -71,7 +71,8 @@ def pack(source, destination, image, env):
                         archive.addfile(info, body)
             verify(plaintext)
             if mode:
-                encrypt(plaintext, partial, mode, env['BACKUP_RECIPIENT'])
+                encrypt(plaintext, partial, mode, env['BACKUP_RECIPIENT'],
+                        int(env['BACKUP_CRYPTO_TIMEOUT_SECS']))
             else:
                 with plaintext.open('rb') as body, partial.open('xb') as output:
                     shutil.copyfileobj(body, output)

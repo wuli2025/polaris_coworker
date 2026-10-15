@@ -52,6 +52,19 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 config.validate(inputs() | {key: value})
 
+    def test_crypto_timeout_defaults_and_validation(self):
+        key = 'BACKUP_CRYPTO_TIMEOUT_SECS'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '.env'
+            path.write_text('')
+            self.assertEqual(config.load(path)[key], '300')
+        for value in ('1', '300', '600', '86400'):
+            with self.subTest(value=value):
+                config.validate(inputs() | {key: value})
+        for value in ('', '0', '-1', '1.5', 'true', 'nan', 'inf', '86401'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, key):
+                config.validate(inputs() | {key: value})
+
     def test_generation_no_secrets_in_proxy_configs_and_no_stale_pin(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

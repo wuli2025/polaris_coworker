@@ -179,6 +179,8 @@ Caddy 从受控 Docker 网络接受 PROXY v2，覆盖 XFF/X-Real-IP，忽略外�
   有现存数据库时，备份现状同样须配置收件人或明确确认明文例外；解密能力不能代替备份加密配置。
   拒绝路径穿越、重复成员、链接和未知文件；移除旧 WAL/SHM；失败保持停止，避免半恢复库上线。
   重启后从容器内 `/api/account/pubkey` 获取公钥，调用 `probe.py fingerprint` 比对 `EXPECTED_FINGERPRINT`。
+  `RESTORE_VERIFY_TIMEOUT_SECS` 默认 30 秒，是 curl 的重试预算（`--retry-max-time`）；单次请求 `--max-time` 为 `min(10, 预算)` 秒。
+  最后一次请求可能越过重试预算，因此 curl 请求等待总计至多预算加单次上限（默认 40 秒）；这不包含 Docker 调度、恢复和清理耗时。
   不符、无法取得公钥或响应无效均停止 authority 并非零退出；指引核对可信指纹与原备份，不能直接接受新指纹。
   无现有库时支持空卷恢复；若原容器停止，临时启动核验后恢复停止状态。公网 smoke 仍需运维另跑。
   缺少预期指纹默认在写入前拒绝；仅灾难恢复人工确认时可设 `RESTORE_UNPINNED_ACK=1`，会告警并输出实际指纹，不能证明身份可信。
@@ -200,6 +202,7 @@ BACKUP_ENCRYPT=age
 BACKUP_RECIPIENT=age1替换为可信收件人公钥
 BACKUP_PLAINTEXT_ACK=0
 BACKUP_IDENTITY=/secure/offline-recovery/age-identity.txt
+BACKUP_CRYPTO_TIMEOUT_SECS=300
 RESTORE_UNPINNED_ACK=0
 RESTORE_VERIFY_TIMEOUT_SECS=30
 ```
@@ -207,6 +210,10 @@ RESTORE_VERIFY_TIMEOUT_SECS=30
 age 备份只需公钥，恢复私钥应独立保管，恢复时再提供。切换 GnuPG：`BACKUP_ENCRYPT=gpg`，
 `BACKUP_RECIPIENT` 填已导入密钥环且经独立核对的完整公钥指纹，`BACKUP_IDENTITY` 留空。
 收件人由工具校验密钥格式；配置先拒绝空白/选项形式、未知加密模式，ACK 仅允许 `0/1`，identity 须绝对路径，恢复等待预算为 `1..300` 秒。
+`BACKUP_CRYPTO_TIMEOUT_SECS` 为每次 age/gpg 加密或解密子进程的超时，默认 300 秒，必须是 `1..86400` 的整数。
+大备份可在 `.env` 设置 `BACKUP_CRYPTO_TIMEOUT_SECS=600`；改回 `300` 或删除该项恢复默认。指纹重试预算可设 `RESTORE_VERIFY_TIMEOUT_SECS=60`（单次 10 秒，总请求等待至多 70 秒）。
+子进程超时会被终止并回收，返回具名 `BackupCryptoTimeout`（含工具、加/解密操作和配置秒数）；沿用明文清理及部分密文删除，备份恢复原运行状态，解密失败在 Docker 操作前退出。
+旧 `.env` 未含超时字段时自动合并 300 秒默认值；归档格式与密钥配置无需迁移。此限制不覆盖整个备份/恢复或外部工具管理的独立守护进程。
 gpg 显式信任指定收件人，所以运维必须核对指纹；不会交互询问信任，也不支持本包传递私钥口令。
 确需加密介质上的明文快照：`BACKUP_ENCRYPT=`、`BACKUP_RECIPIENT=`、`BACKUP_PLAINTEXT_ACK=1`；恢复默认策略时填回加密配置并将 ACK 改为 `0`。
 历史 `.env` 自动合并新增默认值，因此旧部署未补加密配置时 backup/upgrade/恢复前备份会拒绝；历史归档内容格式无迁移。

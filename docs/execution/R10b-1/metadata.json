@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-15T06:55:59.313926+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "1881ded78dcdd3fc825b4e81d90b47a51358627c5810216ed85b5fa6ed941612",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": " M src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json\n M src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/risk.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json\n M src-tauri/crates/polaris-collab/src/collab/interconnect/security.sql\n M src-tauri/crates/polaris-collab/src/collab/mesh.rs\n?? docs/execution/P6d-1/\n?? docs/execution/R10b-1/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M deploy/singapore/.env.example\n M deploy/singapore/README.md\n M deploy/singapore/scripts/backup_crypto.py\n M deploy/singapore/scripts/config.py\n M deploy/singapore/scripts/restore.sh\n M deploy/singapore/scripts/snapshot.py\n M deploy/singapore/tests/fake_crypto.py\n M deploy/singapore/tests/test_backup_security.py\n M deploy/singapore/tests/test_behavior.py\n M docs/feature-tree.md\n M src-tauri/crates/polaris-collab/src/collab/http.rs\n M src-tauri/crates/polaris-collab/src/collab/http/rate_limits.rs\n M src-tauri/crates/polaris-collab/src/collab/http/router.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json\n M src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/risk.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json\n M src-tauri/crates/polaris-collab/src/collab/interconnect/security.sql\n M src-tauri/crates/polaris-collab/src/collab/mesh.rs\n?? docs/execution/P6d-1/\n?? docs/execution/R10b-1/\n?? docs/execution/R10b/\n?? src-tauri/crates/polaris-collab/src/collab/http/browser_routes.rs\n?? src-tauri/crates/polaris-collab/src/collab/interconnect/browser/\n",
+    "diff_stat": " deploy/singapore/.env.example                      |  4 +-\n deploy/singapore/README.md                         |  7 +++\n deploy/singapore/scripts/backup_crypto.py          | 15 ++++--\n deploy/singapore/scripts/config.py                 |  3 +-\n deploy/singapore/scripts/restore.sh                |  4 +-\n deploy/singapore/scripts/snapshot.py               |  3 +-\n deploy/singapore/tests/fake_crypto.py              |  7 +++\n deploy/singapore/tests/test_backup_security.py     | 53 ++++++++++++++++++++++\n deploy/singapore/tests/test_behavior.py            | 13 ++++++\n docs/feature-tree.md                               |  2 +-\n src-tauri/crates/polaris-collab/src/collab/http.rs |  2 +\n .../polaris-collab/src/collab/http/rate_limits.rs  |  7 +--\n .../polaris-collab/src/collab/http/router.rs       |  7 +++\n .../src/collab/interconnect/defaults.json          |  7 +++\n .../polaris-collab/src/collab/interconnect/gate.rs |  1 +\n .../polaris-collab/src/collab/interconnect/mod.rs  |  3 ++\n .../polaris-collab/src/collab/interconnect/risk.rs |  9 ++--\n .../src/collab/interconnect/schema.json            | 37 +++++++++++++++\n .../src/collab/interconnect/security.sql           |  4 ++\n src-tauri/crates/polaris-collab/src/collab/mesh.rs |  2 +-\n 20 files changed, 175 insertions(+), 15 deletions(-)\n"
+  },
+  "finished_at": "2026-10-15T07:02:31.887648+00:00"
+}

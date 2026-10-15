@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import shutil
 import sqlite3
 import unittest
@@ -80,6 +81,58 @@ class BackupSecurityTests(support.MaintenanceFixture, unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.fake / 'calls.jsonl').read_text(), before)
         self.assert_no_plaintext_scratch()
+
+    def assert_crypto_timeout(self, result, mode, operation):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'BackupCryptoTimeout: {mode} {operation}超时', result.stderr)
+        self.assertIn('BACKUP_CRYPTO_TIMEOUT_SECS=1', result.stderr)
+        pid = int((self.fake / 'crypto.pid').read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assert_no_plaintext_scratch()
+
+    def test_encryption_timeout_cleans_partial_and_restarts(self):
+        for mode in ('age', 'gpg'):
+            with self.subTest(mode=mode):
+                self.crypto(mode)
+                self.configure(BACKUP_CRYPTO_TIMEOUT_SECS='1', BACKUP_PLAINTEXT_ACK='1')
+                self.env['FAKE_CRYPTO_HANG'] = '1'
+                result = self.run_script('backup.sh')
+                self.assert_crypto_timeout(result, mode, '加密')
+                self.assertTrue(json.loads(self.state.read_text())['running'])
+                self.assertEqual(list((self.root / 'backups').iterdir()), [])
+
+    def test_decryption_timeout_cleans_plaintext_before_docker(self):
+        for mode in ('age', 'gpg'):
+            with self.subTest(mode=mode):
+                self.crypto(mode)
+                self.configure(BACKUP_CRYPTO_TIMEOUT_SECS='1')
+                self.env.pop('FAKE_CRYPTO_HANG', None)
+                result = self.run_script('backup.sh')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                archive = next((self.root / 'backups').glob('*.' + mode))
+                original = archive.read_bytes()
+                before = (self.fake / 'calls.jsonl').read_text()
+                self.env['FAKE_CRYPTO_HANG'] = '1'
+                result = self.run_script('restore.sh', archive)
+                self.assert_crypto_timeout(result, mode, '解密')
+                self.assertEqual((self.fake / 'calls.jsonl').read_text(), before)
+                self.assertEqual(archive.read_bytes(), original)
+                self.assertTrue(json.loads(self.state.read_text())['running'])
+
+    def test_restore_pubkey_request_timeout_is_capped(self):
+        archive = self.backup()
+        for budget, request_limit in ((1, 1), (5, 5), (10, 10), (30, 10), (300, 10)):
+            with self.subTest(budget=budget):
+                self.configure(RESTORE_VERIFY_TIMEOUT_SECS=str(budget))
+                result = self.run_script('restore.sh', archive)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = [json.loads(line) for line in
+                         (self.fake / 'calls.jsonl').read_text().splitlines()]
+                request = [call for call in calls if 'curl' in call][-1]
+                self.assertEqual(request[request.index('--max-time') + 1], str(request_limit))
+                self.assertEqual(request[request.index('--retry-max-time') + 1], str(budget))
+                self.assert_no_plaintext_scratch()
 
     def test_restore_missing_pin_refuses_before_docker(self):
         archive = self.backup()
