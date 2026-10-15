@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, onActivated } from "vue";
+import { envDoctor, type EnvReport } from "../../../tauri";
+import { runtimeCopy as copy } from "../../runtime/copy";
+import { ref, computed, onMounted, onActivated } from "vue";
 import {
   sandbox,
   cube,
@@ -18,7 +20,9 @@ const emit = defineEmits<{ ready: [] }>();
 const status = ref<SandboxStatus | null>(null);
 const log = ref<string[]>([]);
 const busy = ref(false);
-const execCmd = ref("claude --version");
+const execCmd = ref<string>(copy.sandboxCommand);
+const host = ref<EnvReport | null>(null);
+const supported = computed(() => !!host.value && !host.value.imageManaged && host.value.os !== "browser");
 const execOut = ref("");
 
 // CubeSandbox (E2B) 后端配置
@@ -28,6 +32,9 @@ const cubeBusy = ref(false);
 
 async function refresh() {
   try {
+    host.value = null;
+    host.value = await envDoctor.check();
+    if (!supported.value) return;
     status.value = await sandbox.status();
   } catch (e: any) {
     log.value.unshift(`[refresh] ${e?.message ?? e}`);
@@ -42,6 +49,7 @@ async function loadCube() {
   }
 }
 async function saveCube() {
+  if (!supported.value) return;
   cubeBusy.value = true;
   try {
     cubeCfg.value = await cube.configSet(cubeCfg.value);
@@ -54,6 +62,7 @@ async function saveCube() {
   }
 }
 async function testCube() {
+  if (!supported.value) return;
   cubeBusy.value = true;
   try {
     cubeStat.value = await cube.status();
@@ -63,8 +72,8 @@ async function testCube() {
 }
 onMounted(() => {
   // 不 await：状态异步填入即可，不被 docker 慢查询拖住
-  refresh();
-  loadCube();
+  // Pi 工具路由目前未接通 E2B；保留兼容后端的配置入口。
+  void refresh().then(() => { if (supported.value) loadCube(); });
   // 等数字人 / 状态卡片画出来后再通知 App 收起加载条（遮住挂载那一下的卡顿）
   setTimeout(() => emit("ready"), 420);
 });
@@ -75,6 +84,7 @@ onActivated(() => {
 });
 
 async function build() {
+  if (!supported.value) return;
   busy.value = true;
   log.value.unshift("[build] 开始构建镜像 polaris-sandbox:alpine …");
   try {
@@ -88,6 +98,7 @@ async function build() {
   }
 }
 async function stop() {
+  if (!supported.value) return;
   busy.value = true;
   try {
     log.value.unshift(await sandbox.stop());
@@ -99,6 +110,7 @@ async function stop() {
   }
 }
 async function runCmd() {
+  if (!supported.value) return;
   if (!execCmd.value.trim()) return;
   busy.value = true;
   execOut.value = "(running …)";
@@ -117,8 +129,7 @@ async function runCmd() {
     <div class="head">
       <div class="title">安全沙箱层</div>
       <div class="sub">
-        基于 <code>alpine:3.20</code> 的极简镜像 · 原生二进制
-        <code>claude-code</code> (apk 装, 无 Node) · 镜像 ~120MB
+        {{ host?.imageManaged ? copy.serverSandbox : host?.os === "browser" ? copy.preview : copy.sandbox }}
       </div>
     </div>
 
@@ -126,7 +137,8 @@ async function runCmd() {
     <Workstations />
 
     <!-- CubeSandbox (E2B) 后端：替换 Docker 方案的可选后端 -->
-    <div class="cube">
+    <p v-if="!host">{{ copy.sandboxUnknown }}</p>
+    <div v-if="supported && host?.agentRuntime.backend === 'claude-cli'" class="cube">
       <div class="cube-head">
         <span class="cube-title">沙箱后端 · CubeSandbox (E2B)</span>
         <span
@@ -146,9 +158,7 @@ async function runCmd() {
         </span>
       </div>
       <div class="cube-desc">
-        CubeSandbox 是腾讯云基于 RustVMM+KVM 的微虚机沙箱，兼容 E2B。它需运行在
-        <strong>Linux/KVM</strong>（远程主机 / WSL2 / 云），把端点 URL 填到这里即可把执行从
-        Docker 切到 CubeSandbox。
+        {{ copy.cube }}
       </div>
       <div class="cube-row">
         <label>后端</label>
@@ -179,7 +189,7 @@ async function runCmd() {
       <div v-if="cubeStat?.note" class="cube-note">▸ {{ cubeStat.note }}</div>
     </div>
 
-    <div class="status-grid">
+    <div v-if="supported" class="status-grid">
       <div class="stat-card" :class="{ ok: status?.docker_installed }">
         <div class="stat-label">Docker CLI</div>
         <div class="stat-value">
@@ -212,12 +222,12 @@ async function runCmd() {
       <div v-for="(n, i) in status.notes" :key="i" class="note">▸ {{ n }}</div>
     </div>
 
-    <SandboxProject :disabled="busy" :notes="status?.notes" @log="log.unshift($event)" @changed="refresh" />
+    <SandboxProject v-if="supported" :disabled="busy || !supported" :notes="status?.notes" @log="log.unshift($event)" @changed="refresh" />
     <div class="actions">
-      <button class="primary-btn" :disabled="busy" @click="build">
+      <button class="primary-btn" :disabled="busy || !supported" @click="build">
         构建镜像
       </button>
-      <button class="secondary-btn" :disabled="busy" @click="stop">
+      <button class="secondary-btn" :disabled="busy || !supported" @click="stop">
         停止容器
       </button>
       <button class="secondary-btn" @click="refresh">刷新状态</button>
@@ -226,10 +236,10 @@ async function runCmd() {
     <div class="exec-row">
       <input
         v-model="execCmd"
-        placeholder="在沙箱内执行命令(如 claude --version)"
+        :placeholder="copy.sandboxPlaceholder"
         @keydown.enter="runCmd"
       />
-      <button class="primary-btn" :disabled="busy" @click="runCmd">执行</button>
+      <button class="primary-btn" :disabled="busy || !supported" @click="runCmd">执行</button>
     </div>
     <pre v-if="execOut" class="exec-out">{{ execOut }}</pre>
 

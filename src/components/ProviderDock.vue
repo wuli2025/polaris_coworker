@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { usageCost } from "../features/runtime/presentation";
+import { runtimeCopy as copy } from "../features/runtime/copy";
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
 // 懒加载:绘图供应商面板只在 Dock 展开到对应页时才渲染,静态 import 会把它
 // (连同其依赖)吸进首屏 chunk。ProviderDock 本体保持静态 —— 首屏可能立刻用。
@@ -69,8 +71,8 @@ const periods: { key: Period; label: string }[] = [
 ];
 
 // 注:这里曾有个「Claude Code ⇄ Codex」分段器, 已删。它把 Codex 说成一个与
-// Claude Code 并列的「后端/CLI」, 而 Polaris 从不 spawn codex CLI —— 对话永远由
-// claude CLI 跑, 「Codex」只是「ChatGPT 订阅」这一家供应商(经本地翻译代理, 上游
+// Claude Code 并列的「后端/CLI」。Codex 在此是订阅供应商，对话由
+// 当前 Agent 后端跑；Pi 使用原生协议，claude-cli 兼容分支使用本地翻译代理(上游
 // 写死 chatgpt.com)。那个二元框架凭空让人以为能「在 Codex 下选 MiniMax」, 实际
 // MiniMax 等各家本就在下方供应商列表里点选即用。真相只有一层: 选哪家供应商。
 onMounted(() => {
@@ -135,7 +137,7 @@ function fmt(n: number): string {
   return String(n);
 }
 function fmtCost(n: number): string {
-  return "$" + n.toFixed(4);
+  return usageCost(n);
 }
 function hostOf(url: string): string {
   if (!url) return "本地 / 订阅";
@@ -267,8 +269,7 @@ function openBoard() {
 function importExport() {
   // 占位:先给轻提示;下版接真 UI
   alert(
-    "导入/导出:把 ~/.claude/settings.json 拖入或复制 env 块即可。\n" +
-    "下一版提供完整 UI(目前供应商增删改已覆盖大部分场景)。"
+    copy.importHint
   );
 }
 async function removeProvider(p: ProviderView) {
@@ -539,7 +540,7 @@ function subtitleOf(p: ProviderView): string {
 
               <!-- 联动/隔离开关:隔离(默认)只影响 Polaris 自己 spawn 的 claude,
                    联动才写 ~/.claude/settings.json 让终端 CLI 跟着切 -->
-              <div class="link-row">
+              <div v-if="store.legacyActions" class="link-row">
                 <div class="link-info">
                   <span class="link-title">联动系统 CLI</span>
                   <span class="link-desc">{{
@@ -560,9 +561,11 @@ function subtitleOf(p: ProviderView): string {
                 </button>
               </div>
 
+              <p v-if="store.backendStatus?.lastError === 'BrowserPreview'" class="codex-note">{{ copy.preview }}</p>
+              <p v-if="!store.legacyActions" class="codex-note">{{ copy.providerScope }} {{ copy.credentials }}</p>
               <!-- 本地路由总开关(cc-switch 式代理模式):开 = 所有供应商统一经
                    127.0.0.1 本地路由转发,Key 由路由实时注入,改 Key/切换即刻生效 -->
-              <div class="link-row">
+              <div v-if="store.legacyActions" class="link-row">
                 <div class="link-info">
                   <span class="link-title">本地路由 · 热切换</span>
                   <span class="link-desc">{{
@@ -613,7 +616,7 @@ function subtitleOf(p: ProviderView): string {
                       </template>
                       <template v-else>
                         {{ hostOf(current.baseUrl) }}<span v-if="currentModel"> · {{ currentModel }}</span>
-                        <span v-if="store.routeLocal && store.codexProxy?.running"> · 本地路由 127.0.0.1:{{ store.codexProxy.port }}</span>
+                        <span v-if="store.legacyActions && store.routeLocal && store.codexProxy?.running"> · 本地路由 127.0.0.1:{{ store.codexProxy.port }}</span>
                       </template>
                     </div>
                   </div>
@@ -902,7 +905,9 @@ function subtitleOf(p: ProviderView): string {
                     <p class="codex-ok">
                       <ShieldCheck :size="14" :stroke-width="2" /> 已授权 ChatGPT
                     </p>
-                    <p v-if="store.currentId === 'codex'" class="codex-note">
+                    <p v-if="store.backendStatus?.lastError === 'BrowserPreview'" class="codex-note">{{ copy.preview }}</p>
+              <p v-if="!store.legacyActions" class="codex-note">{{ copy.loginSaved }}</p>
+                    <p v-else-if="store.currentId === 'codex'" class="codex-note">
                       Claude Code 正经本地翻译代理使用你的 ChatGPT 订阅(<code>gpt5.6-sol</code>)<template
                         v-if="store.codexProxy?.running"
                       > · 127.0.0.1:{{ store.codexProxy.port }}</template
@@ -911,7 +916,7 @@ function subtitleOf(p: ProviderView): string {
                     <p v-else class="codex-note">
                       凭据已写入 <code>~/.codex/auth.json</code>。点「用 GPT 对话」即让 Claude Code 经本地翻译代理用上 ChatGPT 订阅(<code>gpt5.6-sol</code>)。
                     </p>
-                    <p v-if="store.codexProxy?.lastError" class="codex-fail">
+                    <p v-if="store.legacyActions && store.codexProxy?.lastError" class="codex-fail">
                       代理上次报错:{{ store.codexProxy.lastError }}
                     </p>
                     <div class="ed-actions">
@@ -933,11 +938,7 @@ function subtitleOf(p: ProviderView): string {
 
                   <!-- 未授权:显著大按钮 -->
                   <template v-else>
-                    <p class="codex-note">
-                      用 ChatGPT 账号授权一次(无需安装 codex CLI)。点击后会打开验证网址并给出一个效验码,
-                      在网页填码即完成,凭据写入 <code>~/.codex/auth.json</code>。
-                      <b>授权后 Claude Code(经本地翻译代理)与 codex CLI 都直接用上这份 ChatGPT 订阅。</b>
-                    </p>
+                    <p class="codex-note">{{ copy.login }}</p>
                     <div class="ed-actions">
                       <button class="ed-cancel" @click="codexOpen = false">关闭</button>
                       <button
@@ -951,7 +952,7 @@ function subtitleOf(p: ProviderView): string {
                       </button>
                     </div>
                     <button
-                      class="codex-alt"
+                      v-if="store.legacyActions" class="codex-alt"
                       @click="startCodexAuth(false)"
                       :disabled="codexBusy"
                     >
@@ -983,10 +984,7 @@ function subtitleOf(p: ProviderView): string {
                     <p class="codex-ok claude">
                       <ShieldCheck :size="14" :stroke-width="2" /> 已登录 Claude 订阅
                     </p>
-                    <p class="codex-note">
-                      凭据已写入 <code>~/.claude/.credentials.json</code>,Polaris 与终端
-                      <code>claude</code> 都会复用这份订阅,无需在外壳里再登录。
-                    </p>
+                    <p class="codex-note">{{ copy.loginSaved }}</p>
                     <div class="ed-actions">
                       <button class="ed-cancel" @click="startClaudeAuth()" :disabled="claudeBusy">
                         <RefreshCw :size="13" :stroke-width="2" /> 重新授权
@@ -1049,11 +1047,7 @@ function subtitleOf(p: ProviderView): string {
 
                   <!-- 未授权:发起按钮 -->
                   <template v-else>
-                    <p class="codex-note">
-                      用 Claude 账号登录订阅(Pro / Max)。点击后将打开浏览器,
-                      登录并点「Authorize」即自动完成授权,凭据写入
-                      <code>~/.claude/.credentials.json</code>。
-                    </p>
+                    <p class="codex-note">{{ copy.login }}</p>
                     <div class="ed-actions">
                       <button class="ed-cancel" @click="claudeOpen = false">关闭</button>
                       <button
@@ -1104,13 +1098,13 @@ function subtitleOf(p: ProviderView): string {
                     </button>
                   </div>
                   <div v-if="activeBucket" class="mini-foot">
-                    <span>成本估算 <b>{{ fmtCost(activeBucket.cost) }}</b></span>
+                    <span>总成本 <b>{{ fmtCost(activeBucket.cost) }}</b></span>
                     <span>输入 {{ fmt(activeBucket.input) }} · 输出 {{ fmt(activeBucket.output) }}</span>
                     <span>{{ activeBucket.requests }} 次</span>
                   </div>
                 </template>
                 <div v-else class="usage-empty">
-                  暂无用量数据<br /><span>(尚未通过 Claude Code 产生会话)</span>
+                  暂无用量数据<br /><span>{{ copy.usageEmpty }}</span>
                 </div>
 
                 <div class="util-row">

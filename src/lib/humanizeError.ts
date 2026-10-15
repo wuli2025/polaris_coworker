@@ -1,3 +1,4 @@
+import { runtimeCopy } from "../features/runtime/copy";
 // 错误 → 人话。所有展示给用户的错误先过这里:常见模式映射成可行动的提示,
 // 兜底保留原文(截断)但不再裸漏 Rust panic / HTTP 状态码。
 export function humanizeError(err: unknown): string {
@@ -33,7 +34,7 @@ export function humanizeError(err: unknown): string {
   if (/http 5\d\d|"?5\d\d"? (internal|bad gateway|service)/.test(s) || s.includes("overloaded"))
     return "服务端暂时不可用(5xx)——通常稍等片刻重试即可。";
   if (s.includes("program not found") || s.includes("claude") && s.includes("not found"))
-    return "找不到 Claude Code——请到「环境」页检测并安装。";
+    return runtimeCopy.runtimeMissing;
   if (s.includes("permission denied") || s.includes("access is denied") || s.includes("拒绝访问"))
     return "文件被占用或没有权限——关闭占用该文件的程序后重试。";
   if (s.includes("no such file") || s.includes("not found") || s.includes("找不到"))

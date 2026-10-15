@@ -21,7 +21,7 @@ export type ViewKey =
   | "graph"
   | "automation"
   | "sandbox"
-  | "claude_md"
+  | "claude_md" // 兼容路由键：专家中心 / 上下文文件
   | "skill_center"
   | "env_doctor"
   | "mcp"
@@ -361,7 +361,7 @@ export const useAppStore = defineStore("app", () => {
     await convApi.openProjectDir(projectId);
   }
 
-  /** 设置(或清除)项目的工作目录：本项目下所有对话以此为 claude cwd（终端 cd 进 repo 同款）。
+  /** 设置(或清除)项目的工作目录：本项目下所有对话以此为 Agent cwd（终端 cd 进 repo 同款）。
    *  workDir 传 null/空 = 解绑回落默认。成功后就地更新本地项目的 workDir。 */
   async function setProjectWorkDir(projectId: string, workDir: string | null) {
     await convApi.setWorkDir(projectId, workDir);

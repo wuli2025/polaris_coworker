@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { agentRuntime } from "../tauri";
 import { onMounted, ref, computed } from "vue";
 import {
   MessagesSquare,
@@ -214,7 +215,7 @@ async function archiveProj(proj: { id: string; name: string }) {
 }
 
 // ─────────── 入驻专家 / 专家团（写项目 CLAUDE.md，复用 persona_apply）───────────
-// 在「…」菜单点「入驻专家 / 专家团」→ 弹浮层选单专家或专家团 → 选中即注入本项目 CLAUDE.md。
+// Pi 转到请求级专家入口；仅 claude-cli 兼容分支使用下方项目文件写入流程。
 // 单专家=一段人设皮肤；专家团=战略师领衔的编排型 CLAUDE.md（按情况组阵、四模式默认单 agent）。
 const personaPickerPid = ref<string | null>(null);
 const personaPresets = ref<PersonaPreset[]>([]);
@@ -224,6 +225,10 @@ const singlePresets = computed(() => personaPresets.value.filter((p) => p.kind !
 
 async function openPersonaPicker(pid: string) {
   openMenuPid.value = null;
+  try {
+    const status = await agentRuntime.status();
+    if (status.backend !== "claude-cli") { app.setView("claude_md"); return; }
+  } catch (e) { toast.error(String(e)); return; }
   personaPickerPid.value = pid;
   if (personaPresets.value.length === 0) {
     try {

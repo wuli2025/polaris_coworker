@@ -254,8 +254,8 @@ export const useChatStore = defineStore("chatRuntime", () => {
     }
   }
 
-  // ── 常驻 claude 进程预热 ──
-  // claude CLI spawn 后立即自举(~6.4s), 不等首条消息 —— 在「打开/切换对话」「输入框
+  // ── Agent 会话预热 ──
+  // Agent 会话按后端能力预热, 不等首条消息 —— 在「打开/切换对话」「输入框
   // 聚焦/首个键入」时提前 spawn, 首条消息首响 ~10s → ~3s。fire-and-forget:
   // 后端 best-effort 永不报错, 这里再兜一层 catch。
   // 每对话 60s 去抖: 后端指纹一致本就 no-op, 去抖只为省无谓 IPC; 不做"永久一次"是
@@ -419,7 +419,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
         const n = parseInt(ev.text ?? "", 10);
         if (!Number.isNaN(n)) tokensByConv.value[cid] = n;
       } else if (ev.kind === "error") {
-        // Claude CLI 会把普通诊断写到 stderr；这不代表本轮失败，后续正文仍应正常展示。
+        // Agent 后端可能输出普通诊断；这不代表本轮失败，后续正文仍应正常展示。
         // 新 emitter 可直接给 severity；旧 emitter 继续用稳定的 [stderr] 前缀兼容判定。
         const raw = ev.text ?? "";
         const warning = ev.severity === "warning" || /^\[stderr\]/i.test(raw.trim());

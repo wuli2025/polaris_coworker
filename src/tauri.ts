@@ -1,3 +1,7 @@
+import { runtimeCopy } from "./features/runtime/copy";
+import type { AgentBackendStatus } from "./types/agentRuntime";
+export type { AgentBackendStatus } from "./types/agentRuntime";
+import { previewBackendStatus } from "./types/agentRuntime";
 import type { AgentRuntimeReport } from "./types/doctor";
 /**
  * Typed wrappers around Tauri commands.
@@ -1501,6 +1505,8 @@ export interface KbClaudeMd {
 
 export type ClaudeMdArea = "kb" | "project";
 
+export const agentRuntime = { status: () => invoke<AgentBackendStatus>("agent_backend_status") };
+
 export const claudeMd = {
   listProjects: () => invoke<ProjectClaudeMd[]>("claude_md_list_projects"),
   kbInfo: () => invoke<KbClaudeMd>("claude_md_kb_info"),
@@ -2118,7 +2124,7 @@ export interface EnvConflict {
 }
 /** 一条实跑验证的结果 —— 每条都真的起了子进程 */
 export interface VerifyStep {
-  key: "exec" | "terminal" | "shell" | "config" | "auth" | "smoke";
+  key: "exec" | "terminal" | "shell" | "config" | "auth" | "smoke" | "node" | "agentd-entry" | "ping" | "credentials";
   name: string;
   status: "ok" | "fail" | "warn" | "skip";
   detail: string;
@@ -2454,9 +2460,8 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
     case "provider_switch":
       return String(_args?.id ?? "claude-official");
     case "provider_set_link_mode":
-      return Boolean(_args?.link);
     case "provider_set_route_mode":
-      return Boolean(_args?.route);
+      throw new Error("Unsupported: Pi browser preview");
     case "provider_save":
       return "custom-stub";
     case "provider_delete":
@@ -2481,16 +2486,9 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
     case "codex_status":
       return { installed: false, loggedIn: false, authPath: "(browser-only)" };
     case "codex_start_login":
-      return {
-        mode: "device",
-        deviceCode: "stub-device",
-        userCode: "WXYZ-1234",
-        verificationUri: "https://auth.openai.com/codex/device",
-        interval: 5,
-        expiresIn: 900,
-      };
+      throw new Error(runtimeCopy.preview);
     case "codex_poll_login":
-      return { status: "ok" };
+      return { status: "pending" };
     case "codex_login_poll":
     case "claude_login_poll":
       return { status: "idle", message: "" };
@@ -2500,16 +2498,12 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
     case "claude_oauth_status":
       return { loggedIn: false, credPath: "(browser-only)" };
     case "claude_start_login":
-      return {
-        mode: "manual",
-        authorizeUrl: "https://claude.ai/oauth/authorize?code=true",
-        verifier: "stub-verifier",
-        state: "stub-state",
-      };
+      throw new Error(runtimeCopy.preview);
     case "claude_finish_login":
-      return { loggedIn: true, credPath: "(browser stub) ~/.claude/.credentials.json" };
+      return { loggedIn: false, credPath: "(browser preview) ~/Polaris/data/providers.json" };
     case "codex_proxy_info":
       return { running: false, port: 0, lastError: "" };
+    case "agent_backend_status": return { ...previewBackendStatus };
     case "env_check": {
       const tool = (key: string, name: string, found: boolean, required = false): ToolStatus => ({
         key: key as ToolStatus["key"],
@@ -2527,10 +2521,10 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         agentRuntime: { backend: "pi", nodeReady: false, entryExists: false, handshake: false,
           protocolVersion: null, piVersion: null, agentdVersion: null, credentialsConfigured: false,
           legacyActions: false, error: "BrowserPreview" },
-        claude: tool("claude", "Claude Code", false, true),
+        claude: tool("claude", "Claude Code", false),
         pwsh: tool("pwsh", "PowerShell 7", false),
-        node: tool("node", "Node.js", true),
-        npm: tool("npm", "npm", true),
+        node: tool("node", "Node.js", false, true),
+        npm: tool("npm", "npm", false),
         uv: tool("uv", "uv", false),
         python: tool("python", "Python", false),
         claudeDir: null,

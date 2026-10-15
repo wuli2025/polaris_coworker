@@ -412,3 +412,27 @@ Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列�
 
 详细配置切换、迁移边界见 [P5b 报告](pi-migration/p5b-indirect-callers.md)；
 真实命令、未运行项、行数与技术债见 [P5b 验证清单](pi-migration/p5b-files-and-validation.md)。
+
+### R7 路径穿越回归
+
+- 入口：`W/wiki/compile/tests.rs::page_path_rejects_combined_parent_directory_traversal`。
+- 依赖：现有 `Temp` 临时 wiki 根目录与 `progress::page_path`；无需后端或网络。
+- 行为：`a/../b`、`概念/../../etc/passwd`、`概念/嵌套/../穿透.md`、`a\..\b` 均须返回 `WikiWriteOutsideRoot` 错误；测试不受 Unix 条件编译限制。
+- 配置/迁移：只增加测试，无新增配置、依赖或迁移，生产代码不变；原有配置默认值、类型校验和切换示例沿用上方 P5b 报告。
+- 验证：wiki 全量 7 测试通过；desktop/server（含 collab-net）offline check 均退出 0、0 警告。命令与限制见 [R7 执行报告](pi-migration/r7-result.md)。
+
+## P5c 前端 Pi 适配（部分实现，BLOCKED）
+
+| 入口 | 依赖与行为 | 配置、迁移与验证 |
+| --- | --- | --- |
+| `src/features/runtime/{copy,presentation,useBackendStatus}.ts`、RuntimeDiagnostics → EnvDoctor/App | env_check.agentRuntime + env_verify.shell.detail；Node/入口/ping/版本/凭据布尔；Pi 校验不推理；旧动作双守卫 | 默认 Pi；backend=claude-cli 且 legacyActions=true 才显示旧 doctor 动作；浏览器明确预览、不假报就绪 |
+| `src/types/agentRuntime.ts`、tauri.agentRuntime → providers/ProviderDock | supervisor 状态与 doctor 独立；Pi 隐藏并拒绝联动/代理 setter；订阅使用共享凭据说明 | ~/Polaris/data/providers.json；首次迁移重新登录；预览登录拒绝发起 |
+| `providerConfig.ts`、ProviderModelHelp → AddProviderModal | settingsConfig.models 字符串/对象清单；五种协议选项；模型元数据类型校验 | 默认空协议=Anthropic；不虚构 Pi 默认模型；env/catalog 回退；示例与限制见执行报告 |
+| presentation.usageCost → UsageBoard/ProviderDock | 来源为 Pi 权威记录 + Claude 历史；总成本未知，正的已记录金额单列 | 后端没有价格完整性字段，混合汇总不能判断全量成本；不把零价当免费 |
+| contextPolicy/ContextRuntimeNotice → ClaudeMdPanel/Sidebar/app | 展示 AGENTS.md 优先规则；Pi 禁用固定写 CLAUDE.md 的旧入口，旧后端保留 | **BLOCKED**：缺少上下文存在性/选择/读写契约；未改名文件，未声称已完成自动选择 |
+| ExpertRuntimeNotice → ExpertCenter/ExpertTeam | 请求级选择复用 P3b；Pi 导出按钮改选择入口；默认关闭与当前状态未知可见 | **BLOCKED**：后端无专家开关读写接口，开关禁用；提供 experts.enabled 配置示例 |
+| SandboxStatus、ChatComposer/chat、FeishuSettings、InterconnectView、humanizeError | 项目 RW + KB RO / 路由前校验；服务端不支持沙箱；运行时文案集中 | 不改样式规则和 chat 事件消费；保留兼容路由键；不新增 npm 依赖 |
+
+验证与完整文件行数见 [P5c 执行报告](pi-migration/p5c-frontend.md)。
+新增 Vitest 覆盖诊断映射/SSR、成本缺价、协议与模型校验、旧动作守卫、预览不假报成功及上下文阻塞策略。
+仅作执行报告；上下文自动选择与专家开关仍受后端契约阻塞，由 Claude 重跑、Pi 独立审查后决定验收。

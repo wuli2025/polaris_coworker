@@ -7,6 +7,9 @@
  *  ② 全部专家：按领域浏览 / 搜索，单独入驻（emit select-expert）
  * 附：每个专家/团可「下载」CLAUDE.md；「智能匹配测试」面板可调试路由命中。
  */
+import { useBackendStatus } from "../features/runtime/useBackendStatus";
+import { runtimeCopy as copy } from "../features/runtime/copy";
+const { legacy } = useBackendStatus();
 import { ref, onMounted } from "vue";
 import {
   expert,
@@ -81,6 +84,11 @@ function avatarUrl(id: string, icon: string): string {
 // 下载某专家/团的 CLAUDE.md
 async function downloadDoc(kind: "expert" | "team", id: string, name: string, ev: Event) {
   ev.stopPropagation();
+  if (!legacy.value) {
+    if (kind === "team") emit("select-team", id);
+    else emit("select-expert", id);
+    return;
+  }
   try {
     const text =
       kind === "team" ? await expert.exportTeam(id) : await expert.exportExpert(id);
@@ -177,7 +185,7 @@ const emit = defineEmits<{
           <div class="team-meta">{{ tm.memberIds.length + 1 }} 人 · {{ tm.tags.slice(0, 3).join(" / ") }}</div>
         </div>
         <div class="card-actions">
-          <span class="dl-inline" title="下载该团 CLAUDE.md" @click.stop="downloadDoc('team', tm.id, tm.name, $event)">⬇</span>
+          <span class="dl-inline" :title="legacy ? '下载该团 CLAUDE.md' : copy.expertAction" @click.stop="downloadDoc('team', tm.id, tm.name, $event)">{{ legacy ? "⬇" : "→" }}</span>
           <span class="summon-pill" title="召唤这支团" @click.stop="emit('select-team', tm.id)">召唤</span>
         </div>
       </button>
@@ -218,7 +226,7 @@ const emit = defineEmits<{
           <div class="exp-role">{{ exp.role }}</div>
         </div>
         <div class="card-actions">
-          <span class="dl-inline" title="下载该专家 CLAUDE.md" @click.stop="downloadDoc('expert', exp.id, exp.name, $event)">⬇</span>
+          <span class="dl-inline" :title="legacy ? '下载该专家 CLAUDE.md' : copy.expertAction" @click.stop="downloadDoc('expert', exp.id, exp.name, $event)">{{ legacy ? "⬇" : "→" }}</span>
           <span class="summon-pill sm" title="召唤这位专家" @click.stop="emit('select-expert', exp.id)">召唤</span>
         </div>
       </button>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { runtimeCopy as copy } from "../features/runtime/copy";
 // 「聊天机器人」—— 飞书（暂时只保留飞书）。
 // 配置 App ID/Secret → 启动长连接网关 → 飞书 @机器人/私聊 走 Polaris 真对话管线
 // (Claude Code 带工具执行、消息落库 UI 可见) → 回复发回飞书。支持开机自动启动 + 防断守护。
@@ -167,8 +168,7 @@ onUnmounted(() => {
         <span class="status" :class="gwState">{{ stateLabel() }}</span>
       </div>
       <div class="sub">
-        飞书里 <b>@机器人</b>（或私聊）的指令，会经长连接进来交给 <b>Claude Code</b>（在「飞书机器人」项目里、带工具执行、可操作软件），
-        过程在 Polaris 里实时可见，结果发回飞书。
+        {{ copy.feishu }}
       </div>
     </div>
 
@@ -261,7 +261,7 @@ onUnmounted(() => {
         <span class="eng-state" :class="gwState">{{ stateLabel() }}</span>
       </div>
       <p class="eng-desc">
-        启动后挂飞书长连接收发消息。内置<b>防断守护</b>（断线/崩溃自动重连重起），来消息才跑 Claude，空闲几乎零开销。首启会自动 npm 装飞书 SDK（需 Node.js）。
+        {{ copy.feishuStart }}
       </p>
       <label class="fld check auto">
         <input type="checkbox" v-model="cfg.autoStart" @change="toggleAutoStart" />

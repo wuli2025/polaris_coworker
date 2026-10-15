@@ -187,7 +187,7 @@ onMounted(() => {
   void listen<{ message?: string }>("provider://failover", (p) => {
     if (p?.message) toast.info(p.message);
   });
-  // 环境静默托管(后端 doctor::autopilot):缺 Claude Code 时后台自己装,用户**不用点任何东西**。
+  // 环境状态由 doctor::autopilot 播报；Pi 仅诊断，安装动作由兼容后端守卫。
   // 这里只做**被动播报**——装的时候说一声、装完/失败给个结果,绝不弹窗、不要求操作。
   // 绝大多数启动什么都不缺 → 后端根本不发事件,这里全程静默。
   void listen<{ running?: boolean; finished?: boolean; ok?: boolean; step?: string; message?: string }>(

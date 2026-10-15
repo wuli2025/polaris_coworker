@@ -1,3 +1,7 @@
+import { agentRuntime } from "../tauri";
+import type { AgentBackendStatus } from "../types/agentRuntime";
+import { legacyProviderActions } from "../features/runtime/presentation";
+import { runtimeCopy } from "../features/runtime/copy";
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import {
@@ -15,6 +19,8 @@ import {
 } from "../tauri";
 
 export const useProvidersStore = defineStore("providers", () => {
+  const backendStatus = ref<AgentBackendStatus | null>(null);
+  const legacyActions = computed(() => legacyProviderActions(backendStatus.value));
   const providers = ref<ProviderView[]>([]);
   const currentId = ref<string>("claude-official");
   /** true = 联动系统 CLI(写 ~/.claude/settings.json); false = 隔离, 仅 Polaris 内生效 */
@@ -61,6 +67,8 @@ export const useProvidersStore = defineStore("providers", () => {
   async function refresh() {
     loading.value = true;
     try {
+      backendStatus.value = null;
+      backendStatus.value = await agentRuntime.status();
       const res = await providerApi.list();
       providers.value = res.providers;
       currentId.value = res.currentId || "claude-official";
@@ -129,6 +137,7 @@ export const useProvidersStore = defineStore("providers", () => {
   }
 
   async function refreshCodexProxy() {
+    if (!legacyActions.value) { codexProxy.value = null; return; }
     try {
       codexProxy.value = await providerApi.codexProxyInfo();
     } catch (e) {
@@ -219,6 +228,7 @@ export const useProvidersStore = defineStore("providers", () => {
   /** 切换「联动系统 CLI / 隔离」模式;开联动会把当前供应商写入全局 settings.json,
    *  关联动会把全局清回官方(终端 CLI 立刻恢复干净)、Polaris 内选择不变 */
   async function setLinkMode(link: boolean): Promise<boolean> {
+    if (!legacyActions.value) { error.value = runtimeCopy.providerScope; return false; }
     error.value = null;
     try {
       linkGlobal.value = await providerApi.setLinkMode(link);
@@ -231,6 +241,7 @@ export const useProvidersStore = defineStore("providers", () => {
 
   /** 本地路由总开关(cc-switch 式);后端会立即对当前供应商重新生效(开=改走本地路由,关=回直连) */
   async function setRouteMode(route: boolean): Promise<boolean> {
+    if (!legacyActions.value) { error.value = runtimeCopy.providerScope; return false; }
     error.value = null;
     try {
       routeLocal.value = await providerApi.setRouteMode(route);
@@ -280,6 +291,7 @@ export const useProvidersStore = defineStore("providers", () => {
   }
 
   return {
+    backendStatus, legacyActions,
     providers,
     currentId,
     linkGlobal,

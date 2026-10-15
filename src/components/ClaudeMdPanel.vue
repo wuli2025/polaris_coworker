@@ -1,4 +1,10 @@
 <script setup lang="ts">
+import ContextRuntimeNotice from "../features/runtime/components/ContextRuntimeNotice.vue";
+import { runtimeCopy as copy } from "../features/runtime/copy";
+import { useBackendStatus } from "../features/runtime/useBackendStatus";
+import { contextEditingAvailable } from "../features/runtime/contextPolicy";
+const { status, refreshBackend } = useBackendStatus();
+const editable = computed(() => contextEditingAvailable(status.value?.backend));
 import { computed, onMounted, ref } from "vue";
 import {
   claudeMd,
@@ -70,6 +76,8 @@ const selectedMeta = computed(() => {
 });
 
 async function refresh() {
+  await refreshBackend();
+  if (!editable.value) return;
   loading.value = true;
   // 用 allSettled + 超时：任一命令失败/卡住都不再让整个面板空转，且能在顶部看到原因。
   const [psR, kbR, prR, metaR] = await Promise.allSettled([
@@ -182,6 +190,7 @@ async function loadContent(area: ClaudeMdArea, projectId?: string) {
 }
 
 async function save() {
+  if (!editable.value) return;
   if (!selected.value || !dirty.value) return;
   saving.value = true;
   message.value = null;
@@ -225,10 +234,9 @@ onMounted(refresh);
   <div class="cmd-root">
     <div class="cmd-head">
       <div>
-        <div class="title">人格 · 项目的灵魂与专属知识库</div>
+        <div class="title">{{ copy.contextTitle }}</div>
         <div class="sub">
-          每个项目就是一个人格(它的 <code>CLAUDE.md</code>)。可一键套用预设人格,
-          并绑定该人格的专属知识库范围。发消息前自动注入(身份+人格+时间+对应知识库)。
+          {{ copy.contextPriority }}
         </div>
       </div>
       <button class="btn ghost" @click="refresh" :disabled="loading">
@@ -236,7 +244,8 @@ onMounted(refresh);
       </button>
     </div>
 
-    <div class="cmd-body">
+    <ContextRuntimeNotice v-if="!editable" />
+    <div v-else class="cmd-body">
       <!-- Left: list -->
       <aside class="list">
         <div class="grp-head">知识库 · 全局共享</div>

@@ -5,9 +5,11 @@
  * 让 AI 更懂你：
  *  ① 按当前项目的知识库反推「该配哪支专家团」，一键入驻；
  *  ② 浏览全部专家 + 业务团（介绍 / 头像 / 下载 / 匹配测试）；
- *  ③ 高级：直接编辑本项目的人格档案 CLAUDE.md。
+ *  ③ 高级：兼容上下文编辑器；Pi 优先 AGENTS.md。
  */
 import { ref, computed, onMounted, watch } from "vue";
+import ExpertRuntimeNotice from "../features/runtime/components/ExpertRuntimeNotice.vue";
+import { runtimeCopy as copy } from "../features/runtime/copy";
 import ExpertTeam from "./ExpertTeam.vue";
 import ClaudeMdPanel from "./ClaudeMdPanel.vue";
 import { expert, avatarSlot, type KbRecommendation } from "../tauri";
@@ -55,7 +57,7 @@ onMounted(async () => {
 watch(projectId, loadRecommendation);
 
 // 召唤 = 把这支团/这位专家入驻到当前项目并切回对话区(由 ChatPanel 统一落地:
-// expert.apply/teamApply + 设模式 + 记最近召唤 + 显示专家团工作台)。没有当前项目则提示。
+// 请求级 expertSelection + 设模式 + 记最近召唤 + 显示专家团工作台)。没有当前项目则提示。
 function summonTeam(id: string) {
   if (!app.currentProjectId) { toast.error("请先在对话区选择或新建一个项目，再召唤专家团"); return; }
   app.requestSummon("team", id);
@@ -85,7 +87,7 @@ function onSelectExpert(id: string) {
       <div class="ec-title-wrap">
         <div class="ec-title">🧭 专家团 · 让 AI 更懂你</div>
         <div class="ec-sub">
-          按你的知识库与偏好，自动给你配好对应业务的专家团；也可手动浏览全部专家入驻本项目。
+          {{ copy.expertRequest }}
         </div>
       </div>
       <div class="ec-proj">
@@ -96,6 +98,7 @@ function onSelectExpert(id: string) {
       </div>
     </header>
 
+    <ExpertRuntimeNotice />
     <!-- KB 智能推荐横幅 -->
     <section class="ec-rec" :class="{ has: rec?.team }">
       <div v-if="recLoading" class="ec-rec-loading">正在按知识库反推最适合你的专家团…</div>
@@ -111,7 +114,7 @@ function onSelectExpert(id: string) {
             <span v-for="t in rec.matchedTopics.slice(0, 6)" :key="t" class="ec-topic">{{ t }}</span>
           </div>
         </div>
-        <button class="ec-rec-apply" @click="applyRecommended">一键入驻</button>
+        <button class="ec-rec-apply" @click="applyRecommended">{{ copy.expertAction }}</button>
       </template>
       <template v-else>
         <div class="ec-rec-body">
@@ -124,7 +127,7 @@ function onSelectExpert(id: string) {
     <!-- Tab -->
     <div class="ec-tabs">
       <button class="ec-tab" :class="{ on: tab === 'market' }" @click="tab = 'market'">专家市场</button>
-      <button class="ec-tab" :class="{ on: tab === 'advanced' }" @click="tab = 'advanced'">人格档案 · 高级</button>
+      <button class="ec-tab" :class="{ on: tab === 'advanced' }" @click="tab = 'advanced'">上下文文件 · 高级</button>
     </div>
 
     <!-- 内容 -->

@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import RuntimeDiagnostics from "../features/runtime/components/RuntimeDiagnostics.vue";
+import { legacyDoctorActions } from "../features/runtime/presentation";
+import { runtimeCopy as copy } from "../features/runtime/copy";
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   envDoctor,
@@ -28,6 +31,7 @@ const READY_FLAG = "polaris.env.ready.v1";
 type Phase = "checking" | "ready-skip" | "panel";
 const phase = ref<Phase>("checking");
 const report = ref<EnvReport | null>(null);
+const legacy = computed(() => legacyDoctorActions(report.value));
 
 // 安装 / 修复 / 更新 的进行态
 const busyKind = ref<
@@ -108,8 +112,8 @@ onBeforeUnmount(() => {
 
 // 进入面板 / 跳过页且 Claude Code 已安装时, 自动静默检测一次更新
 watch(phase, (p) => {
-  if ((p === "panel" || p === "ready-skip") && isTauri) {
-    if (report.value?.claude.found && !updateInfo.value && !checkingUpdate.value) {
+  if ((p === "panel" || p === "ready-skip") && report.value?.os !== "browser") {
+    if (legacy.value && report.value?.claude.found && !updateInfo.value && !checkingUpdate.value) {
       checkClaudeUpdate();
     }
     if (report.value?.uv.found && !uvCache.value) {
@@ -117,7 +121,7 @@ watch(phase, (p) => {
     }
     // 快速校验 (不发请求, ~1-3s) 在侧栏「环境」页自动跑一次。
     // 启动关 (gate) 不自动跑: 那里要的是尽快放行, 不该为了一份诊断多等几秒。
-    if (!props.gate && p === "panel" && !verify.value && !verifying.value) {
+    if ((!props.gate || !legacy.value) && !verify.value && !verifying.value) {
       runVerify(false);
     }
   }
@@ -130,7 +134,7 @@ async function runVerify(deep = false) {
   if (verifying.value) return;
   verifying.value = deep ? "deep" : "quick";
   try {
-    verify.value = await envDoctor.verify(deep);
+    verify.value = await envDoctor.verify(legacy.value && deep);
   } catch (e) {
     banner.value = { kind: "err", text: `深度校验失败：${String(e)}` };
   } finally {
@@ -157,7 +161,7 @@ async function finishInstall(ok: boolean, message: string) {
   if (r.ready) localStorage.setItem(READY_FLAG, "1");
   // 装好 / 更新完后重新检测版本, 让「更新」按钮翻成「已是最新」
   updateInfo.value = null;
-  if (r.claude.found) checkClaudeUpdate();
+  if (legacy.value && r.claude.found) checkClaudeUpdate();
   // 刚装完 uv → 刷新缓存信息卡
   if (justFinished === "uv") loadUvCache();
   // 装/更新过之后旧的校验结论就作废了 (最典型: 刚装完那份可能与老的那份并存) → 重跑快速校验
@@ -170,6 +174,7 @@ async function finishInstall(ok: boolean, message: string) {
 // 装 Claude Code。默认 "direct"：直抓平台包 tgz (R2 优先 → npmmirror → npmjs) 解压到
 // ~/.local/bin，**不经 npm**（后者下 80MB optional 依赖常卡死）。"native" = 官方脚本兜底。
 async function installClaude(method: "native" | "direct" = "direct") {
+  if (!legacy.value) return;
   if (busyKind.value) return; // 防双发:已有安装流程在跑
   banner.value = null;
   logs.value = [];
@@ -190,6 +195,7 @@ async function installClaude(method: "native" | "direct" = "direct") {
 }
 
 async function installNode() {
+  if (!legacy.value) return;
   if (busyKind.value) return; // 防双发
   banner.value = null;
   logs.value = [];
@@ -268,7 +274,7 @@ async function cleanUvCache() {
 // 检测 Claude Code 是否有新版本 (静默, 不打扰; 仅在已安装时有意义)
 async function checkClaudeUpdate() {
   if (checkingUpdate.value || busy.value) return;
-  if (!report.value?.claude.found) return;
+  if (!legacy.value || !report.value?.claude.found) return;
   checkingUpdate.value = true;
   try {
     updateInfo.value = await envDoctor.checkClaudeUpdate();
@@ -281,6 +287,7 @@ async function checkClaudeUpdate() {
 
 // 一键更新 Claude Code (走国内 npmmirror), 复用安装的流式日志管线
 async function updateClaude() {
+  if (!legacy.value) return;
   banner.value = null;
   logs.value = [];
   busyKind.value = "claude-update";
@@ -296,6 +303,7 @@ async function updateClaude() {
 }
 
 async function fixPath() {
+  if (!legacy.value) return;
   banner.value = null;
   busyKind.value = "path";
   try {
@@ -351,7 +359,7 @@ function statusText(t: ToolStatus): string {
   // 随安装包内置的那份: 免安装、免管理员, 如实说明来源, 不显示成「用户装好了」
   if (t.found && t.bundled) return "已就绪 · 随应用内置";
   if (t.key === "pwsh" && !t.found) {
-    return report.value?.shellReady ? "可选 · 已内置 Git Bash" : "未安装 · 建议";
+    return report.value?.shellReady ? "可选 · shell 已就绪" : "未安装 · 建议";
   }
   // uv 缺席不是缺陷: Python 走内置解释器 + pip --user 即可, uv 只是更省事
   if (t.key === "uv" && !t.found) return "可选 · 未安装（不影响使用）";
@@ -387,13 +395,13 @@ const isWin = computed(() => osName.value === "windows");
 const tools = computed<ToolStatus[]>(() => {
   if (!report.value) return [];
   const r = report.value;
-  const all = [r.claude, r.pwsh, r.node, r.npm, r.uv, r.python];
+  const all = legacy.value ? [r.claude, r.pwsh, r.node, r.npm, r.uv, r.python] : [r.uv, r.python];
   // PowerShell 7 仅 Windows 上是 Claude 的可用 shell; mac/Linux 自带 sh/zsh, 不展示该行。
   return isWin.value ? all : all.filter((t) => t.key !== "pwsh");
 });
 const pathNeedsFix = computed(
   () =>
-    !!report.value &&
+    legacy.value && !!report.value &&
     report.value.claude.found &&
     !report.value.claudeDirOnUserPath
 );
@@ -418,11 +426,7 @@ const dockerUpdateHint = computed(() => {
       <!-- 头 -->
       <div class="badge"><span class="star"></span></div>
       <h1 class="title">环境检测与配置</h1>
-      <p class="lead">
-        北极星依托 <strong>Claude Code</strong> 在你本机干活。跑 Python 脚本与命令所需的
-        <strong>Python、Git Bash 已随应用内置</strong>——免安装、免管理员权限，装好即用（uv 只是可选加速器，
-        不装也不影响）。Claude Code 会在<strong>后台自动装好</strong>，你不用点任何东西。
-      </p>
+      <p class="lead">{{ copy.intro }}</p>
 
       <!-- 检测中 -->
       <div v-if="phase === 'checking'" class="checking">
@@ -430,6 +434,7 @@ const dockerUpdateHint = computed(() => {
       </div>
 
       <template v-else>
+        <RuntimeDiagnostics v-if="report && !legacy" :report="report" :verify="verify" />
         <!-- 工具清单 -->
         <ul class="tools">
           <li v-for="t in tools" :key="t.key" class="tool">
@@ -537,7 +542,7 @@ const dockerUpdateHint = computed(() => {
         </p>
 
         <!-- 安装 Claude 的方式说明 + 兜底 (默认直抓平台包 tgz, R2 优先多源; 官方脚本仅境外网络兜底) -->
-        <p v-else-if="report && !report.claude.found" class="alt">
+        <p v-else-if="legacy && report && !report.claude.found" class="alt">
           默认<strong>直接下载</strong>官方平台包（<code>@anthropic-ai/claude-code</code> 原生二进制），
           四源逐个自证 <strong>R2 → npmmirror(阿里) → yarn → npmjs</strong>（各源下载+解压+试跑一次），解压到 <code>~/.local/bin</code> 即用、<strong>不经 npm</strong>（避免下载卡死）。
           <button class="link" :disabled="busy" @click="installClaude('native')">
@@ -563,7 +568,7 @@ const dockerUpdateHint = computed(() => {
              (Windows 从注册表重建机器级+用户级 PATH), 所以它跟应用内那条是两个独立结论。 -->
         <div v-if="!props.gate" class="verify">
           <div class="v-head">
-            <span class="v-title">深度校验</span>
+            <span class="v-title">{{ copy.verify }}</span>
             <span v-if="verifying" class="v-sub">
               <span class="spinner sm"></span>
               {{ verifying === "deep" ? "正在真发一次请求…" : "正在实跑验证…" }}
@@ -571,13 +576,13 @@ const dockerUpdateHint = computed(() => {
             <span v-else-if="verify" class="v-sub" :class="verify.ok ? 'ok' : 'warn'">
               {{ verify.summary }}
             </span>
-            <span v-else class="v-sub">检测安装冲突，并实测 Claude Code 是否真能跑起来</span>
+            <span v-else class="v-sub">{{ copy.verifyHint }}</span>
             <div class="spacer"></div>
             <button class="btn sm" :disabled="busy || !!verifying" @click="runVerify(false)">
               {{ verify ? "重新校验" : "开始校验" }}
             </button>
             <button
-              class="btn sm primary"
+              v-if="legacy" class="btn sm primary"
               :disabled="busy || !!verifying || !verify?.appRunnable"
               title="真的发一次最小请求（几十 token），确证「装好了 + 能连上 + 有凭据」整条链路通"
               @click="runVerify(true)"
@@ -589,7 +594,7 @@ const dockerUpdateHint = computed(() => {
           <template v-if="verify">
             <!-- ① 安装冲突。零冲突要明说 (否则用户以为没检测), 但**只在真验成功时才敢说**——
                  claude 都没跑起来时冲突数当然是 0, 那时说「只有一份、两边一致」是在撒谎。 -->
-            <div v-if="conflictCount === 0 && verify.appRunnable" class="v-clean">
+            <div v-if="legacy && conflictCount === 0 && verify.appRunnable" class="v-clean">
               未发现安装冲突 —— 本机只有一份 Claude Code，终端与应用跑的是同一份。
             </div>
             <ul v-else class="conflicts">
@@ -606,7 +611,7 @@ const dockerUpdateHint = computed(() => {
                   <div v-for="(p, i) in c.paths" :key="i" class="cf-path" :title="p">{{ p }}</div>
                 </div>
                 <button
-                  v-if="c.fixable"
+                  v-if="legacy && c.fixable"
                   class="btn sm"
                   :disabled="busy || !!verifying"
                   @click="fixPath"
@@ -636,7 +641,8 @@ const dockerUpdateHint = computed(() => {
               v-if="!verify.deep || highConflictCount > 0 || hasFixableConflict"
               class="v-foot"
             >
-              <template v-if="!verify.deep">
+              <template v-if="!legacy && !verify.deep">{{ copy.noInference }}</template>
+              <template v-else-if="!verify.deep">
                 「深度检测」会真发一次最小请求，是确认<strong>真正可用</strong>（凭据、网络、上游全通）的唯一硬证据。
               </template>
               <template v-else-if="highConflictCount > 0">

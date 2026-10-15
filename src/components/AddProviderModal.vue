@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { runtimeCopy as copy } from "../features/runtime/copy";
+import { protocolOptions, validateProviderConfig } from "../features/runtime/providerConfig";
+import ProviderModelHelp from "../features/runtime/components/ProviderModelHelp.vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { X, Check, Eye, EyeOff, Sparkles, Link2 } from "@lucide/vue";
 import SearchGlass from "./icons/SearchGlass.vue";
@@ -24,7 +27,7 @@ const form = reactive({
   websiteUrl: "",
   tokenField: "ANTHROPIC_AUTH_TOKEN",
   /** "" = Anthropic 兼容(直连); "openai" = OpenAI 协议(经 Polaris 本地路由翻译转发) */
-  protocol: "" as "" | "openai",
+  protocol: "" as string,
   baseUrl: "",
   apiKey: "",
   model: "",
@@ -89,7 +92,7 @@ function applyProvider(p: ProviderView) {
   form.note = p.note || "";
   form.websiteUrl = p.websiteUrl || "";
   form.tokenField = p.tokenField || "ANTHROPIC_AUTH_TOKEN";
-  form.protocol = p.protocol === "openai" ? "openai" : "";
+  form.protocol = p.protocol || "";
   form.baseUrl = p.baseUrl || "";
   form.apiKey = p.authToken || "";
   form.model =
@@ -136,7 +139,7 @@ const isOpenAiProto = computed(() => form.protocol === "openai");
 // OpenAI 协议(本地路由)供应商: 模型字段留空时自动预填默认 gpt5.6-sol 并钉四档,
 // 用户无需手输即得正确模型名; 已有钉选值则尊重, 不覆盖。
 watch(isOpenAiProto, (on) => {
-  if (on && !form.model.trim()) {
+  if (store.legacyActions && on && !form.model.trim()) {
     form.model = DEFAULT_OPENAI_MODEL;
     onModel();
   }
@@ -272,6 +275,8 @@ async function submit() {
     localErr.value = "OpenAI 协议供应商必须填写请求地址(如 https://api.openai.com/v1)";
     return;
   }
+  const configError = validateProviderConfig(cfg, form.protocol);
+  if (configError) { localErr.value = configError; return; }
   saving.value = true;
   const id = await store.save({
     id: form.id,
@@ -313,7 +318,7 @@ function dotColor(p: ProviderView) {
         <!-- tabs -->
         <div class="m-tabs">
           <button class="m-tab" :class="{ on: tab === 'claude' }" @click="tab = 'claude'">
-            Claude 供应商
+            API 供应商
           </button>
           <button class="m-tab" :class="{ on: tab === 'universal' }" @click="tab = 'universal'">
             统一供应商
@@ -322,7 +327,7 @@ function dotColor(p: ProviderView) {
 
         <div class="m-body">
           <p v-if="tab === 'universal'" class="universal-note">
-            统一供应商会同步到 Claude / Codex / Gemini —— Polaris 当前对 <b>Claude Code</b> 生效，配置方式一致。
+            {{ copy.providerScope }}
           </p>
 
           <!-- 预设网格 -->
@@ -355,7 +360,7 @@ function dotColor(p: ProviderView) {
 
           <!-- OAuth 提示 -->
           <div v-if="isOauth" class="oauth-note">
-            <b>{{ form.name }}</b> 说 OpenAI 协议，需 OAuth 授权 + 翻译代理才能直连 Claude Code（轻量版未内置路由）。Codex 可在左下角「供应商坞」用官方 CLI 授权。
+            {{ copy.login }} {{ copy.credentials }}
           </div>
 
           <!-- 表单 -->
@@ -403,17 +408,11 @@ function dotColor(p: ProviderView) {
 
             <label class="field">
               <span class="f-lab">上游协议</span>
-              <div v-if="canPickProtocol" class="field-toggle">
-                <button :class="{ sel: form.protocol === '' }" @click="form.protocol = ''">Anthropic 兼容 · 直连</button>
-                <button :class="{ sel: form.protocol === 'openai' }" @click="form.protocol = 'openai'">OpenAI 协议 · 本地路由</button>
-              </div>
-              <p v-else class="hint">
-                {{ isOpenAiProto ? "OpenAI 协议 · 请求经 Polaris 本地路由翻译转发" : "Anthropic 兼容 · Claude Code 直连该端点" }}
-              </p>
-              <p v-if="canPickProtocol && isOpenAiProto" class="hint">
-                💡 GPT 等只说 OpenAI 协议的端点选这档：Claude Code 把请求发到 Polaris 本地路由
-                (127.0.0.1)，由它实时翻译并转发到下方地址——同 cc-switch 的本地转发，改 Key/换模型即刻生效。
-              </p>
+              <select v-if="canPickProtocol" v-model="form.protocol">
+                <option v-for="p in (store.legacyActions ? protocolOptions.slice(0, 2) : protocolOptions)" :key="p.value" :value="p.value">{{ p.label }}</option>
+              </select>
+              <p v-else class="hint">{{ form.protocol || 'anthropic' }}</p>
+              <p class="hint">{{ store.legacyActions ? copy.legacyScope : copy.protocol }}</p>
             </label>
 
             <label class="field">
@@ -433,17 +432,13 @@ function dotColor(p: ProviderView) {
               <input
                 v-model="form.model"
                 list="model-presets"
-                :placeholder="isOpenAiProto ? '默认 gpt5.6-sol（可下拉选择，或手输其他模型名）' : '例如：MiniMax-M3（留空则用 Claude 默认模型名）'"
+                :placeholder="copy.modelPlaceholder"
                 @input="onModel"
               />
               <datalist id="model-presets">
                 <option v-for="m in MODEL_PRESETS" :key="m" :value="m" />
               </datalist>
-              <p class="hint">
-                💡 第三方供应商通常需指定自家模型名。填一个值会同时钉主模型与 Opus/Sonnet/Haiku
-                三档默认，连后台小任务也走它，避免回落到最低档。OpenAI 协议默认已预填
-                <code>gpt5.6-sol</code>，无需手输。
-              </p>
+              <ProviderModelHelp />
             </label>
 
             <!-- 配置 JSON + 开关 -->
@@ -451,7 +446,7 @@ function dotColor(p: ProviderView) {
               <span class="f-lab">配置 JSON</span>
               <button class="fmt-btn" @click="formatJson"><Sparkles :size="12" :stroke-width="1.8" /> 格式化</button>
             </div>
-            <div class="toggles">
+            <div v-if="store.legacyActions" class="toggles">
               <label v-for="t in toggleDefs" :key="t.key" class="tg">
                 <input
                   type="checkbox"

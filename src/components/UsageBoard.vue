@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { runtimeCopy as copy } from "../features/runtime/copy";
+import { usageCost, recordedCost } from "../features/runtime/presentation";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   X,
@@ -15,17 +17,10 @@ import type { TokenBucket, ProviderBalance } from "../tauri";
 
 const store = useProvidersStore();
 
-type Source = "all" | "claude" | "codex" | "gemini";
 type Period = "today" | "week" | "month" | "year";
-const source = ref<Source>("all");
+const source = ref("all");
 const period = ref<Period>("today");
-
-const sources: { key: Source; label: string }[] = [
-  { key: "all", label: "全部" },
-  { key: "claude", label: "Claude Code" },
-  { key: "codex", label: "Codex" },
-  { key: "gemini", label: "Gemini" },
-];
+const sources = [{ key: "all", label: copy.usageSource }];
 const periods: { key: Period; label: string }[] = [
   { key: "today", label: "当天" },
   { key: "week", label: "近 7 天" },
@@ -33,8 +28,8 @@ const periods: { key: Period; label: string }[] = [
   { key: "year", label: "近 1 年" },
 ];
 
-// 我们的数据全部来自 ~/.claude/projects(Claude Code)。
-const hasData = computed(() => source.value === "all" || source.value === "claude");
+// 后端返回 Pi 与 Claude 历史的合并汇总，无法按来源拆分。
+const hasData = computed(() => source.value === "all");
 
 onMounted(async () => {
   store.refreshUsage();
@@ -84,7 +79,7 @@ function fmtK(n: number): string {
   return String(n);
 }
 function fmtCost(n: number): string {
-  return "$" + n.toFixed(4);
+  return usageCost(n);
 }
 function cacheTotal(b: TokenBucket): number {
   return b.cacheRead + b.cacheCreation;
@@ -99,7 +94,7 @@ function cacheTotal(b: TokenBucket): number {
         <header class="ub-head">
           <div>
             <div class="ub-title">使用统计</div>
-            <div class="ub-sub">查看 AI 模型的使用情况和成本统计 · 数据源 ~/.claude/projects</div>
+            <div class="ub-sub">{{ copy.usageSource }}</div>
           </div>
           <button class="icon-btn" @click="store.closeUsage()"><X :size="18" :stroke-width="1.8" /></button>
         </header>
@@ -177,6 +172,7 @@ function cacheTotal(b: TokenBucket): number {
             </div>
           </section>
 
+          <p>{{ copy.usageLimit }}</p>
           <template v-if="bucket">
             <!-- 4 卡片 -->
             <div class="cards">
@@ -194,6 +190,7 @@ function cacheTotal(b: TokenBucket): number {
                   <span class="c-ic green"><DollarSign :size="15" :stroke-width="2" /></span>
                 </div>
                 <div class="c-num">{{ fmtCost(bucket.cost) }}</div>
+                <div class="c-sub">已记录金额：{{ recordedCost(bucket.cost) }}</div>
               </div>
 
               <div class="card">
@@ -249,11 +246,11 @@ function cacheTotal(b: TokenBucket): number {
 
           <div v-else-if="store.usage && !store.usage.available" class="empty">
             <div class="empty-big">暂无用量数据</div>
-            <div class="empty-sub">尚未通过 Claude Code 产生会话</div>
+            <div class="empty-sub">{{ copy.usageEmpty }}</div>
           </div>
           <div v-else class="empty">
-            <div class="empty-big">{{ source === "codex" ? "Codex" : "Gemini" }} 暂无数据</div>
-            <div class="empty-sub">该看板仅聚合 Claude Code 日志；{{ source === "codex" ? "Codex" : "Gemini" }} 用量需对应 CLI 自身记录</div>
+            <div class="empty-big">{{ copy.usageEmpty }}</div>
+            <div class="empty-sub">{{ copy.usageSource }}</div>
           </div>
         </div>
       </div>

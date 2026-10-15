@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { runtimeCopy as copy } from "../../features/runtime/copy";
 // 输入区(自 ChatPanel 拆出,逻辑原样搬移):输入卡片 + 工具条(工作模式/技能/模式/
 // 智能体/供应商弹层) + 授权栏 + 语音听写 + 附件/贴图 + 发送/停止/清空上下文。
 // 状态尽量下沉本组件;与父层(消息区)共享的只有 agentMode(v-model,消息区要显示
@@ -95,7 +96,7 @@ const showSkillPanel = ref(false);
 const skillSearch = ref("");
 const skillsList = ref<Skill[]>([]);
 
-// ─────────── 目标模式 (Claude Code goal) ───────────
+// ─────────── 目标模式 (Agent goal) ───────────
 // 开启后，主输入框里写的内容即「完成条件」：Claude 会持续推进直到达成，
 // 不中途收尾、不反问。开关随会话持续生效（贴近 session-scoped /goal），手动关闭。
 const goalMode = ref(false);
@@ -511,7 +512,7 @@ const activeModeSummary = computed(() => {
 // 快速模式(默认): 「快速调用知识库 + 快速回答」。强制走知识库召回的「快档」(双车道融合但跳过
 //   重排 API, ~1.8s→~0.25s)+ 工具精简(弃 Task/NotebookEdit)+ 提示词瘦身(跳「可运行项目」「长
 //   任务」约定)+ 上下文预算调小 + 默认自动批准 —— 一切为秒级查库、秒级回答。
-// 工作模式: 纯 Claude Code —— 放开全套工具 + 注入全部约定(可运行项目/长任务)+ 全质量召回(带
+// 工作模式: Pi 工作模式 —— 放开全套工具 + 注入全部约定(可运行项目/长任务)+ 全质量召回(带
 //   重排)+ 手动授权, 面向写代码 / 跑项目 / 产出复杂成品。随设备记忆(localStorage), 默认快速。
 const workMode = ref<WorkMode>(
   localStorage.getItem("polaris.workMode") === "work" ? "work" : "fast"
@@ -530,12 +531,12 @@ const workModeOptions: { mode: WorkMode; name: string; desc: string }[] = [
   {
     mode: "work",
     name: "工作模式",
-    desc: "纯 Claude Code：全套工具 + 全部约定 + 全质量召回 + 手动授权；写代码·跑项目·产复杂成品时切到这",
+    desc: copy.workMode,
   },
 ];
 // 切换工作模式即套用该模式的聪明默认(用户随后仍可手动覆盖):
 //   快速 = 自动批准编辑(少弹窗) + 默认开知识库(本模式本职就是快速调用知识库);
-//   工作 = 手动授权(纯 Claude Code, 改东西逐步确认) + 默认关知识库(要查再开)。
+//   工作 = 手动授权(Pi 工作模式, 改东西逐步确认) + 默认关知识库(要查再开)。
 function applyModeDefaults(m: WorkMode) {
   permMode.value = m === "work" ? "manual" : "auto_current";
   kbMode.value = m === "fast";
@@ -962,7 +963,7 @@ function recallHistory(dir: 1 | -1): boolean {
   return true;
 }
 
-// ─────────── 常驻 claude 进程预热(输入区触发) ───────────
+// ─────────── Agent 会话预热(输入区触发) ───────────
 // 输入框首次聚焦/首个键入 = 「马上要发消息」的最强信号: 立刻预热常驻进程, 让 CLI
 // ~6.4s 的自举在用户打字期间跑完, 首条消息首响 ~10s → ~3s。每对话只发一次(切对话
 // 后对新对话再发; store 内另有 60s 去抖兜底), 传输入区**当下真实档位**(权限/工作
@@ -1302,7 +1303,7 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
           sending
             ? '生成中 …（按 Esc 或点 ■ 停止本轮）'
             : goalMode
-            ? '目标模式：在此写下完成条件，Claude 会持续推进直到达成 (Enter 发送) …'
+            ? copy.goalPlaceholder
             : '请输入消息 (Enter 发送 · Shift + Enter 换行，可拖文件进来作为附件) …'
         "
         rows="2"
@@ -1325,7 +1326,7 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
               <div class="btn-tooltip-inner">
                 快速 / 工作 两套预设
                 <div class="btn-tooltip-sub">
-                  快速模式：强制快速查库 + 快速回答（精简工具、跳重排、瘦身提示词、自动批准）；工作模式：纯 Claude Code 全套
+                  {{ copy.modeHint }}
                 </div>
               </div>
             </div>
@@ -1350,7 +1351,7 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
               <div class="btn-tooltip-inner">
                 使用 LLM 大规模联网搜索相关内容
                 <div class="btn-tooltip-sub">
-                  激活后 Claude 会自动检索多来源信息并交叉验证
+                  {{ copy.research }}
                 </div>
               </div>
             </div>

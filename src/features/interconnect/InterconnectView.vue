@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { runtimeCopy as copy } from "../runtime/copy";
 import { errMsg } from "../../lib/err";
 /**
  * 互联 · 设备联盟 —— 与「协作(项目/任务)」彻底分开的独立板块。
@@ -1566,7 +1567,7 @@ onUnmounted(() => {
                 {{ execPolicy.mode === "shell" ? "立即落回白名单" : "临时解锁 Shell 模式(30 分钟)" }}
               </button>
               <span class="ex-note">
-                白名单模式够日常用(git/npm/cargo/claude…)。需要管道、重定向或在册外的命令时才解锁 Shell,到点自动回收。
+                {{ copy.execAllowlist }}
               </span>
             </div>
 
