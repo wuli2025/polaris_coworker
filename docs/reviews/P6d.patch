@@ -1,0 +1,1566 @@
+diff --git a/src-tauri/crates/polaris-collab/src/collab/gateway.rs b/src-tauri/crates/polaris-collab/src/collab/gateway.rs
+index c267d90..fc9491c 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/gateway.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/gateway.rs
+@@ -114,6 +114,7 @@ pub fn gateway_node_id() -> Result<String, String> {
+ // ── Endpoint 惰性初始化 ─────────────────────────────────────────────────────
+ 
+ mod endpoint;
++mod request;
+ use endpoint::ensure_endpoint;
+ 
+ /// 取一条到指定主机的健康连接:缓存里已死的丢弃重建。
+@@ -365,7 +366,7 @@ pub async fn gateway_proxy(
+         }
+         Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
+     };
+-    let qs = build_qs(&q);
++    let qs = request::build_qs(&q);
+     // WebSocket 升级(手机 /ws 流式)→ 走双向 pump 反代;普通 HTTP 走下面 ureq。
+     if let Some(ws) = ws {
+         let backend = format!("ws://127.0.0.1:{port}/{rest}{qs}");
+@@ -379,31 +380,12 @@ pub async fn gateway_proxy(
+     let url = format!("http://127.0.0.1:{port}/{rest}{qs}");
+     let m = method.as_str().to_string();
+     // 透传关键请求头(鉴权/内容类型);Host 由 ureq 依 url 自设。
+-    let auth = headers
+-        .get(header::AUTHORIZATION)
+-        .and_then(|v| v.to_str().ok())
+-        .map(str::to_string);
+-    let ct = headers
+-        .get(header::CONTENT_TYPE)
+-        .and_then(|v| v.to_str().ok())
+-        .map(str::to_string);
+-    let accept = headers
+-        .get(header::ACCEPT)
+-        .and_then(|v| v.to_str().ok())
+-        .map(str::to_string);
++    let forwarded = request::forwarded(&headers);
+     let body_vec = body.to_vec();
+ 
+     let out = tokio::task::spawn_blocking(move || -> Result<(u16, String, Vec<u8>), String> {
+         let mut req = ureq::request(&m, &url).timeout(Duration::from_secs(600));
+-        if let Some(a) = &auth {
+-            req = req.set("Authorization", a);
+-        }
+-        if let Some(c) = &ct {
+-            req = req.set("Content-Type", c);
+-        }
+-        if let Some(a) = &accept {
+-            req = req.set("Accept", a);
+-        }
++        for (name, value) in &forwarded { req = req.set(name, value); }
+         let resp = if body_vec.is_empty() && (m == "GET" || m == "HEAD") {
+             req.call()
+         } else {
+@@ -444,32 +426,6 @@ pub async fn gateway_proxy(
+     }
+ }
+ 
+-/// 最小 URL 编码(query 值透传;与 http.rs urlencode 同款,gateway 内自带避免跨模块 pub)。
+-fn urlencode(s: &str) -> String {
+-    let mut out = String::with_capacity(s.len());
+-    for b in s.bytes() {
+-        match b {
+-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+-                out.push(b as char)
+-            }
+-            _ => out.push_str(&format!("%{:02X}", b)),
+-        }
+-    }
+-    out
+-}
+-
+-/// query map → `?k=v&...`(空则空串)。HTTP 与 WS 反代共用。
+-fn build_qs(q: &HashMap<String, String>) -> String {
+-    if q.is_empty() {
+-        return String::new();
+-    }
+-    let enc: Vec<String> = q
+-        .iter()
+-        .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+-        .collect();
+-    format!("?{}", enc.join("&"))
+-}
+-
+ // ── WS 反代:手机 WebSocket ↔ 后端(经隧道到桌面 apihub /ws) ─────────────────
+ 
+ type BackendWs =
+diff --git a/src-tauri/crates/polaris-collab/src/collab/gateway/request.rs b/src-tauri/crates/polaris-collab/src/collab/gateway/request.rs
+new file mode 100644
+index 0000000..5b17954
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/gateway/request.rs
+@@ -0,0 +1,51 @@
++//! Preserve the signed actor proof needed by Policy B at the destination host.
++use axum::http::HeaderMap;
++pub(super) fn forwarded(headers: &HeaderMap) -> Vec<(&'static str, String)> {
++    ["authorization", "content-type", "accept", "x-polaris-device-assertion"].into_iter()
++        .filter_map(|name| headers.get(name).and_then(|value| value.to_str().ok()).map(|value| (name, value.to_string())))
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn forwards_device_proof_but_not_client_proxy_trust_headers() -> Result<(), String> {
++        let mut headers = HeaderMap::new();
++        for (name, value) in [("authorization", "Bearer session"), ("x-polaris-device-assertion", "PA1.signed"),
++            ("x-forwarded-for", "127.0.0.1"), ("host", "attacker.example")] {
++            headers.insert(name, value.parse().map_err(|e| format!("{e}"))?);
++        }
++        assert_eq!(forwarded(&headers), vec![("authorization", "Bearer session".into()),
++            ("x-polaris-device-assertion", "PA1.signed".into())]);
++        Ok(())
++    }
++}
++
++use std::collections::HashMap;
++
++fn urlencode(s: &str) -> String {
++    let mut out = String::with_capacity(s.len());
++    for b in s.bytes() {
++        match b {
++            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
++                out.push(b as char)
++            }
++            _ => out.push_str(&format!("%{:02X}", b)),
++        }
++    }
++    out
++}
++
++/// query map → `?k=v&...`(空则空串)。HTTP 与 WS 反代共用。
++pub(super) fn build_qs(q: &HashMap<String, String>) -> String {
++    if q.is_empty() {
++        return String::new();
++    }
++    let enc: Vec<String> = q
++        .iter()
++        .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
++        .collect();
++    format!("?{}", enc.join("&"))
++}
++
+diff --git a/src-tauri/crates/polaris-collab/src/collab/http.rs b/src-tauri/crates/polaris-collab/src/collab/http.rs
+index 78fedf4..1d592b1 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/http.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/http.rs
+@@ -31,12 +31,16 @@ use std::time::{Duration, Instant};
+ use tokio::sync::broadcast;
+ 
+ mod account_routes;
++mod browser_routes;
++use browser_routes::*;
+ mod mesh_routes;
+ mod security_routes;
+ use security_routes::*;
+ #[cfg(test)]
+ mod interconnect_tests;
+ #[cfg(test)]
++mod browser_tests;
++#[cfg(test)]
+ mod security_tests;
+ use account_routes::*;
+ use mesh_routes::*;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/http/browser_routes.rs b/src-tauri/crates/polaris-collab/src/collab/http/browser_routes.rs
+new file mode 100644
+index 0000000..9bcb769
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/http/browser_routes.rs
+@@ -0,0 +1,59 @@
++//! Session-scoped HTTP orchestration. No caller-selected host identity or console admission.
++use super::*;
++use crate::collab::interconnect::browser;
++
++pub(super) async fn browser_login(Json(value): Json<Value>) -> Response {
++    match browser::password_login(value).await {
++        Ok(value) => Json(value).into_response(),
++        Err(_) => login_failed(),
++    }
++}
++fn login_failed() -> Response {
++    (StatusCode::UNAUTHORIZED, Json(json!({"error":"interconnect_login_failed",
++        "interconnect":{"stage":"register","state":"failed","error":"interconnect_login_failed","retryable":true}})))
++        .into_response()
++}
++pub(super) async fn browser_status(headers: HeaderMap) -> Response {
++    let Some(token) = bearer_of(&headers) else { return forbid(); };
++    match tokio::task::spawn_blocking(move || browser::status(&token)).await {
++        Ok(Ok(value)) => Json(value).into_response(),
++        _ => forbid(),
++    }
++}
++pub(super) async fn browser_retry(headers: HeaderMap) -> Response {
++    let Some(token) = bearer_of(&headers) else { return forbid(); };
++    let checked = token.clone();
++    if !matches!(tokio::task::spawn_blocking(move || browser::status(&checked)).await, Ok(Ok(_))) { return forbid(); }
++    match browser::retry(token).await {
++        Ok(value) => Json(value).into_response(),
++        Err(error) if error == "interconnect_retry_busy" =>
++            (StatusCode::CONFLICT, Json(json!({"error":error}))).into_response(),
++        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"interconnect_retry_failed"}))).into_response(),
++    }
++}
++async fn security(headers: HeaderMap, path: &'static str, value: Value) -> Response {
++    let Some(token) = bearer_of(&headers) else { return forbid(); };
++    let checked = token.clone();
++    if !matches!(tokio::task::spawn_blocking(move || browser::status(&checked)).await, Ok(Ok(_))) { return forbid(); }
++    unwrap_api(tokio::task::spawn_blocking(move || browser::security(&token, path, &value)).await)
++}
++pub(super) async fn browser_inbox(headers: HeaderMap) -> Response {
++    security(headers, "/api/mesh/security/inbox", json!({})).await
++}
++pub(super) async fn browser_ack(headers: HeaderMap, Json(value): Json<Value>) -> Response {
++    security(headers, "/api/mesh/security/ack", value).await
++}
++pub(super) async fn browser_decide(headers: HeaderMap, Json(value): Json<Value>) -> Response {
++    security(headers, "/api/mesh/risk/decide", value).await
++}
++pub(super) async fn browser_revoke(headers: HeaderMap, Json(value): Json<Value>) -> Response {
++    security(headers, "/api/mesh/revoke", value).await
++}
++
++/// Sessions and downstream credentials must never enter browser or intermediary caches.
++pub(super) async fn browser_no_store(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
++    let protected = request.uri().path().starts_with("/api/interconnect/");
++    let mut response = next.run(request).await;
++    if protected { response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store")); }
++    response
++}
+diff --git a/src-tauri/crates/polaris-collab/src/collab/http/browser_tests.rs b/src-tauri/crates/polaris-collab/src/collab/http/browser_tests.rs
+new file mode 100644
+index 0000000..c09b7b0
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/http/browser_tests.rs
+@@ -0,0 +1,217 @@
++use super::*;
++use crate::collab::{auth, authority, db, interconnect, mesh};
++use interconnect::test_env::TestEnv;
++use tower::ServiceExt;
++
++fn setup() -> Result<(TestEnv, String, Router), String> {
++    let env = TestEnv::new("browser-http")?;
++    std::env::set_var("POLARIS_ACCOUNT_AUTHORITY", "1");
++    let (user, uid) = auth::create_authority_account("webuser", "test-password-123", "Web user", "")?;
++    db::with_conn(|conn| conn.execute("UPDATE users SET role='owner' WHERE id=?1", [user.id])
++        .map(|_| ()).map_err(|e| e.to_string()))?;
++    let (sender, _) = tokio::sync::broadcast::channel(4);
++    let router = collab_router(CollabState { app: crate::host::AppHandle::new(sender),
++        auth_token: Arc::new(None), advertise: Arc::new(parking_lot::RwLock::new(vec![])) }, false);
++    Ok((env, uid, router))
++}
++async fn call(router: &Router, method: &str, path: &str, token: &str, value: Value) -> Result<(StatusCode, Value), String> {
++    let mut request = axum::http::Request::builder().method(method).uri(path).header("content-type", "application/json");
++    if !token.is_empty() { request = request.header("authorization", format!("Bearer {token}")); }
++    let response = router.clone().oneshot(request.body(Body::from(value.to_string())).map_err(|e| e.to_string())?)
++        .await.map_err(|e| e.to_string())?;
++    let status = response.status();
++    let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024).await.map_err(|e| e.to_string())?;
++    Ok((status, serde_json::from_slice(&bytes).map_err(|e| e.to_string())?))
++}
++async fn login(router: &Router) -> Result<Value, String> {
++    let (status, value) = call(router, "POST", "/api/interconnect/login", "", json!({
++        "username":"webuser","password":"test-password-123","deviceName":"My browser","platform":"web",
++    })).await?;
++    assert_eq!(status, StatusCode::OK, "{value}");
++    Ok(value)
++}
++fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
++    value[key].as_str().ok_or_else(|| format!("missing {key}"))
++}
++
++#[tokio::test]
++async fn login_is_bound_queryable_and_does_not_claim_the_console() -> Result<(), String> {
++    let (_env, uid, router) = setup()?;
++    db::meta_set("owner_uid", "existing-owner")?;
++    let output = login(&router).await?;
++    assert_eq!(output["interconnect"]["state"], "ready");
++    assert_eq!(output["storageMode"], "http");
++    assert!(output.get("relayConfig").is_some());
++    let token = field(&output, "token")?;
++    let binding: (String, String) = db::with_conn(|conn| conn.query_row(
++        "SELECT uid,node_id FROM bound_sessions WHERE token=?1", [token], |r| Ok((r.get(0)?,r.get(1)?)))
++        .map_err(|e| e.to_string()))?;
++    assert_eq!(binding.0, uid);
++    assert_eq!(binding.1, output["nodeId"]);
++    assert_eq!(authority::owner_uid(), "existing-owner", "HTTP must preserve host ownership");
++    assert!(mesh::peers(&uid, "another-host")?.is_empty(), "session devices must not be dialed as iroh nodes");
++    let (status, queried) = call(&router, "GET", "/api/interconnect/status", token, json!({})).await?;
++    assert_eq!(status, StatusCode::OK);
++    assert_eq!(queried["interconnect"], output["interconnect"]);
++    assert!(queried.get("token").is_none());
++    let second = login(&router).await?;
++    assert_ne!(second["nodeId"], output["nodeId"]);
++    assert_eq!(call(&router, "GET", "/api/interconnect/status", "", json!({})).await?.0, StatusCode::FORBIDDEN);
++    mesh::revoke(&uid, field(&output, "nodeId")?)?;
++    assert_eq!(call(&router, "POST", "/api/interconnect/retry", token, json!({})).await?.0, StatusCode::FORBIDDEN);
++    Ok(())
++}
++
++#[tokio::test]
++async fn failed_connect_retry_preserves_device_key_and_registration_time() -> Result<(), String> {
++    let (_env, uid, router) = setup()?;
++    mesh::enroll(&uid, "invalid-iroh-node", "Existing host", "linux", "1")?;
++    let output = login(&router).await?;
++    assert_eq!(output["enrolled"], true);
++    assert_eq!(output["interconnect"]["stage"], "connect");
++    assert_eq!(output["interconnect"]["state"], "failed");
++    let token = field(&output, "token")?;
++    let node = field(&output, "nodeId")?;
++    let before = interconnect::devices::active(&uid, node)?;
++    let hash: String = db::with_conn(|conn| conn.query_row("SELECT key_hash FROM mesh_nodes WHERE node_id=?1", [node], |r| r.get(0))
++        .map_err(|e| e.to_string()))?;
++    db::with_conn(|conn| conn.execute("UPDATE mesh_nodes SET last_seen=0 WHERE node_id='invalid-iroh-node'", [])
++        .map(|_| ()).map_err(|e| e.to_string()))?;
++    let (status, retried) = call(&router, "POST", "/api/interconnect/retry", token, json!({})).await?;
++    assert_eq!(status, StatusCode::OK);
++    assert_eq!(retried["interconnect"]["state"], "ready");
++    assert_eq!(retried["peers"][0]["state"], "offline");
++    let after = interconnect::devices::active(&uid, node)?;
++    assert_eq!(before.device_id, after.device_id);
++    assert_eq!(before.enrolled_at, after.enrolled_at);
++    let unchanged: bool = db::with_conn(|conn| conn.query_row(
++        "SELECT key_hash=?2 FROM mesh_nodes WHERE node_id=?1", rusqlite::params![node,hash], |r| r.get(0))
++        .map_err(|e| e.to_string()))?;
++    assert!(unchanged);
++    assert_eq!(mesh::devices(&uid)?.len(), 2);
++    Ok(())
++}
++
++#[tokio::test]
++async fn login_errors_do_not_reveal_missing_disabled_or_wrong_password_accounts() -> Result<(), String> {
++    let (_env, _uid, router) = setup()?;
++    let mut responses = vec![];
++    for username in ["webuser", "missing-user"] {
++        responses.push(call(&router, "POST", "/api/interconnect/login", "", json!({"username":username,"password":"wrong"})).await?);
++    }
++    db::with_conn(|conn| conn.execute("UPDATE users SET disabled=1", []).map(|_| ()).map_err(|e| e.to_string()))?;
++    responses.push(call(&router, "POST", "/api/interconnect/login", "", json!({"username":"webuser","password":"test-password-123"})).await?);
++    for response in &responses {
++        assert_eq!(response, &responses[0]);
++        assert_eq!(response.0, StatusCode::UNAUTHORIZED);
++        assert_eq!(response.1["error"], "interconnect_login_failed");
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn new_browser_device_notifies_old_device_and_cannot_bypass_or_self_approve_risk() -> Result<(), String> {
++    let (_env, uid, router) = setup()?;
++    mesh::enroll(&uid, "old-host", "Old host", "linux", "1")?;
++    let output = login(&router).await?;
++    let token = field(&output, "token")?;
++    let node = field(&output, "nodeId")?;
++    let notices = interconnect::notifications::inbox(&uid, "old-host")?;
++    assert_eq!(notices[0]["name"], "My browser");
++    assert_eq!(notices[0]["platform"], "web");
++    let operation = json!({"nodeId":"old-host"});
++    let (status, pending) = call(&router, "POST", "/api/peer/revoke", token, operation.clone()).await?;
++    assert_eq!(status, StatusCode::FORBIDDEN);
++    assert!(field(&pending, "error")?.starts_with("approval_pending:"));
++    assert!(!crate::collab::grants::is_revoked("old-host"));
++    let inbox = interconnect::risk::pending(&uid, "old-host")?;
++    let request = field(&inbox[0], "id")?;
++    assert_eq!(inbox[0]["actorName"], "My browser");
++    assert_eq!(inbox[0]["actorPlatform"], "web");
++    assert!(interconnect::risk::decide(&uid, node, request, true).is_err());
++    interconnect::risk::decide(&uid, "old-host", request, true)?;
++    assert_eq!(call(&router, "POST", "/api/peer/revoke", token, operation).await?.0, StatusCode::OK);
++    assert!(crate::collab::grants::is_revoked("old-host"));
++    Ok(())
++}
++
++#[tokio::test]
++async fn revoked_and_unknown_approval_actors_have_null_metadata() -> Result<(), String> {
++    let (_env, uid, router) = setup()?;
++    mesh::enroll(&uid, "old-host", "Old host", "linux", "1")?;
++    let output = login(&router).await?;
++    let token = field(&output, "token")?;
++    call(&router, "POST", "/api/peer/revoke", token, json!({"nodeId":"target"})).await?;
++    mesh::revoke(&uid, field(&output, "nodeId")?)?;
++    let revoked = interconnect::risk::pending(&uid, "old-host")?;
++    assert_eq!(revoked[0]["actorName"], Value::Null);
++    assert_eq!(revoked[0]["actorPlatform"], Value::Null);
++    db::with_conn(|conn| conn.execute("DELETE FROM mesh_device_ids WHERE node_id=?1", [field(&output, "nodeId")?])
++        .map(|_| ()).map_err(|e| e.to_string()))?;
++    let unknown = interconnect::risk::pending(&uid, "old-host")?;
++    assert_eq!(unknown[0]["actorName"], Value::Null);
++    assert_eq!(unknown[0]["actorPlatform"], Value::Null);
++    Ok(())
++}
++
++#[tokio::test]
++async fn http_login_status_and_retry_use_configured_budgets() -> Result<(), String> {
++    let (env, _uid, router) = setup()?;
++    std::fs::write(env.directory.join("config.json"), r#"{"rateLimit":{"loginRequests":2,"writeRequests":1,"readRequests":1}}"#)
++        .map_err(|e| e.to_string())?;
++    let output = login(&router).await?;
++    let token = field(&output, "token")?;
++    for (method, path) in [("GET", "/api/interconnect/status"), ("POST", "/api/interconnect/retry")] {
++        assert_eq!(call(&router, method, path, token, json!({})).await?.0, StatusCode::OK);
++        assert_eq!(call(&router, method, path, token, json!({})).await?.0, StatusCode::TOO_MANY_REQUESTS);
++    }
++    call(&router, "POST", "/api/interconnect/login", "random-1", json!({})).await?;
++    let limited = call(&router, "POST", "/api/interconnect/login", "random-2", json!({})).await?;
++    assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS);
++    assert_eq!(limited.1["error"], "interconnect_rate_limited");
++    Ok(())
++}
++
++#[test]
++fn browser_configuration_validates_types_limits_and_old_defaults() -> Result<(), String> {
++    assert_eq!(interconnect::resolve(Some("{}"), |_| None)?.browser.request_timeout_secs, 10);
++    for browser in [json!({"maxPeers":0}), json!({"requestTimeoutSecs":"10"}), json!({"platform":false}),
++        json!({"deviceName":""}), json!({"maxPeers":129}), json!({"gatewayUrl":"https://user:pw@host"}), json!({"unknown":true})] {
++        assert!(interconnect::resolve(Some(&json!({"browser":browser}).to_string()), |_| None).is_err());
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn existing_password_cooldown_still_applies_inside_orchestration() -> Result<(), String> {
++    let (_env, _, router) = setup()?;
++    auth::create_authority_account("cooldown-browser", "test-password-123", "Test", "")?;
++    for _ in 0..5 {
++        assert_eq!(call(&router, "POST", "/api/interconnect/login", "",
++            json!({"username":"cooldown-browser","password":"wrong"})).await?.0, StatusCode::UNAUTHORIZED);
++    }
++    let (status, value) = call(&router, "POST", "/api/interconnect/login", "",
++        json!({"username":"cooldown-browser","password":"test-password-123"})).await?;
++    assert_eq!(status, StatusCode::UNAUTHORIZED);
++    assert_eq!(value["error"], "interconnect_login_failed");
++    Ok(())
++}
++
++#[tokio::test]
++async fn caller_cannot_select_an_old_device_or_console_mode_and_logout_removes_resume_state() -> Result<(), String> {
++    let (_env, uid, router) = setup()?;
++    for extra in [json!({"nodeId":"old-host"}), json!({"console":true}), json!({"url":"http://attacker"}), json!({"deviceName":false})] {
++        let mut input = json!({"username":"webuser","password":"test-password-123"});
++        for (key, value) in extra.as_object().ok_or("invalid fixture")? { input[key] = value.clone(); }
++        assert_eq!(call(&router, "POST", "/api/interconnect/login", "", input).await?.0, StatusCode::UNAUTHORIZED);
++    }
++    assert!(mesh::devices(&uid)?.is_empty());
++    let logged_in = login(&router).await?;
++    let token = field(&logged_in, "token")?;
++    assert_eq!(call(&router, "POST", "/api/collab/logout", token, json!({})).await?.0, StatusCode::OK);
++    let remaining: i64 = db::with_conn(|conn| conn.query_row(
++        "SELECT COUNT(*) FROM browser_interconnect WHERE token=?1", [token], |r| r.get(0)).map_err(|e| e.to_string()))?;
++    assert_eq!(remaining, 0);
++    assert_eq!(call(&router, "GET", "/api/interconnect/status", token, json!({})).await?.0, StatusCode::FORBIDDEN);
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-collab/src/collab/http/rate_limits.rs b/src-tauri/crates/polaris-collab/src/collab/http/rate_limits.rs
+index b239d18..2d23cf7 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/http/rate_limits.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/http/rate_limits.rs
+@@ -12,13 +12,14 @@ const LIMITED: &str = "interconnect_rate_limited";
+ 
+ fn category(path: &str) -> Option<&'static str> {
+     match path {
+-        "/api/mesh/security/inbox" | "/api/mesh/security/watch" | "/api/mesh/revocations"
++        "/api/interconnect/status" | "/api/interconnect/security/inbox" | "/api/mesh/security/inbox" | "/api/mesh/security/watch" | "/api/mesh/revocations"
+         | "/api/mesh/devices" | "/api/mesh/announce" | "/api/mesh/assert" => Some("read"),
+-        "/api/mesh/security/ack" | "/api/mesh/risk/decide" | "/api/mesh/risk/authorize"
++        "/api/interconnect/retry" | "/api/interconnect/security/ack" | "/api/interconnect/security/decide"
++        | "/api/interconnect/devices/revoke" | "/api/mesh/security/ack" | "/api/mesh/risk/decide" | "/api/mesh/risk/authorize"
+         | "/api/mesh/revoke" | "/api/mesh/rename" | "/api/peer/revoke"
+         | "/api/collab/admin/device_revoke" | "/api/account/reset"
+         | "/api/collab/email/reset" => Some("write"),
+-        "/api/account/login" | "/api/account/login_code" | "/api/account/signup"
++        "/api/interconnect/login" | "/api/account/login" | "/api/account/login_code" | "/api/account/signup"
+         | "/api/mesh/enroll" | "/api/collab/login_assertion" | "/api/collab/login"
+         | "/api/collab/email/login" | "/api/collab/join" => Some("login"),
+         _ => None,
+diff --git a/src-tauri/crates/polaris-collab/src/collab/http/router.rs b/src-tauri/crates/polaris-collab/src/collab/http/router.rs
+index 664478a..c644824 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/http/router.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/http/router.rs
+@@ -18,6 +18,13 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
+         // ── 账号权威(云机签发身份断言;成员主机离线验签)──
+         // 权威侧发号:公钥、注册(强制绑邮箱)、登录、改密。非权威机上这些路由一律 400,
+         // 前端据 /api/account/info 决定登录页往哪儿打,不靠猜。
++        .route("/api/interconnect/login", post(browser_login))
++        .route("/api/interconnect/status", get(browser_status))
++        .route("/api/interconnect/retry", post(browser_retry))
++        .route("/api/interconnect/security/inbox", get(browser_inbox))
++        .route("/api/interconnect/security/ack", post(browser_ack))
++        .route("/api/interconnect/security/decide", post(browser_decide))
++        .route("/api/interconnect/devices/revoke", post(browser_revoke))
+         .route("/api/account/info", get(account_info))
+         .route("/api/account/pubkey", get(account_pubkey))
+         .route("/api/account/signup", post(account_signup))
+@@ -209,5 +216,6 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
+         r = r.route("/ws", get(collab_ws_handler));
+     }
+     r.layer(axum::middleware::from_fn(risk_middleware))
+-        .layer(axum::middleware::from_fn(rate_limits::middleware)).with_state(state)
++        .layer(axum::middleware::from_fn(rate_limits::middleware))
++        .layer(axum::middleware::from_fn(browser_no_store)).with_state(state)
+ }
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/authority.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/authority.rs
+new file mode 100644
+index 0000000..971b2a0
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/authority.rs
+@@ -0,0 +1,100 @@
++//! Device credential adapter. All remote URLs come from validated server configuration.
++use super::*;
++use crate::collab::{authority as a, auth, mesh};
++
++pub fn request(method: &str, url: &str, key: Option<&str>, body: &Value) -> Result<Value, String> {
++    let agent = ureq::AgentBuilder::new().redirects(0)
++        .timeout(std::time::Duration::from_secs(super::super::load()?.browser.request_timeout_secs)).build();
++    let mut request = agent.request(method, url);
++    if let Some(key) = key { request = request.set("Authorization", &format!("Bearer {key}")); }
++    let response = if method == "GET" { request.call() } else { request.send_json(body.clone()) };
++    match response {
++        Ok(response) => serde_json::from_reader(response.into_reader().take(2 * 1024 * 1024))
++            .map_err(|_| "interconnect_invalid_response".into()),
++        Err(ureq::Error::Status(status, response)) => {
++            if status == 401 || status == 403 { return Err("interconnect_upstream_unauthorized".into()); }
++            let value: Value = serde_json::from_reader(response.into_reader().take(65536))
++                .map_err(|_| "interconnect_upstream_failed")?;
++            // Only stable policy outcomes cross the transport boundary; never upstream diagnostics.
++            let error = value["error"].as_str().map_or("", |value| value);
++            if ["approval_pending:", "approval_expired_or_denied:"].iter().any(|prefix| error.starts_with(prefix)) {
++                return Err(error.to_string());
++            }
++            Err("interconnect_upstream_failed".into())
++        }
++        Err(_) => Err("interconnect_upstream_unavailable".into()),
++    }
++}
++
++pub fn password(username: &str, password: &str) -> Result<(String, a::Claims), String> {
++    let assertion = if a::is_authority() {
++        let (user, uid, email) = auth::authority_login(username, password)?;
++        a::sign_assertion(&uid, &user.username, &email, &user.display_name)?
++    } else {
++        let url = super::super::load()?.authority.url.ok_or("interconnect_authority_required")?;
++        a::pin_explicit(&url)?;
++        request("POST", &format!("{url}/api/account/login"), None,
++            &json!({"username":username,"password":password}))?["assertion"]
++            .as_str().ok_or("interconnect_missing_assertion")?.to_string()
++    };
++    let claims = verify(&assertion)?;
++    Ok((assertion, claims))
++}
++
++pub fn verify(assertion: &str) -> Result<a::Claims, String> {
++    if a::is_authority() { a::verify_assertion_with(assertion, &a::public_key_b64()?) }
++    else { a::verify_assertion(assertion) }
++}
++
++pub fn enroll(assertion: &str, uid: &str, node: &str, name: &str, platform: &str) -> Result<String, String> {
++    if a::is_authority() { return mesh::enroll(uid, node, name, platform, env!("CARGO_PKG_VERSION")); }
++    let url = super::super::load()?.authority.url.ok_or("interconnect_authority_required")?;
++    request("POST", &format!("{url}/api/mesh/enroll"), None,
++        &json!({"assertion":assertion,"nodeId":node,"name":name,"os":platform,"ver":env!("CARGO_PKG_VERSION")}))?
++        ["meshKey"].as_str().map(String::from).ok_or_else(|| "interconnect_missing_key".into())
++}
++
++pub fn call(record: &Record, method: &str, path: &str, value: &Value) -> Result<Value, String> {
++    let current_url = if a::is_authority() { None } else { super::super::load()?.authority.url };
++    if current_url != record.authority_url { return Err("interconnect_authority_changed".into()); }
++    if !a::is_authority() {
++        let url = current_url.ok_or("interconnect_authority_required")?;
++        a::pin_explicit(&url)?;
++        return request(method, &format!("{url}{path}"), Some(&record.key), value);
++    }
++    let (uid, node) = mesh::resolve_key(&record.key)?;
++    if uid != record.uid || node != record.node { return Err("interconnect_device_mismatch".into()); }
++    match path {
++        "/api/mesh/assert" => Ok(json!({"assertion":a::sign_device_assertion(&uid, &node)?})),
++        "/api/mesh/announce" => {
++            let (_, peers) = mesh::announce(&record.key, &record.name, &record.platform, env!("CARGO_PKG_VERSION"))?;
++            Ok(json!({"peers":peers,"relays":super::super::advertised_relays()?}))
++        }
++        "/api/mesh/security/inbox" => Ok(json!({
++            "notifications":super::super::notifications::inbox(&uid, &node)?,
++            "approvals":super::super::risk::pending(&uid, &node)?,
++        })),
++        "/api/mesh/security/ack" => {
++            super::super::notifications::acknowledge(&uid, &node, string(value, "deviceId")?)?;
++            Ok(json!({"ok":true}))
++        }
++        "/api/mesh/risk/decide" => {
++            super::super::risk::decide(&uid, &node, string(value, "requestId")?,
++                value["approve"].as_bool().ok_or("approve must be boolean")?)?;
++            Ok(json!({"ok":true}))
++        }
++        "/api/mesh/revoke" => {
++            super::super::gate::require(&uid, &node, "revoke_other_device", value)?;
++            mesh::revoke(&uid, string(value, "nodeId")?)?;
++            Ok(json!({"ok":true}))
++        }
++        "/api/mesh/risk/authorize" => {
++            let permit = super::super::risk::authorize(&uid, &node, &node,
++                string(value, "operation")?, string(value, "digest")?, string(value, "nonce")?)?;
++            Ok(json!({"permit":a::sign_document("PRISK1", &permit)?}))
++        }
++        _ => Err("interconnect_unsupported_operation".into()),
++    }
++}
++
++use std::io::Read;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/connections.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/connections.rs
+new file mode 100644
+index 0000000..aa76302
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/connections.rs
+@@ -0,0 +1,83 @@
++//! Browser storage uses authenticated HTTP over the existing gateway tunnel, never host OS mounts.
++use super::*;
++use std::{collections::HashMap, sync::{Arc, Weak}};
++type SessionLock = tokio::sync::Mutex<()>;
++static LOCKS: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<String, Weak<SessionLock>>>> =
++    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
++
++pub(super) fn session_lock(token: &str) -> Arc<SessionLock> {
++    let mut locks = LOCKS.lock();
++    locks.retain(|_, lock| lock.strong_count() > 0);
++    let key = super::super::risk::digest("browser-retry", &json!(token));
++    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) { return lock; }
++    let lock = Arc::new(SessionLock::new(()));
++    locks.insert(key, Arc::downgrade(&lock));
++    lock
++}
++
++pub(super) fn connect(record: &mut Record) -> Result<(), String> {
++    connect_with(record, authority::request)
++}
++
++fn connect_with(record: &mut Record, mut request: impl FnMut(&str, &str, Option<&str>, &Value) -> Result<Value, String>) -> Result<(), String> {
++    let config = super::super::load()?;
++    let peers = record.discovery["peers"].as_array().ok_or("interconnect_missing_peers")?;
++    if peers.len() > config.browser.max_peers { return Err("interconnect_peer_limit".into()); }
++    let gateway = config.browser.gateway_url.or(config.authority.url);
++    let assertion = record.assertion()?;
++    let previous = std::mem::take(&mut record.connections);
++    let mut failed = false;
++    for peer in peers {
++        let node = string(peer, "node_id")?;
++        let mut link = json!({"nodeId":node,"name":peer["name"],"os":peer["os"],
++            "online":peer["online"],"connected":false,"mounted":false,"storageMode":"http"});
++        if peer["online"] != true {
++            link["state"] = json!("offline");
++        } else {
++            let result = (|| {
++                // A directory value is never allowed to turn into a URL path or SSRF target.
++                if node.len() != 64 || !node.bytes().all(|c| c.is_ascii_hexdigit()) {
++                    return Err("interconnect_invalid_peer".into());
++                }
++                let base = gateway.as_deref().ok_or("interconnect_gateway_required")?.trim_end_matches('/');
++                let url = format!("{base}/h/{node}");
++                let previous = previous.iter().find(|item| item["nodeId"] == node && item["url"] == url);
++                link["url"] = json!(url);
++                if let Some(token) = previous.and_then(|item| item["token"].as_str()) {
++                    link["token"] = json!(token);
++                    match request("GET", &format!("{url}/api/fs/caps"), Some(token), &Value::Null) {
++                        Ok(caps) => return accept_caps(&mut link, caps),
++                        Err(error) if error == "interconnect_upstream_unauthorized" => {}
++                        Err(error) => return Err(error),
++                    }
++                }
++                let login = request("POST", &format!("{url}/api/collab/login_assertion"), None,
++                    &json!({"assertion":assertion,"deviceId":record.node}))?;
++                let token = string(&login, "token")?;
++                // Keep issued sessions on partial failure; reauthenticate only on explicit rejection.
++                link["token"] = json!(token);
++                let caps = request("GET", &format!("{url}/api/fs/caps"), Some(token), &Value::Null)?;
++                accept_caps(&mut link, caps)?;
++                Ok::<(), String>(())
++            })();
++            if let Err(error) = result {
++                link["state"] = json!("failed");
++                link["error"] = json!(error);
++                failed = true;
++            }
++        }
++        record.connections.push(link);
++    }
++    if failed { Err("interconnect_peer_connection_failed".into()) } else { Ok(()) }
++}
++
++fn accept_caps(link: &mut Value, caps: Value) -> Result<(), String> {
++    if caps["read"] != true { return Err("interconnect_storage_denied".into()); }
++    link["caps"] = caps;
++    link["connected"] = json!(true);
++    link["state"] = json!("ready");
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/connections/tests.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/connections/tests.rs
+new file mode 100644
+index 0000000..ddecdde
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/connections/tests.rs
+@@ -0,0 +1,78 @@
++use super::*;
++use crate::collab::{auth, mesh, interconnect::test_env::TestEnv};
++
++#[test]
++fn gateway_connect_authenticates_storage_and_retry_reuses_the_bound_identity() -> Result<(), String> {
++    let env = TestEnv::new("browser-connect")?;
++    std::env::set_var("POLARIS_ACCOUNT_AUTHORITY", "1");
++    std::fs::write(env.directory.join("config.json"), r#"{"browser":{"gatewayUrl":"https://gateway.example"}}"#)
++        .map_err(|e| e.to_string())?;
++    let (_, uid) = auth::create_authority_account("connect-test", "test-password-123", "Test", "")?;
++    let node = "web_connect-test";
++    let key = mesh::enroll(&uid, node, "Browser", "web", "1")?;
++    let peer = "ab".repeat(32);
++    let mut record = Record { uid: uid.clone(), node: node.into(), key, name: "Browser".into(), platform: "web".into(),
++        authority_url: None, progress: Value::Null, connections: vec![],
++        discovery: json!({"peers":[{"node_id":peer,"name":"NAS","os":"linux","online":true}]}) };
++    let mut calls = vec![];
++    connect_with(&mut record, |method, url, key, body| {
++        calls.push((method.to_string(), url.to_string()));
++        assert!(url.starts_with(&format!("https://gateway.example/h/{peer}/api/")));
++        if method == "POST" {
++            assert!(key.is_none());
++            let claims = authority::verify(string(body, "assertion")?)?;
++            assert_eq!(claims.uid, uid);
++            assert_eq!(claims.node_id.as_deref(), Some(node));
++            assert_eq!(body["deviceId"], node);
++            Ok(json!({"token":"peer-session"}))
++        } else {
++            assert_eq!(key, Some("peer-session"));
++            Ok(json!({"read":true,"write":false}))
++        }
++    })?;
++    assert_eq!(calls.len(), 2);
++    assert_eq!(record.connections[0]["connected"], true);
++    assert_eq!(record.connections[0]["mounted"], false, "HTTP access is not an OS drive mount");
++    let failure = connect_with(&mut record, |method, _, key, _| {
++        assert_eq!(method, "GET");
++        assert_eq!(key, Some("peer-session"));
++        Err("interconnect_upstream_unavailable".into())
++    });
++    assert!(failure.is_err());
++    assert_eq!(record.connections[0]["state"], "failed");
++    connect_with(&mut record, |method, _, key, _| {
++        assert_eq!(method, "GET");
++        assert_eq!(key, Some("peer-session"));
++        Ok(json!({"read":true,"write":true}))
++    })?;
++    assert_eq!(record.connections[0]["state"], "ready");
++    let mut step = 0;
++    connect_with(&mut record, |method, _, key, body| {
++        step += 1;
++        match step {
++            1 => { assert_eq!(key, Some("peer-session")); Err("interconnect_upstream_unauthorized".into()) }
++            2 => {
++                assert_eq!(method, "POST");
++                assert_eq!(authority::verify(string(body, "assertion")?)?.node_id.as_deref(), Some(node));
++                Ok(json!({"token":"renewed-session"}))
++            }
++            _ => { assert_eq!(key, Some("renewed-session")); Ok(json!({"read":true})) }
++        }
++    })?;
++    assert_eq!(step, 3);
++    assert_eq!(record.connections[0]["token"], "renewed-session");
++    Ok(())
++}
++
++#[test]
++fn retries_are_single_flight_per_session_without_blocking_other_users() {
++    let first = session_lock("one");
++    let same = session_lock("one");
++    let other = session_lock("two");
++    let guard = first.try_lock();
++    assert!(guard.is_ok());
++    assert!(same.try_lock().is_err());
++    assert!(other.try_lock().is_ok());
++    drop(guard);
++    assert!(same.try_lock().is_ok());
++}
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/mod.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/mod.rs
+new file mode 100644
+index 0000000..0517ca2
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/mod.rs
+@@ -0,0 +1,224 @@
++//! HTTP clients get independent, bound session devices, never the server's console identity.
++use crate::collab::{auth, db};
++use super::login::{self, Progress, Stage, Steps};
++use rusqlite::{params, OptionalExtension};
++use serde::{Deserialize, Serialize};
++use serde_json::{json, Value};
++use std::{future::Future, pin::Pin};
++mod authority;
++mod connections;
++
++#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct Config {
++    pub device_name: String,
++    pub platform: String,
++    pub gateway_url: Option<String>,
++    pub request_timeout_secs: u64,
++    pub max_peers: usize,
++}
++impl Config {
++    pub fn validate(&self) -> Result<(), String> {
++        for value in [&self.device_name, &self.platform] { validate_label(value)?; }
++        if !(1..=60).contains(&self.request_timeout_secs) || !(1..=128).contains(&self.max_peers) {
++            return Err("browser timeout/peer limit out of range".into());
++        }
++        if let Some(url) = &self.gateway_url { super::validate_url(url)?; }
++        Ok(())
++    }
++}
++fn validate_label(value: &str) -> Result<(), String> {
++    if value.trim().is_empty() || value.chars().count() > 40 || value.chars().any(char::is_control) {
++        return Err("device label must contain 1..40 printable characters".into());
++    }
++    Ok(())
++}
++fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> {
++    value[field].as_str().ok_or_else(|| format!("missing {field}"))
++}
++
++#[derive(Clone, Serialize, Deserialize)]
++struct Record {
++    authority_url: Option<String>,
++    uid: String, node: String, key: String, name: String, platform: String,
++    progress: Value, discovery: Value, connections: Vec<Value>,
++}
++impl Record {
++    fn save(&self, token: &str) -> Result<(), String> {
++        db::with_conn(|conn| {
++            conn.execute("INSERT INTO browser_interconnect(token,record) VALUES(?1,?2)
++                ON CONFLICT(token) DO UPDATE SET record=excluded.record", params![token, json!(self).to_string()])
++                .map_err(|e| e.to_string())?;
++            Ok(())
++        })
++    }
++    fn response(&self) -> Value {
++        let mut devices = self.connections.clone();
++        devices.insert(0, json!({"nodeId":self.node,"name":self.name,"os":self.platform,"isSelf":true,
++            "online":true,"connected":true,"mounted":false,"storageMode":"http"}));
++        json!({"enrolled":true,"uid":self.uid,"nodeId":self.node,"deviceKind":"session",
++            "interconnect":self.progress,"relayConfig":relay_status(),"peers":self.connections,"devices":devices,
++            "authorityConfigured":true,"storageMode":"http"})
++    }
++    fn assertion(&self) -> Result<String, String> {
++        let value = authority::call(self, "POST", "/api/mesh/assert", &json!({}))?;
++        let assertion = string(&value, "assertion")?;
++        let claims = authority::verify(assertion)?;
++        if claims.uid != self.uid || claims.node_id.as_deref() != Some(&self.node) || claims.device_id.is_none() {
++            return Err("interconnect_device_mismatch".into());
++        }
++        Ok(assertion.to_string())
++    }
++}
++fn relay_status() -> Value {
++    #[cfg(feature = "collab-net")]
++    { crate::collab::tunnel::relay_status() }
++    #[cfg(not(feature = "collab-net"))]
++    { json!({"urls":[],"state":"unavailable","pending":false}) }
++}
++fn load(token: &str) -> Result<Record, String> {
++    auth::check_session(token)?;
++    let raw: String = db::with_conn(|conn| conn.query_row(
++        "SELECT record FROM browser_interconnect WHERE token=?1", params![token], |r| r.get(0),
++    ).map_err(|e| e.to_string()))?;
++    serde_json::from_str(&raw).map_err(|e| e.to_string())
++}
++
++#[derive(Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++struct LoginInput {
++    username: String, password: String,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    device_name: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    platform: Option<String>,
++}
++
++struct Coordinator {
++    record: Option<Record>, token: String, credentials: Option<Value>, persistence_error: Option<String>,
++}
++impl Steps for Coordinator {
++    fn publish(&mut self, progress: &Progress) {
++        if let Some(record) = &mut self.record {
++            record.progress = json!(progress);
++            if let Err(error) = record.save(&self.token) { self.persistence_error = Some(error); }
++        }
++    }
++    fn execute(&mut self, stage: Stage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
++        Box::pin(async move {
++            if self.persistence_error.is_some() { return Err("interconnect_state_unavailable".into()); }
++            if stage == Stage::Register {
++                let input = self.credentials.take().ok_or("interconnect_login_required")?;
++                let (token, record) = tokio::task::spawn_blocking(move || register(input)).await
++                    .map_err(|_| "interconnect_login_failed")??;
++                self.token = token;
++                self.record = Some(record);
++                return Ok(());
++            }
++            let mut record = self.record.clone().ok_or("interconnect_login_required")?;
++            let (updated, result) = tokio::task::spawn_blocking(move || {
++                let result = match stage {
++                    Stage::Discover => (|| {
++                        record.assertion()?;
++                        record.discovery = authority::call(&record, "POST", "/api/mesh/announce",
++                            &json!({"name":record.name,"os":record.platform,"ver":env!("CARGO_PKG_VERSION")}))?;
++                        Ok(())
++                    })(),
++                    Stage::Relay => super::apply_received_relays(&record.discovery),
++                    Stage::Connect => connections::connect(&mut record),
++                    Stage::Register => Err("interconnect_invalid_stage".into()),
++                };
++                (record, result)
++            }).await.map_err(|_| "interconnect_task_failed")?;
++            self.record = Some(updated);
++            result
++        })
++    }
++}
++fn register(value: Value) -> Result<(String, Record), String> {
++    let config = super::load()?.browser;
++    let name = value.get("deviceName").map_or(Ok(config.device_name.as_str()), |v| v.as_str().ok_or("invalid deviceName"))?;
++    let platform = value.get("platform").map_or(Ok(config.platform.as_str()), |v| v.as_str().ok_or("invalid platform"))?;
++    validate_label(name)?;
++    validate_label(platform)?;
++    let (assertion, claims) = authority::password(string(&value, "username")?, string(&value, "password")?)?;
++    // Remote admission must succeed before enrollment; no unbound session is ever issued here.
++    let admission = if crate::collab::authority::owner_uid() == claims.uid {
++        crate::collab::authority::Admission::SelfOwned
++    } else { crate::collab::authority::Admission::ExistingOnly };
++    let user = crate::collab::authority::upsert_member(&claims, admission)?;
++    let node = format!("web_{}", auth::random_token());
++    let key = authority::enroll(&assertion, &claims.uid, &node, name, platform)?;
++    let authority_url = if crate::collab::authority::is_authority() { None } else { super::load()?.authority.url };
++    let record = Record { authority_url, uid: claims.uid, node, key, name: name.into(), platform: platform.into(),
++        progress: Value::Null, discovery: Value::Null, connections: vec![] };
++    let bound = authority::verify(&record.assertion()?)?;
++    let token = super::binding::issue(user.id, &bound, &record.node)?;
++    if let Err(error) = record.save(&token) {
++        let _ = auth::logout(&token);
++        return Err(error);
++    }
++    Ok((token, record))
++}
++
++pub async fn password_login(input: Value) -> Result<Value, String> {
++    let input: LoginInput = serde_json::from_value(input).map_err(|_| "interconnect_login_failed")?;
++    if input.username.len() > 256 || input.password.len() > 1024 { return Err("interconnect_login_failed".into()); }
++    let input = json!(input);
++    let mut coordinator = Coordinator { record: None, token: String::new(), credentials: Some(input), persistence_error: None };
++    let progress = login::run(&mut coordinator, Stage::Register).await;
++    if progress.stage == Stage::Register { return Err("interconnect_login_failed".into()); }
++    let record = coordinator.record.ok_or("interconnect_login_failed")?;
++    if coordinator.persistence_error.is_some() { return Err("interconnect_state_unavailable".into()); }
++    let mut output = record.response();
++    output["token"] = json!(coordinator.token);
++    Ok(output)
++}
++
++pub fn status(token: &str) -> Result<Value, String> {
++    let record = load(token)?;
++    let assertion = record.assertion()?;
++    authority::call(&record, "POST", "/api/mesh/announce",
++        &json!({"name":record.name,"os":record.platform,"ver":env!("CARGO_PKG_VERSION")}))?;
++    let mut output = record.response();
++    output["deviceAssertion"] = json!(assertion);
++    Ok(output)
++}
++
++pub async fn retry(token: String) -> Result<Value, String> {
++    // A weak per-session mutex bounds registry lifetime without serializing unrelated logins.
++    let lock = connections::session_lock(&token);
++    let _guard = lock.try_lock().map_err(|_| "interconnect_retry_busy")?;
++    let record = load(&token)?;
++    let mut coordinator = Coordinator { record: Some(record), token, credentials: None, persistence_error: None };
++    login::run(&mut coordinator, Stage::Discover).await;
++    if coordinator.persistence_error.is_some() { return Err("interconnect_state_unavailable".into()); }
++    Ok(coordinator.record.ok_or("interconnect_login_required")?.response())
++}
++
++pub fn security(token: &str, path: &str, value: &Value) -> Result<Value, String> {
++    let record = load(token)?;
++    record.assertion()?;
++    authority::call(&record, if path.ends_with("inbox") { "GET" } else { "POST" }, path, value)
++}
++
++/// Returns false for pre-existing session types so their existing policy remains in charge.
++pub fn risk(token: &str, operation: &str, payload: &Value) -> Result<bool, String> {
++    let exists: Option<i64> = db::with_conn(|conn| conn.query_row(
++        "SELECT 1 FROM browser_interconnect WHERE token=?1", params![token], |r| r.get(0),
++    ).optional().map_err(|e| e.to_string()))?;
++    if exists.is_none() { return Ok(false); }
++    let record = load(token)?;
++    let claims = authority::verify(&record.assertion()?)?;
++    let digest = super::risk::digest(operation, payload);
++    let nonce = auth::random_token();
++    let value = authority::call(&record, "POST", "/api/mesh/risk/authorize",
++        &json!({"actorNodeId":record.node,"operation":operation,"digest":digest,"nonce":nonce}))?;
++    let key = if crate::collab::authority::is_authority() { crate::collab::authority::public_key_b64()? }
++        else { crate::collab::authority::pinned().ok_or("interconnect_authority_required")?.1 };
++    let permit: super::risk::Permit = crate::collab::authority::verify_document("PRISK1", string(&value, "permit")?, &key)?;
++    if permit.uid != record.uid || permit.host != record.node || Some(permit.actor) != claims.device_id
++        || permit.digest != digest || permit.nonce != nonce || permit.expires_at <= db::now()
++    { return Err("interconnect_invalid_permit".into()); }
++    Ok(true)
++}
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json b/src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json
+index 7e72c5e..9bb8cfa 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json
+@@ -19,5 +19,12 @@
+     "writeRequests": 30,
+     "loginRequests": 20,
+     "globalMultiplier": 20
++  },
++  "browser": {
++    "deviceName": "Browser session",
++    "platform": "web",
++    "gatewayUrl": null,
++    "requestTimeoutSecs": 10,
++    "maxPeers": 32
+   }
+ }
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs
+index 01c426f..f7da479 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs
+@@ -58,6 +58,7 @@ pub fn session(token: &str, operation: &str, payload: &Value) -> Result<(), Stri
+ 
+ pub fn session_proven(token: &str, operation: &str, payload: &Value, assertion: Option<&str>) -> Result<(), String> {
+     crate::collab::auth::check_session(token)?;
++    if super::browser::risk(token, operation, payload)? { return Ok(()); }
+     let binding: Option<(String, String)> = db::with_conn(|conn| conn.query_row(
+         "SELECT uid,node_id FROM bound_sessions WHERE token=?1", params![token],
+         |r| Ok((r.get(0)?, r.get(1)?)),
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs
+index 0b01d89..a31d012 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs
+@@ -12,6 +12,7 @@ pub mod devices;
+ pub mod revocations;
+ pub mod binding;
+ pub mod login;
++pub mod browser;
+ pub mod risk_inventory;
+ 
+ pub const DEFAULTS: &str = include_str!("defaults.json");
+@@ -24,6 +25,7 @@ pub struct Config {
+     pub relay: Relay,
+     pub security: Security,
+     pub rate_limit: RateLimit,
++    pub browser: browser::Config,
+ }
+ 
+ #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+@@ -136,6 +138,7 @@ pub fn resolve(
+     ] {
+         if value == 0 || value > max { return Err(format!("rateLimit.{name} 须为 1..={max} 的整数")); }
+     }
++    config.browser.validate()?;
+     Ok(config)
+ }
+ 
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/risk.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/risk.rs
+index 34b24e3..3756cbb 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/risk.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/risk.rs
+@@ -114,14 +114,17 @@ pub fn pending(uid: &str, node: &str) -> Result<Vec<Value>, String> {
+     let device = super::devices::active(uid, node)?;
+     db::with_conn(|conn| {
+         let mut st = conn.prepare(
+-            "SELECT a.id,a.operation,a.actor,a.host,a.digest,a.expires_at,a.state FROM mesh_approvals a
+-             JOIN mesh_device_ids d ON d.device_id=a.actor WHERE a.uid=?1 AND a.expires_at>?2
+-             AND a.state IN ('pending','approved') AND (d.sequence>?3 OR a.actor=?4)",
++            "SELECT a.id,a.operation,a.actor,a.host,a.digest,a.expires_at,a.state,m.name,m.os FROM mesh_approvals a
++             LEFT JOIN mesh_device_ids d ON d.device_id=a.actor AND d.uid=a.uid
++             LEFT JOIN mesh_nodes m ON m.node_id=d.node_id AND m.uid=a.uid AND m.revoked=0
++             WHERE a.uid=?1 AND a.expires_at>?2 AND a.state IN ('pending','approved')
++             AND (d.sequence>?3 OR a.actor=?4 OR d.device_id IS NULL)",
+         ).map_err(|e| e.to_string())?;
+         let rows = st.query_map(params![uid, db::now(), device.sequence, device.device_id], |r| Ok(json!({
+             "id":r.get::<_,String>(0)?, "operation":r.get::<_,String>(1)?, "actor":r.get::<_,String>(2)?,
+             "host":r.get::<_,String>(3)?, "digest":r.get::<_,String>(4)?,
+             "expiresAt":r.get::<_,i64>(5)?, "state":r.get::<_,String>(6)?,
++            "actorName":r.get::<_,Option<String>>(7)?, "actorPlatform":r.get::<_,Option<String>>(8)?,
+         }))).map_err(|e| e.to_string())?;
+         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+     })
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json b/src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json
+index f227242..6bbb493 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json
+@@ -106,6 +106,43 @@
+           "maximum": 10000
+         }
+       }
++    },
++    "browser": {
++      "type": "object",
++      "additionalProperties": false,
++      "properties": {
++        "deviceName": {
++          "type": "string",
++          "minLength": 1,
++          "maxLength": 40,
++          "default": "Browser session"
++        },
++        "platform": {
++          "type": "string",
++          "minLength": 1,
++          "maxLength": 40,
++          "default": "web"
++        },
++        "gatewayUrl": {
++          "type": [
++            "string",
++            "null"
++          ],
++          "default": null
++        },
++        "requestTimeoutSecs": {
++          "type": "integer",
++          "minimum": 1,
++          "maximum": 60,
++          "default": 10
++        },
++        "maxPeers": {
++          "type": "integer",
++          "minimum": 1,
++          "maximum": 128,
++          "default": 32
++        }
++      }
+     }
+   }
+ }
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/security.sql b/src-tauri/crates/polaris-collab/src/collab/interconnect/security.sql
+index 300ccb4..fb8641e 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/security.sql
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/security.sql
+@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS bound_sessions(
+     uid TEXT NOT NULL, device_id TEXT NOT NULL, node_id TEXT NOT NULL
+ );
+ CREATE INDEX IF NOT EXISTS bound_session_device ON bound_sessions(uid,device_id);
++CREATE TABLE IF NOT EXISTS browser_interconnect(
++    token TEXT PRIMARY KEY REFERENCES bound_sessions(token) ON DELETE CASCADE,
++    record TEXT NOT NULL
++);
+ -- Backfill independent device IDs; the node primary key keeps migration idempotent.
+ INSERT OR IGNORE INTO mesh_device_ids(node_id,uid,device_id,enrolled_at,sequence)
+ SELECT node_id,uid,'dev_' || lower(hex(randomblob(16))),first_seen,rowid FROM mesh_nodes;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/mesh.rs b/src-tauri/crates/polaris-collab/src/collab/mesh.rs
+index 7d5998b..221864a 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/mesh.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/mesh.rs
+@@ -140,7 +140,7 @@ pub fn peers(uid: &str, exclude_node: &str) -> Result<Vec<Peer>, String> {
+     let mut st = conn
+         .prepare(&format!(
+             "SELECT {PEER_COLS} FROM mesh_nodes \
+-             WHERE uid=?1 AND revoked=0 AND node_id<>?2 ORDER BY last_seen DESC"
++             WHERE uid=?1 AND revoked=0 AND node_id<>?2 AND node_id NOT GLOB 'web_*' ORDER BY last_seen DESC"
+         ))
+         .map_err(|e| format!("查设备清单失败: {e}"))?;
+     let rows = st
+diff --git a/src/features/interconnect/ApprovalPanel.vue b/src/features/interconnect/ApprovalPanel.vue
+index 4f87941..a118ef8 100644
+--- a/src/features/interconnect/ApprovalPanel.vue
++++ b/src/features/interconnect/ApprovalPanel.vue
+@@ -15,7 +15,7 @@ onUnmounted(() => clearInterval(timer));
+     <p v-if="error" role="alert">{{ error }} <button :disabled="busy" @click="$emit('retry')">{{ c.retry }}</button></p>
+     <h2 v-if="approvals.length">{{ c.approvals }}</h2>
+     <article v-for="item in approvals.filter(a => a.id !== pending && a.state === 'pending')" :key="item.id">
+-      <p>{{ c.operations[item.operation] || item.operation }} · {{ c.device }}：{{ item.actor }}</p>
++      <p>{{ c.operations[item.operation] || item.operation }} · {{ c.device }}：{{ item.actorName || c.unknownDevice }} · {{ item.actorPlatform || c.unknownPlatform }} ({{ item.actor }})</p>
+       <p>{{ c.remaining }} {{ Math.max(0, Math.ceil(item.expiresAt - now / 1000)) }} {{ c.seconds }}</p>
+       <button :disabled="busy || item.expiresAt * 1000 <= now" @click="$emit('decide', item.id, true)">{{ c.approve }}</button>
+       <button :disabled="busy || item.expiresAt * 1000 <= now" @click="$emit('decide', item.id, false)">{{ c.deny }}</button>
+diff --git a/src/features/interconnect/DeviceList.vue b/src/features/interconnect/DeviceList.vue
+index 3b47503..0eff0ba 100644
+--- a/src/features/interconnect/DeviceList.vue
++++ b/src/features/interconnect/DeviceList.vue
+@@ -11,10 +11,11 @@ defineProps<{ devices: Device[]; paths: Record<number, { path: string }>; collab
+       <strong>{{ device.name }}</strong> <span v-if="device.isSelf">{{ c.self }}</span>
+       <p>{{ c.source }}：{{ device.os || c.unknownPlatform }}</p>
+       <p>{{ device.online ? c.online : c.offline }} ·
+-        <span v-if="device.port && paths[device.port]?.path === 'relay'">{{ c.relay }}</span>
++        <span v-if="device.storageMode === 'http' && device.connected">{{ c.httpConnected }}</span>
++        <span v-else-if="device.port && paths[device.port]?.path === 'relay'">{{ c.relay }}</span>
+         <span v-else-if="device.port && paths[device.port]?.path === 'direct'">{{ c.direct }}</span>
+         <span v-else-if="!device.isSelf">{{ c.connecting }}</span>
+-        · {{ device.mounted ? `${c.mounted} ${device.drive}` : c.unmounted }}
++        · {{ device.storageMode === 'http' ? c.httpStorage : device.mounted ? `${c.mounted} ${device.drive}` : c.unmounted }}
+       </p>
+       <p v-if="device.error" role="alert">{{ device.error }}</p>
+     </article>
+diff --git a/src/features/interconnect/browserTransport.test.ts b/src/features/interconnect/browserTransport.test.ts
+new file mode 100644
+index 0000000..dafa643
+--- /dev/null
++++ b/src/features/interconnect/browserTransport.test.ts
+@@ -0,0 +1,93 @@
++import { describe, expect, it, vi } from 'vitest';
++import { createSSRApp, h } from 'vue';
++import { renderToString } from 'vue/server-renderer';
++import { createInterconnectCommand } from './browserTransport';
++import { useLogin } from './useLogin';
++import type { Command, Approval } from './contracts';
++import ApprovalPanel from './ApprovalPanel.vue';
++import { interconnectCopy as c } from './copy';
++
++function fixture(native = false, available = true) {
++  const invoke = vi.fn();
++  const backend = vi.fn().mockResolvedValue(available);
++  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
++  const command = createInterconnectCommand({ native, invoke: invoke as Command, backend,
++    token: () => 'account-session', fetch: fetch as typeof globalThis.fetch });
++  return { invoke, backend, fetch, command };
++}
++describe('environment-selected login transport', () => {
++  it('keeps native login and retry on Tauri', async () => {
++    const io = fixture(true);
++    await io.command('account_login_password', { username: 'a', password: 'b' });
++    await io.command('mesh_sync');
++    expect(io.invoke.mock.calls).toEqual([['account_login_password', { username: 'a', password: 'b' }], ['mesh_sync', undefined]]);
++    expect(io.fetch).not.toHaveBeenCalled();
++  });
++  it('uses HTTP login then session-authenticated status/retry without invoking server console commands', async () => {
++    const io = fixture();
++    io.fetch.mockResolvedValue({ ok: true, json: async () => ({ enrolled: true, token: 'new-session',
++      interconnect: { stage: 'connect', state: 'failed', retryable: true } }) });
++    const adopt = vi.fn();
++    const login = useLogin(io.command, adopt, 30000);
++    await login.login('alice', 'secret');
++    expect(io.fetch.mock.calls[0][0]).toBe('/api/interconnect/login');
++    expect(io.fetch.mock.calls[0][1].headers.Authorization).toBeUndefined();
++    expect(JSON.parse(io.fetch.mock.calls[0][1].body)).toEqual({ username: 'alice', password: 'secret' });
++    expect(adopt).toHaveBeenCalledWith('new-session');
++    await login.retry();
++    expect(io.fetch.mock.calls.map(([url]) => url)).toEqual([
++      '/api/interconnect/login', '/api/interconnect/retry', '/api/interconnect/status',
++    ]);
++    expect(io.fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer account-session');
++    expect(io.invoke).not.toHaveBeenCalled();
++  });
++  it('retains real HTTP login errors and 429 without falling back to preview', async () => {
++    const io = fixture();
++    for (const error of ['interconnect_login_failed', 'interconnect_rate_limited']) {
++      io.fetch.mockResolvedValue({ ok: false, json: async () => ({ error }) });
++      await expect(io.command('account_login_password', { username: 'a', password: 'wrong' })).rejects.toThrow(error);
++    }
++    expect(io.invoke).not.toHaveBeenCalled();
++  });
++  it('preview mirrors the progress contract but never adopts a real account', async () => {
++    const io = fixture(false, false);
++    const adopt = vi.fn();
++    const login = useLogin(io.command, adopt, 30000);
++    await login.login('a', 'b');
++    expect(login.progress.value?.state).toBe('ready');
++    expect(login.error.value).toBe(c.preview);
++    expect(adopt).not.toHaveBeenCalled();
++    expect(io.fetch).not.toHaveBeenCalled();
++  });
++  it('uses the browser session for notification acknowledgements and approvals', async () => {
++    const io = fixture();
++    await io.command('mesh_security_ack', { deviceId: 'new' });
++    await io.command('mesh_risk_decide', { requestId: 'pending', approve: true });
++    expect(io.fetch.mock.calls.map(([url]) => url)).toEqual(['/api/interconnect/security/ack', '/api/interconnect/security/decide']);
++    expect(io.fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer account-session');
++  });
++});
++
++describe('approval device directory presentation', () => {
++  const approval: Approval = { id: 'request', actor: 'dev_123', host: 'host', operation: 'delete_account',
++    expiresAt: Date.now() / 1000 + 300, state: 'pending' };
++  async function render(metadata: Partial<Approval>) {
++    return renderToString(createSSRApp({ render: () => h(ApprovalPanel, {
++      approvals: [{ ...approval, ...metadata }], pending: '', error: '', busy: false,
++    }) }));
++  }
++  it('shows directory names and platform as escaped text alongside the stable ID', async () => {
++    const html = await render({ actorName: '<My laptop>', actorPlatform: 'linux' });
++    expect(html).toContain('&lt;My laptop&gt;');
++    expect(html).toContain('linux');
++    expect(html).toContain('dev_123');
++  });
++  it('shows placeholders for revoked, unknown and old-server records', async () => {
++    for (const metadata of [{}, { actorName: null, actorPlatform: null }]) {
++      const html = await render(metadata);
++      expect(html).toContain(c.unknownDevice);
++      expect(html).toContain(c.unknownPlatform);
++      expect(html).toContain('dev_123');
++    }
++  });
++});
+diff --git a/src/features/interconnect/browserTransport.ts b/src/features/interconnect/browserTransport.ts
+new file mode 100644
+index 0000000..a4e8052
+--- /dev/null
++++ b/src/features/interconnect/browserTransport.ts
+@@ -0,0 +1,43 @@
++import type { Command } from './contracts';
++import { interconnectCopy as c } from './copy';
++
++const routes: Record<string, [string, string]> = {
++  account_login_password: ['POST', '/api/interconnect/login'],
++  mesh_status: ['GET', '/api/interconnect/status'],
++  mesh_sync: ['POST', '/api/interconnect/retry'],
++  mesh_security_inbox: ['GET', '/api/interconnect/security/inbox'],
++  mesh_security_ack: ['POST', '/api/interconnect/security/ack'],
++  mesh_risk_decide: ['POST', '/api/interconnect/security/decide'],
++  mesh_device_remove: ['POST', '/api/interconnect/devices/revoke'],
++};
++interface Transport {
++  native: boolean; invoke: Command; backend: () => Promise<boolean>;
++  token: () => string; fetch: typeof fetch;
++}
++export function createInterconnectCommand(io: Transport): Command {
++  let previewLoggedIn = false;
++  return async <T>(name: string, args?: Record<string, unknown>): Promise<T> => {
++    if (io.native) return io.invoke<T>(name, args);
++    if (name === 'collab_host_start') return {} as T;
++    const route = routes[name];
++    if (!route) return io.invoke<T>(name, args);
++    if (!await io.backend()) {
++      if (name === 'account_login_password') previewLoggedIn = true;
++      if (name === 'mesh_security_inbox') return { notifications: [], approvals: [] } as T;
++      // No real credentials, session token or account adoption in a frontend-only preview.
++      return { enrolled: previewLoggedIn, peers: [], preview: true, configurationError: c.preview,
++        interconnect: previewLoggedIn ? { stage: 'connect', state: 'ready', error: null, retryable: false } : null,
++        relayConfig: { urls: [], state: 'unavailable' } } as T;
++    }
++    const token = io.token();
++    if (name === 'mesh_status' && !token) return { enrolled: false } as T;
++    const [method, url] = route;
++    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
++    if (token && name !== 'account_login_password') headers.Authorization = `Bearer ${token}`;
++    const response = await io.fetch(url, { method, headers, cache: 'no-store', credentials: 'omit',
++      body: method === 'GET' ? undefined : JSON.stringify(args || {}) });
++    const value = await response.json();
++    if (!response.ok) throw new Error(value.error || c.failed);
++    return value as T;
++  };
++}
+diff --git a/src/features/interconnect/contracts.ts b/src/features/interconnect/contracts.ts
+index 21c975e..8e413ea 100644
+--- a/src/features/interconnect/contracts.ts
++++ b/src/features/interconnect/contracts.ts
+@@ -2,9 +2,10 @@ export type Stage = 'register' | 'discover' | 'relay' | 'connect';
+ export interface Progress { stage: Stage; state: string; error?: string | null; retryable: boolean }
+ export interface RelayConfig { urls: string[]; state: string; source?: string }
+ export interface Notice { kind: 'device_enrolled'; deviceId: string; nodeId: string; name: string; platform: string; time: number }
+-export interface Approval { id: string; operation: string; actor: string; host: string; expiresAt: number; state: string }
++export interface Approval { id: string; operation: string; actor: string; actorName?: string | null; actorPlatform?: string | null; host: string; expiresAt: number; state: string }
+ export interface Inbox { notifications: Notice[]; approvals: Approval[] }
+ export interface Device {
++  storageMode?: 'http';
+   nodeId: string; deviceId?: string; name: string; os: string; online: boolean; isSelf: boolean;
+   connected: boolean; mounted: boolean; drive: string; error: string; port?: number; revoked: boolean;
+ }
+diff --git a/src/features/interconnect/copy.ts b/src/features/interconnect/copy.ts
+index aea5254..d9f8a46 100644
+--- a/src/features/interconnect/copy.ts
++++ b/src/features/interconnect/copy.ts
+@@ -14,7 +14,9 @@ export const interconnectCopy = {
+   pendingOperation: '当前有操作等待批准，请先处理或取消', cancel: '取消等待',
+   failed: '失败', ready: '互联已就绪', running: '进行中', idle: '等待开始',
+   noAuthority: '未配置权威；当前可继续使用本地模式',
+-  browserLimit: '当前浏览器支持账号登录；自动设备互联需要桌面端',
++  browserLimit: '浏览器作为独立会话设备接入，远端文件通过 HTTP 网关访问，不映射本机盘符',
++  preview: '纯前端预览：以下为互联演示状态，未登录真实账号',
++  unknownDevice: '未知或已吊销设备', httpConnected: '网关已连接', httpStorage: 'HTTP 文件访问',
+   timeout: '请求仍未返回，请稍后刷新状态；未确认结束前不会重复发起操作',
+   partial: '云端已吊销，本机清理未完成，请重试', invalidRelay: '请输入有效的 HTTP/HTTPS URL，不含凭据、查询或片段',
+   source: '来源平台', remaining: '剩余', seconds: '秒', device: '发起设备',
+diff --git a/src/features/interconnect/defaultView.test.ts b/src/features/interconnect/defaultView.test.ts
+index b4bc4f3..f08c81a 100644
+--- a/src/features/interconnect/defaultView.test.ts
++++ b/src/features/interconnect/defaultView.test.ts
+@@ -10,8 +10,8 @@ vi.mock('../collab/stores/collab', () => ({ useCollabStore: () => ({
+ vi.mock('../../stores/account', () => ({ useAccountStore: () => ({ label: 'alice' }) }));
+ vi.mock('../../stores/app', () => ({ useAppStore: () => ({}) }));
+ vi.mock('./remoteSources', () => ({ loadRemoteSources: () => [], upsertRemoteSource: vi.fn(), removeRemoteSource: vi.fn() }));
+-vi.mock('../../tauri', () => ({ isTauri: true, invoke: vi.fn(), listen: vi.fn(), apps: {}, fsmount: {}, openUrl: vi.fn() }));
+-vi.mock('../collab/api', () => ({ collabApi: {}, parseConnectCode: vi.fn(), getBase: () => '', getToken: () => '' }));
++vi.mock('../../tauri', () => ({ isTauri: true, interconnectBackendAvailable: vi.fn(), invoke: vi.fn(), listen: vi.fn(), apps: {}, fsmount: {}, openUrl: vi.fn() }));
++vi.mock('../collab/api', () => ({ collabApi: {}, parseConnectCode: vi.fn(), getBase: () => '', getToken: () => '', setBase: vi.fn() }));
+ vi.mock('../auth/EmailLogin.vue', () => ({ default: { template: '<form>email login</form>' } }));
+ vi.mock('../auth/AccountCenterModal.vue', () => ({ default: { template: '<div />' } }));
+ vi.mock('./RemoteTerminal.vue', () => ({ default: { template: '<div />' } }));
+diff --git a/src/features/interconnect/useInterconnect.ts b/src/features/interconnect/useInterconnect.ts
+index 80b2730..bc77241 100644
+--- a/src/features/interconnect/useInterconnect.ts
++++ b/src/features/interconnect/useInterconnect.ts
+@@ -7,6 +7,9 @@ import { useSecurity } from './useSecurity';
+ import { timing, type Approval, type Device, type Notice, type Progress, type Timing } from './contracts';
+ import { interconnectCopy as c } from './copy';
+ import { errMsg } from '../../lib/err';
++import { getToken, setBase } from '../collab/api';
++import { interconnectBackendAvailable } from '../../tauri';
++import { createInterconnectCommand } from './browserTransport';
+ 
+ const riskCommands = new Set(['peer_grant_set', 'peer_trust', 'peer_revoke', 'mesh_device_remove',
+   'mesh_kick', 'mesh_leave', 'fs_unmount', 'fs_share_save', 'fs_share_set']);
+@@ -15,12 +18,15 @@ export function useInterconnect(
+   changed: () => Promise<void>, options: Partial<Timing> = {},
+ ) {
+   const config = timing(options);
+-  const login = useLogin(rawInvoke, async token => {
++  const command = createInterconnectCommand({ native: isTauri, invoke: rawInvoke,
++    backend: interconnectBackendAvailable, token: getToken, fetch: (...args) => fetch(...args) });
++  const login = useLogin(command, async token => {
++    if (!isTauri) setBase('');
+     await collab.adoptLocalSession(token);
+     await account.refresh();
+     await changed();
+   }, config.slowMs);
+-  const security = useSecurity(rawInvoke);
++  const security = useSecurity(command);
+   const ports = ref<Record<string, number>>({});
+   const stops: (() => void)[] = [];
+   let disposed = false;
+@@ -28,27 +34,22 @@ export function useInterconnect(
+   let retry: ReturnType<typeof setInterval>;
+   let polling = false;
+   async function refresh() {
+-    if (!isTauri || polling || disposed) return;
++    if (polling || disposed) return;
+     polling = true;
+     try {
+       await login.refresh();
+       if (collab.authed && login.enrolled.value) {
+         await security.refresh();
+-        const state = await rawInvoke<{ peers?: { nodeId: string; port: number }[] }>('mesh_status');
+-        if (!disposed) ports.value = Object.fromEntries((state.peers || []).map(p => [p.nodeId, p.port]));
++        if (isTauri) {
++          const state = await command<{ peers?: { nodeId: string; port: number }[] }>('mesh_status');
++          if (!disposed) ports.value = Object.fromEntries((state.peers || []).map(p => [p.nodeId, p.port]));
++        }
+       }
+     } catch (e) { if (!disposed) login.error.value = errMsg(e); }
+     finally { polling = false; }
+   }
+   async function passwordLogin(username: string, password: string) {
+-    if (isTauri) await login.login(username, password);
+-    else {
+-      login.busy.value = true;
+-      login.error.value = '';
+-      try { await collab.login(username, password); await account.refresh(); }
+-      catch (e) { login.error.value = errMsg(e); }
+-      finally { login.busy.value = false; }
+-    }
++    await login.login(username, password);
+     await refresh();
+   }
+   async function emailDone(info: Record<string, unknown>) {
+@@ -64,16 +65,17 @@ export function useInterconnect(
+       await account.refresh();
+       login.enrolled.value = false;
+       login.progress.value = null;
++      login.peers.value = [];
+       await changed();
+     });
+   }
+   async function invoke<T>(name: string, args?: Record<string, unknown>): Promise<T> {
+-    if (!riskCommands.has(name)) return rawInvoke<T>(name, args);
++    if (!riskCommands.has(name)) return command<T>(name, args);
+     const payload = args ? JSON.parse(JSON.stringify(args)) as Record<string, unknown> : undefined;
+     let result: T | undefined;
+     let completed = false;
+     await security.run(async () => {
+-      result = await rawInvoke<T>(name, payload);
++      result = await command<T>(name, payload);
+       if ((result as { partial?: boolean })?.partial) throw new Error(c.partial);
+       completed = true;
+       void changed().catch(e => { login.error.value = errMsg(e); });
+@@ -85,7 +87,7 @@ export function useInterconnect(
+     const nodeId = notice.nodeId;
+     const deviceId = notice.deviceId;
+     await security.run(async () => {
+-      const result = await rawInvoke<{ partial?: boolean }>('mesh_device_remove', { nodeId });
++      const result = await command<{ partial?: boolean }>('mesh_device_remove', { nodeId });
+       if (result.partial) throw new Error(c.partial);
+       if (!await security.ack(deviceId)) throw new Error(security.error.value);
+       await changed();
+@@ -104,10 +106,10 @@ export function useInterconnect(
+       void subscribe<Notice | Approval>('interconnect:security', event => {
+         if (!disposed && collab.authed) security.receive(event);
+       });
+-      void refresh();
+-      poll = setInterval(() => void refresh(), config.pollMs);
+-      retry = setInterval(() => void security.tick(), config.retryMs);
+     }
++    void refresh();
++    poll = setInterval(() => void refresh(), config.pollMs);
++    retry = setInterval(() => void security.tick(), config.retryMs);
+   });
+   onUnmounted(() => {
+     disposed = true;
+@@ -118,6 +120,7 @@ export function useInterconnect(
+     clearInterval(retry);
+   });
+   function withPorts(devices: Device[]) {
++    if (!isTauri) return login.peers.value;
+     return devices.filter(d => !d.revoked).map(d => ({ ...d, port: ports.value[d.nodeId] }));
+   }
+   return { login, security, passwordLogin, emailDone, logout, invoke, revokeNotice, withPorts };
+diff --git a/src/features/interconnect/useLogin.ts b/src/features/interconnect/useLogin.ts
+index 923ce7a..edb82ac 100644
+--- a/src/features/interconnect/useLogin.ts
++++ b/src/features/interconnect/useLogin.ts
+@@ -1,9 +1,10 @@
+ import { ref } from 'vue';
+ import { errMsg } from '../../lib/err';
+ import { interconnectCopy as c } from './copy';
+-import type { Command, Progress, RelayConfig } from './contracts';
++import type { Command, Device, Progress, RelayConfig } from './contracts';
+ 
+ export interface LoginResult {
++  peers?: Device[]; devices?: Device[];
+   enrolled?: boolean; token?: string; interconnect?: Progress; relayConfig?: RelayConfig;
+   authorityConfigured?: boolean; configurationError?: string;
+ }
+@@ -11,6 +12,7 @@ export function useLogin(command: Command, adopt: (token: string) => Promise<voi
+   const progress = ref<Progress | null>(null);
+   const relay = ref<RelayConfig>();
+   const error = ref('');
++  const peers = ref<Device[]>([]);
+   const busy = ref(false);
+   const enrolled = ref(false);
+   const authorityConfigured = ref<boolean>();
+@@ -18,6 +20,7 @@ export function useLogin(command: Command, adopt: (token: string) => Promise<voi
+   let disposed = false;
+   function receive(result: LoginResult) {
+     if (disposed) return;
++    if (result.devices || result.peers) peers.value = result.devices || result.peers || [];
+     if (result.interconnect) progress.value = result.interconnect;
+     if (result.relayConfig) relay.value = result.relayConfig;
+     if (result.enrolled !== undefined) enrolled.value = result.enrolled;
+@@ -66,5 +69,5 @@ export function useLogin(command: Command, adopt: (token: string) => Promise<voi
+     await refresh();
+   }
+   function dispose() { disposed = true; }
+-  return { progress, relay, error, busy, enrolled, authorityConfigured, receive, refresh, done, login, retry, dispose };
++  return { progress, relay, peers, error, busy, enrolled, authorityConfigured, receive, refresh, done, login, retry, dispose };
+ }
+diff --git a/src/tauri.ts b/src/tauri.ts
+index aa4511c..bce046b 100644
+--- a/src/tauri.ts
++++ b/src/tauri.ts
+@@ -440,6 +440,11 @@ function ensureWs(): void {
+   }
+ }
+ 
++export async function interconnectBackendAvailable(): Promise<boolean> {
++  await ensureBackend();
++  return backendMode === "http";
++}
++
+ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+   if (isTauri) return rawInvoke<T>(cmd, args);
+   await ensureBackend();
