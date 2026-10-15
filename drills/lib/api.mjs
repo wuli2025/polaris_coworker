@@ -53,7 +53,9 @@ export class Api {
     if (turn.approvalError) throw turn.approvalError;
     const events = this.forReq(turn.req);
     check(events.filter(e => e.kind === 'done').length === 1, 'duplicate done');
-    if (!allowErrors) check(!events.some(e => e.kind === 'error'), 'turn reported error');
+    const errors = events.filter(e => e.kind === 'error').map(e => String(e.text ?? '').slice(0, 300));
+    if (errors.length) await this.h.log('turn-errors', JSON.stringify({ reqId: turn.req, errors }) + '\n');
+    if (!allowErrors) check(!errors.length, 'turn reported error');
     const first = events.find(e => e.kind === 'delta' && e.text);
     const metrics = { reqId: turn.req, firstTokenMs: first ? Math.round(first.at - turn.at) : null,
       turnMs: Math.round(done.at - turn.at), eventKinds: events.map(e => e.kind) };
