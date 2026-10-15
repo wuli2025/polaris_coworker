@@ -25,7 +25,8 @@ export async function build(h) {
     await command(h, 'build-agentd', process.execPath, ['scripts/pack-agentd.mjs', join(h.root, 'runtime/agentd')], { env: buildEnv(h) });
     await command(h, 'build-web', 'npm', ['run', 'build'], { env: buildEnv(h) });
     await command(h, 'build-server', 'cargo', ['build', '--release', '--manifest-path', 'src-tauri/Cargo.toml',
-      '-p', 'polaris-app', '--no-default-features', '--features', 'server,collab-net', '--bin', 'polaris-server'],
+      // Same target as the Dockerfile: the server binary lives in polaris-cli.
+      '-p', 'polaris-cli', '--bin', 'polaris-server', '--features', 'collab-net'],
     { env: buildEnv(h) });
     return { agentd: 'production package', server: 'release/server,collab-net', frontend: 'production' };
   })();

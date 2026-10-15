@@ -12,7 +12,9 @@ export class Api {
   async invoke(cmd, args = {}) {
     const r = await request(this.base, '/api/invoke', { cmd, args }, this.token);
     if (r.status !== 200) {
-      await this.h.log('api', JSON.stringify({ cmd, status: r.status }) + '\n');
+      // Keep the server's error text for diagnosis; h.log redacts known secrets.
+      const error = String(r.value?.error ?? r.value ?? '').slice(0, 300);
+      await this.h.log('api', JSON.stringify({ cmd, status: r.status, error }) + '\n');
       throw new Error(`invoke ${cmd} status ${r.status}`);
     }
     return r.value;
