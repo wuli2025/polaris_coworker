@@ -1,0 +1,10 @@
+{
+  "started_at": "2026-10-15T03:57:33.701504+00:00",
+  "status": "BLOCKED",
+  "exit_code": null,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "reason": "Input too large: /home/mi/work/polaris-pi/docs/reviews/R9-diff.patch",
+  "finished_at": "2026-10-15T03:57:33.706332+00:00"
+}
