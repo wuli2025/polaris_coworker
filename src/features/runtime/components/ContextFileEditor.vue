@@ -1,53 +1,15 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { convApi } from '../../../tauri';
-import { contextFiles, type ContextSelection } from '../contracts';
+import { useContextFileEditor } from '../useContextFileEditor';
 
 const projects = ref<{ id: string; name: string }[]>([]);
-const projectId = ref('');
-const createFile = ref<ContextSelection['fileName']>('AGENTS.md');
-const selection = ref<ContextSelection | null>(null);
-const content = ref('');
-const original = ref('');
-const busy = ref(false);
-const error = ref('');
-const saved = ref(false);
-
-async function load() {
-  if (busy.value) return;
-  if (content.value !== original.value && !confirm('重新读取会丢失未保存修改，继续？')) return;
-  busy.value = true;
-  error.value = '';
-  saved.value = false;
-  selection.value = null;
-  content.value = original.value = '';
-  try {
-    const selected = await contextFiles.metadata(projectId.value, createFile.value);
-    const text = selected.exists ? await contextFiles.read(projectId.value, selected) : '';
-    loadedProject.value = projectId.value;
-    selection.value = selected;
-    content.value = original.value = text;
-  } catch (e) { error.value = String(e); }
-  finally { busy.value = false; }
-}
-// Bind edits to the loaded project, so changing the dropdown cannot redirect a save.
-const loadedProject = ref('');
-async function open() { await load(); }
-async function save() {
-  const selected = selection.value;
-  if (!selected || busy.value) return;
-  busy.value = true;
-  error.value = '';
-  saved.value = false;
-  try {
-    await contextFiles.write(loadedProject.value, selected, content.value);
-    original.value = content.value;
-    selection.value = { ...selected, exists: true,
-      agentsExists: selected.agentsExists || selected.fileName === 'AGENTS.md',
-      claudeExists: selected.claudeExists || selected.fileName === 'CLAUDE.md' };
-    saved.value = true;
-  } catch (e) { error.value = String(e); }
-  finally { busy.value = false; }
+const { projectId, createFile, selection, content, busy, error, saved, open, save, switchProject } = useContextFileEditor();
+async function changeProject(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  const next = select.value;
+  select.value = projectId.value;
+  await switchProject(next);
 }
 onMounted(async () => {
   try {
@@ -60,7 +22,7 @@ onMounted(async () => {
 <template>
   <section class="context-editor">
     <p>Pi 按项目实际工作目录优先读取 AGENTS.md，否则读取 CLAUDE.md；保存始终写回本次选中的文件。</p>
-    <label>项目 <select v-model="projectId" :disabled="busy">
+    <label>项目 <select :value="projectId" :disabled="busy" @change="changeProject">
       <option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option>
     </select></label>
     <label>两者都不存在时创建 <select v-model="createFile" :disabled="busy">
