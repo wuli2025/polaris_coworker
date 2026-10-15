@@ -1,0 +1,184 @@
+{
+  "started_at": "2026-10-15T04:02:44.716494+00:00",
+  "status": "REVIEW_RECEIVED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P6c-brief.md",
+        "bytes": 1470,
+        "lines": 8,
+        "sha256": "cb8c04806e423e660f82ce8a56df91497b7431b953c2e497423f4312c7a39f0d"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/.env.example",
+        "bytes": 2496,
+        "lines": 58,
+        "sha256": "527afdc58ae2a4d2d987f7fbe114625b2824206055e295a909c6fc92b65d74de"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/.gitignore",
+        "bytes": 54,
+        "lines": 6,
+        "sha256": "7ea808153628039918e858c18aeacd8b612b1b9de4e3ff50e452962ccecfd585"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/Dockerfile.relay",
+        "bytes": 1116,
+        "lines": 20,
+        "sha256": "5f2a40e8eb1204931f010a337ff414d30bbc046158495d29f506ffc88871bca6"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/README.md",
+        "bytes": 18466,
+        "lines": 207,
+        "sha256": "86b7a3e82f2e6740f4961e920f51ea6ffb967ddf9f363b6eea0f68bfc8451cba"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/VALIDATION.md",
+        "bytes": 6860,
+        "lines": 71,
+        "sha256": "a4556d746b9e64b90f8e12970757aed169e30b371a2b1cfdee9d3b2ae486e2e4"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/client-config.template.json",
+        "bytes": 373,
+        "lines": 16,
+        "sha256": "8c4d90ceb87430045672ff02fc28e7a5d0ad1f05ab8b554f5b277366e685da30"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/docker-compose.yml",
+        "bytes": 3304,
+        "lines": 107,
+        "sha256": "976e3db069dff370edcdc5728a1733ae69ce250febe28a0270a62da9644e5520"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/backup.sh",
+        "bytes": 118,
+        "lines": 7,
+        "sha256": "e16cbbd0394f081a0eca269587eaa051e9f490e6fffedf9967a026b345fa8767"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/common.sh",
+        "bytes": 2172,
+        "lines": 56,
+        "sha256": "0772c2beb606553cecae81ab5096faf1a273e7515afa01fcb25837f3da1b5b62"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/compose.sh",
+        "bytes": 185,
+        "lines": 7,
+        "sha256": "e4f3fe7c51e80eb99f0e896723354a9d428e7464838088fe3b5b0474231ca97c"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/config.py",
+        "bytes": 7902,
+        "lines": 179,
+        "sha256": "e8078026d698f5a0fec4ac3c539c4eb3030c73461211b9d9ace6a3ed59fa261b"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/init-keys.sh",
+        "bytes": 957,
+        "lines": 21,
+        "sha256": "44b1a74683fc4e9848fd6706779b1f1e8a8a90dccea61e98132b2ed2e5e7688b"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/prepare.sh",
+        "bytes": 360,
+        "lines": 12,
+        "sha256": "b47d0067df02b6c97885e19d8f5b955433f4dd17344a54c39d3bf43cb76ccf10"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/probe.py",
+        "bytes": 6369,
+        "lines": 149,
+        "sha256": "864c0fa7cefa3abaf64eb8e49ab6b9cc87b9865aab68b7231b221f2d1ef13048"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/restore.sh",
+        "bytes": 1155,
+        "lines": 30,
+        "sha256": "1b803695fadb91a439d62996e02d57fd92ee3614672f9be8ccd355955cc2f0a4"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/smoke.sh",
+        "bytes": 218,
+        "lines": 5,
+        "sha256": "62b6c2c3bcaf89c76410568b6d02b1d3af7d31cfa10232a42f7d81f5fa763cfe"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/snapshot.py",
+        "bytes": 4846,
+        "lines": 110,
+        "sha256": "8e75ebdb66ed81944e4660c5313c105fedcf90601d17d7afbb617a92e2159a91"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/scripts/upgrade.sh",
+        "bytes": 782,
+        "lines": 16,
+        "sha256": "7a9352052108af234f9cdbb5e559467a14a8effdaa9d94399a4b43c59232c9dd"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/templates/Caddyfile",
+        "bytes": 684,
+        "lines": 30,
+        "sha256": "d910b620036566d9169c02b73db816af498d1152596b621deed71e8f2792e133"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/templates/haproxy.cfg",
+        "bytes": 1891,
+        "lines": 65,
+        "sha256": "82a2c7ff56d165ee1aeeb0d1830736a7732fb411f9e7bf487349f5d09dd1665d"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/templates/relay.toml",
+        "bytes": 516,
+        "lines": 22,
+        "sha256": "772be1f26471abfd4c1c4d33af1cd53c4cb4f95fd04a29d6c962e9af625650b3"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/tests/fake_docker.py",
+        "bytes": 2316,
+        "lines": 62,
+        "sha256": "34e241fc3bd10924eaeeb9dd1a9e812c700524757802ff362acd60d6a17acfe8"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/tests/test_behavior.py",
+        "bytes": 12818,
+        "lines": 259,
+        "sha256": "8cd4905a5495c68fc353ebca91344352c86595549e5bfdd83f772a1985e4ac4e"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/deploy/singapore/tests/test_static.py",
+        "bytes": 2934,
+        "lines": 61,
+        "sha256": "29bdf948934018c81507a8a902eb490a1d578d47a9b7536d5c7a24d70c7407e3"
+      }
+    ],
+    "prompt_sha256": "5f439d604bd977011da667d520a99d22b2d33dffd959cf162b37d25021d1c1a8",
+    "prompt_bytes": 91340
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "provider": "minimax",
+  "model": "MiniMax-M2.7",
+  "usage": {
+    "input": 0,
+    "output": 4472,
+    "cacheRead": 0,
+    "cacheWrite": 25890,
+    "totalTokens": 30362,
+    "cost": {
+      "input": 0,
+      "output": 0.0053663999999999995,
+      "cacheRead": 0,
+      "cacheWrite": 0.00970875,
+      "total": 0.015075149999999999
+    }
+  },
+  "session_id": "01a13dbb-35ab-7b64-bf68-590f14830e95",
+  "finished_at": "2026-10-15T04:06:45.422083+00:00"
+}

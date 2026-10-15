@@ -1,0 +1,81 @@
+## Pi 独立审查报告
+
+**审查模式**：packet（无工具），按本次调用指令报告。
+
+**范围**：本次提供的全部内联材料。repo 工具不可用，无法访问未内联的项目文件（如 `src-tauri/` 目录结构、`docs/interconnect/p6a2-policy-b.md`）。
+
+**结论**：**CHANGES_REQUIRED**
+
+---
+
+### 严重问题
+
+#### 1. Caddy PROXY protocol `fallback_policy reject` 配置位置错误
+**文件**：`templates/Caddyfile` 第 7–10 行
+```caddy
+proxy_protocol {
+    timeout 5s
+    allow 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+    fallback_policy reject
+}
+```
+**证据**：Caddy 文档明确指出 `fallback_policy` 是 Caddyfile 全局/服务器级选项，不是 `proxy_protocol` 块的内联指令。将其嵌套在 `proxy_protocol {}` 块内时，Caddy 不会将其识别为有效指令，行为等价于默认的 fallback 策略（接受非 PROXY 连接），而非拒绝。
+**可复现影响**：攻击者（哪怕在同一 Docker 网络内）发送不含 PROXY v2 头的 TLS 握手会绕过 allowlist，直接以 Caddy 进程身份接收连接，导致来源 IP 频控基于容器 IP 而非真实客户端。
+**最小修复**：将 `fallback_policy reject` 移至 Caddyfile 顶层服务器块（与 `servers :443` 同级），或改为使用 `proxy_protocol transparent` + `trusted_proxies` 的显式拒绝逻辑。修复后需在目标环境验证 Caddy 是否在无 PROXY v2 时拒绝连接。
+
+---
+
+#### 2. HAProxy backend `authority_tls` 未设置 `mode tcp` 后 `send-proxy-v2` 行为
+**文件**：`templates/haproxy.cfg` 第 32–33 行
+```haproxy
+backend authority_tls
+    mode tcp
+    server caddy caddy:443 send-proxy-v2 resolvers docker init-addr libc,none
+```
+**证据**：当 HAProxy 处于 `mode tcp` 时，`send-proxy-v2` 发送 PROXY v2 头的语义与 `mode http` 不同。文档显示 TCP 模式下 PROXY 头在 TLS 握手完成后才注入，而不是替换连接源地址。若 Caddy 的 PROXY listener wrapper 期望在 TLS 握手**前**接收该头，则连接可能失败或 Caddy 记录错误的来源 IP。
+**可复现影响**：Caddy 可能始终以 `10.x.x.x` 等 Docker 网络地址作为来源，导致频控策略失效（频控在 HAProxy 前端 `:8081` 基于 XFF，而 XFF 由 Caddy 设置，若 Caddy 收到的来源错误则 XFF 错误）。
+**最小修复**：验证 Caddy 在 `mode tcp` + `send-proxy-v2` 组合下是否正确解析 PROXY v2 头；若不兼容，考虑在 HAProxy 前端插入 PROXY v2 头后再发送到 Caddy，或改用 Caddy 的 `forward_proxy` 模式。
+
+---
+
+#### 3. `restore.sh` 恢复后未验证指纹一致性
+**文件**：`scripts/restore.sh` 第 29 行，`scripts/init-keys.sh` 第 20 行
+**证据**：`restore.sh` 在恢复后调用 `restart_original` 并退出；从未调用 `probe.py fingerprint` 验证恢复的私钥与 `EXPECTED_FINGERPRINT` 一致。README 第 176 行承认"再启动并 smoke 核对原指纹"，但这是人工操作建议，不是脚本强制检查。
+**可复现影响**：错误的快照（同名但内容不同）、卷混用或部分恢复导致权威身份改变；脚本静默重启 authority，但客户端仍使用旧指纹，造成不可诊断的信任断裂。
+**最小修复**：在 `restore.sh` 末尾、`restart_original` 之后增加指纹验证：
+```bash
+dc exec -T authority curl -fsS --max-time 10 http://127.0.0.1:8080/api/account/pubkey \
+  | python3 "$SG_ROOT/scripts/probe.py" fingerprint "$(value EXPECTED_FINGERPRINT)"
+```
+不匹配时保持停止并报错退出。
+
+---
+
+### 中等问题
+
+#### 4. iroh-relay 健康检查假设 HTTP 端存在但未经验证
+**文件**：`docker-compose.yml` 第 62 行，`templates/relay.toml` 第 1 行
+**证据**：`healthcheck.test: [CMD, curl, -fS, --max-time, 5, http://127.0.0.1:8080/generate_204]`。relay.toml 固定 `http_bind_addr = "0.0.0.0:8080"` 但未配置路由；iroh-relay 1.0.1 源码中 `generate_204` 端点存在性未在本次提供的材料中确认（仅 README 第 56 行声称"官方源码契约"指向 docs.rs，但材料未内联该源码）。
+**可复现影响**：relay 容器健康检查始终失败，Docker 标记 unhealthy 但不触发重启（本次 README 第 37 行已注明），运维无法依赖健康检查判断 relay 状态。
+**最小修复**：在目标环境实际验证 `curl http://<relay-ip>:8080/generate_204` 返回 200；若官方二进制无此端点，改用 `curl -k https://127.0.0.1:8443/ping` 或依赖 UDP smoke 替代容器内健康检查。
+
+#### 5. 备份快照明文包含签名私钥，无自动化加密提示或强制
+**文件**：`scripts/snapshot.py` 第 14 行，第 23–22 行
+**证据**：`PAYLOAD = ('collab.db', 'account_authority.key')`；README 第 172 行有警告，但 `snapshot.py` 未生成加密备份，仅 `chmod 600` + `umask 077`。
+**可复现影响**：备份目录误配置到共享存储或云盘时，签名私钥以明文泄露。
+**最小修复**：`snapshot.py` 在打包后检测 `GPG_RECIPIENT` 或 `BACKUP_ENCRYPTED=1` 环境变量；若存在，调用 `gpg --encrypt` 替换或追加明文 tar；不在则输出stderr 警告要求人工确认已转移到加密介质。
+
+---
+
+### 建议验证步骤
+
+以下步骤区分推断风险与已有证据，不能声称已在目标环境执行：
+
+| 步骤 | 类型 | 说明 |
+|---|---|---|
+| 1. 在目标环境运行 `docker compose config --quiet` | 已有证据（需补充） | VALIDATION.md 第 33 行因 Docker 不可用未执行，静态 YAML 解析不能替代 Compose schema 校验 |
+| 2. 在构建机验证 `Dockerfile.relay` 产出 `iroh-relay --version` 输出 1.0.1 | 推断风险 | 材料第 45 行描述构建步骤，但未提供实际构建日志 |
+| 3. 从外部网络执行 `scripts/smoke.sh` 并确认 UDP QUIC 版本协商响应匹配 | 推断风险 | 材料第 64 行已注明 smoke 限制，需在目标环境实际验证 |
+| 4. 验证 Caddy 在接收非 PROXY v2 TLS 流量时的实际行为（拒绝/接受） | 推断风险 | 严重问题 1 的可复现步骤 |
+| 5. 恢复快照后通过 `probe.py fingerprint` 验证身份一致性 | 推断风险 | 严重问题 3 的可复现步骤 |
+| 6. 确认 `expect` 客户端工具可用或 relay HTTP 端存在 | 推断风险 | HAProxy PROXY v2 发送需要 `expect` 或 TCP 模式验证 |
