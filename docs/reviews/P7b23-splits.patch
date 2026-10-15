@@ -1,0 +1,2656 @@
+commit f5f29a67c853b9f674f3c8fe8dec502654cecf0a
+Author: Glen Church <GlenChurchcbh@gmx.es>
+Date:   Fri Oct 16 02:43:51 2026 +0900
+
+    fix: 订阅提供商切换、私有 CA、agentd 走代理（P7b-2 + P7b-3，Codex 实现，Claude 验证）
+    
+    P7b-2：codex/claude-official 走 SDK 原生 provider 与鉴权，目录外模型以安全默认值注册（成本未知）；
+    agentd 字段路径透传到调用方；authority.extraCaPem 在 webpki 默认根上追加私有 CA（显式依赖锁文件中
+    已有的 webpki-roots =0.26.11，无新包）。
+    P7b-3：agentd 启动即安装 undici EnvHttpProxyAgent 全局分发器（与 Pi CLI 等价，显式依赖锁文件中已有
+    的 undici 8.10.2，无新包），支持 network.proxy 配置与 NO_PROXY，代理凭据脱敏；doctor 增加模型网络
+    连通性检查；提供商保存改为纯本地校验（修复 P7b-2 引入的、依赖后端在线的回归）；mesh 客户端统一 CA。
+    二者均由 D1 真实模型演练发现（切换失败、MODEL_NETWORK）。
+    agentd 129、内核 230、collab 179、fable 105、vitest 118 均 0 失败；三种构建 0 警告。
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src-tauri/crates/polaris-collab/src/collab/authority.rs b/src-tauri/crates/polaris-collab/src/collab/authority.rs
+index c06981b..89ab7df 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/authority.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/authority.rs
+@@ -148,7 +148,7 @@ pub fn upstream_forward(path: &str, body: &serde_json::Value) -> Result<serde_js
+             .0,
+     };
+     let ep = format!("{url}{path}");
+-    match ureq::post(&ep)
++    match super::interconnect::http_client::agent(ureq::AgentBuilder::new())?.post(&ep)
+         .timeout(std::time::Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
+         .send_json(body.clone())
+     {
+@@ -165,7 +165,7 @@ pub fn upstream_forward(path: &str, body: &serde_json::Value) -> Result<serde_js
+                 .unwrap_or("账号中心拒绝了这次请求")
+                 .to_string())
+         }
+-        Err(e) => Err(format!("这台主机也连不上账号中心: {e}")),
++        Err(e) => Err(format!("这台主机也连不上账号中心: {}", super::interconnect::http_client::diagnostic(&e))),
+     }
+ }
+ 
+@@ -174,7 +174,7 @@ pub fn upstream_forward(path: &str, body: &serde_json::Value) -> Result<serde_js
+ pub fn upstream_login(username: &str, password: &str) -> Result<String, String> {
+     let (url, _) = ensure_pinned()?;
+     let ep = format!("{url}/api/account/login");
+-    let resp = ureq::post(&ep)
++    let resp = super::interconnect::http_client::agent(ureq::AgentBuilder::new())?.post(&ep)
+         .timeout(std::time::Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
+         .send_json(serde_json::json!({"username": username, "password": password}));
+     match resp {
+@@ -197,7 +197,7 @@ pub fn upstream_login(username: &str, password: &str) -> Result<String, String>
+                 .unwrap_or("登录被账号权威拒绝")
+                 .to_string())
+         }
+-        Err(e) => Err(format!("连不上账号权威: {e}")),
++        Err(e) => Err(format!("连不上账号权威: {}", super::interconnect::http_client::diagnostic(&e))),
+     }
+ }
+ 
+@@ -210,321 +210,8 @@ pub fn new_uid() -> String {
+     format!("acct_{}", B64.encode(buf))
+ }
+ 
+-/// 入伙资格:一张有效断言只证明「你是谁」,**不证明「这台主机欢迎你」**。
+-/// 两者必须分开 —— 否则任何人在云端注册个账号,就能登进别人家的主机。
+-/// 而主机上的成员能建项目、push 仓库、触发 checks 跑构建脚本 = 主机 RCE,
+-/// 这正是 collab_signup 默认关闭要防的事,联邦登录不能把这道门重新打开。
+-pub enum Admission {
+-    /// 日常登录:只认已经是本机成员的账号;不是就拒(唯一例外见 upsert_member 里的空库分支)。
+-    ExistingOnly,
+-    /// 拿着 owner 签发的一次性邀请票据来入伙,角色由票据决定。
+-    Invited(String),
+-    /// **自己名下的设备**:断言里的 uid 与本机记着的 `owner_uid` 一致 → 直接给 owner。
+-    ///
+-    /// 为什么开这个口:上面那条铁律(「云端证明你是谁,进不进得去由每台机器说了算」)对
+-    /// **别人**成立,对**你自己名下的第二台机器**却是纯摩擦 —— 两台机器的主人是同一个 uid,
+-    /// 却要自己给自己发一张邀请码。用户看到的就是「怎么还要登第二个账号」。
+-    ///
+-    /// 代价与对冲说清楚:云机若被完全拿下,它能签任意断言,于是能直接成为你每台机器的 owner
+-    /// (此前还隔着一道邀请码)。策略 B 允许新设备立即全权；高风险操作另走
+-    /// interconnect::gate 的设备批准与吊销新鲜度检查。另有 `owner_uid` 只写一次的闸
+-    /// (见 [`super::db::meta_set_once`]),否则「谁最后登录谁是主人」会把远程夺权做成一条 API。
+-    SelfOwned,
+-    /// **本机控制台**:用户就坐在这台机器前,在桌面 App 里亲手填了邮箱和验证码
+-    /// (`account_login_code`,只有 Tauri 命令这一条路能到,不经 HTTP、不在手机数据面白名单里)。
+-    ///
+-    /// 为什么必须有这一档:`owner_uid` 只由**联邦登录**写下。v2.9.0 之前装的机器,主人是
+-    /// 「设为主机」时建的本地账号(没有 uid、常常也没绑邮箱),于是 `owner_uid` 恒空、
+-    /// `is_mine` 恒 false —— 主人在自己的电脑上用自己的邮箱登录,反被自己的机器回一句
+-    /// 「本主机还没有邀请你」。两台老机器互相如此,就成了「云端名册看得见对方,却谁也挂不上谁的盘」。
+-    ///
+-    /// 这一档做两件事(见 [`adopt_row_for_console`]):**认领**已有的那一行(邮箱对得上,
+-    /// 或这台机器还没主人且只有一个本地 owner),而不是在同一台机器上再造一个「第二个我」;
+-    /// 认不到又确实没主人时,就地成为主人。
+-    ///
+-    /// 安全边界:这一档**只**给本地控制台。远端递进来的断言(`/api/collab/login_assertion`)
+-    /// 走的仍是 [`Admission::ExistingOnly`] —— 陌生账号照旧要邀请码,这条铁律没松。
+-    LocalConsole,
+-}
+-
+-/// 本机控制台首登时,找出「其实就是同一个人」的那一行 users。找不到返回 None。
+-///
+-/// 两条证据,强弱分明:
+-///  ① **邮箱对得上** —— 账号中心保证一个邮箱只属于一个账号,所以这是硬证据,
+-///     哪怕这台机器已经有主人、有一堆成员,也认。
+-///  ② 老账号常常压根没绑邮箱(`create_user` 建的本地 owner 就是),于是退而求其次:
+-///     **这台机器还没有主人(`owner_uid` 空)且全机只有一个 owner、它还是个本地账号** ——
+-///     这就是「我自己的电脑上那个老账号」。有第二个 owner、或已经有主人,一律不猜。
+-///
+-/// `host_owner` 是**进事务之前**读好的 `owner_uid`:meta 表在另一条连接上,
+-/// 写事务开着的时候再去开一条连接读它是在给自己找 SQLITE_BUSY。
+-fn adopt_row_for_console(
+-    tx: &rusqlite::Transaction<'_>,
+-    claims: &Claims,
+-    host_owner: &str,
+-) -> Result<Option<(i64, String)>, String> {
+-    let email = claims.email.trim().to_ascii_lowercase();
+-    if !email.is_empty() {
+-        let hit: Option<(i64, String, String)> = tx
+-            .query_row(
+-                "SELECT id,role,uid FROM users WHERE email<>'' AND email=?1 COLLATE NOCASE LIMIT 1",
+-                params![email],
+-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+-            )
+-            .optional()
+-            .map_err(|e| format!("按邮箱找本机账号失败: {e}"))?;
+-        if let Some((id, role, uid)) = hit {
+-            // 这一行已经绑在**另一个**云端账号上:不抢。静默顶替等于把别人在本机的
+-            // 项目关系送给来人 —— 与下面那道同名不同 uid 的闸同一口径。
+-            if !uid.is_empty() && uid != claims.uid {
+-                return Err(format!(
+-                    "本机的「{email}」已经绑在另一个云端账号上了 —— \
+-                     换回原来那个账号登录,或让 owner 先在成员列表里解绑它"
+-                ));
+-            }
+-            return Ok(Some((id, role)));
+-        }
+-    }
+-    if !host_owner.is_empty() {
+-        return Ok(None);
+-    }
+-    let mut st = tx
+-        .prepare("SELECT id,uid FROM users WHERE role='owner' ORDER BY id")
+-        .map_err(|e| format!("查本机 owner 失败: {e}"))?;
+-    let owners: Vec<(i64, String)> = st
+-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+-        .map_err(|e| format!("查本机 owner 失败: {e}"))?
+-        .collect::<Result<_, _>>()
+-        .map_err(|e| format!("查本机 owner 失败: {e}"))?;
+-    drop(st);
+-    match owners.as_slice() {
+-        [(id, uid)] if uid.trim().is_empty() => Ok(Some((*id, "owner".to_string()))),
+-        _ => Ok(None),
+-    }
+-}
+-
+-/// 「这台机器不认识你」的话术。**必须带「设备码」三字** —— 登录界面靠它把码输入框
+-/// 自动展开(见 `EmailLogin.vue`)。顺带把「码在哪儿」说死,不让用户自己猜。
+-///
+-/// 注意这句话里已经没有「主机」「邀请」「入伙」了:那是我们的内部分工,不是用户的世界。
+-/// 他的世界只有一件事 —— 「那台机器的码给我」。
+-fn no_invite_msg() -> String {
+-    "这台机器还不认得你 —— 在它的「互联」页第 ① 屏复制那串**设备码**(PLR1-…),\
+-     填到下面就能进"
+-        .to_string()
+-}
+-
+-/// 把一张已验过的断言落成本机的成员资格,返回本机 `users` 行。
+-///
+-/// 四种情况:
+-///  · uid 已在本机 → 更新用户名/邮箱/昵称(权威改名后本机跟着改),复用原角色。
+-///  · uid 不在本机、本机零账号 → 建号并给 **owner**(装这台机器的人就是它的主人)。
+-///  · uid 不在本机、带邀请票据 → 按票据角色建号入伙。
+-///  · uid 不在本机、无票据 → **拒**。云端有账号 ≠ 本机欢迎你。
+-///
+-/// 用户名撞车(同名但 uid 不同)会明确报错交给 owner 处理,绝不静默顶替 ——
+-/// 顶替等于把别人在本机的项目关系送给来人。
+-pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, String> {
+-    // 进事务之前读:meta 走的是另一条连接,写事务开着时再开一条读它 = 自找 SQLITE_BUSY。
+-    let host_owner = owner_uid();
+-    let mut conn = open_db()?;
+-    let tx = conn
+-        .transaction_with_behavior(TransactionBehavior::Immediate)
+-        .map_err(|e| format!("成员资格事务失败: {e}"))?;
+-
+-    let existing: Option<(i64, String)> = tx
+-        .query_row(
+-            "SELECT id,role FROM users WHERE uid=?1",
+-            params![claims.uid],
+-            |r| Ok((r.get(0)?, r.get(1)?)),
+-        )
+-        .optional()
+-        .map_err(|e| format!("查成员资格失败: {e}"))?;
+-
+-    if let Some((id, role)) = existing {
+-        let disabled: i64 = tx
+-            .query_row("SELECT disabled FROM users WHERE id=?1", params![id], |r| {
+-                r.get(0)
+-            })
+-            .map_err(|e| format!("查账号状态失败: {e}"))?;
+-        if disabled != 0 {
+-            return Err("你的账号在本主机上已被停用".into());
+-        }
+-        tx.execute(
+-            "UPDATE users SET username=?1, email=?2, display_name=?3 WHERE id=?4",
+-            params![
+-                claims.username,
+-                claims.email,
+-                claims.display_name.trim(),
+-                id
+-            ],
+-        )
+-        .map_err(|e| {
+-            if e.to_string().contains("UNIQUE") {
+-                // 权威那边把邮箱/用户名改成了本机另一个账号已占的值。本机不猜、不顶替。
+-                "同步账号资料失败:用户名或邮箱与本机另一个账号冲突,请联系 owner 处理".to_string()
+-            } else {
+-                format!("同步账号资料失败: {e}")
+-            }
+-        })?;
+-        tx.commit().map_err(|e| format!("提交成员资格失败: {e}"))?;
+-        // 老库升级路径:这台机器早就有 owner 了,但 owner_uid 这个键是这次才引入的。
+-        // 由本人登录时补写一次(只写一次,后来者改不动)。
+-        stamp_owner_uid(&role, &claims.uid);
+-        return Ok(User {
+-            id,
+-            username: claims.username.clone(),
+-            role,
+-            display_name: claims.display_name.trim().into(),
+-            disabled: false,
+-        });
+-    }
+-
+-    // 本机控制台首登:先认领「其实就是同一个人」的那一行,而不是在同一台机器上再建一个号。
+-    // 认领而不是新建,是为了让老账号名下的项目/任务关系跟着走 —— 那正是用户说的「统一一下」。
+-    if matches!(admission, Admission::LocalConsole) {
+-        if let Some((id, role)) = adopt_row_for_console(&tx, claims, &host_owner)? {
+-            tx.execute(
+-                "UPDATE users SET uid=?1, username=?2, email=?3, display_name=?4 WHERE id=?5",
+-                params![
+-                    claims.uid,
+-                    claims.username,
+-                    claims.email,
+-                    claims.display_name.trim(),
+-                    id
+-                ],
+-            )
+-            .map_err(|e| {
+-                if e.to_string().contains("UNIQUE") {
+-                    format!(
+-                        "本机另一个账号占着用户名「{}」或这个邮箱 —— 请先把它改名再登录",
+-                        claims.username
+-                    )
+-                } else {
+-                    format!("认领本机账号失败: {e}")
+-                }
+-            })?;
+-            tx.commit().map_err(|e| format!("提交成员资格失败: {e}"))?;
+-            stamp_owner_uid(&role, &claims.uid);
+-            db::audit(&claims.username, "member.adopt", &claims.uid, &role);
+-            return Ok(User {
+-                id,
+-                username: claims.username.clone(),
+-                role,
+-                display_name: claims.display_name.trim().into(),
+-                disabled: false,
+-            });
+-        }
+-    }
+-
+-    // 同名不同 uid → 拒绝顶替。
+-    let clash: Option<String> = tx
+-        .query_row(
+-            "SELECT uid FROM users WHERE username=?1 COLLATE NOCASE LIMIT 1",
+-            params![claims.username],
+-            |r| r.get(0),
+-        )
+-        .optional()
+-        .map_err(|e| format!("查用户名失败: {e}"))?;
+-    if let Some(other_uid) = clash {
+-        return Err(if other_uid.is_empty() {
+-            format!(
+-                "本机已有同名本地账号「{}」——请 owner 先把它改名或迁移,再用云端账号登录",
+-                claims.username
+-            )
+-        } else {
+-            format!("本机已有另一个云端账号占用用户名「{}」", claims.username)
+-        });
+-    }
+-
+-    let n: i64 = tx
+-        .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+-        .map_err(|e| e.to_string())?;
+-    // 空库 = 这台主机刚装好还没主人,第一个用云端账号登进来的人就是它的 owner
+-    // (等价于原来的 bootstrap,只是身份改由云端签)。此后一律要票据。
+-    let role = if n == 0 {
+-        "owner".to_string()
+-    } else {
+-        match admission {
+-            Admission::Invited(r) => r,
+-            Admission::SelfOwned => "owner".to_string(),
+-            // 认领不到任何旧行,但这台机器确实还没有主人:坐在它跟前的这个人就是主人。
+-            // 已经有主人了则照旧要邀请码 —— 换个账号在本机控制台登录不该改朝换代。
+-            Admission::LocalConsole if host_owner.is_empty() => "owner".to_string(),
+-            Admission::LocalConsole | Admission::ExistingOnly => return Err(no_invite_msg()),
+-        }
+-    };
+-    tx.execute(
+-        "INSERT INTO users(username,pass_hash,role,display_name,created_at,email,uid) \
+-         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+-        params![
+-            claims.username,
+-            FEDERATED_SENTINEL,
+-            role,
+-            claims.display_name.trim(),
+-            now(),
+-            claims.email,
+-            claims.uid
+-        ],
+-    )
+-    .map_err(|e| format!("建成员资格失败: {e}"))?;
+-    let id = tx.last_insert_rowid();
+-    tx.commit().map_err(|e| format!("提交成员资格失败: {e}"))?;
+-    stamp_owner_uid(&role, &claims.uid);
+-    db::audit(&claims.username, "member.join", &claims.uid, &role);
+-    Ok(User {
+-        id,
+-        username: claims.username.clone(),
+-        role,
+-        display_name: claims.display_name.trim().into(),
+-        disabled: false,
+-    })
+-}
+-
+-/// 这个云端账号在本机**已经有成员资格**了吗。纯本地读,不联网 ——
+-/// 设备网的对账循环每拍都要问一次「我进得了自己这台机器的门吗」,不能为此打一趟公网。
+-pub fn is_member(uid: &str) -> bool {
+-    let uid = uid.trim();
+-    if uid.is_empty() {
+-        return false;
+-    }
+-    let Ok(conn) = open_db() else { return false };
+-    conn.query_row(
+-        "SELECT 1 FROM users WHERE uid=?1 AND disabled=0 LIMIT 1",
+-        params![uid],
+-        |_| Ok(()),
+-    )
+-    .optional()
+-    .map(|x| x.is_some())
+-    .unwrap_or(false)
+-}
+-
+-/// 本机记着的主人 uid。空 = 这台机器还没有主人(全新装机)。
+-pub fn owner_uid() -> String {
+-    db::meta_get(OWNER_UID_KEY).unwrap_or_default()
+-}
+-
+-const OWNER_UID_KEY: &str = "owner_uid";
+-
+-/// 某个账号成为本机 owner 时,把它的 uid 钉成「这台机器的主人」。
+-///
+-/// **只写一次**(见 [`db::meta_set_once`])。这是 [`Admission::SelfOwned`] 整条路的地基:
+-/// 若这个键能被后来的写入覆盖,那就是「谁最后一个登录谁就是主人」—— 等于把远程夺权做成
+-/// 一条 API。写不进去(已有主人)不是错误,是正常的日常路径,静默即可。
+-fn stamp_owner_uid(role: &str, uid: &str) {
+-    if role != "owner" || uid.trim().is_empty() {
+-        return;
+-    }
+-    if let Ok((cur, fresh)) = db::meta_set_once(OWNER_UID_KEY, uid) {
+-        if fresh {
+-            db::audit("system", "host.owner_uid.set", uid, "本机主人已确定");
+-        } else if cur != uid {
+-            // 同一台机器上有两个 owner 角色的联邦账号:后来的那个不会成为「主人」,
+-            // 它照样是 owner(能管本机),但同账号设备网的自动准入只认第一个。如实留痕。
+-            db::audit("system", "host.owner_uid.keep", &cur, uid);
+-        }
+-    }
+-}
++mod membership;
++pub use membership::{Admission, upsert_member, is_member, owner_uid};
+ 
+ /// 断言 → 本机会话(成员主机的登录出口)。验签 → 认成员资格 → 签本机会话 token。
+ ///
+@@ -605,533 +292,6 @@ fn burn_ticket(code: &str, used_by: &str) -> Result<String, String> {
+ }
+ 
+ #[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    /// 独占一个临时库 + 临时签名密钥(两者都是进程级环境变量,必须串行)。
+-    fn tmp_env() -> std::sync::MutexGuard<'static, ()> {
+-        let g = super::super::db::TEST_LOCK
+-            .lock()
+-            .unwrap_or_else(|e| e.into_inner());
+-        let stamp = format!(
+-            "{}-{}",
+-            std::process::id(),
+-            std::time::SystemTime::now()
+-                .duration_since(std::time::UNIX_EPOCH)
+-                .unwrap()
+-                .as_nanos()
+-        );
+-        std::env::set_var(
+-            "POLARIS_COLLAB_DB",
+-            std::env::temp_dir().join(format!("authority-test-{stamp}.db")),
+-        );
+-        std::env::set_var(
+-            "POLARIS_ACCOUNT_KEY",
+-            std::env::temp_dir().join(format!("authority-test-{stamp}.key")),
+-        );
+-        std::env::remove_var("POLARIS_ACCOUNT_AUTHORITY");
+-        std::env::remove_var("POLARIS_ACCOUNT_AUTHORITY_URL");
+-        g
+-    }
+-
+-    #[test]
+-    fn sign_then_verify_roundtrip() {
+-        let _g = tmp_env();
+-        let pk = public_key_b64().unwrap();
+-        let a = sign_assertion("acct_x", "alice", "a@b.com", "Alice").unwrap();
+-        let c = verify_assertion_with(&a, &pk).unwrap();
+-        assert_eq!(c.uid, "acct_x");
+-        assert_eq!(c.username, "alice");
+-        assert_eq!(c.email, "a@b.com");
+-    }
+-
+-    #[test]
+-    fn tampered_assertion_is_rejected() {
+-        let _g = tmp_env();
+-        let pk = public_key_b64().unwrap();
+-        let a = sign_assertion("acct_x", "alice", "a@b.com", "Alice").unwrap();
+-        // 改载荷(把 alice 换成 root)后重新拼装 —— 签名覆盖载荷,必须验不过。
+-        let mut parts: Vec<&str> = a.split('.').collect();
+-        let raw = B64.decode(parts[1]).unwrap();
+-        let mut claims: Claims = serde_json::from_slice(&raw).unwrap();
+-        claims.username = "root".into();
+-        let forged = B64.encode(serde_json::to_vec(&claims).unwrap());
+-        parts[1] = &forged;
+-        let bad = parts.join(".");
+-        assert!(verify_assertion_with(&bad, &pk).is_err());
+-    }
+-
+-    #[test]
+-    fn other_key_cannot_verify() {
+-        let _g = tmp_env();
+-        let a = sign_assertion("acct_x", "alice", "a@b.com", "Alice").unwrap();
+-        // 另一把钥匙的公钥:验不过(这就是「换把钥匙冒充权威」被挡住的那一刻)。
+-        let mut seed = [7u8; 32];
+-        seed[0] = 9;
+-        let other = SigningKey::from_bytes(&seed);
+-        let other_pub = B64.encode(other.verifying_key().to_bytes());
+-        assert!(verify_assertion_with(&a, &other_pub).is_err());
+-    }
+-
+-    #[test]
+-    fn expired_assertion_is_rejected() {
+-        let _g = tmp_env();
+-        let pk = public_key_b64().unwrap();
+-        let sk = signing_key().unwrap();
+-        let claims = Claims {
+-            iss: kid_of(&pk),
+-            uid: "acct_x".into(),
+-            username: "alice".into(),
+-            email: "a@b.com".into(),
+-            display_name: "Alice".into(),
+-            device_id: None,
+-            node_id: None,
+-            iat: now() - 10_000,
+-            exp: now() - 9_000,
+-        };
+-        let head = format!("PA1.{}", B64.encode(serde_json::to_vec(&claims).unwrap()));
+-        let sig = sk.sign(head.as_bytes());
+-        let a = format!("{head}.{}", B64.encode(sig.to_bytes()));
+-        let e = verify_assertion_with(&a, &pk).unwrap_err();
+-        assert!(e.contains("过期"), "err={e}");
+-    }
+-
+-    fn claims_of(uid: &str, username: &str, email: &str) -> Claims {
+-        Claims {
+-            iss: "k".into(),
+-            uid: uid.into(),
+-            username: username.into(),
+-            email: email.into(),
+-            display_name: username.into(),
+-            device_id: None,
+-            node_id: None,
+-            iat: now(),
+-            exp: now() + 300,
+-        }
+-    }
+-
+-    #[test]
+-    fn first_member_becomes_owner_and_is_idempotent() {
+-        let _g = tmp_env();
+-        let c1 = claims_of("acct_1", "alice", "a@b.com");
+-        let u1 = upsert_member(&c1, Admission::ExistingOnly).unwrap();
+-        assert_eq!(u1.role, "owner", "空库第一个联邦账号应成为本机 owner");
+-
+-        // 幂等:同 uid 再来一次不新建、不降级。
+-        let again = upsert_member(&c1, Admission::ExistingOnly).unwrap();
+-        assert_eq!(again.id, u1.id);
+-        assert_eq!(again.role, "owner");
+-    }
+-
+-    /// 这次改动的安全线:**云端有账号 ≠ 本机欢迎你**。
+-    /// 主机已有主人之后,陌生的云端账号不带邀请码一律进不来 —— 否则谁在云端注册
+-    /// 一个号就能登进别人家的主机,而主机上的成员能触发构建脚本 = 主机 RCE。
+-    #[test]
+-    fn stranger_with_valid_identity_is_not_auto_admitted() {
+-        let _g = tmp_env();
+-        upsert_member(
+-            &claims_of("acct_1", "alice", "a@b.com"),
+-            Admission::ExistingOnly,
+-        )
+-        .unwrap();
+-
+-        let stranger = claims_of("acct_2", "mallory", "m@b.com");
+-        let e = upsert_member(&stranger, Admission::ExistingOnly).unwrap_err();
+-        assert!(e.contains("设备码"), "err={e}");
+-
+-        // 带票据角色才进得来,且角色由票据说了算(不是自封)。
+-        let u = upsert_member(&stranger, Admission::Invited("visitor".into())).unwrap();
+-        assert_eq!(u.role, "visitor");
+-        // 进来之后就是成员,日常登录不再需要票据。
+-        assert_eq!(
+-            upsert_member(&stranger, Admission::ExistingOnly)
+-                .unwrap()
+-                .role,
+-            "visitor"
+-        );
+-    }
+-
+-    /// 本次改动的**主线**:同一个账号的第二台设备,**零邀请码**就该进得去。
+-    /// 这正是用户说的「不要还得登两个账号」——它在代码里就是这一个断言。
+-    #[test]
+-    fn my_own_second_device_needs_no_invite_code() {
+-        let _g = tmp_env();
+-        // 第一台设备上首登 → 成 owner,同时把 owner_uid 钉死。
+-        let me = claims_of("acct_me", "wuli", "wuli@qq.com");
+-        let u1 = upsert_member(&me, Admission::ExistingOnly).unwrap();
+-        assert_eq!(u1.role, "owner");
+-        assert_eq!(owner_uid(), "acct_me", "首个 owner 必须落成本机主人");
+-
+-        // 模拟「另一台机器」:同一个 uid 拿断言来 —— 走 SelfOwned,不要票据。
+-        let (u2, token) = login_with_assertion(&fresh_assertion_for(&me), "node-second").unwrap();
+-        assert_eq!(u2.role, "owner");
+-        assert!(!token.is_empty());
+-        // 且它已被登记进信任契约；高风险批准另由 interconnect::gate 管。
+-        assert!(super::super::grants::get("node-second").unwrap().is_some());
+-    }
+-
+-    /// 安全线一:`owner_uid` 只写一次。否则「谁最后登录谁是主人」= 远程夺权。
+-    #[test]
+-    fn owner_uid_cannot_be_hijacked_by_a_later_owner() {
+-        let _g = tmp_env();
+-        upsert_member(
+-            &claims_of("acct_me", "wuli", "w@q.com"),
+-            Admission::ExistingOnly,
+-        )
+-        .unwrap();
+-        assert_eq!(owner_uid(), "acct_me");
+-
+-        // 攻击者拿到一张 owner 票据(或本机 owner 手滑给了他 owner 角色)。
+-        let attacker = claims_of("acct_evil", "mallory", "m@q.com");
+-        let u = upsert_member(&attacker, Admission::Invited("owner".into())).unwrap();
+-        assert_eq!(u.role, "owner", "他确实成了本机 owner(票据给的)");
+-        // 但「本机主人」这个身份没被他抢走 —— 他的设备走不了 SelfOwned 那条免票据的路。
+-        assert_eq!(owner_uid(), "acct_me", "主人 uid 不该被后来的 owner 覆盖");
+-    }
+-
+-    /// 安全线二:**撤销优先于「我是主人」**。丢了电脑在别处点了「移出」之后,
+-    /// 捡到电脑的人拿着同一个账号也进不来。
+-    #[test]
+-    fn revoked_device_is_refused_even_for_the_owner() {
+-        let _g = tmp_env();
+-        let me = claims_of("acct_me", "wuli", "w@q.com");
+-        upsert_member(&me, Admission::ExistingOnly).unwrap();
+-        // 先正常进一次,拿到契约。
+-        login_with_assertion(&fresh_assertion_for(&me), "node-lost").unwrap();
+-        // 丢了 → 在另一台设备上撤销它。
+-        super::super::grants::revoke("node-lost", "wuli").unwrap();
+-
+-        let e = login_with_assertion(&fresh_assertion_for(&me), "node-lost").unwrap_err();
+-        assert!(e.contains("移出"), "err={e}");
+-        // 别的设备不受影响。
+-        assert!(login_with_assertion(&fresh_assertion_for(&me), "node-other").is_ok());
+-    }
+-
+-    /// 安全线三:SelfOwned **只**放自己账号。别人的账号照旧要邀请码 —— 这条铁律没松。
+-    #[test]
+-    fn selfowned_does_not_leak_to_other_accounts() {
+-        let _g = tmp_env();
+-        upsert_member(
+-            &claims_of("acct_me", "wuli", "w@q.com"),
+-            Admission::ExistingOnly,
+-        )
+-        .unwrap();
+-        let stranger = claims_of("acct_other", "mallory", "m@q.com");
+-        let e = login_with_assertion(&fresh_assertion_for(&stranger), "node-x").unwrap_err();
+-        assert!(e.contains("设备码"), "陌生账号必须仍被那道码闸挡住,err={e}");
+-    }
+-
+-    /// 用户报的那个「账号主没有邀请你」:v2.9.0 之前装的机器,主人是「设为主机」时建的
+-    /// **本地账号**(没有 uid、没绑邮箱),于是 `owner_uid` 恒空 —— 主人在自己的电脑上
+-    /// 用自己的邮箱登录,反被自己的机器挡在门外。控制台这一档必须把那一行认领下来。
+-    #[test]
+-    fn console_login_adopts_the_legacy_local_owner() {
+-        let _g = tmp_env();
+-        // 老机器:一个本地 owner,用户名是当年随手起的,没绑邮箱、没有 uid。
+-        super::super::auth::create_user("wuli2025", "s3cret-8", "owner", "老账号").unwrap();
+-        assert_eq!(owner_uid(), "", "本地账号不该钉出本机主人");
+-
+-        let me = claims_of("acct_me", "agdim0003", "agdim0003@outlook.com");
+-        // 远端递进来的断言照旧被挡(这条铁律没松)。
+-        let e = upsert_member(&me, Admission::ExistingOnly).unwrap_err();
+-        assert!(e.contains("设备码"), "err={e}");
+-
+-        // 本人在这台机器前亲手登录 → 认领**那一行**,不是再建一个「第二个我」。
+-        let u = upsert_member(&me, Admission::LocalConsole).unwrap();
+-        assert_eq!(u.role, "owner");
+-        assert_eq!(u.username, "agdim0003", "用户名统一到账号中心那个");
+-        assert_eq!(owner_uid(), "acct_me", "认领之后这台机器才算有了主人");
+-        assert_eq!(
+-            super::super::auth::list_users().unwrap().len(),
+-            1,
+-            "认领而不是新建 —— 老账号名下的项目关系要跟着走"
+-        );
+-        // 从此走的是 SelfOwned 那条免票据的路。
+-        assert_eq!(
+-            upsert_member(&me, Admission::ExistingOnly).unwrap().role,
+-            "owner"
+-        );
+-    }
+-
+-    /// 邮箱是硬证据:哪怕这台机器已经有主人、有一堆成员,邮箱对得上的那一行就是同一个人。
+-    /// 它同时是「同一邮箱、用户名不同」那个症状的正解 —— 认人只认邮箱/uid,不认用户名。
+-    #[test]
+-    fn console_login_adopts_by_email_even_on_a_shared_host() {
+-        let _g = tmp_env();
+-        upsert_member(
+-            &claims_of("acct_boss", "boss", "boss@q.com"),
+-            Admission::ExistingOnly,
+-        )
+-        .unwrap();
+-        assert_eq!(owner_uid(), "acct_boss");
+-        // 老规矩建的本地成员:邮箱绑了,用户名与账号中心那边不一样。
+-        super::super::auth::create_user_with_email(
+-            "xiaoli",
+-            "s3cret-8",
+-            "collaborator",
+-            "小李",
+-            "Li@Example.COM",
+-        )
+-        .unwrap();
+-
+-        let li = claims_of("acct_li", "li", "li@example.com");
+-        let u = upsert_member(&li, Admission::LocalConsole).unwrap();
+-        assert_eq!(
+-            u.role, "collaborator",
+-            "认领不改角色 —— 不能借登录自封 owner"
+-        );
+-        assert_eq!(owner_uid(), "acct_boss", "主人也不该被换掉");
+-        assert_eq!(super::super::auth::list_users().unwrap().len(), 2);
+-    }
+-
+-    /// 控制台这一档不能变成「换个账号登一次就改朝换代」:机器已经有主人、
+-    /// 又没有任何一行认得这个邮箱时,照旧要邀请码。
+-    #[test]
+-    fn console_login_does_not_hijack_a_claimed_host() {
+-        let _g = tmp_env();
+-        upsert_member(
+-            &claims_of("acct_me", "wuli", "w@q.com"),
+-            Admission::ExistingOnly,
+-        )
+-        .unwrap();
+-        assert_eq!(owner_uid(), "acct_me");
+-
+-        let stranger = claims_of("acct_evil", "mallory", "m@q.com");
+-        let e = upsert_member(&stranger, Admission::LocalConsole).unwrap_err();
+-        assert!(e.contains("设备码"), "err={e}");
+-        assert_eq!(owner_uid(), "acct_me");
+-    }
+-
+-    /// 邮箱对得上、但那一行已经绑在**另一个**云端账号上:不抢,报清楚。
+-    #[test]
+-    fn console_login_refuses_to_steal_a_row_bound_to_another_account() {
+-        let _g = tmp_env();
+-        upsert_member(
+-            &claims_of("acct_a", "alice", "a@q.com"),
+-            Admission::ExistingOnly,
+-        )
+-        .unwrap();
+-        // 另一个 uid 拿着同一个邮箱来(正常账号中心不可能签出这种断言,但别人的权威可以)。
+-        let e = upsert_member(
+-            &claims_of("acct_b", "bob", "a@q.com"),
+-            Admission::LocalConsole,
+-        )
+-        .unwrap_err();
+-        assert!(e.contains("另一个云端账号"), "err={e}");
+-    }
+-
+-    /// **一码**:进这台机器的门,用的就是它「互联」页上那串设备码 ——
+-    /// 不再有第二种码。拿它进来的是 visitor(能做什么由设备契约逐台说了算),
+-    /// 绝不是 owner。
+-    #[test]
+-    fn the_device_code_is_the_only_code_needed_to_get_in() {
+-        let _g = tmp_env();
+-        // 这台机器已经有主人了 —— 陌生账号照旧进不去。
+-        let me = claims_of("acct_me", "wuli", "w@q.com");
+-        upsert_member(&me, Admission::ExistingOnly).unwrap();
+-        let stranger = claims_of("acct_other", "mallory", "m@q.com");
+-        let a = fresh_assertion_for(&stranger);
+-        assert!(login_with_assertion(&a, "node-x").is_err());
+-
+-        // 拿本机那串设备码来 → 进得去,角色是 visitor。
+-        let code = super::super::identity::access_code().unwrap();
+-        let (u, token) = join_with_ticket(
+-            &fresh_assertion_for(&stranger),
+-            &code,
+-            "他的笔记本",
+-            "node-x",
+-        )
+-        .unwrap();
+-        assert_eq!(u.role, "visitor", "设备码永远不该产出一个 owner");
+-        assert!(!token.is_empty());
+-        // 设备码是**常驻**的:同一串码换台设备再来一次照样管用(不像票据用一次就废)。
+-        let other = claims_of("acct_third", "carol", "c@q.com");
+-        assert_eq!(
+-            join_with_ticket(
+-                &fresh_assertion_for(&other),
+-                &code.to_ascii_lowercase(),
+-                "第三台",
+-                "node-y"
+-            )
+-            .unwrap()
+-            .0
+-            .role,
+-            "visitor"
+-        );
+-        // 换一串之后旧码当场作废。
+-        super::super::identity::rotate_access_code("本机").unwrap();
+-        let d = claims_of("acct_4th", "dave", "d@q.com");
+-        assert!(join_with_ticket(&fresh_assertion_for(&d), &code, "第四台", "node-z").is_err());
+-    }
+-
+-    /// 邀请码只有一种,但用户会粘裸码、分享码或互联页 PLR1 设备码。都得认。
+-    #[test]
+-    fn invite_code_accepts_bare_lowercase_share_and_plr1_forms() {
+-        let _g = tmp_env();
+-        let share = super::super::identity::encode_share_code(
+-            "ABCD2345",
+-            &["http://192.168.1.9:8484".to_string()],
+-        );
+-        assert_eq!(normalize_invite("ABCD2345"), "ABCD2345");
+-        assert_eq!(normalize_invite("  abcd2345 "), "ABCD2345");
+-        assert_eq!(normalize_invite(&share), "ABCD2345");
+-        assert_eq!(
+-            normalize_invite("PLR1-ABCD2345-0123456789abcdef"),
+-            "ABCD2345"
+-        );
+-        assert_eq!(
+-            normalize_invite("plr1-abcd2345-0123456789abcdef"),
+-            "ABCD2345"
+-        );
+-        assert_eq!(normalize_invite("PLR1-ABCD2345"), "PLR1-ABCD2345");
+-        assert_eq!(normalize_invite("   "), "");
+-    }
+-
+-    /// 用 tmp_env 里的临时签名密钥给一组 claims 现签一张真断言,
+-    /// 并把本机钉在这把钥匙上 —— 让 login_with_assertion 的验签走真路径,不绕过。
+-    fn fresh_assertion_for(c: &Claims) -> String {
+-        let pk = public_key_b64().unwrap();
+-        // 首次调用时钉住自己(测试里权威与成员是同一进程、同一把钥匙)。
+-        if pinned().is_none() {
+-            db::meta_set("authority_url", "http://test-authority").unwrap();
+-            db::meta_set("authority_pub", &pk).unwrap();
+-            db::meta_set("authority_kid", &kid_of(&pk)).unwrap();
+-        }
+-        sign_assertion(&c.uid, &c.username, &c.email, &c.display_name).unwrap()
+-    }
+-
+-    /// 一张票据只能用一次:并发/重复入伙不能各拿一个成员资格。
+-    #[test]
+-    fn ticket_is_burned_exactly_once() {
+-        let _g = tmp_env();
+-        upsert_member(
+-            &claims_of("acct_1", "alice", "a@b.com"),
+-            Admission::ExistingOnly,
+-        )
+-        .unwrap();
+-        let t = super::super::identity::create_ticket("collaborator", "t").unwrap();
+-
+-        assert_eq!(burn_ticket(&t.code, "bob").unwrap(), "collaborator");
+-        let e = burn_ticket(&t.code, "carol").unwrap_err();
+-        assert!(e.contains("已被使用"), "err={e}");
+-    }
+-
+-    #[test]
+-    fn federated_user_cannot_be_password_logged_in() {
+-        let _g = tmp_env();
+-        let c = Claims {
+-            iss: "k".into(),
+-            uid: "acct_1".into(),
+-            username: "alice".into(),
+-            email: "a@b.com".into(),
+-            display_name: "Alice".into(),
+-            device_id: None,
+-            node_id: None,
+-            iat: now(),
+-            exp: now() + 300,
+-        };
+-        upsert_member(&c, Admission::ExistingOnly).unwrap();
+-        // 哨兵不是合法 PHC —— 任何密码都不该进得去。
+-        assert!(super::super::auth::login("alice", "whatever", "d1").is_err());
+-        assert!(super::super::auth::login("alice", FEDERATED_SENTINEL, "d1").is_err());
+-    }
+-
+-    /// 本次改动要证明的那件事:**一个账号,在两台互不相识的主机上都能登进去**。
+-    ///
+-    /// 两台主机 = 两个 collab.db(切 `POLARIS_COLLAB_DB` 就是换一台机器的视角:同一份代码、
+-    /// 另一份数据)。权威机建号签断言,两台成员主机各自**离线验签**、各自落自己的成员资格 ——
+-    /// 全程没有任何一台成员主机见过密码,也没有任何一台需要连得上权威。
+-    #[test]
+-    fn one_account_logs_into_two_independent_hosts() {
+-        let _g = tmp_env();
+-        let stamp = std::process::id();
+-        let db_authority = std::env::temp_dir().join(format!("auth-cloud-{stamp}.db"));
+-        let db_host_a = std::env::temp_dir().join(format!("auth-hostA-{stamp}.db"));
+-        let db_host_b = std::env::temp_dir().join(format!("auth-hostB-{stamp}.db"));
+-        for p in [&db_authority, &db_host_a, &db_host_b] {
+-            let _ = std::fs::remove_file(p);
+-        }
+-
+-        // ── 云机(账号权威):建全局账号 + 签断言 ──
+-        std::env::set_var("POLARIS_COLLAB_DB", &db_authority);
+-        let pubkey = public_key_b64().unwrap();
+-        let (acct, uid) = super::super::auth::create_authority_account(
+-            "wuli",
+-            "s3cret-8",
+-            "武力",
+-            "wuli@example.com",
+-        )
+-        .unwrap();
+-        assert!(!uid.is_empty());
+-        // 权威侧用**邮箱**也登得进(注册绑的就是它)。
+-        let (_, uid2, email) =
+-            super::super::auth::authority_login("wuli@example.com", "s3cret-8").unwrap();
+-        assert_eq!(uid2, uid, "邮箱登录与用户名登录必须是同一个全局身份");
+-        assert_eq!(email, "wuli@example.com");
+-        let assertion = sign_assertion(&uid, &acct.username, &email, "武力").unwrap();
+-
+-        // ── 主机 A(比如家里的桌面):空库,离线验签即进,首个成员当 owner ──
+-        std::env::set_var("POLARIS_COLLAB_DB", &db_host_a);
+-        let claims_a = verify_assertion_with(&assertion, &pubkey).unwrap();
+-        let ua = upsert_member(&claims_a, Admission::ExistingOnly).unwrap();
+-        assert_eq!(ua.username, "wuli");
+-        assert_eq!(ua.role, "owner");
+-        let token_a = super::super::auth::issue_session(ua.id, "devA").unwrap();
+-        assert_eq!(
+-            super::super::auth::check_session(&token_a)
+-                .unwrap()
+-                .username,
+-            "wuli"
+-        );
+-
+-        // ── 主机 B(比如 NAS):另一座库,同一张断言照样进 ──
+-        std::env::set_var("POLARIS_COLLAB_DB", &db_host_b);
+-        let claims_b = verify_assertion_with(&assertion, &pubkey).unwrap();
+-        let ub = upsert_member(&claims_b, Admission::ExistingOnly).unwrap();
+-        assert_eq!(ub.username, "wuli");
+-        let token_b = super::super::auth::issue_session(ub.id, "devB").unwrap();
+-
+-        // 全局身份同一个;两台机器上的本地行号与会话各自独立(互不影响,互不泄露)。
+-        assert_eq!(claims_a.uid, claims_b.uid, "跨主机认的必须是同一个 uid");
+-        assert!(
+-            super::super::auth::check_session(&token_a).is_err(),
+-            "主机 A 的会话不该在主机 B 上有效"
+-        );
+-        assert_eq!(
+-            super::super::auth::check_session(&token_b)
+-                .unwrap()
+-                .username,
+-            "wuli"
+-        );
+-
+-        // 密码从没离开过权威:成员主机上拿真密码也登不进去。
+-        assert!(
+-            super::super::auth::login("wuli", "s3cret-8", "devB").is_err(),
+-            "联邦账号不该能在成员主机上用密码登录"
+-        );
+-
+-        for p in [&db_authority, &db_host_a, &db_host_b] {
+-            let _ = std::fs::remove_file(p);
+-        }
+-    }
+-
+-    #[test]
+-    fn username_squatting_is_refused() {
+-        let _g = tmp_env();
+-        // 本机先有一个同名的本地账号(uid 为空)。
+-        super::super::auth::create_user("alice", "s3cret-8", "owner", "Local Alice").unwrap();
+-        let c = Claims {
+-            iss: "k".into(),
+-            uid: "acct_1".into(),
+-            username: "alice".into(),
+-            email: "a@b.com".into(),
+-            display_name: "Alice".into(),
+-            device_id: None,
+-            node_id: None,
+-            iat: now(),
+-            exp: now() + 300,
+-        };
+-        let e = upsert_member(&c, Admission::ExistingOnly).unwrap_err();
+-        assert!(e.contains("同名"), "err={e}");
+-    }
+-}
++mod tests;
++#[cfg(test)]
++mod host_tests;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/authority/host_tests.rs b/src-tauri/crates/polaris-collab/src/collab/authority/host_tests.rs
+new file mode 100644
+index 0000000..3dab7e7
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/authority/host_tests.rs
+@@ -0,0 +1,102 @@
++use super::*;
++use super::tests::tmp_env;
++
++/// 本次改动要证明的那件事:**一个账号,在两台互不相识的主机上都能登进去**。
++///
++/// 两台主机 = 两个 collab.db(切 `POLARIS_COLLAB_DB` 就是换一台机器的视角:同一份代码、
++/// 另一份数据)。权威机建号签断言,两台成员主机各自**离线验签**、各自落自己的成员资格 ——
++/// 全程没有任何一台成员主机见过密码,也没有任何一台需要连得上权威。
++
++#[test]
++fn one_account_logs_into_two_independent_hosts() {
++    let _g = tmp_env();
++    let stamp = std::process::id();
++    let db_authority = std::env::temp_dir().join(format!("auth-cloud-{stamp}.db"));
++    let db_host_a = std::env::temp_dir().join(format!("auth-hostA-{stamp}.db"));
++    let db_host_b = std::env::temp_dir().join(format!("auth-hostB-{stamp}.db"));
++    for p in [&db_authority, &db_host_a, &db_host_b] {
++        let _ = std::fs::remove_file(p);
++    }
++
++    // ── 云机(账号权威):建全局账号 + 签断言 ──
++    std::env::set_var("POLARIS_COLLAB_DB", &db_authority);
++    let pubkey = public_key_b64().unwrap();
++    let (acct, uid) = crate::collab::auth::create_authority_account(
++        "wuli",
++        "s3cret-8",
++        "武力",
++        "wuli@example.com",
++    )
++    .unwrap();
++    assert!(!uid.is_empty());
++    // 权威侧用**邮箱**也登得进(注册绑的就是它)。
++    let (_, uid2, email) =
++        crate::collab::auth::authority_login("wuli@example.com", "s3cret-8").unwrap();
++    assert_eq!(uid2, uid, "邮箱登录与用户名登录必须是同一个全局身份");
++    assert_eq!(email, "wuli@example.com");
++    let assertion = sign_assertion(&uid, &acct.username, &email, "武力").unwrap();
++
++    // ── 主机 A(比如家里的桌面):空库,离线验签即进,首个成员当 owner ──
++    std::env::set_var("POLARIS_COLLAB_DB", &db_host_a);
++    let claims_a = verify_assertion_with(&assertion, &pubkey).unwrap();
++    let ua = upsert_member(&claims_a, Admission::ExistingOnly).unwrap();
++    assert_eq!(ua.username, "wuli");
++    assert_eq!(ua.role, "owner");
++    let token_a = crate::collab::auth::issue_session(ua.id, "devA").unwrap();
++    assert_eq!(
++        crate::collab::auth::check_session(&token_a)
++            .unwrap()
++            .username,
++        "wuli"
++    );
++
++    // ── 主机 B(比如 NAS):另一座库,同一张断言照样进 ──
++    std::env::set_var("POLARIS_COLLAB_DB", &db_host_b);
++    let claims_b = verify_assertion_with(&assertion, &pubkey).unwrap();
++    let ub = upsert_member(&claims_b, Admission::ExistingOnly).unwrap();
++    assert_eq!(ub.username, "wuli");
++    let token_b = crate::collab::auth::issue_session(ub.id, "devB").unwrap();
++
++    // 全局身份同一个;两台机器上的本地行号与会话各自独立(互不影响,互不泄露)。
++    assert_eq!(claims_a.uid, claims_b.uid, "跨主机认的必须是同一个 uid");
++    assert!(
++        crate::collab::auth::check_session(&token_a).is_err(),
++        "主机 A 的会话不该在主机 B 上有效"
++    );
++    assert_eq!(
++        crate::collab::auth::check_session(&token_b)
++            .unwrap()
++            .username,
++        "wuli"
++    );
++
++    // 密码从没离开过权威:成员主机上拿真密码也登不进去。
++    assert!(
++        crate::collab::auth::login("wuli", "s3cret-8", "devB").is_err(),
++        "联邦账号不该能在成员主机上用密码登录"
++    );
++
++    for p in [&db_authority, &db_host_a, &db_host_b] {
++        let _ = std::fs::remove_file(p);
++    }
++}
++
++#[test]
++fn username_squatting_is_refused() {
++    let _g = tmp_env();
++    // 本机先有一个同名的本地账号(uid 为空)。
++    crate::collab::auth::create_user("alice", "s3cret-8", "owner", "Local Alice").unwrap();
++    let c = Claims {
++        iss: "k".into(),
++        uid: "acct_1".into(),
++        username: "alice".into(),
++        email: "a@b.com".into(),
++        display_name: "Alice".into(),
++        device_id: None,
++        node_id: None,
++        iat: now(),
++        exp: now() + 300,
++    };
++    let e = upsert_member(&c, Admission::ExistingOnly).unwrap_err();
++    assert!(e.contains("同名"), "err={e}");
++}
+diff --git a/src-tauri/crates/polaris-collab/src/collab/authority/membership.rs b/src-tauri/crates/polaris-collab/src/collab/authority/membership.rs
+new file mode 100644
+index 0000000..0352c4b
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/authority/membership.rs
+@@ -0,0 +1,319 @@
++//! Local admission and ownership rules.
++use super::*;
++
++/// 入伙资格:一张有效断言只证明「你是谁」,**不证明「这台主机欢迎你」**。
++/// 两者必须分开 —— 否则任何人在云端注册个账号,就能登进别人家的主机。
++/// 而主机上的成员能建项目、push 仓库、触发 checks 跑构建脚本 = 主机 RCE,
++/// 这正是 collab_signup 默认关闭要防的事,联邦登录不能把这道门重新打开。
++pub enum Admission {
++    /// 日常登录:只认已经是本机成员的账号;不是就拒(唯一例外见 upsert_member 里的空库分支)。
++    ExistingOnly,
++    /// 拿着 owner 签发的一次性邀请票据来入伙,角色由票据决定。
++    Invited(String),
++    /// **自己名下的设备**:断言里的 uid 与本机记着的 `owner_uid` 一致 → 直接给 owner。
++    ///
++    /// 为什么开这个口:上面那条铁律(「云端证明你是谁,进不进得去由每台机器说了算」)对
++    /// **别人**成立,对**你自己名下的第二台机器**却是纯摩擦 —— 两台机器的主人是同一个 uid,
++    /// 却要自己给自己发一张邀请码。用户看到的就是「怎么还要登第二个账号」。
++    ///
++    /// 代价与对冲说清楚:云机若被完全拿下,它能签任意断言,于是能直接成为你每台机器的 owner
++    /// (此前还隔着一道邀请码)。策略 B 允许新设备立即全权；高风险操作另走
++    /// interconnect::gate 的设备批准与吊销新鲜度检查。另有 `owner_uid` 只写一次的闸
++    /// (见 [`super::db::meta_set_once`]),否则「谁最后登录谁是主人」会把远程夺权做成一条 API。
++    SelfOwned,
++    /// **本机控制台**:用户就坐在这台机器前,在桌面 App 里亲手填了邮箱和验证码
++    /// (`account_login_code`,只有 Tauri 命令这一条路能到,不经 HTTP、不在手机数据面白名单里)。
++    ///
++    /// 为什么必须有这一档:`owner_uid` 只由**联邦登录**写下。v2.9.0 之前装的机器,主人是
++    /// 「设为主机」时建的本地账号(没有 uid、常常也没绑邮箱),于是 `owner_uid` 恒空、
++    /// `is_mine` 恒 false —— 主人在自己的电脑上用自己的邮箱登录,反被自己的机器回一句
++    /// 「本主机还没有邀请你」。两台老机器互相如此,就成了「云端名册看得见对方,却谁也挂不上谁的盘」。
++    ///
++    /// 这一档做两件事(见 [`adopt_row_for_console`]):**认领**已有的那一行(邮箱对得上,
++    /// 或这台机器还没主人且只有一个本地 owner),而不是在同一台机器上再造一个「第二个我」;
++    /// 认不到又确实没主人时,就地成为主人。
++    ///
++    /// 安全边界:这一档**只**给本地控制台。远端递进来的断言(`/api/collab/login_assertion`)
++    /// 走的仍是 [`Admission::ExistingOnly`] —— 陌生账号照旧要邀请码,这条铁律没松。
++    LocalConsole,
++}
++
++/// 本机控制台首登时,找出「其实就是同一个人」的那一行 users。找不到返回 None。
++///
++/// 两条证据,强弱分明:
++///  ① **邮箱对得上** —— 账号中心保证一个邮箱只属于一个账号,所以这是硬证据,
++///     哪怕这台机器已经有主人、有一堆成员,也认。
++///  ② 老账号常常压根没绑邮箱(`create_user` 建的本地 owner 就是),于是退而求其次:
++///     **这台机器还没有主人(`owner_uid` 空)且全机只有一个 owner、它还是个本地账号** ——
++///     这就是「我自己的电脑上那个老账号」。有第二个 owner、或已经有主人,一律不猜。
++///
++/// `host_owner` 是**进事务之前**读好的 `owner_uid`:meta 表在另一条连接上,
++/// 写事务开着的时候再去开一条连接读它是在给自己找 SQLITE_BUSY。
++fn adopt_row_for_console(
++    tx: &rusqlite::Transaction<'_>,
++    claims: &Claims,
++    host_owner: &str,
++) -> Result<Option<(i64, String)>, String> {
++    let email = claims.email.trim().to_ascii_lowercase();
++    if !email.is_empty() {
++        let hit: Option<(i64, String, String)> = tx
++            .query_row(
++                "SELECT id,role,uid FROM users WHERE email<>'' AND email=?1 COLLATE NOCASE LIMIT 1",
++                params![email],
++                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
++            )
++            .optional()
++            .map_err(|e| format!("按邮箱找本机账号失败: {e}"))?;
++        if let Some((id, role, uid)) = hit {
++            // 这一行已经绑在**另一个**云端账号上:不抢。静默顶替等于把别人在本机的
++            // 项目关系送给来人 —— 与下面那道同名不同 uid 的闸同一口径。
++            if !uid.is_empty() && uid != claims.uid {
++                return Err(format!(
++                    "本机的「{email}」已经绑在另一个云端账号上了 —— \
++                     换回原来那个账号登录,或让 owner 先在成员列表里解绑它"
++                ));
++            }
++            return Ok(Some((id, role)));
++        }
++    }
++    if !host_owner.is_empty() {
++        return Ok(None);
++    }
++    let mut st = tx
++        .prepare("SELECT id,uid FROM users WHERE role='owner' ORDER BY id")
++        .map_err(|e| format!("查本机 owner 失败: {e}"))?;
++    let owners: Vec<(i64, String)> = st
++        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
++        .map_err(|e| format!("查本机 owner 失败: {e}"))?
++        .collect::<Result<_, _>>()
++        .map_err(|e| format!("查本机 owner 失败: {e}"))?;
++    drop(st);
++    match owners.as_slice() {
++        [(id, uid)] if uid.trim().is_empty() => Ok(Some((*id, "owner".to_string()))),
++        _ => Ok(None),
++    }
++}
++
++/// 「这台机器不认识你」的话术。**必须带「设备码」三字** —— 登录界面靠它把码输入框
++/// 自动展开(见 `EmailLogin.vue`)。顺带把「码在哪儿」说死,不让用户自己猜。
++///
++/// 注意这句话里已经没有「主机」「邀请」「入伙」了:那是我们的内部分工,不是用户的世界。
++/// 他的世界只有一件事 —— 「那台机器的码给我」。
++fn no_invite_msg() -> String {
++    "这台机器还不认得你 —— 在它的「互联」页第 ① 屏复制那串**设备码**(PLR1-…),\
++     填到下面就能进"
++        .to_string()
++}
++
++/// 把一张已验过的断言落成本机的成员资格,返回本机 `users` 行。
++///
++/// 四种情况:
++///  · uid 已在本机 → 更新用户名/邮箱/昵称(权威改名后本机跟着改),复用原角色。
++///  · uid 不在本机、本机零账号 → 建号并给 **owner**(装这台机器的人就是它的主人)。
++///  · uid 不在本机、带邀请票据 → 按票据角色建号入伙。
++///  · uid 不在本机、无票据 → **拒**。云端有账号 ≠ 本机欢迎你。
++///
++/// 用户名撞车(同名但 uid 不同)会明确报错交给 owner 处理,绝不静默顶替 ——
++/// 顶替等于把别人在本机的项目关系送给来人。
++pub fn upsert_member(claims: &Claims, admission: Admission) -> Result<User, String> {
++    // 进事务之前读:meta 走的是另一条连接,写事务开着时再开一条读它 = 自找 SQLITE_BUSY。
++    let host_owner = owner_uid();
++    let mut conn = open_db()?;
++    let tx = conn
++        .transaction_with_behavior(TransactionBehavior::Immediate)
++        .map_err(|e| format!("成员资格事务失败: {e}"))?;
++
++    let existing: Option<(i64, String)> = tx
++        .query_row(
++            "SELECT id,role FROM users WHERE uid=?1",
++            params![claims.uid],
++            |r| Ok((r.get(0)?, r.get(1)?)),
++        )
++        .optional()
++        .map_err(|e| format!("查成员资格失败: {e}"))?;
++
++    if let Some((id, role)) = existing {
++        let disabled: i64 = tx
++            .query_row("SELECT disabled FROM users WHERE id=?1", params![id], |r| {
++                r.get(0)
++            })
++            .map_err(|e| format!("查账号状态失败: {e}"))?;
++        if disabled != 0 {
++            return Err("你的账号在本主机上已被停用".into());
++        }
++        tx.execute(
++            "UPDATE users SET username=?1, email=?2, display_name=?3 WHERE id=?4",
++            params![
++                claims.username,
++                claims.email,
++                claims.display_name.trim(),
++                id
++            ],
++        )
++        .map_err(|e| {
++            if e.to_string().contains("UNIQUE") {
++                // 权威那边把邮箱/用户名改成了本机另一个账号已占的值。本机不猜、不顶替。
++                "同步账号资料失败:用户名或邮箱与本机另一个账号冲突,请联系 owner 处理".to_string()
++            } else {
++                format!("同步账号资料失败: {e}")
++            }
++        })?;
++        tx.commit().map_err(|e| format!("提交成员资格失败: {e}"))?;
++        // 老库升级路径:这台机器早就有 owner 了,但 owner_uid 这个键是这次才引入的。
++        // 由本人登录时补写一次(只写一次,后来者改不动)。
++        stamp_owner_uid(&role, &claims.uid);
++        return Ok(User {
++            id,
++            username: claims.username.clone(),
++            role,
++            display_name: claims.display_name.trim().into(),
++            disabled: false,
++        });
++    }
++
++    // 本机控制台首登:先认领「其实就是同一个人」的那一行,而不是在同一台机器上再建一个号。
++    // 认领而不是新建,是为了让老账号名下的项目/任务关系跟着走 —— 那正是用户说的「统一一下」。
++    if matches!(admission, Admission::LocalConsole) {
++        if let Some((id, role)) = adopt_row_for_console(&tx, claims, &host_owner)? {
++            tx.execute(
++                "UPDATE users SET uid=?1, username=?2, email=?3, display_name=?4 WHERE id=?5",
++                params![
++                    claims.uid,
++                    claims.username,
++                    claims.email,
++                    claims.display_name.trim(),
++                    id
++                ],
++            )
++            .map_err(|e| {
++                if e.to_string().contains("UNIQUE") {
++                    format!(
++                        "本机另一个账号占着用户名「{}」或这个邮箱 —— 请先把它改名再登录",
++                        claims.username
++                    )
++                } else {
++                    format!("认领本机账号失败: {e}")
++                }
++            })?;
++            tx.commit().map_err(|e| format!("提交成员资格失败: {e}"))?;
++            stamp_owner_uid(&role, &claims.uid);
++            db::audit(&claims.username, "member.adopt", &claims.uid, &role);
++            return Ok(User {
++                id,
++                username: claims.username.clone(),
++                role,
++                display_name: claims.display_name.trim().into(),
++                disabled: false,
++            });
++        }
++    }
++
++    // 同名不同 uid → 拒绝顶替。
++    let clash: Option<String> = tx
++        .query_row(
++            "SELECT uid FROM users WHERE username=?1 COLLATE NOCASE LIMIT 1",
++            params![claims.username],
++            |r| r.get(0),
++        )
++        .optional()
++        .map_err(|e| format!("查用户名失败: {e}"))?;
++    if let Some(other_uid) = clash {
++        return Err(if other_uid.is_empty() {
++            format!(
++                "本机已有同名本地账号「{}」——请 owner 先把它改名或迁移,再用云端账号登录",
++                claims.username
++            )
++        } else {
++            format!("本机已有另一个云端账号占用用户名「{}」", claims.username)
++        });
++    }
++
++    let n: i64 = tx
++        .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
++        .map_err(|e| e.to_string())?;
++    // 空库 = 这台主机刚装好还没主人,第一个用云端账号登进来的人就是它的 owner
++    // (等价于原来的 bootstrap,只是身份改由云端签)。此后一律要票据。
++    let role = if n == 0 {
++        "owner".to_string()
++    } else {
++        match admission {
++            Admission::Invited(r) => r,
++            Admission::SelfOwned => "owner".to_string(),
++            // 认领不到任何旧行,但这台机器确实还没有主人:坐在它跟前的这个人就是主人。
++            // 已经有主人了则照旧要邀请码 —— 换个账号在本机控制台登录不该改朝换代。
++            Admission::LocalConsole if host_owner.is_empty() => "owner".to_string(),
++            Admission::LocalConsole | Admission::ExistingOnly => return Err(no_invite_msg()),
++        }
++    };
++    tx.execute(
++        "INSERT INTO users(username,pass_hash,role,display_name,created_at,email,uid) \
++         VALUES(?1,?2,?3,?4,?5,?6,?7)",
++        params![
++            claims.username,
++            FEDERATED_SENTINEL,
++            role,
++            claims.display_name.trim(),
++            now(),
++            claims.email,
++            claims.uid
++        ],
++    )
++    .map_err(|e| format!("建成员资格失败: {e}"))?;
++    let id = tx.last_insert_rowid();
++    tx.commit().map_err(|e| format!("提交成员资格失败: {e}"))?;
++    stamp_owner_uid(&role, &claims.uid);
++    db::audit(&claims.username, "member.join", &claims.uid, &role);
++    Ok(User {
++        id,
++        username: claims.username.clone(),
++        role,
++        display_name: claims.display_name.trim().into(),
++        disabled: false,
++    })
++}
++
++/// 这个云端账号在本机**已经有成员资格**了吗。纯本地读,不联网 ——
++/// 设备网的对账循环每拍都要问一次「我进得了自己这台机器的门吗」,不能为此打一趟公网。
++pub fn is_member(uid: &str) -> bool {
++    let uid = uid.trim();
++    if uid.is_empty() {
++        return false;
++    }
++    let Ok(conn) = open_db() else { return false };
++    conn.query_row(
++        "SELECT 1 FROM users WHERE uid=?1 AND disabled=0 LIMIT 1",
++        params![uid],
++        |_| Ok(()),
++    )
++    .optional()
++    .map(|x| x.is_some())
++    .unwrap_or(false)
++}
++
++/// 本机记着的主人 uid。空 = 这台机器还没有主人(全新装机)。
++pub fn owner_uid() -> String {
++    db::meta_get(OWNER_UID_KEY).unwrap_or_default()
++}
++
++const OWNER_UID_KEY: &str = "owner_uid";
++
++/// 某个账号成为本机 owner 时,把它的 uid 钉成「这台机器的主人」。
++///
++/// **只写一次**(见 [`db::meta_set_once`])。这是 [`Admission::SelfOwned`] 整条路的地基:
++/// 若这个键能被后来的写入覆盖,那就是「谁最后一个登录谁就是主人」—— 等于把远程夺权做成
++/// 一条 API。写不进去(已有主人)不是错误,是正常的日常路径,静默即可。
++pub(super) fn stamp_owner_uid(role: &str, uid: &str) {
++    if role != "owner" || uid.trim().is_empty() {
++        return;
++    }
++    if let Ok((cur, fresh)) = db::meta_set_once(OWNER_UID_KEY, uid) {
++        if fresh {
++            db::audit("system", "host.owner_uid.set", uid, "本机主人已确定");
++        } else if cur != uid {
++            // 同一台机器上有两个 owner 角色的联邦账号:后来的那个不会成为「主人」,
++            // 它照样是 owner(能管本机),但同账号设备网的自动准入只认第一个。如实留痕。
++            db::audit("system", "host.owner_uid.keep", &cur, uid);
++        }
++    }
++}
++
+diff --git a/src-tauri/crates/polaris-collab/src/collab/authority/tests.rs b/src-tauri/crates/polaris-collab/src/collab/authority/tests.rs
+new file mode 100644
+index 0000000..4c7998a
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/authority/tests.rs
+@@ -0,0 +1,430 @@
++use super::*;
++
++/// 独占一个临时库 + 临时签名密钥(两者都是进程级环境变量,必须串行)。
++pub(super) fn tmp_env() -> std::sync::MutexGuard<'static, ()> {
++    let g = crate::collab::db::TEST_LOCK
++        .lock()
++        .unwrap_or_else(|e| e.into_inner());
++    let stamp = format!(
++        "{}-{}",
++        std::process::id(),
++        std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH)
++            .unwrap()
++            .as_nanos()
++    );
++    std::env::set_var(
++        "POLARIS_COLLAB_DB",
++        std::env::temp_dir().join(format!("authority-test-{stamp}.db")),
++    );
++    std::env::set_var(
++        "POLARIS_ACCOUNT_KEY",
++        std::env::temp_dir().join(format!("authority-test-{stamp}.key")),
++    );
++    std::env::remove_var("POLARIS_ACCOUNT_AUTHORITY");
++    std::env::remove_var("POLARIS_ACCOUNT_AUTHORITY_URL");
++    g
++}
++
++#[test]
++fn sign_then_verify_roundtrip() {
++    let _g = tmp_env();
++    let pk = public_key_b64().unwrap();
++    let a = sign_assertion("acct_x", "alice", "a@b.com", "Alice").unwrap();
++    let c = verify_assertion_with(&a, &pk).unwrap();
++    assert_eq!(c.uid, "acct_x");
++    assert_eq!(c.username, "alice");
++    assert_eq!(c.email, "a@b.com");
++}
++
++#[test]
++fn tampered_assertion_is_rejected() {
++    let _g = tmp_env();
++    let pk = public_key_b64().unwrap();
++    let a = sign_assertion("acct_x", "alice", "a@b.com", "Alice").unwrap();
++    // 改载荷(把 alice 换成 root)后重新拼装 —— 签名覆盖载荷,必须验不过。
++    let mut parts: Vec<&str> = a.split('.').collect();
++    let raw = B64.decode(parts[1]).unwrap();
++    let mut claims: Claims = serde_json::from_slice(&raw).unwrap();
++    claims.username = "root".into();
++    let forged = B64.encode(serde_json::to_vec(&claims).unwrap());
++    parts[1] = &forged;
++    let bad = parts.join(".");
++    assert!(verify_assertion_with(&bad, &pk).is_err());
++}
++
++#[test]
++fn other_key_cannot_verify() {
++    let _g = tmp_env();
++    let a = sign_assertion("acct_x", "alice", "a@b.com", "Alice").unwrap();
++    // 另一把钥匙的公钥:验不过(这就是「换把钥匙冒充权威」被挡住的那一刻)。
++    let mut seed = [7u8; 32];
++    seed[0] = 9;
++    let other = SigningKey::from_bytes(&seed);
++    let other_pub = B64.encode(other.verifying_key().to_bytes());
++    assert!(verify_assertion_with(&a, &other_pub).is_err());
++}
++
++#[test]
++fn expired_assertion_is_rejected() {
++    let _g = tmp_env();
++    let pk = public_key_b64().unwrap();
++    let sk = signing_key().unwrap();
++    let claims = Claims {
++        iss: kid_of(&pk),
++        uid: "acct_x".into(),
++        username: "alice".into(),
++        email: "a@b.com".into(),
++        display_name: "Alice".into(),
++        device_id: None,
++        node_id: None,
++        iat: now() - 10_000,
++        exp: now() - 9_000,
++    };
++    let head = format!("PA1.{}", B64.encode(serde_json::to_vec(&claims).unwrap()));
++    let sig = sk.sign(head.as_bytes());
++    let a = format!("{head}.{}", B64.encode(sig.to_bytes()));
++    let e = verify_assertion_with(&a, &pk).unwrap_err();
++    assert!(e.contains("过期"), "err={e}");
++}
++
++pub(super) fn claims_of(uid: &str, username: &str, email: &str) -> Claims {
++    Claims {
++        iss: "k".into(),
++        uid: uid.into(),
++        username: username.into(),
++        email: email.into(),
++        display_name: username.into(),
++        device_id: None,
++        node_id: None,
++        iat: now(),
++        exp: now() + 300,
++    }
++}
++
++#[test]
++fn first_member_becomes_owner_and_is_idempotent() {
++    let _g = tmp_env();
++    let c1 = claims_of("acct_1", "alice", "a@b.com");
++    let u1 = upsert_member(&c1, Admission::ExistingOnly).unwrap();
++    assert_eq!(u1.role, "owner", "空库第一个联邦账号应成为本机 owner");
++
++    // 幂等:同 uid 再来一次不新建、不降级。
++    let again = upsert_member(&c1, Admission::ExistingOnly).unwrap();
++    assert_eq!(again.id, u1.id);
++    assert_eq!(again.role, "owner");
++}
++
++/// 这次改动的安全线:**云端有账号 ≠ 本机欢迎你**。
++/// 主机已有主人之后,陌生的云端账号不带邀请码一律进不来 —— 否则谁在云端注册
++/// 一个号就能登进别人家的主机,而主机上的成员能触发构建脚本 = 主机 RCE。
++#[test]
++fn stranger_with_valid_identity_is_not_auto_admitted() {
++    let _g = tmp_env();
++    upsert_member(
++        &claims_of("acct_1", "alice", "a@b.com"),
++        Admission::ExistingOnly,
++    )
++    .unwrap();
++
++    let stranger = claims_of("acct_2", "mallory", "m@b.com");
++    let e = upsert_member(&stranger, Admission::ExistingOnly).unwrap_err();
++    assert!(e.contains("设备码"), "err={e}");
++
++    // 带票据角色才进得来,且角色由票据说了算(不是自封)。
++    let u = upsert_member(&stranger, Admission::Invited("visitor".into())).unwrap();
++    assert_eq!(u.role, "visitor");
++    // 进来之后就是成员,日常登录不再需要票据。
++    assert_eq!(
++        upsert_member(&stranger, Admission::ExistingOnly)
++            .unwrap()
++            .role,
++        "visitor"
++    );
++}
++
++/// 本次改动的**主线**:同一个账号的第二台设备,**零邀请码**就该进得去。
++/// 这正是用户说的「不要还得登两个账号」——它在代码里就是这一个断言。
++#[test]
++fn my_own_second_device_needs_no_invite_code() {
++    let _g = tmp_env();
++    // 第一台设备上首登 → 成 owner,同时把 owner_uid 钉死。
++    let me = claims_of("acct_me", "wuli", "wuli@qq.com");
++    let u1 = upsert_member(&me, Admission::ExistingOnly).unwrap();
++    assert_eq!(u1.role, "owner");
++    assert_eq!(owner_uid(), "acct_me", "首个 owner 必须落成本机主人");
++
++    // 模拟「另一台机器」:同一个 uid 拿断言来 —— 走 SelfOwned,不要票据。
++    let (u2, token) = login_with_assertion(&fresh_assertion_for(&me), "node-second").unwrap();
++    assert_eq!(u2.role, "owner");
++    assert!(!token.is_empty());
++    // 且它已被登记进信任契约；高风险批准另由 interconnect::gate 管。
++    assert!(crate::collab::grants::get("node-second").unwrap().is_some());
++}
++
++/// 安全线一:`owner_uid` 只写一次。否则「谁最后登录谁是主人」= 远程夺权。
++#[test]
++fn owner_uid_cannot_be_hijacked_by_a_later_owner() {
++    let _g = tmp_env();
++    upsert_member(
++        &claims_of("acct_me", "wuli", "w@q.com"),
++        Admission::ExistingOnly,
++    )
++    .unwrap();
++    assert_eq!(owner_uid(), "acct_me");
++
++    // 攻击者拿到一张 owner 票据(或本机 owner 手滑给了他 owner 角色)。
++    let attacker = claims_of("acct_evil", "mallory", "m@q.com");
++    let u = upsert_member(&attacker, Admission::Invited("owner".into())).unwrap();
++    assert_eq!(u.role, "owner", "他确实成了本机 owner(票据给的)");
++    // 但「本机主人」这个身份没被他抢走 —— 他的设备走不了 SelfOwned 那条免票据的路。
++    assert_eq!(owner_uid(), "acct_me", "主人 uid 不该被后来的 owner 覆盖");
++}
++
++/// 安全线二:**撤销优先于「我是主人」**。丢了电脑在别处点了「移出」之后,
++/// 捡到电脑的人拿着同一个账号也进不来。
++#[test]
++fn revoked_device_is_refused_even_for_the_owner() {
++    let _g = tmp_env();
++    let me = claims_of("acct_me", "wuli", "w@q.com");
++    upsert_member(&me, Admission::ExistingOnly).unwrap();
++    // 先正常进一次,拿到契约。
++    login_with_assertion(&fresh_assertion_for(&me), "node-lost").unwrap();
++    // 丢了 → 在另一台设备上撤销它。
++    crate::collab::grants::revoke("node-lost", "wuli").unwrap();
++
++    let e = login_with_assertion(&fresh_assertion_for(&me), "node-lost").unwrap_err();
++    assert!(e.contains("移出"), "err={e}");
++    // 别的设备不受影响。
++    assert!(login_with_assertion(&fresh_assertion_for(&me), "node-other").is_ok());
++}
++
++/// 安全线三:SelfOwned **只**放自己账号。别人的账号照旧要邀请码 —— 这条铁律没松。
++#[test]
++fn selfowned_does_not_leak_to_other_accounts() {
++    let _g = tmp_env();
++    upsert_member(
++        &claims_of("acct_me", "wuli", "w@q.com"),
++        Admission::ExistingOnly,
++    )
++    .unwrap();
++    let stranger = claims_of("acct_other", "mallory", "m@q.com");
++    let e = login_with_assertion(&fresh_assertion_for(&stranger), "node-x").unwrap_err();
++    assert!(e.contains("设备码"), "陌生账号必须仍被那道码闸挡住,err={e}");
++}
++
++/// 用户报的那个「账号主没有邀请你」:v2.9.0 之前装的机器,主人是「设为主机」时建的
++/// **本地账号**(没有 uid、没绑邮箱),于是 `owner_uid` 恒空 —— 主人在自己的电脑上
++/// 用自己的邮箱登录,反被自己的机器挡在门外。控制台这一档必须把那一行认领下来。
++#[test]
++fn console_login_adopts_the_legacy_local_owner() {
++    let _g = tmp_env();
++    // 老机器:一个本地 owner,用户名是当年随手起的,没绑邮箱、没有 uid。
++    crate::collab::auth::create_user("wuli2025", "s3cret-8", "owner", "老账号").unwrap();
++    assert_eq!(owner_uid(), "", "本地账号不该钉出本机主人");
++
++    let me = claims_of("acct_me", "agdim0003", "agdim0003@outlook.com");
++    // 远端递进来的断言照旧被挡(这条铁律没松)。
++    let e = upsert_member(&me, Admission::ExistingOnly).unwrap_err();
++    assert!(e.contains("设备码"), "err={e}");
++
++    // 本人在这台机器前亲手登录 → 认领**那一行**,不是再建一个「第二个我」。
++    let u = upsert_member(&me, Admission::LocalConsole).unwrap();
++    assert_eq!(u.role, "owner");
++    assert_eq!(u.username, "agdim0003", "用户名统一到账号中心那个");
++    assert_eq!(owner_uid(), "acct_me", "认领之后这台机器才算有了主人");
++    assert_eq!(
++        crate::collab::auth::list_users().unwrap().len(),
++        1,
++        "认领而不是新建 —— 老账号名下的项目关系要跟着走"
++    );
++    // 从此走的是 SelfOwned 那条免票据的路。
++    assert_eq!(
++        upsert_member(&me, Admission::ExistingOnly).unwrap().role,
++        "owner"
++    );
++}
++
++/// 邮箱是硬证据:哪怕这台机器已经有主人、有一堆成员,邮箱对得上的那一行就是同一个人。
++/// 它同时是「同一邮箱、用户名不同」那个症状的正解 —— 认人只认邮箱/uid,不认用户名。
++#[test]
++fn console_login_adopts_by_email_even_on_a_shared_host() {
++    let _g = tmp_env();
++    upsert_member(
++        &claims_of("acct_boss", "boss", "boss@q.com"),
++        Admission::ExistingOnly,
++    )
++    .unwrap();
++    assert_eq!(owner_uid(), "acct_boss");
++    // 老规矩建的本地成员:邮箱绑了,用户名与账号中心那边不一样。
++    crate::collab::auth::create_user_with_email(
++        "xiaoli",
++        "s3cret-8",
++        "collaborator",
++        "小李",
++        "Li@Example.COM",
++    )
++    .unwrap();
++
++    let li = claims_of("acct_li", "li", "li@example.com");
++    let u = upsert_member(&li, Admission::LocalConsole).unwrap();
++    assert_eq!(
++        u.role, "collaborator",
++        "认领不改角色 —— 不能借登录自封 owner"
++    );
++    assert_eq!(owner_uid(), "acct_boss", "主人也不该被换掉");
++    assert_eq!(crate::collab::auth::list_users().unwrap().len(), 2);
++}
++
++/// 控制台这一档不能变成「换个账号登一次就改朝换代」:机器已经有主人、
++/// 又没有任何一行认得这个邮箱时,照旧要邀请码。
++#[test]
++fn console_login_does_not_hijack_a_claimed_host() {
++    let _g = tmp_env();
++    upsert_member(
++        &claims_of("acct_me", "wuli", "w@q.com"),
++        Admission::ExistingOnly,
++    )
++    .unwrap();
++    assert_eq!(owner_uid(), "acct_me");
++
++    let stranger = claims_of("acct_evil", "mallory", "m@q.com");
++    let e = upsert_member(&stranger, Admission::LocalConsole).unwrap_err();
++    assert!(e.contains("设备码"), "err={e}");
++    assert_eq!(owner_uid(), "acct_me");
++}
++
++/// 邮箱对得上、但那一行已经绑在**另一个**云端账号上:不抢,报清楚。
++#[test]
++fn console_login_refuses_to_steal_a_row_bound_to_another_account() {
++    let _g = tmp_env();
++    upsert_member(
++        &claims_of("acct_a", "alice", "a@q.com"),
++        Admission::ExistingOnly,
++    )
++    .unwrap();
++    // 另一个 uid 拿着同一个邮箱来(正常账号中心不可能签出这种断言,但别人的权威可以)。
++    let e = upsert_member(
++        &claims_of("acct_b", "bob", "a@q.com"),
++        Admission::LocalConsole,
++    )
++    .unwrap_err();
++    assert!(e.contains("另一个云端账号"), "err={e}");
++}
++
++/// **一码**:进这台机器的门,用的就是它「互联」页上那串设备码 ——
++/// 不再有第二种码。拿它进来的是 visitor(能做什么由设备契约逐台说了算),
++/// 绝不是 owner。
++#[test]
++fn the_device_code_is_the_only_code_needed_to_get_in() {
++    let _g = tmp_env();
++    // 这台机器已经有主人了 —— 陌生账号照旧进不去。
++    let me = claims_of("acct_me", "wuli", "w@q.com");
++    upsert_member(&me, Admission::ExistingOnly).unwrap();
++    let stranger = claims_of("acct_other", "mallory", "m@q.com");
++    let a = fresh_assertion_for(&stranger);
++    assert!(login_with_assertion(&a, "node-x").is_err());
++
++    // 拿本机那串设备码来 → 进得去,角色是 visitor。
++    let code = crate::collab::identity::access_code().unwrap();
++    let (u, token) = join_with_ticket(
++        &fresh_assertion_for(&stranger),
++        &code,
++        "他的笔记本",
++        "node-x",
++    )
++    .unwrap();
++    assert_eq!(u.role, "visitor", "设备码永远不该产出一个 owner");
++    assert!(!token.is_empty());
++    // 设备码是**常驻**的:同一串码换台设备再来一次照样管用(不像票据用一次就废)。
++    let other = claims_of("acct_third", "carol", "c@q.com");
++    assert_eq!(
++        join_with_ticket(
++            &fresh_assertion_for(&other),
++            &code.to_ascii_lowercase(),
++            "第三台",
++            "node-y"
++        )
++        .unwrap()
++        .0
++        .role,
++        "visitor"
++    );
++    // 换一串之后旧码当场作废。
++    crate::collab::identity::rotate_access_code("本机").unwrap();
++    let d = claims_of("acct_4th", "dave", "d@q.com");
++    assert!(join_with_ticket(&fresh_assertion_for(&d), &code, "第四台", "node-z").is_err());
++}
++
++/// 邀请码只有一种,但用户会粘裸码、分享码或互联页 PLR1 设备码。都得认。
++#[test]
++fn invite_code_accepts_bare_lowercase_share_and_plr1_forms() {
++    let _g = tmp_env();
++    let share = crate::collab::identity::encode_share_code(
++        "ABCD2345",
++        &["http://192.168.1.9:8484".to_string()],
++    );
++    assert_eq!(normalize_invite("ABCD2345"), "ABCD2345");
++    assert_eq!(normalize_invite("  abcd2345 "), "ABCD2345");
++    assert_eq!(normalize_invite(&share), "ABCD2345");
++    assert_eq!(
++        normalize_invite("PLR1-ABCD2345-0123456789abcdef"),
++        "ABCD2345"
++    );
++    assert_eq!(
++        normalize_invite("plr1-abcd2345-0123456789abcdef"),
++        "ABCD2345"
++    );
++    assert_eq!(normalize_invite("PLR1-ABCD2345"), "PLR1-ABCD2345");
++    assert_eq!(normalize_invite("   "), "");
++}
++
++/// 用 tmp_env 里的临时签名密钥给一组 claims 现签一张真断言,
++/// 并把本机钉在这把钥匙上 —— 让 login_with_assertion 的验签走真路径,不绕过。
++fn fresh_assertion_for(c: &Claims) -> String {
++    let pk = public_key_b64().unwrap();
++    // 首次调用时钉住自己(测试里权威与成员是同一进程、同一把钥匙)。
++    if pinned().is_none() {
++        db::meta_set("authority_url", "http://test-authority").unwrap();
++        db::meta_set("authority_pub", &pk).unwrap();
++        db::meta_set("authority_kid", &kid_of(&pk)).unwrap();
++    }
++    sign_assertion(&c.uid, &c.username, &c.email, &c.display_name).unwrap()
++}
++
++/// 一张票据只能用一次:并发/重复入伙不能各拿一个成员资格。
++#[test]
++fn ticket_is_burned_exactly_once() {
++    let _g = tmp_env();
++    upsert_member(
++        &claims_of("acct_1", "alice", "a@b.com"),
++        Admission::ExistingOnly,
++    )
++    .unwrap();
++    let t = crate::collab::identity::create_ticket("collaborator", "t").unwrap();
++
++    assert_eq!(burn_ticket(&t.code, "bob").unwrap(), "collaborator");
++    let e = burn_ticket(&t.code, "carol").unwrap_err();
++    assert!(e.contains("已被使用"), "err={e}");
++}
++
++#[test]
++fn federated_user_cannot_be_password_logged_in() {
++    let _g = tmp_env();
++    let c = Claims {
++        iss: "k".into(),
++        uid: "acct_1".into(),
++        username: "alice".into(),
++        email: "a@b.com".into(),
++        display_name: "Alice".into(),
++        device_id: None,
++        node_id: None,
++        iat: now(),
++        exp: now() + 300,
++    };
++    upsert_member(&c, Admission::ExistingOnly).unwrap();
++    // 哨兵不是合法 PHC —— 任何密码都不该进得去。
++    assert!(crate::collab::auth::login("alice", "whatever", "d1").is_err());
++    assert!(crate::collab::auth::login("alice", FEDERATED_SENTINEL, "d1").is_err());
++}
++
+diff --git a/src-tauri/src/mesh.rs b/src-tauri/src/mesh.rs
+index 1f28a79..6d71627 100644
+--- a/src-tauri/src/mesh.rs
++++ b/src-tauri/src/mesh.rs
+@@ -184,120 +184,8 @@ fn port_for(node_id: &str) -> u16 {
+     p
+ }
+ 
+-// ────────────────────────────── 与云端目录通信 ──────────────────────────────
+-
+-fn agent() -> ureq::Agent {
+-    ureq::AgentBuilder::new()
+-        .timeout_connect(CLOUD_TIMEOUT)
+-        .timeout_read(CLOUD_TIMEOUT)
+-        .build()
+-}
+-
+-/// 把 ureq 错误翻成人话。云端明确给的业务错误原样透传(「设备已被移出设备网」这类
+-/// 必须让用户看见原文,糊成「网络错误」会让人对着正确的账号反复试)。
+-fn cloud_err(e: ureq::Error) -> String {
+-    match e {
+-        ureq::Error::Status(code, resp) => {
+-            let body = resp.into_string().unwrap_or_default();
+-            serde_json::from_str::<Value>(&body)
+-                .ok()
+-                .and_then(|v| v.get("error").and_then(|x| x.as_str()).map(String::from))
+-                .unwrap_or_else(|| format!("HTTP {code}"))
+-        }
+-        ureq::Error::Transport(t) => format!("连不上云端账号中心:{t}"),
+-    }
+-}
+-
+-fn norm_url(u: &str) -> String {
+-    let t = u.trim().trim_end_matches('/');
+-    if t.starts_with("http://") || t.starts_with("https://") {
+-        t.to_string()
+-    } else {
+-        format!("https://{t}")
+-    }
+-}
+-
+-fn loopback_http(url: &str) -> bool {
+-    let Some(rest) = url.strip_prefix("http://") else {
+-        return false;
+-    };
+-    let authority = rest.split('/').next().unwrap_or("");
+-    let host = authority.rsplit('@').next().unwrap_or(authority);
+-    host == "localhost"
+-        || host.starts_with("localhost:")
+-        || host == "127.0.0.1"
+-        || host.starts_with("127.0.0.1:")
+-        || host == "[::1]"
+-        || host.starts_with("[::1]:")
+-}
+-
+-/// 登录凭据、OTP、assertion 与长期 meshKey 都会经过账号中心。公网 HTTP 必须显式确认，
+-/// 不能再因为用户把“高级地址”留空，就静默把整套身份发到明文 IP。
+-fn validate_authority_url(raw: &str, allow_insecure_http: bool) -> Result<String, String> {
+-    if raw.trim().is_empty() {
+-        return Err("未配置权威；当前可继续使用本地模式".into());
+-    }
+-    let url = norm_url(raw);
+-    if url == "https://" || url == "http://" {
+-        return Err("请填写账号中心地址".into());
+-    }
+-    if url.starts_with("https://") || loopback_http(&url) {
+-        return Ok(url);
+-    }
+-    if url.starts_with("http://") {
+-        if allow_insecure_http {
+-            return Ok(url);
+-        }
+-        return Err(format!(
+-            "账号中心 {url} 使用明文 HTTP，邮箱、验证码和设备密钥可能被窃取。请改用 HTTPS；若这是你明确信任的旧服务，请在高级设置勾选‘仍使用不安全 HTTP’后重试"
+-        ));
+-    }
+-    Err("账号中心地址只支持 https://（本机调试可用 http://localhost）".into())
+-}
+-
+-fn authority_transport_state(url: &str) -> &'static str {
+-    if url.starts_with("https://") || loopback_http(url) {
+-        "secure"
+-    } else {
+-        "insecure_legacy"
+-    }
+-}
+-
+-/// 心跳 + 取同账号设备清单。
+-fn announce(c: &Cfg) -> Result<Value, String> {
+-    crate::collab::authority::pin_explicit(&c.url)?;
+-    crate::collab::db::meta_set("mesh_node_id", &my_node_id())?;
+-    let resp = agent()
+-        .post(&format!("{}/api/mesh/announce", c.url))
+-        .set("Authorization", &format!("Bearer {}", c.key))
+-        .send_json(json!({ "name": my_name(), "os": my_os(), "ver": my_ver() }))
+-        .map_err(cloud_err)?;
+-    let v: Value = resp
+-        .into_json()
+-        .map_err(|e| format!("云端返回的不是 JSON:{e}"))?;
+-    if let Some(uid) = v.get("uid").and_then(|x| x.as_str()) {
+-        let _ = crate::collab::db::meta_set(K_UID, uid);
+-    }
+-    security::publish(&v);
+-    Ok(v)
+-}
+-
+-/// 取一张新的身份断言(5 分钟有效),用来进对端主机的门。
+-fn fresh_assertion(c: &Cfg) -> Result<String, String> {
+-    crate::collab::authority::pin_explicit(&c.url)?;
+-    let resp = agent()
+-        .post(&format!("{}/api/mesh/assert", c.url))
+-        .set("Authorization", &format!("Bearer {}", c.key))
+-        .send_json(json!({}))
+-        .map_err(cloud_err)?;
+-    let v: Value = resp
+-        .into_json()
+-        .map_err(|e| format!("云端返回的不是 JSON:{e}"))?;
+-    v.get("assertion")
+-        .and_then(|x| x.as_str())
+-        .map(String::from)
+-        .ok_or_else(|| "云端没返回身份断言".into())
+-}
++mod transport;
++use transport::*;
+ 
+ /// 拿断言去**对端**(经隧道的本地口)换它的本机会话 token。
+ ///
+@@ -509,364 +397,12 @@ pub fn spawn_if_enrolled() {
+     }
+ }
+ 
+-// ────────────────────────────── 命令 ──────────────────────────────
+-
+-/// **设备台账**:一次给全 —— 云端目录(有哪些设备)+ 本机契约(各自什么档)+ 实时链路
+-/// (连上没、挂成哪个盘)。前端一个请求画完整页,不必自己 join 三份数据。
+-///
+-/// 云端拉不到(断网/云机挂了)不算失败:退回只用本机契约与实时链路画,并把原因带上 ——
+-/// 断网时看见「3 台设备,云端暂时联系不上」远好过看见一片空白。
+-#[cfg_attr(feature = "desktop", tauri::command)]
+-pub async fn mesh_devices() -> Result<Value, String> {
+-    let me = my_node_id();
+-    let (cloud, cloud_msg) = match cfg() {
+-        Some(c) => {
+-            let r = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-                let resp = agent()
+-                    .get(&format!("{}/api/mesh/devices", c.url))
+-                    .set("Authorization", &format!("Bearer {}", c.key))
+-                    .call()
+-                    .map_err(cloud_err)?;
+-                resp.into_json::<Value>()
+-                    .map_err(|e| format!("云端返回的不是 JSON:{e}"))
+-            })
+-            .await
+-            .unwrap_or_else(|e| Err(format!("取台账任务失败:{e}")));
+-            match r {
+-                Ok(v) => (v, String::new()),
+-                Err(e) => (json!({}), e),
+-            }
+-        }
+-        None => (json!({}), "本机还没登录".to_string()),
+-    };
+-
+-    // 本机契约:node_id → 档位。
+-    let grants: HashMap<String, crate::collab::grants::Grant> = crate::collab::grants::list()
+-        .unwrap_or_default()
+-        .into_iter()
+-        .map(|g| (g.node_id.clone(), g))
+-        .collect();
+-    // 实时链路 + 盘。
+-    let mounts: HashMap<String, Value> = crate::fsmount::fs_mount_status()
+-        .into_iter()
+-        .filter_map(|v| {
+-            v.get("sourceId")
+-                .and_then(|x| x.as_str())
+-                .map(|s| (s.to_string(), v.clone()))
+-        })
+-        .collect();
+-    let links_snapshot: HashMap<String, (bool, String, String, String, u64)> = links()
+-        .lock()
+-        .unwrap()
+-        .iter()
+-        .map(|(k, l)| {
+-            let connected = link_connected(l);
+-            (
+-                k.clone(),
+-                (
+-                    connected,
+-                    l.err.clone(),
+-                    l.phase.clone(),
+-                    l.error_code.clone(),
+-                    l.last_verified_at,
+-                ),
+-            )
+-        })
+-        .collect();
+-
+-    // 云端台账为骨架;云端拉不到就拿本机契约当骨架(断网也要能看见自己批过哪些设备)。
+-    let skeleton: Vec<Value> = match cloud.get("devices").and_then(|x| x.as_array()) {
+-        Some(list) => list.clone(),
+-        None => grants
+-            .values()
+-            .map(|g| {
+-                json!({
+-                    "nodeId": g.node_id, "name": g.name, "os": "", "ver": "",
+-                    "lastSeen": 0, "online": false, "firstSeen": g.granted_at,
+-                    "revoked": g.revoked, "self": g.node_id == me,
+-                })
+-            })
+-            .collect(),
+-    };
+-
+-    let devices: Vec<Value> = skeleton
+-        .into_iter()
+-        .map(|mut d| {
+-            let nid = d
+-                .get("nodeId")
+-                .and_then(|x| x.as_str())
+-                .unwrap_or("")
+-                .to_string();
+-            let g = grants.get(&nid);
+-            let m = mounts.get(&source_id(&nid));
+-            let (connected, err, phase, error_code, last_verified_at) = links_snapshot
+-                .get(&nid)
+-                .cloned()
+-                .unwrap_or((false, String::new(), "stopped".into(), String::new(), 0));
+-            d["isSelf"] = json!(d.get("self").and_then(|x| x.as_bool()).unwrap_or(nid == me));
+-            d["connected"] = json!(connected);
+-            d["phase"] = json!(phase);
+-            d["errorCode"] = json!(error_code);
+-            d["lastVerifiedAt"] = json!(last_verified_at);
+-            d["error"] = json!(err);
+-            d["drive"] = m.and_then(|x| x.get("drive")).cloned().unwrap_or(json!(""));
+-            d["mounted"] = m.and_then(|x| x.get("ok")).cloned().unwrap_or(json!(false));
+-            d["writable"] = m
+-                .and_then(|x| x.get("writable"))
+-                .cloned()
+-                .unwrap_or(json!(false));
+-            // 档位:没有契约的设备(还没连过)给个「未批准」而不是编一个默认值。
+-            d["fsAccess"] = json!(g.map(|x| x.fs_access.clone()).unwrap_or_default());
+-            d["effectiveFs"] = json!(g.map(|x| x.effective_fs().to_string()).unwrap_or_default());
+-            d["execAccess"] = json!(g.map(|x| x.exec_access.clone()).unwrap_or_default());
+-            d["autoMount"] = json!(g.map(|x| x.auto_mount).unwrap_or(false));
+-            d["inCooldown"] = json!(false);
+-            d["cooldownUntil"] = json!(0);
+-            d["granted"] = json!(g.is_some());
+-            d["localRevoked"] = json!(g.map(|x| x.revoked).unwrap_or(false));
+-            d
+-        })
+-        .collect();
+-
+-    let uid = visible_uid();
+-    let (enrollment_state, ready, secure, enrollment_warn) = enrollment_state();
+-    Ok(json!({
+-        "enrolled": cfg().is_some(),
+-        "ready": ready,
+-        "secure": secure,
+-        "enrollmentState": enrollment_state,
+-        "enrollmentWarn": enrollment_warn,
+-        "interconnect": orchestration::status(),
+-        "authorityConfigured": !default_authority().is_empty(),
+-        "configurationError": crate::collab::interconnect::load().err(),
+-        "relayConfig": orchestration::relay_status(),
+-        "url": meta(K_URL),
+-        "uid": uid,
+-        "nodeId": me,
+-        "name": my_name(),
+-        "cloudError": cloud_msg,
+-        // 「这台机器认不认我」。false 时别的设备一律连不进来(它们进的就是这道门),
+-        // UI 据此把话说明白 + 给出邀请码那条出路,而不是让用户对着一片"看得见连不上"猜。
+-        "localMember": crate::collab::authority::is_member(&uid),
+-        "localMemberWarn": member_warn().lock().unwrap().clone(),
+-        "devices": devices,
+-    }))
+-}
+-
++mod device_commands;
++pub use device_commands::*;
++use device_commands::parse_device_code;
+ mod policy_commands;
+ pub use policy_commands::*;
+-
+-/// 立刻对一次账(UI 点「刷新」用,不必等下一拍心跳)。
+-#[cfg_attr(feature = "desktop", tauri::command)]
+-pub async fn mesh_sync() -> Result<Value, String> {
+-    let n = reconcile_once().await?;
+-    Ok(json!({ "peers": n }))
+-}
+-
+-// ────────────────────────── 设备码:一码互联 ──────────────────────────
+-//
+-// 「主机」这个概念到此为止。每台机器都有一串自己的码,都能被连、也都能去连别人 ——
+-// 界面上不再有「设为主机」「owner 令牌」「邀请码」「入伙」这些只有我们自己懂的词。
+-//
+-// 码的形态:`PLR1-<访问码>-<NodeId>`。
+-// 为什么 NodeId 得在码里而不是像 UU远程 那样只给一串短数字:UU 有一台云端目录服务器
+-// 替它把「ID → 现在在哪」查出来,我们的云端账号中心只认**同一个账号**的设备,
+-// 别人的账号在上面查不到你。要做成 12 位短码,得在云机上再加一张公开的
+-// 「码 → NodeId」目录表并重新部署它 —— 那是另一步,得你点头。现在这串码的好处是
+-// **不依赖云端**:两台机器都断了公网、只在一个局域网里,照样粘码就连上。
+-
+-/// 本机设备码。用户复制的就是这一串。
+-#[cfg_attr(feature = "desktop", tauri::command)]
+-pub async fn device_code() -> Result<Value, String> {
+-    let node_id = my_node_id();
+-    let code = tokio::task::spawn_blocking(crate::collab::identity::access_code)
+-        .await
+-        .map_err(|e| format!("取设备码失败:{e}"))??;
+-    Ok(json!({
+-        "code": code,
+-        "nodeId": node_id,
+-        "name": my_name(),
+-        // NodeId 还没就绪(隧道没起来)时给半成品:UI 照实说「稍候」,别显示一串连不上的码。
+-        "share": if node_id.is_empty() { String::new() } else { format!("PLR1-{code}-{node_id}") },
+-        "ready": !node_id.is_empty(),
+-    }))
+-}
+-
+-/// 换一串码:旧码当场失效,靠旧码连进来的设备会话一并作废。
+-#[cfg_attr(feature = "desktop", tauri::command)]
+-pub async fn device_code_rotate() -> Result<Value, String> {
+-    let code = tokio::task::spawn_blocking(|| crate::collab::identity::rotate_access_code("本机"))
+-        .await
+-        .map_err(|e| format!("换码任务失败:{e}"))??;
+-    let node_id = my_node_id();
+-    Ok(json!({
+-        "code": code,
+-        "share": if node_id.is_empty() { String::new() } else { format!("PLR1-{code}-{node_id}") },
+-    }))
+-}
+-
+-/// 解析一串设备码 → (访问码, NodeId)。只认 `PLR1-<code>-<nodeId>`。
+-fn parse_device_code(s: &str) -> Result<(String, String), String> {
+-    let t = s.trim();
+-    if t.to_ascii_uppercase().starts_with("PLRK1-") {
+-        return Err("legacy_code_unsupported:这是旧版 PLRK1 设备码，缺少一次性挑战和主机密钥证明，不能安全降级使用；请让对方升级 Polaris 后重新复制 PLR1 设备码".into());
+-    }
+-    let body = t
+-        .strip_prefix("PLR1-")
+-        .or_else(|| t.strip_prefix("plr1-"))
+-        .ok_or("这不是设备码 —— 它长这样:PLR1-XXXXXXXX-<一串字母数字>")?;
+-    let (code, node) = body
+-        .split_once('-')
+-        .ok_or("设备码不完整,少了后半段 —— 让对方整串重新复制一次")?;
+-    if code.trim().is_empty() || node.trim().is_empty() {
+-        return Err("设备码不完整 —— 让对方整串重新复制一次".into());
+-    }
+-    Ok((code.trim().to_ascii_uppercase(), node.trim().to_string()))
+-}
+-
+-/// 设备网现状:入网了吗、名册上有谁、各自连上了没、挂成了哪块盘。
+-#[cfg_attr(feature = "desktop", tauri::command)]
+-pub fn mesh_status() -> Value {
+-    let enrolled = cfg().is_some();
+-    let (enrollment_state, ready, secure, enrollment_warn) = enrollment_state();
+-    // fsmount 的实况(盘符/读写档/在线)按 sourceId 对进来,前端一处就能全画出来。
+-    let mounts: HashMap<String, Value> = crate::fsmount::fs_mount_status()
+-        .into_iter()
+-        .filter_map(|v| {
+-            v.get("sourceId")
+-                .and_then(|x| x.as_str())
+-                .map(|s| (s.to_string(), v.clone()))
+-        })
+-        .collect();
+-    let peers: Vec<Value> = links()
+-        .lock()
+-        .unwrap()
+-        .iter()
+-        .map(|(node_id, l)| {
+-            let m = mounts.get(&source_id(node_id));
+-            json!({
+-                "nodeId": node_id,
+-                "name": l.name,
+-                "port": l.port,
+-                "connected": link_connected(l),
+-                "phase": l.phase,
+-                "errorCode": l.error_code,
+-                "lastVerifiedAt": l.last_verified_at,
+-                "error": l.err,
+-                // 对端会话 token 交给前端:远程终端(/api/exec)与「浏览盘」都靠它。
+-                // 与手工添加的远程源同一口径 —— 那条路的 owner 令牌本来就存在前端。
+-                "token": l.token.clone().unwrap_or_default(),
+-                "drive": m.and_then(|x| x.get("drive")).cloned().unwrap_or(json!("")),
+-                "writable": m.and_then(|x| x.get("writable")).cloned().unwrap_or(json!(false)),
+-                "ok": m.and_then(|x| x.get("ok")).cloned().unwrap_or(json!(false)),
+-            })
+-        })
+-        .collect();
+-    json!({
+-        "enrolled": enrolled,
+-        "ready": ready,
+-        "secure": secure,
+-        "enrollmentState": enrollment_state,
+-        "enrollmentWarn": enrollment_warn,
+-        "interconnect": orchestration::status(),
+-        "authorityConfigured": !default_authority().is_empty(),
+-        "configurationError": crate::collab::interconnect::load().err(),
+-        "relayConfig": orchestration::relay_status(),
+-        "url": meta(K_URL),
+-        "uid": visible_uid(),
+-        "nodeId": my_node_id(),
+-        "name": my_name(),
+-        "peers": peers,
+-    })
+-}
+-
+ #[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    #[test]
+-    fn url_normalization_prefers_https_and_public_http_requires_consent() {
+-        assert_eq!(norm_url(" example.com/ "), "https://example.com");
+-        assert_eq!(norm_url("https://a.com/"), "https://a.com");
+-        assert_eq!(norm_url("http://a.com"), "http://a.com");
+-        assert!(validate_authority_url("http://a.com", false)
+-            .unwrap_err()
+-            .contains("明文 HTTP"));
+-        assert_eq!(
+-            validate_authority_url("http://a.com", true).unwrap(),
+-            "http://a.com"
+-        );
+-        assert_eq!(
+-            validate_authority_url("http://127.0.0.1:8080", false).unwrap(),
+-            "http://127.0.0.1:8080"
+-        );
+-    }
+-
+-    #[test]
+-    fn device_code_parser_requires_the_complete_plr1_shape() {
+-        let (code, node) = parse_device_code("plr1-abcd2345-node-identity").unwrap();
+-        assert_eq!(code, "ABCD2345");
+-        assert_eq!(node, "node-identity");
+-        assert!(parse_device_code("ABCD2345").is_err());
+-        assert!(parse_device_code("PLR1-ABCD2345").is_err());
+-        assert!(parse_device_code("PLR1--node").is_err());
+-        assert!(parse_device_code("PLRK1-old-owner-token")
+-            .unwrap_err()
+-            .starts_with("legacy_code_unsupported:"));
+-    }
+-
+-    #[test]
+-    fn logged_out_status_never_exposes_a_stale_uid() {
+-        assert_eq!(current_uid(false, "uid-from-old-login".into()), "");
+-        assert_eq!(current_uid(true, "uid-current".into()), "uid-current");
+-    }
+-
+-    #[test]
+-    fn cached_token_without_a_live_tunnel_is_not_connected() {
+-        let link = Link {
+-            name: "stale".into(),
+-            port: 65_534,
+-            token: Some("cached-session".into()),
+-            phase: "ready".into(),
+-            error_code: String::new(),
+-            last_verified_at: now_secs(),
+-            err: String::new(),
+-        };
+-        assert!(
+-            !link_connected(&link),
+-            "刚验证过的 token 也不能把不存在的 tunnel 冒充成在线"
+-        );
+-    }
+-
+-    /// sourceId 必须稳定且不超长(fsmount 拿它当 key,长 NodeId 截断后仍要唯一到实用)。
+-    #[test]
+-    fn source_id_is_stable_and_short() {
+-        let a = "abcdefghijklmnopqrstuvwxyz0123456789";
+-        assert_eq!(source_id(a), source_id(a));
+-        assert_eq!(source_id(a), "mesh-abcdefghijklmnop");
+-        assert_eq!(source_id("short"), "mesh-short");
+-    }
+-
+-    /// 端口分配:新设备各得一口,已在册的沿用原口(重试不换口)。
+-    #[test]
+-    fn ports_are_unique_and_sticky() {
+-        links().lock().unwrap().clear();
+-        let p1 = port_for("node-a");
+-        links().lock().unwrap().insert(
+-            "node-a".into(),
+-            Link {
+-                name: "a".into(),
+-                port: p1,
+-                token: None,
+-                phase: "connecting".into(),
+-                error_code: String::new(),
+-                last_verified_at: 0,
+-                err: String::new(),
+-            },
+-        );
+-        let p2 = port_for("node-b");
+-        assert_ne!(p1, p2, "两台设备不能撞同一个本地口");
+-        assert_eq!(port_for("node-a"), p1, "已在册的必须沿用原端口");
+-        links().lock().unwrap().clear();
+-    }
+-}
++mod tests;
++#[cfg(test)]
++mod tls_tests;
+diff --git a/src-tauri/src/mesh/device_commands.rs b/src-tauri/src/mesh/device_commands.rs
+new file mode 100644
+index 0000000..c001274
+--- /dev/null
++++ b/src-tauri/src/mesh/device_commands.rs
+@@ -0,0 +1,272 @@
++//! Device inventory and local device-code commands.
++use super::*;
++
++// ────────────────────────────── 命令 ──────────────────────────────
++
++/// **设备台账**:一次给全 —— 云端目录(有哪些设备)+ 本机契约(各自什么档)+ 实时链路
++/// (连上没、挂成哪个盘)。前端一个请求画完整页,不必自己 join 三份数据。
++///
++/// 云端拉不到(断网/云机挂了)不算失败:退回只用本机契约与实时链路画,并把原因带上 ——
++/// 断网时看见「3 台设备,云端暂时联系不上」远好过看见一片空白。
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub async fn mesh_devices() -> Result<Value, String> {
++    let me = my_node_id();
++    let (cloud, cloud_msg) = match cfg() {
++        Some(c) => {
++            let r = tokio::task::spawn_blocking(move || -> Result<Value, String> {
++                let resp = agent()?
++                    .get(&format!("{}/api/mesh/devices", c.url))
++                    .set("Authorization", &format!("Bearer {}", c.key))
++                    .call()
++                    .map_err(cloud_err)?;
++                resp.into_json::<Value>()
++                    .map_err(|e| format!("云端返回的不是 JSON:{e}"))
++            })
++            .await
++            .unwrap_or_else(|e| Err(format!("取台账任务失败:{e}")));
++            match r {
++                Ok(v) => (v, String::new()),
++                Err(e) => (json!({}), e),
++            }
++        }
++        None => (json!({}), "本机还没登录".to_string()),
++    };
++
++    // 本机契约:node_id → 档位。
++    let grants: HashMap<String, crate::collab::grants::Grant> = crate::collab::grants::list()
++        .unwrap_or_default()
++        .into_iter()
++        .map(|g| (g.node_id.clone(), g))
++        .collect();
++    // 实时链路 + 盘。
++    let mounts: HashMap<String, Value> = crate::fsmount::fs_mount_status()
++        .into_iter()
++        .filter_map(|v| {
++            v.get("sourceId")
++                .and_then(|x| x.as_str())
++                .map(|s| (s.to_string(), v.clone()))
++        })
++        .collect();
++    let links_snapshot: HashMap<String, (bool, String, String, String, u64)> = links()
++        .lock()
++        .unwrap_or_else(|error| error.into_inner())
++        .iter()
++        .map(|(k, l)| {
++            let connected = link_connected(l);
++            (
++                k.clone(),
++                (
++                    connected,
++                    l.err.clone(),
++                    l.phase.clone(),
++                    l.error_code.clone(),
++                    l.last_verified_at,
++                ),
++            )
++        })
++        .collect();
++
++    // 云端台账为骨架;云端拉不到就拿本机契约当骨架(断网也要能看见自己批过哪些设备)。
++    let skeleton: Vec<Value> = match cloud.get("devices").and_then(|x| x.as_array()) {
++        Some(list) => list.clone(),
++        None => grants
++            .values()
++            .map(|g| {
++                json!({
++                    "nodeId": g.node_id, "name": g.name, "os": "", "ver": "",
++                    "lastSeen": 0, "online": false, "firstSeen": g.granted_at,
++                    "revoked": g.revoked, "self": g.node_id == me,
++                })
++            })
++            .collect(),
++    };
++
++    let devices: Vec<Value> = skeleton
++        .into_iter()
++        .map(|mut d| {
++            let nid = d
++                .get("nodeId")
++                .and_then(|x| x.as_str())
++                .unwrap_or("")
++                .to_string();
++            let g = grants.get(&nid);
++            let m = mounts.get(&source_id(&nid));
++            let (connected, err, phase, error_code, last_verified_at) = links_snapshot
++                .get(&nid)
++                .cloned()
++                .unwrap_or((false, String::new(), "stopped".into(), String::new(), 0));
++            d["isSelf"] = json!(d.get("self").and_then(|x| x.as_bool()).unwrap_or(nid == me));
++            d["connected"] = json!(connected);
++            d["phase"] = json!(phase);
++            d["errorCode"] = json!(error_code);
++            d["lastVerifiedAt"] = json!(last_verified_at);
++            d["error"] = json!(err);
++            d["drive"] = m.and_then(|x| x.get("drive")).cloned().unwrap_or(json!(""));
++            d["mounted"] = m.and_then(|x| x.get("ok")).cloned().unwrap_or(json!(false));
++            d["writable"] = m
++                .and_then(|x| x.get("writable"))
++                .cloned()
++                .unwrap_or(json!(false));
++            // 档位:没有契约的设备(还没连过)给个「未批准」而不是编一个默认值。
++            d["fsAccess"] = json!(g.map(|x| x.fs_access.clone()).unwrap_or_default());
++            d["effectiveFs"] = json!(g.map(|x| x.effective_fs().to_string()).unwrap_or_default());
++            d["execAccess"] = json!(g.map(|x| x.exec_access.clone()).unwrap_or_default());
++            d["autoMount"] = json!(g.map(|x| x.auto_mount).unwrap_or(false));
++            d["inCooldown"] = json!(false);
++            d["cooldownUntil"] = json!(0);
++            d["granted"] = json!(g.is_some());
++            d["localRevoked"] = json!(g.map(|x| x.revoked).unwrap_or(false));
++            d
++        })
++        .collect();
++
++    let uid = visible_uid();
++    let (enrollment_state, ready, secure, enrollment_warn) = enrollment_state();
++    Ok(json!({
++        "enrolled": cfg().is_some(),
++        "ready": ready,
++        "secure": secure,
++        "enrollmentState": enrollment_state,
++        "enrollmentWarn": enrollment_warn,
++        "interconnect": orchestration::status(),
++        "authorityConfigured": !default_authority().is_empty(),
++        "configurationError": crate::collab::interconnect::load().err(),
++        "relayConfig": orchestration::relay_status(),
++        "url": meta(K_URL),
++        "uid": uid,
++        "nodeId": me,
++        "name": my_name(),
++        "cloudError": cloud_msg,
++        // 「这台机器认不认我」。false 时别的设备一律连不进来(它们进的就是这道门),
++        // UI 据此把话说明白 + 给出邀请码那条出路,而不是让用户对着一片"看得见连不上"猜。
++        "localMember": crate::collab::authority::is_member(&uid),
++        "localMemberWarn": member_warn().lock().unwrap_or_else(|error| error.into_inner()).clone(),
++        "devices": devices,
++    }))
++}
++
++
++/// 立刻对一次账(UI 点「刷新」用,不必等下一拍心跳)。
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub async fn mesh_sync() -> Result<Value, String> {
++    let n = reconcile_once().await?;
++    Ok(json!({ "peers": n }))
++}
++
++// ────────────────────────── 设备码:一码互联 ──────────────────────────
++//
++// 「主机」这个概念到此为止。每台机器都有一串自己的码,都能被连、也都能去连别人 ——
++// 界面上不再有「设为主机」「owner 令牌」「邀请码」「入伙」这些只有我们自己懂的词。
++//
++// 码的形态:`PLR1-<访问码>-<NodeId>`。
++// 为什么 NodeId 得在码里而不是像 UU远程 那样只给一串短数字:UU 有一台云端目录服务器
++// 替它把「ID → 现在在哪」查出来,我们的云端账号中心只认**同一个账号**的设备,
++// 别人的账号在上面查不到你。要做成 12 位短码,得在云机上再加一张公开的
++// 「码 → NodeId」目录表并重新部署它 —— 那是另一步,得你点头。现在这串码的好处是
++// **不依赖云端**:两台机器都断了公网、只在一个局域网里,照样粘码就连上。
++
++/// 本机设备码。用户复制的就是这一串。
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub async fn device_code() -> Result<Value, String> {
++    let node_id = my_node_id();
++    let code = tokio::task::spawn_blocking(crate::collab::identity::access_code)
++        .await
++        .map_err(|e| format!("取设备码失败:{e}"))??;
++    Ok(json!({
++        "code": code,
++        "nodeId": node_id,
++        "name": my_name(),
++        // NodeId 还没就绪(隧道没起来)时给半成品:UI 照实说「稍候」,别显示一串连不上的码。
++        "share": if node_id.is_empty() { String::new() } else { format!("PLR1-{code}-{node_id}") },
++        "ready": !node_id.is_empty(),
++    }))
++}
++
++/// 换一串码:旧码当场失效,靠旧码连进来的设备会话一并作废。
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub async fn device_code_rotate() -> Result<Value, String> {
++    let code = tokio::task::spawn_blocking(|| crate::collab::identity::rotate_access_code("本机"))
++        .await
++        .map_err(|e| format!("换码任务失败:{e}"))??;
++    let node_id = my_node_id();
++    Ok(json!({
++        "code": code,
++        "share": if node_id.is_empty() { String::new() } else { format!("PLR1-{code}-{node_id}") },
++    }))
++}
++
++/// 解析一串设备码 → (访问码, NodeId)。只认 `PLR1-<code>-<nodeId>`。
++pub(super) fn parse_device_code(s: &str) -> Result<(String, String), String> {
++    let t = s.trim();
++    if t.to_ascii_uppercase().starts_with("PLRK1-") {
++        return Err("legacy_code_unsupported:这是旧版 PLRK1 设备码，缺少一次性挑战和主机密钥证明，不能安全降级使用；请让对方升级 Polaris 后重新复制 PLR1 设备码".into());
++    }
++    let body = t
++        .strip_prefix("PLR1-")
++        .or_else(|| t.strip_prefix("plr1-"))
++        .ok_or("这不是设备码 —— 它长这样:PLR1-XXXXXXXX-<一串字母数字>")?;
++    let (code, node) = body
++        .split_once('-')
++        .ok_or("设备码不完整,少了后半段 —— 让对方整串重新复制一次")?;
++    if code.trim().is_empty() || node.trim().is_empty() {
++        return Err("设备码不完整 —— 让对方整串重新复制一次".into());
++    }
++    Ok((code.trim().to_ascii_uppercase(), node.trim().to_string()))
++}
++
++/// 设备网现状:入网了吗、名册上有谁、各自连上了没、挂成了哪块盘。
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub fn mesh_status() -> Value {
++    let enrolled = cfg().is_some();
++    let (enrollment_state, ready, secure, enrollment_warn) = enrollment_state();
++    // fsmount 的实况(盘符/读写档/在线)按 sourceId 对进来,前端一处就能全画出来。
++    let mounts: HashMap<String, Value> = crate::fsmount::fs_mount_status()
++        .into_iter()
++        .filter_map(|v| {
++            v.get("sourceId")
++                .and_then(|x| x.as_str())
++                .map(|s| (s.to_string(), v.clone()))
++        })
++        .collect();
++    let peers: Vec<Value> = links()
++        .lock()
++        .unwrap_or_else(|error| error.into_inner())
++        .iter()
++        .map(|(node_id, l)| {
++            let m = mounts.get(&source_id(node_id));
++            json!({
++                "nodeId": node_id,
++                "name": l.name,
++                "port": l.port,
++                "connected": link_connected(l),
++                "phase": l.phase,
++                "errorCode": l.error_code,
++                "lastVerifiedAt": l.last_verified_at,
++                "error": l.err,
++                // 对端会话 token 交给前端:远程终端(/api/exec)与「浏览盘」都靠它。
++                // 与手工添加的远程源同一口径 —— 那条路的 owner 令牌本来就存在前端。
++                "token": l.token.clone().unwrap_or_default(),
++                "drive": m.and_then(|x| x.get("drive")).cloned().unwrap_or(json!("")),
++                "writable": m.and_then(|x| x.get("writable")).cloned().unwrap_or(json!(false)),
++                "ok": m.and_then(|x| x.get("ok")).cloned().unwrap_or(json!(false)),
++            })
++        })
++        .collect();
++    json!({
++        "enrolled": enrolled,
++        "ready": ready,
++        "secure": secure,
++        "enrollmentState": enrollment_state,
++        "enrollmentWarn": enrollment_warn,
++        "interconnect": orchestration::status(),
++        "authorityConfigured": !default_authority().is_empty(),
++        "configurationError": crate::collab::interconnect::load().err(),
++        "relayConfig": orchestration::relay_status(),
++        "url": meta(K_URL),
++        "uid": visible_uid(),
++        "nodeId": my_node_id(),
++        "name": my_name(),
++        "peers": peers,
++    })
++}
++
+diff --git a/src-tauri/src/mesh/tests.rs b/src-tauri/src/mesh/tests.rs
+new file mode 100644
+index 0000000..9cca643
+--- /dev/null
++++ b/src-tauri/src/mesh/tests.rs
+@@ -0,0 +1,87 @@
++use super::*;
++
++#[test]
++fn url_normalization_prefers_https_and_public_http_requires_consent() -> Result<(), String> {
++    assert_eq!(norm_url(" example.com/ "), "https://example.com");
++    assert_eq!(norm_url("https://a.com/"), "https://a.com");
++    assert_eq!(norm_url("http://a.com"), "http://a.com");
++    assert!(validate_authority_url("http://a.com", false)
++        .err().is_some_and(|error| error.contains("明文 HTTP")));
++    assert_eq!(
++        validate_authority_url("http://a.com", true)?,
++        "http://a.com"
++    );
++    assert_eq!(
++        validate_authority_url("http://127.0.0.1:8080", false)?,
++        "http://127.0.0.1:8080"
++    );
++    Ok(())
++}
++
++#[test]
++fn device_code_parser_requires_the_complete_plr1_shape() -> Result<(), String> {
++    let (code, node) = parse_device_code("plr1-abcd2345-node-identity")?;
++    assert_eq!(code, "ABCD2345");
++    assert_eq!(node, "node-identity");
++    assert!(parse_device_code("ABCD2345").is_err());
++    assert!(parse_device_code("PLR1-ABCD2345").is_err());
++    assert!(parse_device_code("PLR1--node").is_err());
++    assert!(parse_device_code("PLRK1-old-owner-token")
++        .err().is_some_and(|error| error.starts_with("legacy_code_unsupported:")));
++    Ok(())
++}
++
++#[test]
++fn logged_out_status_never_exposes_a_stale_uid() {
++    assert_eq!(current_uid(false, "uid-from-old-login".into()), "");
++    assert_eq!(current_uid(true, "uid-current".into()), "uid-current");
++}
++
++#[test]
++fn cached_token_without_a_live_tunnel_is_not_connected() {
++    let link = Link {
++        name: "stale".into(),
++        port: 65_534,
++        token: Some("cached-session".into()),
++        phase: "ready".into(),
++        error_code: String::new(),
++        last_verified_at: now_secs(),
++        err: String::new(),
++    };
++    assert!(
++        !link_connected(&link),
++        "刚验证过的 token 也不能把不存在的 tunnel 冒充成在线"
++    );
++}
++
++/// sourceId 必须稳定且不超长(fsmount 拿它当 key,长 NodeId 截断后仍要唯一到实用)。
++#[test]
++fn source_id_is_stable_and_short() {
++    let a = "abcdefghijklmnopqrstuvwxyz0123456789";
++    assert_eq!(source_id(a), source_id(a));
++    assert_eq!(source_id(a), "mesh-abcdefghijklmnop");
++    assert_eq!(source_id("short"), "mesh-short");
++}
++
++/// 端口分配:新设备各得一口,已在册的沿用原口(重试不换口)。
++#[test]
++fn ports_are_unique_and_sticky() {
++    links().lock().unwrap_or_else(|error| error.into_inner()).clear();
++    let p1 = port_for("node-a");
++    links().lock().unwrap_or_else(|error| error.into_inner()).insert(
++        "node-a".into(),
++        Link {
++            name: "a".into(),
++            port: p1,
++            token: None,
++            phase: "connecting".into(),
++            error_code: String::new(),
++            last_verified_at: 0,
++            err: String::new(),
++        },
++    );
++    let p2 = port_for("node-b");
++    assert_ne!(p1, p2, "两台设备不能撞同一个本地口");
++    assert_eq!(port_for("node-a"), p1, "已在册的必须沿用原端口");
++    links().lock().unwrap_or_else(|error| error.into_inner()).clear();
++}

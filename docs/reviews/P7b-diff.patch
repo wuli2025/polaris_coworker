@@ -1,0 +1,788 @@
+commit a9417303aae28d5914f86229a748931335c6d8c3
+Author: Glen Church <GlenChurchcbh@gmx.es>
+Date:   Fri Oct 16 00:03:39 2026 +0900
+
+    feat: P7b 打包回归修复与对话中途插话/追加（Codex 实现，Claude 验证）
+    
+    pack-agentd 按导入关系收集契约测试依赖（修复 F1 引入、演练发现的打包失败）并新增真实
+    打包回归测试；产物不含测试文件。新增 chat_steer/chat_follow_up（Tauri 与 HTTP，校验请求
+    归属）、前端插话/排队按钮、D1 steer/followUp 改为真实断言。真实打包成功；agentd 124、
+    vitest 118、内核 228、fable 105、collab 176 均 0 失败；三种构建 0 警告。
+    自定义 CA 待 P7b-2。
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/agentd/test/sessions.test.ts b/agentd/test/sessions.test.ts
+index c753b77..6221a7f 100644
+--- a/agentd/test/sessions.test.ts
++++ b/agentd/test/sessions.test.ts
+@@ -73,8 +73,14 @@ test("steer and followUp share bounded queue and are delivered inside one host t
+     assert.ok(!full.ok && full.error.code === "QUEUE_LIMIT");
+     release(fauxAssistantMessage("initial"));
+     await h.daemon.sessions.wait(id);
+-    assert.match(contexts.join(""), /steering/);
+-    assert.match(contexts.join(""), /following/);
++    assert.equal(contexts.length, 2);
++    assert.match(contexts[0], /steering/);
++    assert.doesNotMatch(contexts[0], /following/);
++    assert.match(contexts[1], /following/);
++    for (const method of ["steer", "followUp"]) {
++      const idle = await h.request(method, { sessionId: id, text: "too late" });
++      assert.ok(!idle.ok && idle.error.code === "SESSION_NOT_RUNNING");
++    }
+     assert.equal(h.events.filter((e) => e.event === "turn.completed").length, 1);
+   } finally { await h.close(); }
+ });
+diff --git a/drills/d1.mjs b/drills/d1.mjs
+index 4af952a..0f06ab2 100644
+--- a/drills/d1.mjs
++++ b/drills/d1.mjs
+@@ -1,6 +1,7 @@
+ import { readFile, writeFile, access } from 'node:fs/promises';
+ import { join } from 'node:path';
+ import { randomBytes } from 'node:crypto';
++import { liveInput } from './lib/live-input.mjs';
+ import { approvedBash, respondDuring } from './lib/permissions.mjs';
+ import { run, Blocked, check, integer } from './lib/harness.mjs';
+ import { build, server, conversation, memory, mapping, setModel, sessionFiles, sessionEntries } from './lib/agent.mjs';
+@@ -67,8 +68,8 @@ const steps = {
+     check(!(await h.api.invoke('chat_is_running', { reqId: t.req })), 'Turn still running after done');
+     return { ...r.metrics, cancelToDoneMs: Math.round(r.done.at - cancelAt), ...await memory(h) };
+   },
+-  async steer() { throw new Blocked('No steer HTTP/IPC entry in apihub; only agentd protocol command exists. See docs/drills/P7a-blockers.md'); },
+-  async followup() { throw new Blocked('No followUp HTTP/IPC entry in apihub. Direct daemon calls would bypass the required server chain'); },
++  steer: h => liveInput(h, 'steer'),
++  followup: h => liveInput(h, 'followUp'),
+   async switch(h) {
+     const next = process.env.DRILL_MODEL_NEXT;
+     if (!h.model || !next?.trim() || next.length > 200 || next === h.model) throw new Blocked('switch requires distinct DRILL_MODEL and DRILL_MODEL_NEXT supported by the copied account');
+@@ -87,5 +88,5 @@ const steps = {
+   },
+ };
+ await run('D1', steps, async (h, name) => {
+-  if (!['build', 'steer', 'followup'].includes(name)) await server(h);
++  if (name !== 'build') await server(h);
+ });
+diff --git a/drills/lib/live-input.mjs b/drills/lib/live-input.mjs
+new file mode 100644
+index 0000000..41ddccb
+--- /dev/null
++++ b/drills/lib/live-input.mjs
+@@ -0,0 +1,54 @@
++import { randomBytes } from 'node:crypto';
++import { check, waitFor } from './harness.mjs';
++import { request } from './api.mjs';
++import { conversation, mapping, sessionEntries, memory } from './agent.mjs';
++
++// Hold an actual tool approval open as a readiness barrier; never race model latency with a sleep.
++export async function liveInput(h, mode) {
++  const c = await conversation(h, mode);
++  const first = `FIRST_${randomBytes(8).toString('hex')}`;
++  const next = `NEXT_${randomBytes(8).toString('hex')}`;
++  const turn = await h.api.begin(c.id,
++    `Use bash to run printf '${first}'. After it completes, answer exactly ${first}.`, { permissionMode: 'manual' });
++  try {
++    const event = await h.api.event(turn.req, e => e.kind === 'permission.request');
++    const permission = JSON.parse(event.text);
++    check(permission.tool === 'bash', 'Expected bash permission barrier');
++    const before = await mapping(h, c.id);
++    const cmd = mode === 'steer' ? 'chat_steer' : 'chat_follow_up';
++    const text = mode === 'steer'
++      ? `Change the final answer to exactly ${next}.`
++      : `After completing the current task, answer exactly ${next}.`;
++    const receipt = await waitFor(async () => {
++      const r = await request(h.api.base, '/api/invoke', {
++        cmd, args: { reqId: turn.req, conversationId: c.id, text },
++      }, h.api.token);
++      if (r.status === 409 && ['ChatTurnNotReady', 'TURN_NOT_READY'].some(code => r.value.error?.startsWith(code))) return false;
++      check(r.status === 200 && r.value.disposition === 'queued', 'Running input was not queued');
++      return r.value;
++    }, { timeoutMs: h.timeout, label: 'running input accepted' });
++    check(typeof receipt.turnId === 'string', 'Missing correlated agentd turn');
++    await h.api.invoke('chat_permission_respond', { response: {
++      sessionId: permission.sessionId, callId: permission.callId, decision: 'allow',
++    } });
++    const result = await h.api.end(turn);
++    check(result.text.includes(next), 'Queued input did not affect the original request output');
++    const after = await mapping(h, c.id);
++    check(before.id === after.id, 'Running input changed agentd session');
++    const messages = (await sessionEntries(h, c.id)).filter(e => e.type === 'message').map(e => e.message);
++    const queuedAt = messages.findIndex(m => m.role === 'user' && JSON.stringify(m.content).includes(next));
++    check(queuedAt >= 0, 'Queued input absent from persisted session');
++    check(messages.slice(queuedAt + 1).some(m => m.role === 'assistant' && JSON.stringify(m.content).includes(next)),
++      'No persisted assistant response after queued user input');
++    if (mode === 'followUp') {
++      check(messages.slice(0, queuedAt).some(m => m.role === 'assistant' && !m.content.some(p => p.type === 'toolCall')
++        && JSON.stringify(m.content).includes(first)), 'Follow-up ran before original answer finished');
++    }
++    const idle = await request(h.api.base, '/api/invoke', { cmd, args: { reqId: turn.req, text: 'too late' } }, h.api.token);
++    check(idle.status === 409 && idle.value.error === 'ChatNotRunning', 'Idle input was accepted');
++    return { ...result.metrics, ...await memory(h), sameSession: true, idleRejected: true, turnId: receipt.turnId };
++  } catch (error) {
++    await h.api.invoke('chat_cancel', { reqId: turn.req }).catch(() => {});
++    throw error;
++  }
++}
+diff --git a/drills/test/harness.test.mjs b/drills/test/harness.test.mjs
+index f07f3c3..0684d90 100644
+--- a/drills/test/harness.test.mjs
++++ b/drills/test/harness.test.mjs
+@@ -1,4 +1,4 @@
+-import test from 'node:test';
++const { test } = await import(process.env.VITEST ? 'vitest' : 'node:test');
+ import assert from 'node:assert/strict';
+ import { EventEmitter } from 'node:events';
+ import { PassThrough } from 'node:stream';
+diff --git a/scripts/pack-agentd.mjs b/scripts/pack-agentd.mjs
+index aacac61..e512721 100644
+--- a/scripts/pack-agentd.mjs
++++ b/scripts/pack-agentd.mjs
+@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
+ import { fileURLToPath, pathToFileURL } from 'node:url';
+ import { execFileSync } from 'node:child_process';
+ import { nodeVersion } from './runtime/node.mjs';
++import { contractFiles, copyContract } from './runtime/contract-files.mjs';
+ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+ const source = join(repo, 'agentd');
+ function files(dir) {
+@@ -17,9 +18,9 @@ function bytes(dir) { return files(dir).reduce((n, p) => n + statSync(p).size, 0
+ export async function packAgentd(destination = join(repo, 'src-tauri/runtime/agentd')) {
+   nodeVersion(JSON.parse(readFileSync(join(source, 'package.json'))).engines.node, process.versions.node);
+   const hash = createHash('sha256').update(`${process.platform}/${process.arch}/${process.versions.node}`);
+-  for (const path of ['package.json', 'package-lock.json', 'tsconfig.json', 'test/sdk-contract.test.ts', ...files(join(source, 'src')),
++  for (const path of ['package.json', 'package-lock.json', 'tsconfig.json', ...contractFiles(source, 'test/sdk-contract.test.ts'), ...files(join(source, 'src')),
+     ...files(join(source, 'config')), fileURLToPath(import.meta.url),
+-    join(repo, 'scripts/runtime/node.mjs'), join(repo, 'scripts/runtime/check-wasm.mjs')]) {
++    join(repo, 'scripts/runtime/contract-files.mjs'), join(repo, 'scripts/runtime/node.mjs'), join(repo, 'scripts/runtime/check-wasm.mjs')]) {
+     hash.update(path).update(readFileSync(resolve(source, path)));
+   }
+   const digest = hash.digest('hex');
+@@ -43,9 +44,9 @@ export async function packAgentd(destination = join(repo, 'src-tauri/runtime/age
+   // Verify the installed production tree, without tsx or TypeScript in the payload.
+   const testDir = join(staging, '.contract-tests');
+   mkdirSync(testDir);
+-  cpSync(join(source, 'dist/test/sdk-contract.test.js'), join(testDir, 'sdk-contract.test.mjs'));
+   try {
+-    execFileSync(process.execPath, ['--test', join(testDir, 'sdk-contract.test.mjs')], { cwd: staging, stdio: 'inherit' });
++    copyContract(join(source, 'dist'), 'test/sdk-contract.test.js', testDir);
++    execFileSync(process.execPath, ['--test', join(testDir, 'test/sdk-contract.test.js')], { cwd: staging, stdio: 'inherit' });
+     execFileSync(process.execPath, [join(repo, 'scripts/runtime/check-wasm.mjs'), staging], { stdio: 'inherit' });
+   } finally { rmSync(testDir, { recursive: true, force: true }); }
+   const composition = Object.fromEntries(['dist', 'config', 'node_modules'].map(name => [name, bytes(join(staging, name))]));
+diff --git a/scripts/runtime/contract-files.mjs b/scripts/runtime/contract-files.mjs
+new file mode 100644
+index 0000000..8f97cce
+--- /dev/null
++++ b/scripts/runtime/contract-files.mjs
+@@ -0,0 +1,31 @@
++import { createRequire } from 'node:module';
++import { cpSync, mkdirSync, readFileSync } from 'node:fs';
++import { dirname, isAbsolute, relative, resolve } from 'node:path';
++
++// Use agentd's existing compiler parser, including export-from and literal dynamic imports.
++const require = createRequire(new URL('../../agentd/package.json', import.meta.url));
++const ts = require('typescript');
++export function contractFiles(root, entry) {
++  const found = new Set();
++  function visit(path) {
++    path = resolve(root, path);
++    const name = relative(root, path);
++    if (name.startsWith('..') || isAbsolute(name)) throw new Error(`Contract import outside root: ${name}`);
++    if (found.has(name)) return;
++    found.add(name);
++    const source = readFileSync(path, 'utf8');
++    for (const dependency of ts.preProcessFile(source, true, true).importedFiles) {
++      if (dependency.fileName.startsWith('.')) visit(resolve(dirname(path), dependency.fileName));
++    }
++  }
++  visit(entry);
++  return [...found].sort();
++}
++
++export function copyContract(root, entry, destination) {
++  for (const name of contractFiles(root, entry)) {
++    const target = resolve(destination, name);
++    mkdirSync(dirname(target), { recursive: true });
++    cpSync(resolve(root, name), target);
++  }
++}
+diff --git a/scripts/runtime/contract-files.test.mjs b/scripts/runtime/contract-files.test.mjs
+new file mode 100644
+index 0000000..a10ce77
+--- /dev/null
++++ b/scripts/runtime/contract-files.test.mjs
+@@ -0,0 +1,31 @@
++import assert from 'node:assert/strict';
++const { test } = await import(process.env.VITEST ? 'vitest' : 'node:test');
++import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { execFileSync } from 'node:child_process';
++import { contractFiles, copyContract } from './contract-files.mjs';
++
++test('packaging follows nested contract helpers and runs without source tree', async () => {
++  const root = mkdtempSync(join(tmpdir(), 'pack-contract-'));
++  try {
++    const source = join(root, 'source');
++    const packed = join(root, 'packed');
++    mkdirSync(join(source, 'helpers'), { recursive: true });
++    writeFileSync(join(source, 'entry.mjs'), 'import { value } from "./helpers/reexport.mjs"; if (value !== 42) throw Error("broken");');
++    writeFileSync(join(source, 'helpers/reexport.mjs'), 'export { value } from "./value.mjs";');
++    writeFileSync(join(source, 'helpers/value.mjs'), 'export const value = 42;');
++    writeFileSync(join(source, 'unrelated.mjs'), 'throw Error("must not ship");');
++    assert.deepEqual(contractFiles(source, 'entry.mjs'), ['entry.mjs', 'helpers/reexport.mjs', 'helpers/value.mjs']);
++    copyContract(source, 'entry.mjs', packed);
++    rmSync(source, { recursive: true });
++    execFileSync(process.execPath, [join(packed, 'entry.mjs')], { stdio: 'inherit' });
++    assert.match(readFileSync(join(packed, 'helpers/value.mjs'), 'utf8'), /42/);
++  } finally { rmSync(root, { recursive: true, force: true }); }
++});
++
++test('current SDK contract includes its helper in the source graph', () => {
++  const root = fileURLToPath(new URL('../../agentd/', import.meta.url));
++  assert.ok(contractFiles(root, 'test/sdk-contract.test.ts').includes('test/synchronization.ts'));
++});
+diff --git a/scripts/runtime/pack-agentd.test.mjs b/scripts/runtime/pack-agentd.test.mjs
+new file mode 100644
+index 0000000..56104ad
+--- /dev/null
++++ b/scripts/runtime/pack-agentd.test.mjs
+@@ -0,0 +1,22 @@
++import assert from 'node:assert/strict';
++import { existsSync, mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { packAgentd } from '../pack-agentd.mjs';
++const runner = await import(process.env.VITEST ? 'vitest' : 'node:test');
++
++async function packageAndVerify() {
++  const root = mkdtempSync(join(tmpdir(), 'pack-agentd-regression-'));
++  const output = join(root, 'agentd');
++  try {
++    // Includes build, production install, contract imports, WASM and native addon checks.
++    await packAgentd(output);
++    assert.ok(existsSync(join(output, 'dist/src/main.js')));
++    assert.ok(existsSync(join(output, '.stamp.json')));
++    assert.equal(existsSync(join(output, '.contract-tests')), false);
++    assert.equal(existsSync(join(output, 'dist/test')), false);
++    assert.equal(existsSync(`${output}.staging`), false);
++  } finally { rmSync(root, { recursive: true, force: true }); }
++}
++if (process.env.VITEST) runner.test('minimal production package passes and removes tests', packageAndVerify, 120000);
++else runner.test('minimal production package passes and removes tests', { timeout: 120000 }, packageAndVerify);
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+index 11d4702..9009897 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/bridge.rs
+@@ -66,4 +66,7 @@ pub(crate) fn run_chat(app: &AppHandle, req: &str, args: ChatSendArgs) -> Result
+     }
+     Ok(())
+ }
+-pub(crate) fn emit(app: &AppHandle, event: ChatStreamEvent) { let _ = app.emit("chat:stream", event); }
++pub(crate) fn emit(app: &AppHandle, event: ChatStreamEvent) {
++    if event.kind == "done" { crate::chat::live_input::finished(&event.req_id); }
++    let _ = app.emit("chat:stream", event);
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/mod.rs
+index 5da5dce..b6a9e7f 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/claude_cli/pipeline/mod.rs
+@@ -154,6 +154,7 @@ use parser::*;
+ 
+ pub(crate) fn emit_event(app: &AppHandle, ev: ChatStreamEvent) {
+     if !crate::chat::backend::claude_cli::capture(&ev) {
++        if ev.kind == "done" { crate::chat::live_input::finished(&ev.req_id); }
+         let _ = app.emit("chat:stream", ev);
+     }
+ }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+index d2ad865..6c9515d 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+@@ -138,6 +138,9 @@ pub trait AgentBackend: Send + Sync {
+         anyhow::ensure!(!options.sandbox && options.expert_prompt.is_none() && options.tool_profile.is_none() && !options.detailed_events, "BackendToolOptionsUnsupported");
+         self.start(input)
+     }
++    fn live_input(&self, _req: &str, _text: &str, _follow_up: bool) -> anyhow::Result<serde_json::Value> {
++        anyhow::bail!("ChatLiveInputUnsupported")
++    }
+     fn cancel(&self, req_id: &str) -> anyhow::Result<()>;
+     fn close(&self, session_id: &str) -> anyhow::Result<()>;
+     fn models(&self) -> anyhow::Result<serde_json::Value>;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
+index 326b4ea..6479227 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs
+@@ -8,6 +8,7 @@ pub enum Control {
+     Request(Command, Reply),
+     Register { session: String, req: String, translator: Translator, stream: Arc<Mailbox>, timeout: Duration, reservation: (Arc<Mutex<std::collections::HashSet<String>>>, String), reply: Reply },
+     Cancel(String, Reply),
++    Input { req: String, text: String, follow_up: bool, reply: Reply },
+     Bind(String, String, Reply),
+     Fail(String, String),
+     Stop,
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/live_input_tests.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/live_input_tests.rs
+new file mode 100644
+index 0000000..2d5c570
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/live_input_tests.rs
+@@ -0,0 +1,41 @@
++use super::{PiBackend, tests::{config, input}, test_support::{wait_budget, wait_until}};
++use crate::chat::backend::AgentBackend;
++
++#[test]
++fn live_input_uses_active_session_and_rejects_finished_request() -> anyhow::Result<()> {
++    let config = config();
++    let dir = config.session_map.clone();
++    let backend = PiBackend::new(config)?;
++    backend.models()?;
++    let stream = backend.start(input("running", "permission"))?;
++    let payload = loop {
++        let event = stream.recv_timeout(wait_budget())?;
++        if event.kind == "permission.request" {
++            break serde_json::from_str::<serde_json::Value>(event.text.as_deref().ok_or_else(|| anyhow::anyhow!("missing permission"))?)?;
++        }
++    };
++    // The protocol permits events before the prompt response; wait on the actor's named readiness result.
++    let receipt = std::cell::RefCell::new(None);
++    wait_until("live-input route bound", || match backend.live_input("running", "steering", false) {
++        Ok(value) => { *receipt.borrow_mut() = Some(value); true }
++        Err(error) => { assert_eq!(error.to_string(), "ChatTurnNotReady"); false }
++    })?;
++    let receipt = receipt.into_inner().ok_or_else(|| anyhow::anyhow!("missing receipt"))?;
++    let queued = backend.live_input("running", "following", true)?;
++    assert_eq!(receipt["turnId"], queued["turnId"]);
++    assert_eq!(queued["disposition"], "queued");
++    assert!(backend.live_input("other", "wrong", false).is_err());
++    backend.permission_respond(super::protocol::PermissionResponse {
++        session_id: payload["sessionId"].as_str().ok_or_else(|| anyhow::anyhow!("missing session"))?.into(),
++        call_id: payload["callId"].as_str().ok_or_else(|| anyhow::anyhow!("missing call"))?.into(),
++        decision: super::protocol::Decision::Allow,
++    })?;
++    while stream.recv_timeout(wait_budget())?.kind != "done" {}
++    for follow_up in [false, true] {
++        let error = backend.live_input("running", "late", follow_up).err().ok_or_else(|| anyhow::anyhow!("late input accepted"))?;
++        assert_eq!(error.to_string(), "ChatNotRunning");
++    }
++    backend.shutdown();
++    std::fs::remove_dir_all(dir)?;
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+index 5884457..d3e4d21 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+@@ -13,6 +13,7 @@ mod supervisor;
+ mod translate;
+ #[cfg(windows)] mod windows_job;
+ #[cfg(test)] mod tests;
++#[cfg(test)] mod live_input_tests;
+ use super::*;
+ use client::{Client, Control};
+ use protocol::{Command, Empty, Prompt};
+@@ -173,6 +174,12 @@ impl AgentBackend for PiBackend {
+         });
+         Ok(stream)
+     }
++    fn live_input(&self, req: &str, text: &str, follow_up: bool) -> anyhow::Result<Value> {
++        let client = self.client()?;
++        let (tx, rx) = mpsc::sync_channel(1);
++        client.send(Control::Input { req: req.into(), text: text.into(), follow_up, reply: tx })?;
++        client.wait(rx)
++    }
+     fn cancel(&self, req: &str) -> anyhow::Result<()> {
+         if self.preparing.lock().contains(req) { self.cancelled.lock().insert(req.into()); }
+         if let Some(client) = self.client.get() { client.cancel(req)?; }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+index ba8ee0e..138ace1 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+@@ -170,6 +170,29 @@ impl State {
+                 };
+                 let _ = reply.send(result);
+             }
++            Control::Input { req, text, follow_up, reply } => {
++                // Resolve and write in the actor: a stale request cannot target the next turn.
++                let route = self.routes.values().find(|route| route.req == req);
++                let result = match route {
++                    None => Err("ChatNotRunning"),
++                    Some(route) if route.terminal.is_some() || route.stream.is_finished()
++                        || route.abort_deadline.is_some() => Err("ChatNotRunning"),
++                    Some(route) if !route.started || !route.acknowledged => Err("ChatTurnNotReady"),
++                    Some(route) => Ok(route.session.clone()),
++                };
++                match (result, process) {
++                    (Err(error), _) => { let _ = reply.send(Err(error.into())); }
++                    (Ok(session_id), Some(process)) => {
++                        let text = super::protocol::Text { session_id, text };
++                        let command = if follow_up { Command::FollowUp(text) } else { Command::Steer(text) };
++                        if let Err(error) = self.request(process, command, Some(reply.clone())) {
++                            let _ = reply.send(Err(error.to_string()));
++                            return Err(error);
++                        }
++                    }
++                    (_, None) => { let _ = reply.send(Err(self.unavailable())); }
++                }
++            }
+             Control::Cancel(req, reply) => {
+                 let session = self.active.lock().get(&req).cloned();
+                 if let Some(session) = session {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/live_input.rs b/src-tauri/crates/polaris-kernel/src/chat/live_input.rs
+new file mode 100644
+index 0000000..c10165b
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/live_input.rs
+@@ -0,0 +1,108 @@
++//! Active request ownership and running-input commands. No caller-supplied owner on IPC.
++use once_cell::sync::Lazy;
++use parking_lot::Mutex;
++use serde::Deserialize;
++use serde_json::Value;
++use std::collections::HashMap;
++
++#[derive(Clone)]
++struct Binding { owner: String, conversation: Option<String> }
++#[derive(Default)]
++struct Registry(HashMap<String, Binding>);
++static ACTIVE: Lazy<Mutex<Registry>> = Lazy::new(|| Mutex::new(Registry::default()));
++pub(crate) struct Lease(String);
++impl Drop for Lease {
++    fn drop(&mut self) { finished(&self.0); }
++}
++pub(crate) fn finished(req: &str) { ACTIVE.lock().0.remove(req); }
++impl Registry {
++    fn insert(&mut self, req: &str, conversation: Option<&str>, owner: &str) -> Result<(), String> {
++        if self.0.contains_key(req) || conversation.is_some_and(|id| {
++            self.0.values().any(|b| b.conversation.as_deref() == Some(id))
++        }) { return Err("ChatBusy".into()); }
++        self.0.insert(req.into(), Binding { owner: owner.into(), conversation: conversation.map(String::from) });
++        Ok(())
++    }
++    fn resolve(&self, owner: &str, target: &Target) -> Result<String, String> {
++        if target.req_id.is_none() && target.conversation_id.is_none() {
++            return Err("ChatTargetRequired".into());
++        }
++        let found = match &target.req_id {
++            Some(req) => self.0.get(req).map(|binding| (req, binding)),
++            None => self.0.iter().find(|(_, b)| b.conversation == target.conversation_id),
++        };
++        let (req, binding) = found.ok_or("ChatNotRunning")?;
++        if binding.owner != owner { return Err("ChatForbidden".into()); }
++        if target.conversation_id.is_some() && target.conversation_id != binding.conversation {
++            return Err("ChatTargetMismatch".into());
++        }
++        Ok(req.clone())
++    }
++}
++pub(crate) fn reserve(req: &str, conversation: Option<&str>, owner: &str) -> Result<Lease, String> {
++    ACTIVE.lock().insert(req, conversation, owner)?;
++    Ok(Lease(req.into()))
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct Target {
++    pub req_id: Option<String>,
++    pub conversation_id: Option<String>,
++    pub text: String,
++}
++/// HTTP supplies authenticated identity; desktop commands use the local trusted principal.
++/// Input is accepted only by the current route. agentd decides whether the turn is still streaming.
++pub fn send(owner: &str, target: Target, follow_up: bool) -> Result<Value, String> {
++    if target.text.trim().is_empty() { return Err("ChatEmptyInput".into()); }
++    if target.text.len() > 2 * 1024 * 1024 { return Err("ChatInputTooLarge".into()); }
++    let req = ACTIVE.lock().resolve(owner, &target)?;
++    super::backend::selected().and_then(|b| b.live_input(&req, &target.text, follow_up))
++        .map_err(|e| e.to_string())
++}
++
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub async fn chat_steer(req_id: Option<String>, conversation_id: Option<String>, text: String) -> Result<Value, String> {
++    tokio::task::spawn_blocking(move || send("desktop", Target { req_id, conversation_id, text }, false))
++        .await.map_err(|e| e.to_string())?
++}
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub async fn chat_follow_up(req_id: Option<String>, conversation_id: Option<String>, text: String) -> Result<Value, String> {
++    tokio::task::spawn_blocking(move || send("desktop", Target { req_id, conversation_id, text }, true))
++        .await.map_err(|e| e.to_string())?
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn done_releases_binding_before_next_turn_and_old_lease_cannot_remove_it() -> Result<(), String> {
++        let old = reserve("lease-old", Some("lease-conv"), "alice")?;
++        finished("lease-old");
++        let next = reserve("lease-next", Some("lease-conv"), "alice")?;
++        drop(old);
++        let target = Target { req_id: None, conversation_id: Some("lease-conv".into()), text: "next".into() };
++        assert_eq!(ACTIVE.lock().resolve("alice", &target)?, "lease-next");
++        drop(next);
++        assert_eq!(ACTIVE.lock().resolve("alice", &target), Err("ChatNotRunning".into()));
++        Ok(())
++    }
++    #[test]
++    fn ownership_idle_busy_and_stale_request() -> Result<(), String> {
++        let mut registry = Registry::default();
++        let mut target = Target { req_id: None, conversation_id: Some("conv".into()), text: "hello".into() };
++        assert_eq!(registry.resolve("alice", &target), Err("ChatNotRunning".into()));
++        registry.insert("req1", Some("conv"), "alice")?;
++        assert_eq!(registry.resolve("alice", &target)?, "req1");
++        assert_eq!(registry.resolve("bob", &target), Err("ChatForbidden".into()));
++        assert_eq!(registry.insert("req2", Some("conv"), "bob"), Err("ChatBusy".into()));
++        target.req_id = Some("req1".into());
++        assert_eq!(registry.resolve("bob", &target), Err("ChatForbidden".into()));
++        target.conversation_id = Some("different".into());
++        assert_eq!(registry.resolve("alice", &target), Err("ChatTargetMismatch".into()));
++        registry.0.remove("req1");
++        registry.insert("req2", Some("conv"), "alice")?;
++        assert_eq!(registry.resolve("alice", &target), Err("ChatNotRunning".into()));
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/mod.rs
+index ea13115..2c4616e 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/mod.rs
+@@ -20,6 +20,7 @@ pub mod attach;
+ // 内核→引擎桥(kb/fable/expert 依赖倒置端口, 由外壳启动时经 wiring 注入实现)
+ pub mod bridges;
+ pub mod pipeline;
++pub mod live_input;
+ pub mod prompt;
+ // 常驻 claude agent 进程池(省每消息 ~6.4s CLI 自举; POLARIS_PERSISTENT_AGENT=0 回落旧路径)
+ pub mod session_pool;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/pipeline.rs b/src-tauri/crates/polaris-kernel/src/chat/pipeline.rs
+index c0d8dba..3aeea9e 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/pipeline.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/pipeline.rs
+@@ -31,6 +31,10 @@ fn next_req_id() -> String {
+ 
+ #[cfg_attr(feature = "desktop", tauri::command)]
+ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, String> {
++    chat_send_owned(app, args, "desktop".into()).await
++}
++
++pub async fn chat_send_owned(app: AppHandle, args: ChatSendArgs, owner: String) -> Result<String, String> {
+     if args.prompt.trim().is_empty() {
+         return Err("消息不能为空".into());
+     }
+@@ -45,6 +49,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
+         conv::ensure_writable_or_create(cid)?;
+     }
+     let req_id = next_req_id();
++    let lease = super::live_input::reserve(&req_id, args.conversation_id.as_deref(), &owner)?;
+ 
+     // 轻量同步部分到此为止: 只做 req_id 生成 + user 消息落历史(便宜, 且保证「先 user
+     // 后 assistant」的落库顺序)。其余重活 —— 产物目录快照(WalkDir)、CLAUDE.md 渲染、
+@@ -59,6 +64,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
+     let bg_req = req_id.clone();
+     let bg_conv = args.conversation_id.clone();
+     std::thread::spawn(move || {
++        let _lease = lease;
+         // 后台线程内任何 Err/panic 都必须转成前端已能处理的事件发出去, 绝不能静默吞掉
+         // 让气泡永远转圈: 旧同步路径里 spawn 失败 = invoke reject = 前端「[发送失败]」气泡
+         // + 结束运行态; 这里等价复刻为 error 事件(错误气泡) + done 事件(唯一终态, 结束
+diff --git a/src-tauri/src/apihub/auth.rs b/src-tauri/src/apihub/auth.rs
+index de0daf0..fdb794c 100644
+--- a/src-tauri/src/apihub/auth.rs
++++ b/src-tauri/src/apihub/auth.rs
+@@ -191,7 +191,15 @@ use polaris_protocol::{strict_args_enabled, Args, InvokeRequest};
+ 
+ /// 把命令错误串按「客户端错误 vs 服务端错误」映射到合适的 HTTP 状态码,而非一律 500。
+ fn invoke_err_resp(e: String) -> Response {
+-    let status = if e.starts_with("未知命令") {
++    let status = if e == "ChatForbidden" {
++        StatusCode::FORBIDDEN
++    } else if ["ChatNotRunning", "ChatTurnNotReady", "ChatBusy", "SESSION_NOT_RUNNING", "TURN_NOT_READY", "QUEUE_LIMIT"]
++        .iter().any(|code| e.starts_with(code)) {
++        StatusCode::CONFLICT
++    } else if ["ChatInvalidInput", "ChatTargetRequired", "ChatTargetMismatch", "ChatEmptyInput", "ChatInputTooLarge"]
++        .iter().any(|code| e.starts_with(code)) {
++        StatusCode::BAD_REQUEST
++    } else if e.starts_with("未知命令") {
+         StatusCode::NOT_FOUND
+     } else if (e.contains("参数")
+         && (e.contains("缺少") || e.contains("解析失败") || e.contains("无效")))
+diff --git a/src-tauri/src/apihub/invoke.rs b/src-tauri/src/apihub/invoke.rs
+index bbd5c9c..f34219d 100644
+--- a/src-tauri/src/apihub/invoke.rs
++++ b/src-tauri/src/apihub/invoke.rs
+@@ -129,12 +129,27 @@ async fn invoke(
+         };
+     }
+ 
++    if cmd == "chat_steer" || cmd == "chat_follow_up" {
++        let target = match serde_json::from_value::<crate::chat::live_input::Target>(args) {
++            Ok(target) => target,
++            Err(error) => return invoke_err_resp(format!("ChatInvalidInput: {error}")),
++        };
++        let owner = format!("http:{}:{}", ctx.user_id, ctx.username);
++        return match tokio::task::spawn_blocking(move || {
++            crate::chat::live_input::send(&owner, target, cmd == "chat_follow_up")
++        }).await {
++            Ok(Ok(value)) => Json(value).into_response(),
++            Ok(Err(error)) => invoke_err_resp(error),
++            Err(error) => invoke_err_resp(error.to_string()),
++        };
++    }
++
+     // chat_send 是 async（其余皆 sync）。单独处理。
+     if cmd == "chat_send" {
+         let inner = args.get("args").cloned().unwrap_or(Value::Null);
+         let parsed: Result<crate::chat::ChatSendArgs, _> = serde_json::from_value(inner);
+         return match parsed {
+-            Ok(a) => match crate::chat::chat_send(app, a).await {
++            Ok(a) => match crate::chat::pipeline::chat_send_owned(app, a, format!("http:{}:{}", ctx.user_id, ctx.username)).await {
+                 Ok(req_id) => Json(json!(req_id)).into_response(),
+                 Err(e) => invoke_err_resp(e),
+             },
+diff --git a/src-tauri/src/desktop_commands.rs b/src-tauri/src/desktop_commands.rs
+index 5e2edd3..f4e5e9a 100644
+--- a/src-tauri/src/desktop_commands.rs
++++ b/src-tauri/src/desktop_commands.rs
+@@ -184,6 +184,8 @@ tauri::generate_handler![
+             chat::backend::host_tools::chat_permission_respond,
+             chat::agent_backend_status,
+             chat::chat_prewarm, // 打字期预热常驻 claude 进程(best-effort)
++            chat::live_input::chat_steer,
++            chat::live_input::chat_follow_up,
+             chat::chat_cancel,
+             chat::chat_is_running, // 前端无声死亡看门狗:熔断前先确认后端真死了
+             chat::chat_attach_files,
+diff --git a/src/components/chat/ChatComposer.vue b/src/components/chat/ChatComposer.vue
+index 741e350..97124b0 100644
+--- a/src/components/chat/ChatComposer.vue
++++ b/src/components/chat/ChatComposer.vue
+@@ -1,4 +1,5 @@
+ <script setup lang="ts">
++import LiveInputActions from "./LiveInputActions.vue";
+ import { runtimeCopy as copy } from "../../features/runtime/copy";
+ // 输入区(自 ChatPanel 拆出,逻辑原样搬移):输入卡片 + 工具条(工作模式/技能/模式/
+ // 智能体/供应商弹层) + 授权栏 + 语音听写 + 附件/贴图 + 发送/停止/清空上下文。
+@@ -1312,6 +1313,9 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
+         @input="autoGrow"
+         @paste="onPaste"
+       ></textarea>
++      <LiveInputActions v-if="sending" :conversation-id="app.currentConvId" :text="input"
++        :disabled="attachments.length > 0 || pendingAttach.length > 0"
++        @sent="(cid, text) => { if (drafts.get(cid) === text) drafts.delete(cid); if (app.currentConvId === cid && input === text) input = ''; }" />
+       <div class="toolbar">
+         <div class="toolbar-left">
+           <button
+diff --git a/src/components/chat/LiveInputActions.vue b/src/components/chat/LiveInputActions.vue
+new file mode 100644
+index 0000000..24ecc9a
+--- /dev/null
++++ b/src/components/chat/LiveInputActions.vue
+@@ -0,0 +1,44 @@
++<script setup lang="ts">
++import { ref } from 'vue';
++import { useChatStore } from '../../stores/chat';
++import { sendLiveInput, type LiveInputMode } from './liveInput';
++
++const props = defineProps<{ conversationId: string | null; text: string; disabled?: boolean }>();
++const emit = defineEmits<{ sent: [conversationId: string, text: string] }>();
++const chat = useChatStore();
++const pending = ref(false);
++const status = ref('');
++async function send(mode: LiveInputMode) {
++  const conversationId = props.conversationId;
++  const reqId = conversationId ? chat.reqByConv[conversationId] : undefined;
++  if (pending.value || props.disabled || !conversationId || !reqId) return;
++  const text = props.text;
++  pending.value = true;
++  status.value = '';
++  try {
++    await sendLiveInput({ reqId, conversationId }, text, mode);
++    chat.pushBubble(conversationId, { role: 'user', text, at: Date.now() });
++    status.value = mode === 'steer' ? '插话已接收' : '已排队，将在当前回答后继续';
++    emit('sent', conversationId, text);
++  } catch (error) {
++    status.value = `发送失败，草稿已保留：${String(error)}`;
++  } finally { pending.value = false; }
++}
++</script>
++
++<template>
++  <div class="live-input-actions">
++    <button type="button" :disabled="pending || disabled || !text.trim()" @click="send('steer')"
++      title="在当前任务中补充或纠正要求">插话</button>
++    <button type="button" :disabled="pending || disabled || !text.trim()" @click="send('followUp')"
++      title="当前回答结束后继续处理这条消息">排队</button>
++    <span role="status">{{ status }}</span>
++  </div>
++</template>
++
++<style scoped>
++.live-input-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
++button { color: var(--text); background: var(--bg-soft); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; cursor: pointer; }
++button:disabled { opacity: 0.5; cursor: default; }
++span { font-size: 12px; color: var(--text-2); }
++</style>
+diff --git a/src/components/chat/liveInput.test.ts b/src/components/chat/liveInput.test.ts
+new file mode 100644
+index 0000000..4d45436
+--- /dev/null
++++ b/src/components/chat/liveInput.test.ts
+@@ -0,0 +1,25 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++vi.mock('../../tauri', () => ({ invoke: vi.fn() }));
++import { invoke } from '../../tauri';
++import { sendLiveInput, type LiveInputMode } from './liveInput';
++const target = { reqId: 'req-original', conversationId: 'conv' };
++describe('running input transport', () => {
++  beforeEach(() => { vi.mocked(invoke).mockReset(); });
++  it.each([['steer', 'chat_steer'], ['followUp', 'chat_follow_up']] as const)(
++    '%s captures the original request and conversation', async (mode, command) => {
++      vi.mocked(invoke).mockResolvedValue({ turnId: 'turn', disposition: 'queued' });
++      expect(await sendLiveInput(target, 'keep this text', mode)).toEqual({ turnId: 'turn', disposition: 'queued' });
++      expect(invoke).toHaveBeenCalledWith(command, { ...target, text: 'keep this text' });
++    });
++  it('rejects idle, empty and invalid modes without network activity', async () => {
++    await expect(sendLiveInput({ ...target, reqId: '' }, 'hello', 'steer')).rejects.toThrow('ChatNotRunning');
++    await expect(sendLiveInput(target, '  ', 'steer')).rejects.toThrow('ChatEmptyInput');
++    await expect(sendLiveInput(target, 'hello', 'invalid' as LiveInputMode)).rejects.toThrow('ChatInvalidMode');
++    expect(invoke).not.toHaveBeenCalled();
++  });
++  it('surfaces a done race instead of sending a new prompt', async () => {
++    vi.mocked(invoke).mockRejectedValue(new Error('SESSION_NOT_RUNNING'));
++    await expect(sendLiveInput(target, 'hello', 'followUp')).rejects.toThrow('SESSION_NOT_RUNNING');
++    expect(invoke).toHaveBeenCalledTimes(1);
++  });
++});
+diff --git a/src/components/chat/liveInput.ts b/src/components/chat/liveInput.ts
+new file mode 100644
+index 0000000..a9e6d96
+--- /dev/null
++++ b/src/components/chat/liveInput.ts
+@@ -0,0 +1,15 @@
++import { invoke } from '../../tauri';
++
++export type LiveInputMode = 'steer' | 'followUp';
++export interface LiveInputTarget { reqId: string; conversationId: string }
++export interface LiveInputReceipt { turnId: string; disposition: string }
++const commands: Record<LiveInputMode, string> = {
++  steer: 'chat_steer',
++  followUp: 'chat_follow_up',
++};
++export async function sendLiveInput(target: LiveInputTarget, text: string, mode: LiveInputMode) {
++  if (!target.reqId || !target.conversationId) throw new Error('ChatNotRunning');
++  if (!text.trim()) throw new Error('ChatEmptyInput');
++  if (!Object.hasOwn(commands, mode)) throw new Error('ChatInvalidMode');
++  return invoke<LiveInputReceipt>(commands[mode], { ...target, text });
++}
+diff --git a/src/stores/chat.ts b/src/stores/chat.ts
+index 5dd33eb..ce939d4 100644
+--- a/src/stores/chat.ts
++++ b/src/stores/chat.ts
+@@ -463,6 +463,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
+ 
+   return {
+     byConv,
++    reqByConv,
+     bubblesFor,
+     isSending,
+     runningConvIds,

@@ -1,0 +1,2330 @@
+commit f5f29a67c853b9f674f3c8fe8dec502654cecf0a
+Author: Glen Church <GlenChurchcbh@gmx.es>
+Date:   Fri Oct 16 02:43:51 2026 +0900
+
+    fix: 订阅提供商切换、私有 CA、agentd 走代理（P7b-2 + P7b-3，Codex 实现，Claude 验证）
+    
+    P7b-2：codex/claude-official 走 SDK 原生 provider 与鉴权，目录外模型以安全默认值注册（成本未知）；
+    agentd 字段路径透传到调用方；authority.extraCaPem 在 webpki 默认根上追加私有 CA（显式依赖锁文件中
+    已有的 webpki-roots =0.26.11，无新包）。
+    P7b-3：agentd 启动即安装 undici EnvHttpProxyAgent 全局分发器（与 Pi CLI 等价，显式依赖锁文件中已有
+    的 undici 8.10.2，无新包），支持 network.proxy 配置与 NO_PROXY，代理凭据脱敏；doctor 增加模型网络
+    连通性检查；提供商保存改为纯本地校验（修复 P7b-2 引入的、依赖后端在线的回归）；mesh 客户端统一 CA。
+    二者均由 D1 真实模型演练发现（切换失败、MODEL_NETWORK）。
+    agentd 129、内核 230、collab 179、fable 105、vitest 118 均 0 失败；三种构建 0 警告。
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/agentd/package.json b/agentd/package.json
+index 90a8aa5..41749ff 100644
+--- a/agentd/package.json
++++ b/agentd/package.json
+@@ -20,7 +20,8 @@
+ 	"dependencies": {
+ 		"@earendil-works/pi-ai": "1.0.4",
+ 		"@earendil-works/pi-coding-agent": "1.0.4",
+-		"typebox": "1.3.27"
++		"typebox": "1.3.27",
++		"undici": "8.10.2"
+ 	},
+ 	"devDependencies": {
+ 		"@types/node": "22.19.19",
+diff --git a/agentd/src/config/load.ts b/agentd/src/config/load.ts
+index 62ee5bd..eb49e39 100644
+--- a/agentd/src/config/load.ts
++++ b/agentd/src/config/load.ts
+@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
+ import { Value } from "typebox/value";
+ import { ConfigSchema, ConfigPatchSchema, type Config } from "./schema.ts";
+ import { validateConfig } from "./validate.ts";
++import { validateNetwork } from "../network.ts";
+ import { DaemonError } from "../protocol/errors.ts";
+ 
+ export function mergeConfig(base: Config, patch: unknown): Config {
+@@ -20,6 +21,7 @@ export function mergeConfig(base: Config, patch: unknown): Config {
+   if (new Set(result.providers.map((p) => p.id)).size !== result.providers.length) {
+     throw new DaemonError("INVALID_CONFIG", "提供商标识重复。", ["/providers"]);
+   }
++  validateNetwork(result.network);
+   const dir = result.sessionDir;
+   result.sessionDir = resolve(dir.startsWith("~/") ? resolve(homedir(), dir.slice(2)) : dir);
+   return result;
+@@ -34,7 +36,12 @@ export function loadConfig(path?: string, env: NodeJS.ProcessEnv = process.env):
+     const base: unknown = JSON.parse(readFileSync(defaults, "utf8"));
+     validateConfig(ConfigSchema, base);
+     if (!Value.Check(ConfigSchema, base)) throw new Error("Unreachable invalid defaults");
+-    const config = mergeConfig(base, path ? JSON.parse(readFileSync(path, "utf8")) : {});
++    let config = mergeConfig(base, path ? JSON.parse(readFileSync(path, "utf8")) : {});
++    // Host configuration is delivered before SDK initialization (including doctor).
++    if (env.POLARIS_AGENTD_NETWORK) {
++      const host = mergeConfig(config, { network: JSON.parse(env.POLARIS_AGENTD_NETWORK) });
++      config = mergeConfig(config, { network: { ...config.network, ...host.network } });
++    }
+     // The host supplies the bundled shell as a default; explicit JSON wins.
+     return mergeConfig(config, { shellPath: config.shellPath || env.POLARIS_AGENTD_SHELL_PATH || null });
+   } catch (error) {
+diff --git a/agentd/src/config/schema.ts b/agentd/src/config/schema.ts
+index a554dfb..9a30d09 100644
+--- a/agentd/src/config/schema.ts
++++ b/agentd/src/config/schema.ts
+@@ -3,12 +3,14 @@ import { Type, type Static } from "typebox";
+ const text = Type.String({ minLength: 1 });
+ const positive = Type.Integer({ minimum: 1, maximum: 2147483647 });
+ const toggle = Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false });
++const rates = { input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(), cacheWrite: Type.Number() };
+ const cost = Type.Object({
+-  input: Type.Number({ minimum: 0 }), output: Type.Number({ minimum: 0 }),
+-  cacheRead: Type.Number({ minimum: 0 }), cacheWrite: Type.Number({ minimum: 0 }),
++  ...rates, tiers: Type.Optional(Type.Array(Type.Object({
++    ...rates, inputTokensAbove: Type.Number({ minimum: 0 }),
++  }, { additionalProperties: false }))),
+ }, { additionalProperties: false });
+ export const ProviderSchema = Type.Object({
+-  id: text, baseUrl: text, api: text, authHeader: Type.Optional(Type.Boolean()),
++  id: text, baseUrl: Type.Optional(text), api: Type.Optional(text), authHeader: Type.Optional(Type.Boolean()),
+   models: Type.Array(Type.Object({
+     id: text, name: text, reasoning: Type.Boolean(),
+     input: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")])),
+@@ -16,6 +18,11 @@ export const ProviderSchema = Type.Object({
+   }, { additionalProperties: false }), { minItems: 1 }),
+ }, { additionalProperties: false });
+ export const ConfigSchema = Type.Object({
++  network: Type.Optional(Type.Object({
++    proxy: Type.Optional(Type.Union([text, Type.Null()])),
++    idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647 })),
++    probeTimeoutMs: Type.Optional(positive),
++  }, { additionalProperties: false })),
+   shellPath: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+   oauthTimeoutMs: positive,
+   usageDir: Type.String(),
+diff --git a/agentd/src/daemon.ts b/agentd/src/daemon.ts
+index 0c8741f..7fb9fa5 100644
+--- a/agentd/src/daemon.ts
++++ b/agentd/src/daemon.ts
+@@ -14,6 +14,7 @@ import { versions } from "./protocol/version.ts";
+ import { validateAttachments } from "./sessions/attachments.ts";
+ import { SessionRegistry } from "./sessions/registry.ts";
+ 
++import { configureNetwork } from "./network.ts";
+ import { Logins } from "./models/logins.ts";
+ 
+ export class Daemon {
+@@ -45,6 +46,7 @@ export class Daemon {
+       credentials?: CredentialStore; redactor?: Redactor; factories?: ExtensionFactory[];
+     } = {}): Promise<Daemon> {
+     const redactor = options.redactor ?? new Redactor();
++    configureNetwork(config.network, redactor);
+     const models = await Models.create(config, options.credentials ?? memoryCredentials(), redactor);
+     let daemon: Daemon;
+     const logger = new Logger(() => daemon?.config.logLevel ?? config.logLevel, redactor, log);
+@@ -57,7 +59,7 @@ export class Daemon {
+       ? raw.id as string | number : null;
+     let sessionId: string | undefined;
+     try {
+-      if (raw.method === "config.apply" && raw.params && typeof raw.params === "object" && "config" in raw.params) {
++      if (["config.apply", "config.validate"].includes(String(raw.method)) && raw.params && typeof raw.params === "object" && "config" in raw.params) {
+         validateConfig(ConfigPatchSchema, raw.params.config);
+       }
+       if (raw.method === "prompt" && raw.params && typeof raw.params === "object" && "attachments" in raw.params) {
+@@ -110,9 +112,14 @@ export class Daemon {
+       case "close":
+         await this.sessions.close(request.params.sessionId);
+         return { closed: true };
++      case "config.validate": {
++        await this.models.validate(mergeConfig(this.config, request.params.config));
++        return { valid: true };
++      }
+       case "config.apply": {
+         const config = mergeConfig(this.config, request.params.config ?? {});
+         await this.models.apply(config, request.params.credentials);
++        configureNetwork(config.network, this.models.redactor);
+         const defaultChanged = JSON.stringify(this.config.defaultModel) !== JSON.stringify(config.defaultModel);
+         this.config = config;
+         await this.sessions.refreshConfig(defaultChanged);
+diff --git a/agentd/src/main.ts b/agentd/src/main.ts
+index f093e55..04bf12b 100644
+--- a/agentd/src/main.ts
++++ b/agentd/src/main.ts
+@@ -1,10 +1,9 @@
+ #!/usr/bin/env node
+ import { format } from "node:util";
+ import { loadConfig } from "./config/load.ts";
+-import { Daemon } from "./daemon.ts";
++import { configureNetwork, probeNetwork } from "./network.ts";
+ import { Logger } from "./log.ts";
+-import { FileCredentials } from "./models/file-credentials.ts";
+-import { Redactor } from "./models/credentials.ts";
++import { Redactor } from "./models/redactor.ts";
+ import { publicError } from "./protocol/errors.ts";
+ import { JsonlReader, JsonlWriter } from "./protocol/jsonl.ts";
+ 
+@@ -24,10 +23,27 @@ for (const method of ["log", "info", "warn", "error", "debug"] as const) {
+ 
+ async function main(): Promise<void> {
+   const args = process.argv.slice(2);
++  if (args[0] === "--probe-network" && (!args[1] || args[1].startsWith("--"))) throw new Error("Expected probe target");
++  const probe = args[0] === "--probe-network" ? args.splice(0, 2)[1] : undefined;
+   if (args.length && (args.length !== 2 || args[0] !== "--config")) {
+     throw new Error("Expected --config <path>");
+   }
+   const config = loadConfig(args[1] ?? process.env.POLARIS_AGENTD_CONFIG);
++  configureNetwork(config.network, redactor);
++  if (probe !== undefined) {
++    let target = probe;
++    if (!/^https?:/.test(target)) {
++      const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
++      const { memoryCredentials } = await import("./models/credentials.ts");
++      const runtime = await ModelRuntime.create({ credentials: memoryCredentials(), modelsPath: null, allowModelNetwork: false });
++      target = runtime.getModels().find((model) => model.provider === target)?.baseUrl ?? "";
++    }
++    output.send(await probeNetwork(target, config.network));
++    await output.flush();
++    return;
++  }
++  const { Daemon } = await import("./daemon.ts");
++  const { FileCredentials } = await import("./models/file-credentials.ts");
+   if (process.env.POLARIS_USAGE_DIR) config.usageDir = process.env.POLARIS_USAGE_DIR;
+   const path = process.env.POLARIS_PROVIDER_STORE;
+   const credentials = path ? new FileCredentials(path, redactor, {
+diff --git a/agentd/src/models/credentials.ts b/agentd/src/models/credentials.ts
+index d39e183..2be5b61 100644
+--- a/agentd/src/models/credentials.ts
++++ b/agentd/src/models/credentials.ts
+@@ -7,28 +7,4 @@ export function memoryCredentials(): CredentialStore {
+   return new InMemoryCredentialStore();
+ }
+ 
+-export class Redactor {
+-  private readonly secrets = new Set<string>();
+-  add(secret: string): void {
+-    if (!secret) return;
+-    // Register representations before any logger/event sink sees the credential.
+-    for (const variant of [secret, encodeURIComponent(secret),
+-      Buffer.from(secret, "utf8").toString("base64"), JSON.stringify(secret).slice(1, -1)]) {
+-      this.secrets.add(variant);
+-    }
+-  }
+-  text(value: string): string {
+-    for (const secret of [...this.secrets].sort((a, b) => b.length - a.length)) {
+-      value = value.split(secret).join("[REDACTED]");
+-    }
+-    return value;
+-  }
+-  clean<T>(value: T): T {
+-    if (typeof value === "string") return this.text(value) as T;
+-    if (Array.isArray(value)) return value.map((v) => this.clean(v)) as T;
+-    if (value && typeof value === "object") {
+-      return Object.fromEntries(Object.entries(value).map(([k, v]) => [this.text(k), this.clean(v)])) as T;
+-    }
+-    return value;
+-  }
+-}
++export { Redactor } from "./redactor.ts";
+diff --git a/agentd/src/models/redactor.ts b/agentd/src/models/redactor.ts
+new file mode 100644
+index 0000000..3e2313f
+--- /dev/null
++++ b/agentd/src/models/redactor.ts
+@@ -0,0 +1,25 @@
++export class Redactor {
++  private readonly secrets = new Set<string>();
++  add(secret: string): void {
++    if (!secret) return;
++    // Register representations before any logger/event sink sees the credential.
++    for (const variant of [secret, encodeURIComponent(secret),
++      Buffer.from(secret, "utf8").toString("base64"), JSON.stringify(secret).slice(1, -1)]) {
++      this.secrets.add(variant);
++    }
++  }
++  text(value: string): string {
++    for (const secret of [...this.secrets].sort((a, b) => b.length - a.length)) {
++      value = value.split(secret).join("[REDACTED]");
++    }
++    return value;
++  }
++  clean<T>(value: T): T {
++    if (typeof value === "string") return this.text(value) as T;
++    if (Array.isArray(value)) return value.map((v) => this.clean(v)) as T;
++    if (value && typeof value === "object") {
++      return Object.fromEntries(Object.entries(value).map(([k, v]) => [this.text(k), this.clean(v)])) as T;
++    }
++    return value;
++  }
++}
+diff --git a/agentd/src/models/runtime.ts b/agentd/src/models/runtime.ts
+index c068681..f6a4299 100644
+--- a/agentd/src/models/runtime.ts
++++ b/agentd/src/models/runtime.ts
+@@ -24,14 +24,30 @@ export class Models {
+   private static async build(config: Config, credentials: CredentialStore) {
+     const runtime = await ModelRuntime.create({ credentials, modelsPath: null, allowModelNetwork: false });
+     const builtinProviders = new Set(runtime.getModels().map((m) => m.provider));
+-    for (const { id, ...provider } of config.providers) runtime.registerProvider(id, provider);
+-    if (runtime.getError()) throw new DaemonError("INVALID_PROVIDER", "Provider configuration is invalid");
+     const catalog = runtime.getModels().filter((m) => builtinProviders.has(m.provider)).map(({ provider, id, name, api, baseUrl, input, cost, reasoning, contextWindow, maxTokens }) => ({
+       provider, id, name, api, baseUrl, input, cost, reasoning, contextWindow, maxTokens,
+     }));
++    for (const [index, { id, ...provider }] of config.providers.entries()) {
++      for (const [modelIndex, model] of provider.models.entries()) {
++        if (model.maxTokens > model.contextWindow) {
++          throw new DaemonError("INVALID_PROVIDER", "Output limit exceeds context window", [`/providers/${index}/models/${modelIndex}/maxTokens`]);
++        }
++      }
++      // Preserve native model compatibility/options while allowing explicit metadata overrides.
++      if (id === "anthropic" || id === "openai-codex") {
++        provider.models = provider.models.map((model) => ({ ...runtime.getModel(id, model.id), ...model }));
++      }
++      try { runtime.registerProvider(id, provider); }
++      catch { throw new DaemonError("INVALID_PROVIDER", "Provider registration failed", [`/providers/${index}`]); }
++    }
++    if (runtime.getError()) throw new DaemonError("INVALID_PROVIDER", "Provider configuration is invalid");
+     return { runtime, catalog };
+   }
+ 
++  async validate(config: Config): Promise<void> {
++    await Models.build(config, this.credentials);
++  }
++
+   async apply(config: Config, keys: Credentials = {}): Promise<void> {
+     for (const key of Object.values(keys)) if (key) this.redactor.add(key);
+     const candidate = await Models.build(config, this.credentials);
+diff --git a/agentd/src/network.ts b/agentd/src/network.ts
+new file mode 100644
+index 0000000..4a8e70e
+--- /dev/null
++++ b/agentd/src/network.ts
+@@ -0,0 +1,101 @@
++/** Pi CLI's dispatcher policy, using the same installed undici version. */
++import { EventEmitter } from "node:events";
++import * as undici from "undici";
++import type { Config } from "./config/schema.ts";
++import type { Redactor } from "./models/credentials.ts";
++import { DaemonError } from "./protocol/errors.ts";
++
++type Network = Config["network"];
++const DEFAULT_IDLE_MS = 300_000;
++const FAMILY_ATTEMPT_MS = 2_000;
++const DEFAULT_PROBE_MS = 5_000;
++let installed: undici.EnvHttpProxyAgent | undefined;
++let fingerprint: string | undefined;
++const originalFetch = globalThis.fetch;
++let installedFetch: typeof fetch | undefined;
++
++export function validateNetwork(network: Network): void {
++  if (network?.proxy == null) return;
++  try {
++    const url = new URL(network.proxy);
++    if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.search || url.hash
++      || url.pathname !== "/") throw new Error();
++  } catch {
++    throw new DaemonError("INVALID_CONFIG", "代理必须是 HTTP(S) 代理地址。", ["/network/proxy"]);
++  }
++}
++function guarded<T extends EventEmitter>(dispatcher: T): T {
++  EventEmitter.prototype.on.call(dispatcher, "error", () => {});
++  return dispatcher;
++}
++function protectProxy(value: string | undefined | null, redactor: Redactor): void {
++  if (!value) return;
++  redactor.add(value);
++  try {
++    const url = new URL(value);
++    for (const part of [url.username, url.password]) {
++      redactor.add(part);
++      redactor.add(decodeURIComponent(part));
++    }
++    redactor.add(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`);
++  } catch { /* Invalid URLs are reported without their contents. */ }
++}
++function createDispatcher(network: Network, onProxyRequest = () => {}): undici.EnvHttpProxyAgent {
++  const idle = network?.idleTimeoutMs ?? DEFAULT_IDLE_MS;
++  try {
++    return guarded(new undici.EnvHttpProxyAgent({
++      httpProxy: network?.proxy ?? undefined, httpsProxy: network?.proxy ?? undefined,
++      allowH2: false, proxyTunnel: true, bodyTimeout: idle, headersTimeout: idle,
++      connect: { autoSelectFamilyAttemptTimeout: FAMILY_ATTEMPT_MS },
++      clientFactory: (origin, options) => {
++        const client = guarded(new undici.Client(origin, options));
++        const dispatch = client.dispatch.bind(client);
++        client.dispatch = (options, handler) => { onProxyRequest(); return dispatch(options, handler); };
++        return client;
++      },
++      factory: (origin, options) => (options as undici.Pool.Options).connections === 1
++        ? guarded(new undici.Client(origin, options))
++        : guarded(new undici.Pool(origin, { ...options,
++          factory: (url, opts) => guarded(new undici.Client(url, opts)) })),
++    }));
++  } catch {
++    throw new DaemonError("INVALID_CONFIG", "无法安装 HTTP 代理分发器。", ["/network/proxy"]);
++  }
++}
++
++export function configureNetwork(network: Network, redactor: Redactor): void {
++  validateNetwork(network);
++  const env = process.env;
++  for (const value of [network?.proxy, env.http_proxy, env.HTTP_PROXY, env.https_proxy, env.HTTPS_PROXY]) {
++    protectProxy(value, redactor);
++  }
++  const key = JSON.stringify([network, env.http_proxy, env.HTTP_PROXY, env.https_proxy, env.HTTPS_PROXY, env.no_proxy, env.NO_PROXY]);
++  if (key === fingerprint) return;
++  const dispatcher = createDispatcher(network);
++  undici.setGlobalDispatcher(dispatcher);
++  if (globalThis.fetch === (installedFetch ?? originalFetch)) {
++    undici.install();
++    installedFetch = globalThis.fetch;
++  }
++  const previous = installed;
++  installed = dispatcher;
++  fingerprint = key;
++  void previous?.close().catch(() => {});
++}
++
++/** HEAD at the origin only: no auth, model payload, redirects, or paid inference. */
++export async function probeNetwork(target: string, network: Network): Promise<{ reachable: boolean; proxy: boolean }> {
++  let dispatcher: undici.EnvHttpProxyAgent | undefined;
++  let usedProxy = false;
++  try {
++    const url = new URL(target);
++    if (!["https:", "http:"].includes(url.protocol)) throw new Error();
++    // Fresh connections make proxy reporting exact even after earlier model traffic.
++    dispatcher = createDispatcher(network, () => { usedProxy = true; });
++    const response = await undici.fetch(url.origin, { dispatcher, method: "HEAD", redirect: "manual",
++      signal: AbortSignal.timeout(network?.probeTimeoutMs ?? DEFAULT_PROBE_MS) });
++    await response.body?.cancel();
++    return { reachable: true, proxy: usedProxy };
++  } catch { return { reachable: false, proxy: usedProxy }; }
++  finally { await dispatcher?.destroy().catch(() => {}); }
++}
+diff --git a/agentd/src/protocol/schema.ts b/agentd/src/protocol/schema.ts
+index 37d70d0..f39fbf6 100644
+--- a/agentd/src/protocol/schema.ts
++++ b/agentd/src/protocol/schema.ts
+@@ -62,6 +62,7 @@ export const RequestSchema = Type.Union([
+   request("steer", { sessionId: text, text }),
+   request("followUp", { sessionId: text, text }),
+   request("abort", { sessionId: text }), request("close", { sessionId: text }),
++  request("config.validate", { config: ConfigPatchSchema }),
+   Type.Object({ id, method: Type.Literal("config.apply"), params: Type.Object({
+     config: Type.Optional(ConfigPatchSchema), credentials: Type.Optional(CredentialsSchema),
+   }, { additionalProperties: false }) }, { additionalProperties: false }),
+diff --git a/agentd/test/catalog.test.ts b/agentd/test/catalog.test.ts
+index 064010e..3dc2f0d 100644
+--- a/agentd/test/catalog.test.ts
++++ b/agentd/test/catalog.test.ts
+@@ -5,7 +5,7 @@ import { Value } from "typebox/value";
+ import { CatalogSchema } from "../src/protocol/schema.ts";
+ import { harness, result } from "./helpers.ts";
+ 
+-test("apply rebuilds builtin catalog with updated native provider configuration", async () => {
++test("apply updates the runtime but keeps the SDK catalog independent of overrides", async () => {
+   const h = await harness();
+   try {
+     const builtin = h.daemon.models.builtinCatalog.find((m) => m.provider === "anthropic");
+@@ -15,8 +15,10 @@ test("apply rebuilds builtin catalog with updated native provider configuration"
+     result(await h.request("config.apply", { config: { providers: [{ id: provider, api, baseUrl, models: [configModel] }] } }));
+     const catalog = result<{ models: typeof model[] }>(await h.request("models.catalog"));
+     assert.ok(Value.Check(CatalogSchema, catalog));
+-    assert.equal(catalog.models.find((m) => m.provider === provider)?.name, "Updated built-in");
+-    assert.equal(catalog.models.find((m) => m.provider === provider)?.contextWindow, 64000);
++    assert.deepEqual(catalog.models.find((m) => m.provider === provider && m.id === model.id), builtin);
++    const active = result<{ models: typeof model[] }>(await h.request("models.list"));
++    assert.equal(active.models.find((m) => m.provider === provider && m.id === model.id)?.name, "Updated built-in");
++    assert.equal(active.models.find((m) => m.provider === provider && m.id === model.id)?.contextWindow, 64000);
+   } finally { await h.close(); }
+ });
+ test("shared catalog sample validates and incomplete/invalid metadata is rejected", async () => {
+diff --git a/agentd/test/native-provider.test.ts b/agentd/test/native-provider.test.ts
+new file mode 100644
+index 0000000..24dbcba
+--- /dev/null
++++ b/agentd/test/native-provider.test.ts
+@@ -0,0 +1,57 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { fauxAssistantMessage, InMemoryCredentialStore } from "@earendil-works/pi-ai";
++import { readFileSync, readdirSync } from "node:fs";
++import { join } from "node:path";
++import { harness, result } from "./helpers.ts";
++import { recordUsage } from "../src/events/usage-store.ts";
++
++const unknown = { id: "polaris-out-of-catalog-test", name: "polaris-out-of-catalog-test", contextWindow: 128000, maxTokens: 8192,
++  input: ["text"], reasoning: false, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
++
++test("native providers register out-of-catalog models without custom endpoints and retain OAuth", async () => {
++  const credentials = new InMemoryCredentialStore();
++  const h = await harness([], {}, [], credentials);
++  try {
++    for (const [id, api] of [["openai-codex", "openai-codex-responses"], ["anthropic", "anthropic-messages"]]) {
++      const credential = { type: "oauth" as const, access: "test-access", refresh: "test-refresh", expires: Date.now() + 3600000 };
++      await credentials.modify(id, async () => credential);
++      const config = { providers: [{ id, models: [unknown] }], defaultModel: { provider: id, id: unknown.id } };
++      const before = h.daemon.models.runtime;
++      result(await h.request("config.validate", { config }));
++      assert.equal(h.daemon.models.runtime, before, "save validation must not change the active runtime");
++      result(await h.request("config.apply", { config }));
++      const model = h.daemon.models.runtime.getModel(id, unknown.id);
++      assert.ok(model);
++      assert.equal(model.api, api);
++      assert.ok(model.baseUrl.startsWith("https://"));
++      assert.deepEqual(await credentials.read(id), credential);
++      assert.equal(h.daemon.models.runtime.isUsingOAuth(id), true);
++      assert.ok(!h.daemon.models.builtinCatalog.some((m) => m.provider === id && m.id === unknown.id));
++      const message = { ...fauxAssistantMessage("usage"), provider: id, model: unknown.id };
++      const directory = join(h.dir, id);
++      recordUsage(directory, "session", "turn", 1, message, h.daemon.models.runtime);
++      const date = readdirSync(directory)[0];
++      const row = JSON.parse(readFileSync(join(directory, date, readdirSync(join(directory, date))[0]), "utf8"));
++      assert.equal(row.priceAvailable, false);
++    }
++  } finally { await h.close(); }
++});
++
++test("validation and apply report the same field paths, accept catalog tiered costs", async () => {
++  const h = await harness();
++  try {
++    for (const method of ["config.validate", "config.apply"]) {
++      const response = await h.request(method, { config: { providers: [
++        { id: "openai-codex", models: [{ ...unknown, maxTokens: 0 }] },
++      ] } });
++      assert.equal(response.ok, false);
++      if (response.ok) throw new Error("invalid config accepted");
++      assert.equal(response.error.code, "INVALID_CONFIG");
++      assert.deepEqual(response.error.paths, ["/providers/0/models/0/maxTokens"]);
++      result(await h.request(method, { config: { providers: [{ id: "anthropic", models: [{ ...unknown,
++        cost: { ...unknown.cost, input: 3, tiers: [{ ...unknown.cost, input: 6, inputTokensAbove: 200000 }] },
++      }] }] } }));
++    }
++  } finally { await h.close(); }
++});
+diff --git a/agentd/test/network-probe.test.ts b/agentd/test/network-probe.test.ts
+new file mode 100644
+index 0000000..69a213b
+--- /dev/null
++++ b/agentd/test/network-probe.test.ts
+@@ -0,0 +1,30 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { configureNetwork, probeNetwork } from "../src/network.ts";
++import { loadConfig } from "../src/config/load.ts";
++import { Redactor } from "../src/models/redactor.ts";
++
++// No listener required; the successful CONNECT/model test remains in network.test.ts.
++test("failed probes still report HTTPS_PROXY, NO_PROXY and host configuration precedence", async () => {
++  const original = { ...process.env };
++  const base = { ...process.env };
++  for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy", "POLARIS_AGENTD_NETWORK"]) delete base[key];
++  try {
++    for (const [overrides, expected] of [
++      [{ HTTPS_PROXY: "http://127.0.0.1:65534" }, true],
++      [{ HTTPS_PROXY: "http://127.0.0.1:65534", NO_PROXY: "127.0.0.1" }, false],
++      [{ HTTP_PROXY: "invalid-env", HTTPS_PROXY: "invalid-env", http_proxy: "invalid-env",
++        POLARIS_AGENTD_NETWORK: JSON.stringify({ proxy: "http://user:probe-secret@127.0.0.1:65534", probeTimeoutMs: 200 }) }, true],
++    ] as const) {
++      process.env = { ...base, POLARIS_AGENTD_NETWORK: JSON.stringify({ probeTimeoutMs: 200 }), ...overrides };
++      const config = loadConfig();
++      const redactor = new Redactor();
++      configureNetwork(config.network, redactor);
++      assert.deepEqual(await probeNetwork("https://127.0.0.1:65534/paid", config.network), { reachable: false, proxy: expected });
++      if (config.network?.proxy) assert.ok(!redactor.text(config.network.proxy).includes("probe-secret"));
++    }
++  } finally {
++    process.env = original;
++    configureNetwork({}, new Redactor());
++  }
++});
+diff --git a/agentd/test/network.test.ts b/agentd/test/network.test.ts
+new file mode 100644
+index 0000000..c280f7c
+--- /dev/null
++++ b/agentd/test/network.test.ts
+@@ -0,0 +1,126 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { createServer, type Server } from "node:http";
++import { connect, type Socket } from "node:net";
++import { once } from "node:events";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { spawn } from "node:child_process";
++import { loadConfig, mergeConfig } from "../src/config/load.ts";
++import { Daemon } from "../src/daemon.ts";
++import { Redactor } from "../src/models/credentials.ts";
++import { configureNetwork } from "../src/network.ts";
++import type { ProtocolEvent } from "../src/protocol/events.ts";
++import { result, until } from "./helpers.ts";
++import { bounded } from "./synchronization.ts";
++
++async function listen(server: Server): Promise<number> {
++  server.listen(0, "127.0.0.1");
++  await once(server, "listening");
++  const address = server.address();
++  if (!address || typeof address === "string") throw new Error("missing address");
++  return address.port;
++}
++test("SDK model requests use CONNECT, NO_PROXY and explicit proxy precedence; doctor uses HEAD", async () => {
++  const env = { ...process.env };
++  const dir = mkdtempSync(join(tmpdir(), "agentd-proxy-"));
++  const sockets = new Set<Socket>();
++  let requests = 0;
++  const methods: string[] = [];
++  const upstream = createServer((req, res) => {
++    methods.push(req.method ?? "");
++    if (req.method === "HEAD") { res.writeHead(401).end(); return; }
++    assert.equal(req.url, "/v1/chat/completions");
++    assert.equal(req.method, "POST");
++    requests++;
++    req.resume();
++    res.writeHead(200, { "content-type": "text/event-stream" });
++    const chunk = (delta: object, finish_reason: string | null) => ({ id: "test", object: "chat.completion.chunk",
++      created: 1, model: "test", choices: [{ index: 0, delta, finish_reason }] });
++    res.end(`data: ${JSON.stringify(chunk({ role: "assistant", content: "proxied reply" }, null))}\n\n`
++      + `data: ${JSON.stringify(chunk({}, "stop"))}\n\ndata: [DONE]\n\n`);
++  });
++  const proxies = [createServer(), createServer()];
++  const connects = [0, 0];
++  const track = (socket: Socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); };
++  for (const server of [upstream, ...proxies]) server.on("connection", track);
++  try {
++    const port = await listen(upstream);
++    const ports = await Promise.all(proxies.map(listen));
++    proxies.forEach((proxy, index) => proxy.on("connect", (req, downstream, head) => {
++      connects[index]++;
++      assert.equal(req.url?.split(":").at(-1), String(port));
++      const socket = connect(port, "127.0.0.1", () => {
++        downstream.write("HTTP/1.1 200 Connection Established\r\n\r\n");
++        if (head.length) socket.write(head);
++        downstream.pipe(socket).pipe(downstream);
++      });
++      track(socket);
++      socket.on("error", () => downstream.destroy());
++      downstream.on("error", () => socket.destroy());
++    }));
++    for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"]) delete process.env[key];
++    process.env.HTTP_PROXY = `http://127.0.0.1:${ports[0]}`;
++    process.env.HTTPS_PROXY = process.env.HTTP_PROXY;
++    for (const mode of ["environment", "bypass", "explicit"] as const) {
++      process.env.NO_PROXY = mode === "bypass" ? "127.0.0.1" : "";
++      process.env.http_proxy = process.env.HTTP_PROXY;
++      const before = [...connects];
++      const events: ProtocolEvent[] = [];
++      const config = mergeConfig(loadConfig(), { sessionDir: join(dir, mode), usageDir: join(dir, "usage"),
++        tools: [], extensions: { enabled: false }, retry: { enabled: false },
++        network: mode === "explicit" ? { proxy: `http://user:proxy-secret@127.0.0.1:${ports[1]}` } : {},
++        defaultModel: { provider: "proxy-test", id: "test" },
++        providers: [{ id: "proxy-test", api: "openai-completions", baseUrl: `http://127.0.0.1:${port}/v1`,
++          models: [{ id: "test", name: "test", reasoning: false, input: ["text"], contextWindow: 128000,
++            maxTokens: 8192, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] }],
++      });
++      const redactor = new Redactor();
++      const daemon = await Daemon.create(config, (event) => { if (event.type === "event") events.push(event); }, () => {}, { redactor });
++      try {
++        result(await daemon.handle({ id: 1, method: "config.apply", params: { credentials: { "proxy-test": "test-key" } } }));
++        const opened = result<{ sessionId: string }>(await daemon.handle({ id: 2, method: "session.open", params: { cwd: dir } }));
++        result(await daemon.handle({ id: 3, method: "prompt", params: { sessionId: opened.sessionId, text: "hello" } }));
++        await until(() => events.some((event) => event.event === "turn.completed"));
++        assert.ok(events.some((event) => event.event === "turn.completed" && event.status === "completed"), JSON.stringify(events));
++        assert.equal(events.filter((event) => event.event === "text.delta").map((event) => event.text).join(""), "proxied reply");
++        assert.equal(connects[0] > before[0], mode === "environment");
++        assert.equal(connects[1] > before[1], mode === "explicit");
++        if (mode === "explicit") assert.ok(!redactor.text("http://user:proxy-secret@127.0.0.1 proxy-secret").includes("proxy-secret"));
++      } finally { await daemon.shutdown(); }
++    }
++    assert.equal(requests, 3);
++    process.env.NO_PROXY = "";
++    const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts", "--probe-network", `http://127.0.0.1:${port}/paid`], {
++      env: { ...process.env, POLARIS_AGENTD_NETWORK: JSON.stringify({ proxy: `http://127.0.0.1:${ports[1]}` }) },
++      stdio: ["ignore", "pipe", "pipe"],
++    });
++    let output = "";
++    child.stdout.on("data", (data) => { output += data; });
++    const [code] = await bounded(once(child, "close"), "network probe");
++    assert.equal(code, 0);
++    assert.deepEqual(JSON.parse(output), { reachable: true, proxy: true });
++    assert.equal(methods.at(-1), "HEAD");
++    assert.equal(requests, 3, "doctor must never submit model inference");
++  } finally {
++    process.env = env;
++    configureNetwork({}, new Redactor());
++    for (const socket of sockets) socket.destroy();
++    await Promise.all([upstream, ...proxies].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++test("invalid network fields never expose proxy credentials", () => {
++  for (const raw of ["42", "null", "[]", '{"proxy":false}']) {
++    assert.throws(() => loadConfig(undefined, { POLARIS_AGENTD_NETWORK: raw }));
++  }
++  for (const network of [{ proxy: 1 }, { proxy: "socks5://secret@localhost:80" }, { idleTimeoutMs: -1 }, { probeTimeoutMs: 0 }]) {
++    assert.throws(() => mergeConfig(loadConfig(), { network }), (error: unknown) => {
++      assert.ok(error instanceof Error);
++      assert.ok(!error.message.includes("secret"));
++      return true;
++    });
++  }
++});
+diff --git a/drills/README.md b/drills/README.md
+index 61b6204..a4de742 100644
+--- a/drills/README.md
++++ b/drills/README.md
+@@ -103,11 +103,12 @@ auto-current 的越界写语义是“要求批准”，不是无条件硬拒；
+ | step | 预期结果与限制 |
+ | --- | --- |
+ | `topology` | 5 个目标角色和 TLS 入口启动，HTTP ready，显式 CA 的 curl 访问 authority 和 relay；从公钥重算 SHA-256 指纹 |
+-| `login` / `relay` / `access` | blocked：成员 ureq 自签 CA 信任入口尚未找到；脚本未实现成员本机准入/真实主机入网和跨主机数据面 |
++| `tls` | 成员配置 `authority.extraCaPem=/tmp/drill-ca.crt`，经生产 ureq 获取权威公钥并转发请求；必须收到 HTTP 200，不能用 curl 替代 |
++| `login` / `relay` / `access` | blocked：脚本未实现成员本机准入/真实主机入网和跨主机数据面；TLS 单独由 `tls` 验证 |
+ | `notifications` | **权威本机 HTTP 会话设备**：旧会话收到新设备通知 |
+ | `approvals` | 同上：新会话高风险操作返回 approval_pending，自批失败，旧会话批准后操作成功 |
+ | `revoke` | 同上：一键吊销，新会话在配置拉取周期预算内被拒；不是远端传播证明 |
+-| `offline` / `revocations` | blocked：委托 TLS 链未建立，未实现离线保持会话及清单篡改/回滚投递演练 |
++| `offline` / `revocations` | blocked：未实现离线保持会话及清单篡改/回滚投递演练 |
+ | `r11` | 真实 HTTP 对注册/未注册邮箱比较状态与 JSON；collab signup/reset/login 及 account send_code；两边同时错误不能算 pass |
+ | `rate` | 真正重复匿名登录请求，必须获得 429，预算来自 runtime.json |
+ | `backup` | 停本次 authority，复用部署 snapshot.py，用真实 age 加密/解密；校验 tar/SQLite/key 后覆盖恢复，重启校验完整指纹和原账号登录 |
+diff --git a/drills/d4.mjs b/drills/d4.mjs
+index 1a1e43e..751e4b1 100644
+--- a/drills/d4.mjs
++++ b/drills/d4.mjs
+@@ -9,6 +9,14 @@ async function pair(h) {
+ }
+ const steps = {
+   topology,
++  async tls(h) {
++    // The member must fetch/pin the authority key and forward over verified TLS.
++    // Unlike curl probes, this executes the production ureq construction.
++    const response = await accountCall(h, '/api/collab/email/send_code',
++      { email: 'tls-probe@example.invalid', purpose: 'login' }, undefined, 'member-a');
++    check(response.status === 200, `Delegated TLS forwarding failed: ${JSON.stringify(response.value)}`);
++    return { trust: 'authority.extraCaPem', transport: 'production ureq over private-CA HTTPS', forwarded: true };
++  },
+   async login() { delegatedBlocked(); },
+   async relay() { delegatedBlocked(); },
+   async access() { delegatedBlocked(); },
+diff --git a/drills/lib/d4-topology.mjs b/drills/lib/d4-topology.mjs
+index c3bee63..ea028aa 100644
+--- a/drills/lib/d4-topology.mjs
++++ b/drills/lib/d4-topology.mjs
+@@ -83,7 +83,7 @@ export async function topology(h) {
+     }, { timeoutMs: h.timeout, label: 'authority public key' });
+     h.fingerprint = createHash('sha256').update(Buffer.from(publicKey.publicKey, 'base64url')).digest('hex');
+     check(publicKey.fingerprint === h.fingerprint, 'Authority fingerprint does not match its public key');
+-    await save(join(h.root, 'member.json'), { ...baseConfig, authority: { url: 'https://authority.drill', publicKeyFingerprints: [h.fingerprint] } });
++    await save(join(h.root, 'member.json'), { ...baseConfig, authority: { url: 'https://authority.drill', publicKeyFingerprints: [h.fingerprint], extraCaPem: '/tmp/drill-ca.crt' } });
+     await compose(h, 'members-start', ['up', '-d', 'member-a', 'member-b', 'new-device']);
+     for (const name of Object.keys(h.data)) await waitFor(async () => {
+       try { return (await request(`http://127.0.0.1:${h.ports[name]}`, '/api/ready')).status === 200; } catch { return false; }
+@@ -106,5 +106,5 @@ export async function login(h, name = 'Old device', service = 'authority') {
+   return r.value;
+ }
+ export function delegatedBlocked() {
+-  throw new Blocked('Delegated self-CA chain blocked: ureq default TLS has no test CA injection in authority/trust.rs or interconnect/browser/authority.rs. Also requires explicit member admission and real host enrollment, not web_ session identities. See docs/drills/P7a-blockers.md');
++  throw new Blocked('This step still requires explicit member admission and real host enrollment, not web_ session identities. CA trust is exercised separately by the tls step. See docs/drills/P7a-blockers.md');
+ }
+diff --git a/src-tauri/crates/polaris-collab/Cargo.toml b/src-tauri/crates/polaris-collab/Cargo.toml
+index 9abb62f..182946d 100644
+--- a/src-tauri/crates/polaris-collab/Cargo.toml
++++ b/src-tauri/crates/polaris-collab/Cargo.toml
+@@ -25,6 +25,8 @@ regex = "1"
+ directories = "5"
+ walkdir = "2"
+ ureq = { version = "2", features = ["json"] }
++# Match ureq 2.12.1 exactly; reuse the existing lockfile package.
++webpki-roots = "=0.26.11"
+ base64 = "0.22"
+ hex = "0.4"
+ sha2 = "0.10"
+diff --git a/src-tauri/crates/polaris-collab/src/collab/authority/trust.rs b/src-tauri/crates/polaris-collab/src/collab/authority/trust.rs
+index af7a093..6f15626 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/authority/trust.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/authority/trust.rs
+@@ -63,10 +63,10 @@ fn fetch_public_key(url: &str) -> Result<String, String> {
+     }
+     super::super::interconnect::validate_url(url)?;
+     let ep = format!("{}/api/account/pubkey", url.trim_end_matches('/'));
+-    let resp = ureq::get(&ep)
++    let resp = super::super::interconnect::http_client::agent(ureq::AgentBuilder::new())?.get(&ep)
+         .timeout(std::time::Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
+         .call()
+-        .map_err(|e| format!("连不上账号权威 {url}: {e}"))?;
++        .map_err(|e| format!("连不上账号权威 {url}: {}", super::super::interconnect::http_client::diagnostic(&e)))?;
+     let v: serde_json::Value = resp
+         .into_json()
+         .map_err(|e| format!("账号权威返回的不是 JSON: {e}"))?;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/commands.rs b/src-tauri/crates/polaris-collab/src/collab/commands.rs
+index eaa615f..f68692f 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/commands.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/commands.rs
+@@ -180,11 +180,12 @@ pub fn collab_gateway_attach(
+         let name = hostName
+             .filter(|s| !s.trim().is_empty())
+             .unwrap_or_else(|| "桌面主机".into());
+-        let resp = ureq::post(&format!("{base}/api/gw/register"))
++        let resp = super::interconnect::http_client::agent(ureq::AgentBuilder::new())?
++            .post(&format!("{base}/api/gw/register"))
+             .set("Authorization", &format!("Bearer {}", token.trim()))
+             .timeout(std::time::Duration::from_secs(30))
+             .send_json(serde_json::json!({"hostNodeId": host_nid, "hostName": name}))
+-            .map_err(|e| format!("注册到云机失败: {e}"))?;
++            .map_err(|e| format!("注册到云机失败: {}", super::interconnect::http_client::diagnostic(&e)))?;
+         let v: serde_json::Value = resp
+             .into_json()
+             .map_err(|e| format!("解析注册响应失败: {e}"))?;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/gateway/endpoint.rs b/src-tauri/crates/polaris-collab/src/collab/gateway/endpoint.rs
+index 74fab84..bb78b32 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/gateway/endpoint.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/gateway/endpoint.rs
+@@ -19,12 +19,15 @@ pub(super) async fn ensure_endpoint() -> Result<std::sync::Arc<crate::collab::tu
+             IdleTimeout::try_from(IDLE_TIMEOUT).map_err(|e| format!("网关 idle timeout 无效: {e}"))?,
+         ))
+         .build();
+-    let ep = Endpoint::builder(presets::N0)
++    let mut builder = Endpoint::builder(presets::N0)
+         .relay_mode(crate::collab::tunnel::relay::mode(&relay_config)?)
+         .secret_key(SecretKey::from_bytes(&seed))
+         .transport_config(transport)
+-        .alpns(vec![ALPN.to_vec()])
+-        .bind()
++        .alpns(vec![ALPN.to_vec()]);
++    if let Some(tls) = crate::collab::interconnect::http_client::relay_tls_config()? {
++        builder = builder.ca_tls_config(tls);
++    }
++    let ep = builder.bind()
+         .await
+         .map_err(|e| format!("网关 iroh endpoint 绑定失败: {e}"))?;
+     let ep = crate::collab::tunnel::relay::track(ep, relay_config, "gateway");
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/authority.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/authority.rs
+index 971b2a0..1881fd8 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/authority.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/browser/authority.rs
+@@ -3,8 +3,8 @@ use super::*;
+ use crate::collab::{authority as a, auth, mesh};
+ 
+ pub fn request(method: &str, url: &str, key: Option<&str>, body: &Value) -> Result<Value, String> {
+-    let agent = ureq::AgentBuilder::new().redirects(0)
+-        .timeout(std::time::Duration::from_secs(super::super::load()?.browser.request_timeout_secs)).build();
++    let agent = super::super::http_client::agent(ureq::AgentBuilder::new().redirects(0)
++        .timeout(std::time::Duration::from_secs(super::super::load()?.browser.request_timeout_secs)))?;
+     let mut request = agent.request(method, url);
+     if let Some(key) = key { request = request.set("Authorization", &format!("Bearer {key}")); }
+     let response = if method == "GET" { request.call() } else { request.send_json(body.clone()) };
+@@ -22,7 +22,7 @@ pub fn request(method: &str, url: &str, key: Option<&str>, body: &Value) -> Resu
+             }
+             Err("interconnect_upstream_failed".into())
+         }
+-        Err(_) => Err("interconnect_upstream_unavailable".into()),
++        Err(error) => Err(super::super::http_client::diagnostic(&error)),
+     }
+ }
+ 
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json b/src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json
+index 5308df0..8cc23c0 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json
+@@ -1,5 +1,6 @@
+ {
+   "authority": {
++    "extraCaPem": null,
+     "url": null,
+     "publicKeyFingerprints": []
+   },
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs
+index f7da479..c72ccfc 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs
+@@ -27,7 +27,7 @@ pub fn require_proven(
+     { return Ok(()); }
+     let (url, key, _) = authority::pinned().ok_or("需要联网确认：尚未信任权威")?;
+     let mesh_key = db::meta_get("mesh_key").ok_or("需要联网确认：本机尚未入网")?;
+-    let response = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build()
++    let response = super::http_client::agent(ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)))?
+         .post(&format!("{url}/api/mesh/risk/authorize"))
+         .set("Authorization", &format!("Bearer {mesh_key}"))
+         .send_json(json!({"actorNodeId":actor_node, "operation":operation, "digest":digest, "nonce":nonce, "actorAssertion":assertion}));
+@@ -37,7 +37,7 @@ pub fn require_proven(
+             let value: Value = response.into_json().map_err(|e| e.to_string())?;
+             return Err(value["error"].as_str().map_or_else(|| "需要联网确认".into(), String::from));
+         }
+-        Err(error) => return Err(format!("需要联网确认：{error}")),
++        Err(error) => return Err(format!("需要联网确认：{}", super::http_client::diagnostic(&error))),
+     };
+     let document = response["permit"].as_str().ok_or("需要联网确认：权威未返回签名批准")?;
+     let config = super::load()?;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/http_client.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/http_client.rs
+new file mode 100644
+index 0000000..a3b3cd5
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/http_client.rs
+@@ -0,0 +1,74 @@
++//! One TLS policy for HTTP requests to configured authorities and relays.
++use std::{error::Error, sync::Arc};
++use ureq::rustls::{self, pki_types::{CertificateDer, pem::PemObject}};
++
++/// Preserve each caller's timeout/redirect policy and ureq's unchanged default TLS
++/// configuration when no extra trust is configured. Reload on construction.
++pub fn agent(builder: ureq::AgentBuilder) -> Result<ureq::Agent, String> {
++    with_ca(builder, super::load()?.authority.extra_ca_pem.as_deref())
++}
++
++pub fn with_ca(builder: ureq::AgentBuilder, extra: Option<&str>) -> Result<ureq::Agent, String> {
++    let Some(extra) = extra else { return Ok(builder.build()); };
++    Ok(builder.tls_config(Arc::new(tls_config(Some(extra))?)).build())
++}
++
++fn tls_config(extra: Option<&str>) -> Result<rustls::ClientConfig, String> {
++    let mut roots = rustls::RootCertStore::empty();
++    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
++    for certificate in extra.map(certificates).transpose()?.into_iter().flatten() {
++        roots.add(certificate).map_err(|e| format!("InterconnectCaInvalid: authority.extraCaPem: {e}"))?;
++    }
++    // Use ureq's crypto backend explicitly: collab-net may also enable aws-lc-rs.
++    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
++        .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
++        .map_err(|e| format!("InterconnectTlsConfigInvalid: {e}"))?
++        .with_root_certificates(roots)
++        .with_no_client_auth();
++    Ok(tls)
++}
++
++fn certificates(extra: &str) -> Result<Vec<CertificateDer<'static>>, String> {
++    let pem = if extra.contains("-----BEGIN CERTIFICATE-----") {
++        extra.as_bytes().to_vec()
++    } else {
++        std::fs::read(extra).map_err(|e| format!("InterconnectCaReadFailed: authority.extraCaPem: {e}"))?
++    };
++    let certificates = CertificateDer::pem_slice_iter(&pem).collect::<Result<Vec<_>, _>>()
++        .map_err(|e| format!("InterconnectCaInvalid: authority.extraCaPem: {e}"))?;
++    if certificates.is_empty() { return Err("InterconnectCaInvalid: authority.extraCaPem contains no certificates".into()); }
++    // Validate certificates for both the ureq and iroh adapters.
++    let mut check = rustls::RootCertStore::empty();
++    for certificate in &certificates {
++        check.add(certificate.clone()).map_err(|e| format!("InterconnectCaInvalid: authority.extraCaPem: {e}"))?;
++    }
++    Ok(certificates)
++}
++
++/// iroh's relay HTTP/TLS uses the same additive CA input. Leave its defaults alone
++/// without configuration; endpoint recreation/restart picks up CA changes.
++#[cfg(feature = "collab-net")]
++pub fn relay_tls_config() -> Result<Option<iroh::tls::CaTlsConfig>, String> {
++    super::load()?.authority.extra_ca_pem.as_deref().map(|extra| {
++        Ok(iroh::tls::CaTlsConfig::embedded().with_extra_roots(certificates(extra)?))
++    }).transpose()
++}
++
++/// Transport diagnostics must not echo URLs, tokens or response bodies.
++pub fn diagnostic(error: &ureq::Error) -> String {
++    let mut cause: Option<&(dyn Error + 'static)> = Some(error);
++    while let Some(current) = cause {
++        if let Some(tls) = current.downcast_ref::<rustls::Error>() {
++            return format!("InterconnectTlsCertificateError: {tls}; check authority.extraCaPem, certificate hostname and validity");
++        }
++        let text = current.to_string().to_ascii_lowercase();
++        if text.contains("certificate") || text.contains("tls connection") {
++            return "InterconnectTlsCertificateError: TLS certificate verification failed; check authority.extraCaPem, certificate hostname and validity".into();
++        }
++        cause = current.source();
++    }
++    "interconnect_upstream_unavailable".into()
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/http_client/tests.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/http_client/tests.rs
+new file mode 100644
+index 0000000..60c8f4d
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/http_client/tests.rs
+@@ -0,0 +1,125 @@
++use super::*;
++use std::{fs, io::{Read, Write}, net::TcpListener, path::PathBuf, process::Command,
++    thread, time::{Duration, Instant}};
++use rustls::pki_types::PrivateKeyDer;
++
++type TestResult = Result<(), Box<dyn Error>>;
++struct Directory(PathBuf);
++impl Drop for Directory {
++    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
++}
++fn openssl(dir: &Directory, args: &[&str]) -> TestResult {
++    let result = Command::new("openssl").args(args).current_dir(&dir.0).output()?;
++    if !result.status.success() { return Err(String::from_utf8_lossy(&result.stderr).into_owned().into()); }
++    Ok(())
++}
++
++fn certificate_fixture(label: &str) -> Result<Directory, Box<dyn Error>> {
++    let dir = Directory(std::env::temp_dir().join(format!("p7-ca-{label}-{}", std::process::id())));
++    fs::create_dir_all(&dir.0)?;
++    openssl(&dir, &["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
++        "-subj", "/CN=Polaris Test CA", "-addext", "basicConstraints=critical,CA:TRUE",
++        "-keyout", "ca.key", "-out", "ca.pem"])?;
++    openssl(&dir, &["req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
++        "-keyout", "server.key", "-out", "server.csr"])?;
++    fs::write(dir.0.join("extensions"), "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\nbasicConstraints=critical,CA:FALSE\n")?;
++    openssl(&dir, &["x509", "-req", "-days", "1", "-in", "server.csr", "-CA", "ca.pem",
++        "-CAkey", "ca.key", "-CAcreateserial", "-extfile", "extensions", "-out", "server.pem"])?;
++    Ok(dir)
++}
++
++#[test]
++fn private_ca_requires_explicit_trust_and_keeps_hostname_verification() -> TestResult {
++    let dir = certificate_fixture("https")?;
++    let certs = CertificateDer::pem_slice_iter(&fs::read(dir.0.join("server.pem"))?).collect::<Result<Vec<_>, _>>()?;
++    let key = PrivateKeyDer::from_pem_slice(&fs::read(dir.0.join("server.key"))?)?;
++    let config = Arc::new(rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
++        .with_safe_default_protocol_versions()?.with_no_client_auth().with_single_cert(certs, key)?);
++    let listener = TcpListener::bind("127.0.0.1:0")?;
++    let port = listener.local_addr()?.port();
++    listener.set_nonblocking(true)?;
++    let server = thread::spawn(move || -> Result<(), String> {
++        let end = Instant::now() + Duration::from_secs(20);
++        let mut attempts = 0;
++        while attempts < 4 && Instant::now() < end {
++            let (socket, _) = match listener.accept() {
++                Ok(socket) => socket,
++                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
++                    thread::sleep(Duration::from_millis(5)); continue;
++                }
++                Err(e) => return Err(e.to_string()),
++            };
++            attempts += 1;
++            socket.set_read_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
++            socket.set_write_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
++            let connection = rustls::ServerConnection::new(config.clone()).map_err(|e| e.to_string())?;
++            let mut stream = rustls::StreamOwned::new(connection, socket);
++            let mut request = [0u8; 4096];
++            // Untrusted CA and hostname mismatch must fail the TLS handshake.
++            if stream.read(&mut request).is_ok() {
++                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
++                    .map_err(|e| e.to_string())?;
++            }
++        }
++        if attempts != 4 { return Err("HTTPS test did not receive all attempts".into()); }
++        Ok(())
++    });
++    let builder = || ureq::AgentBuilder::new().timeout(Duration::from_secs(3)).try_proxy_from_env(false);
++    let url = format!("https://localhost:{port}/");
++    let error = with_ca(builder(), None)?.get(&url).call().err().ok_or("untrusted CA accepted")?;
++    assert!(diagnostic(&error).contains("InterconnectTlsCertificateError"));
++    let pem = fs::read_to_string(dir.0.join("ca.pem"))?;
++    assert_eq!(with_ca(builder(), Some(&pem))?.get(&url).call()?.into_string()?, "ok");
++    let path = dir.0.join("ca.pem");
++    let path = path.to_str().ok_or("CA path encoding")?;
++    assert_eq!(with_ca(builder(), Some(path))?.get(&url).call()?.into_string()?, "ok");
++    let error = with_ca(builder(), Some(&pem))?.get(&format!("https://127.0.0.1:{port}/"))
++        .call().err().ok_or("hostname mismatch accepted")?;
++    assert!(diagnostic(&error).contains("InterconnectTlsCertificateError"));
++    server.join().map_err(|_| "HTTPS server panicked")??;
++    assert!(with_ca(builder(), Some("-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----")).is_err());
++    Ok(())
++}
++
++#[test]
++fn optional_ca_config_is_typed_and_defaults_to_none() -> TestResult {
++    assert!(crate::collab::interconnect::resolve(None, |_| None)?.authority.extra_ca_pem.is_none());
++    for invalid in [r#"{"authority":{"extraCaPem":4}}"#, r#"{"authority":{"extraCaPem":" "}}"#] {
++        assert!(crate::collab::interconnect::resolve(Some(invalid), |_| None).is_err());
++    }
++    Ok(())
++}
++
++// Exercises the real rustls handshake even in runners that forbid TCP listeners.
++#[test]
++fn ca_chain_and_hostname_are_verified_without_sockets() -> TestResult {
++    let dir = certificate_fixture("memory")?;
++    let pem = fs::read_to_string(dir.0.join("ca.pem"))?;
++    let certs = CertificateDer::pem_slice_iter(&fs::read(dir.0.join("server.pem"))?).collect::<Result<Vec<_>, _>>()?;
++    let key = PrivateKeyDer::from_pem_slice(&fs::read(dir.0.join("server.key"))?)?;
++    let server = Arc::new(rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
++        .with_safe_default_protocol_versions()?.with_no_client_auth().with_single_cert(certs, key)?);
++    let handshake = |extra: Option<&str>, name: &'static str| -> TestResult {
++        let mut client = rustls::ClientConnection::new(Arc::new(tls_config(extra)?), name.try_into()?)?;
++        let mut peer = rustls::ServerConnection::new(server.clone())?;
++        for _ in 0..10 {
++            let mut bytes = Vec::new();
++            client.write_tls(&mut bytes)?;
++            peer.read_tls(&mut std::io::Cursor::new(bytes))?;
++            peer.process_new_packets()?;
++            let mut bytes = Vec::new();
++            peer.write_tls(&mut bytes)?;
++            client.read_tls(&mut std::io::Cursor::new(bytes))?;
++            client.process_new_packets()?;
++            if !client.is_handshaking() && !peer.is_handshaking() { return Ok(()); }
++        }
++        Err("TLS handshake did not complete".into())
++    };
++    assert!(handshake(None, "localhost").is_err());
++    handshake(Some(&pem), "localhost")?;
++    handshake(Some(dir.0.join("ca.pem").to_str().ok_or("CA path encoding")?), "localhost")?;
++    assert!(handshake(Some(&pem), "wrong.example").is_err());
++    assert!(with_ca(ureq::AgentBuilder::new(), Some("/missing/p7-ca.pem")).is_err());
++    assert!(with_ca(ureq::AgentBuilder::new(), Some("-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----")).is_err());
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs
+index 81f643b..7195a90 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs
+@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
+ use std::path::PathBuf;
+ 
+ pub mod hardening;
++pub mod http_client;
+ pub mod gate;
+ pub mod notifications;
+ pub mod risk;
+@@ -35,6 +36,8 @@ pub struct Config {
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ pub struct Authority {
+     pub url: Option<String>,
++    #[serde(default)]
++    pub extra_ca_pem: Option<String>,
+     pub public_key_fingerprints: Vec<String>,
+ }
+ 
+@@ -141,6 +144,9 @@ pub fn resolve(
+     ] {
+         if value == 0 || value > max { return Err(format!("rateLimit.{name} 须为 1..={max} 的整数")); }
+     }
++    if config.authority.extra_ca_pem.as_ref().is_some_and(|v| v.trim().is_empty()) {
++        return Err("InterconnectCaInvalid: authority.extraCaPem must be a PEM certificate or file path".into());
++    }
+     config.browser.validate()?;
+     config.ingress.validate()?;
+     config.mail_delivery.validate()?;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json b/src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json
+index 86d35d4..c3bc010 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json
+@@ -15,6 +15,12 @@
+           ],
+           "default": null
+         },
++        "extraCaPem": {
++          "type": ["string", "null"],
++          "minLength": 1,
++          "default": null,
++          "description": "Additional CA PEM certificates or a PEM file path; default webpki roots remain trusted"
++        },
+         "publicKeyFingerprints": {
+           "type": "array",
+           "default": [],
+diff --git a/src-tauri/crates/polaris-collab/src/collab/interconnect/sync.rs b/src-tauri/crates/polaris-collab/src/collab/interconnect/sync.rs
+index 3c75615..68f69f2 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/interconnect/sync.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/interconnect/sync.rs
+@@ -7,9 +7,9 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
+ 
+ pub fn poll_account(url: &str, uid: &str, timeout: Duration) -> Result<(), String> {
+     poll_account_with(uid, || {
+-        ureq::AgentBuilder::new().timeout(timeout).build()
++        super::http_client::agent(ureq::AgentBuilder::new().timeout(timeout))?
+             .get(&format!("{url}/api/mesh/revocations")).query("uid", uid)
+-            .call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())
++            .call().map_err(|e| super::http_client::diagnostic(&e))?.into_json().map_err(|e| e.to_string())
+     })
+ }
+ 
+diff --git a/src-tauri/crates/polaris-collab/src/collab/tunnel/endpoint.rs b/src-tauri/crates/polaris-collab/src/collab/tunnel/endpoint.rs
+index 9121788..4f20a3a 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/tunnel/endpoint.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/tunnel/endpoint.rs
+@@ -39,6 +39,9 @@ pub(super) async fn build_endpoint(seed: [u8; 32], role: &'static str) -> Result
+             .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, p))
+             .map_err(|e| format!("POLARIS_IROH_PORT={p} 绑定失败: {e}"))?;
+     }
++    if let Some(tls) = crate::collab::interconnect::http_client::relay_tls_config()? {
++        builder = builder.ca_tls_config(tls);
++    }
+     let relay_config = relay::desired()?;
+     builder = builder.relay_mode(relay::mode(&relay_config)?);
+     let ep = builder
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+index c29bb76..b69eead 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+@@ -2,6 +2,9 @@
+ use serde::{Deserialize, Serialize};
+ use std::path::PathBuf;
+ use super::BackendError;
++#[path = "config_network.rs"]
++mod network;
++pub use network::Network;
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum BackendKind { Pi, ClaudeCli }
+@@ -30,6 +33,7 @@ impl Default for Agent { fn default() -> Self { Self { backend: "pi".into() } }
+ #[derive(Debug, Clone, Deserialize, Serialize)]
+ #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+ pub struct Agentd {
++    pub network: Network,
+     pub node: PathBuf,
+     pub entry: PathBuf,
+     pub node_args: Vec<String>,
+@@ -68,6 +72,7 @@ pub struct Agentd {
+ impl Default for Agentd {
+     fn default() -> Self {
+         Self {
++            network: Network::default(),
+             node: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).0,
+             entry: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).1, node_args: vec![], args: vec![],
+             isolation: if cfg!(feature = "desktop") { "shared" } else { "per-account" }.into(),
+@@ -128,6 +133,7 @@ impl Config {
+         BackendKind::parse(&self.agent.backend)?;
+         let c = &self.agentd;
+         c.attachments.validate()?;
++        c.network.validate()?;
+         anyhow::ensure!(c.expert_settings.is_absolute() && c.expert_settings.file_name().is_some(),
+             "InvalidAgentConfig: expertSettings must be an absolute file path");
+         anyhow::ensure!(!c.sandbox_container.is_empty() && !c.sandbox_container.starts_with('-')
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/config_network.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/config_network.rs
+new file mode 100644
+index 0000000..7885826
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/config_network.rs
+@@ -0,0 +1,62 @@
++//! Host -> child transport settings. Never include proxy credentials in Debug.
++use serde::{Deserialize, Serialize};
++
++#[derive(Clone, Default, Deserialize, Serialize)]
++#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
++pub struct Network {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub proxy: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub idle_timeout_ms: Option<u32>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub probe_timeout_ms: Option<u32>,
++}
++impl std::fmt::Debug for Network {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("Network").field("proxy_configured", &self.proxy.is_some())
++            .field("idle_timeout_ms", &self.idle_timeout_ms).field("probe_timeout_ms", &self.probe_timeout_ms).finish()
++    }
++}
++impl Network {
++    pub fn validate(&self) -> anyhow::Result<()> {
++        if let Some(proxy) = &self.proxy {
++            let valid = ureq::get(proxy).request_url().ok().is_some_and(|url| {
++                matches!(url.scheme(), "http" | "https") && !url.host().is_empty()
++                    && !proxy.contains('?') && !proxy.contains('#') && url.path() == "/"
++            });
++            anyhow::ensure!(valid, "AgentNetworkConfigInvalid [paths: /agentd/network/proxy]");
++        }
++        anyhow::ensure!(self.idle_timeout_ms.is_none_or(|n| n <= i32::MAX as u32),
++            "AgentNetworkConfigInvalid [paths: /agentd/network/idleTimeoutMs]");
++        anyhow::ensure!(self.probe_timeout_ms.is_none_or(|n| n > 0 && n <= i32::MAX as u32),
++            "AgentNetworkConfigInvalid [paths: /agentd/network/probeTimeoutMs]");
++        Ok(())
++    }
++    pub fn configure(&self, command: &mut std::process::Command) -> anyhow::Result<()> {
++        self.validate()?;
++        command.env("POLARIS_AGENTD_NETWORK", serde_json::to_string(self)?);
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn forwards_settings_and_redacts_diagnostics() -> anyhow::Result<()> {
++        let network: Network = serde_json::from_str(r#"{"proxy":"http://user:secret@localhost:8080","idleTimeoutMs":0}"#)?;
++        let mut command = std::process::Command::new("node");
++        network.configure(&mut command)?;
++        assert!(!format!("{network:?}").contains("secret"));
++        let value = command.get_envs().find(|(key, _)| *key == "POLARIS_AGENTD_NETWORK")
++            .and_then(|(_, value)| value).ok_or_else(|| anyhow::anyhow!("missing child configuration"))?;
++        let decoded: Network = serde_json::from_str(&value.to_string_lossy())?;
++        assert_eq!(decoded.proxy, network.proxy);
++        assert_eq!(decoded.idle_timeout_ms, Some(0));
++        let bad = Network { proxy: Some("socks5://secret@localhost:80".into()), ..Default::default() };
++        let error = bad.validate().err().ok_or_else(|| anyhow::anyhow!("invalid proxy accepted"))?;
++        assert!(error.to_string().contains("/agentd/network/proxy"));
++        assert!(!error.to_string().contains("secret"));
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+index 6c9515d..67c46e7 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+@@ -121,6 +121,9 @@ pub trait AgentBackend: Send + Sync {
+     fn experts_enabled(&self, _enabled: Option<bool>) -> anyhow::Result<bool> {
+         anyhow::bail!("ExpertConfigUnsupported")
+     }
++    fn provider_validate(&self, _view: &crate::provider::ProviderView) -> anyhow::Result<()> {
++        anyhow::bail!("ProviderValidationUnsupported")
++    }
+     fn provider_apply(&self, _id: &str) -> anyhow::Result<serde_json::Value> {
+         anyhow::bail!("ProviderApplyUnsupported")
+     }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+index d3e4d21..533d253 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+@@ -61,6 +61,19 @@ impl AgentBackend for PiBackend {
+     fn auth(&self, operation: &str, provider: &str, input: Option<String>) -> anyhow::Result<Value> {
+         self.client()?.call(Command::Auth(protocol::Auth { operation: operation.into(), provider: provider.into(), input }))
+     }
++    fn provider_validate(&self, view: &crate::provider::ProviderView) -> anyhow::Result<()> {
++        let client = self.client()?;
++        let catalog = protocol::Catalog::parse(client.call(Command::Catalog(Empty {}))?)?;
++        let defaults = crate::provider::pi_config::load().map_err(anyhow::Error::msg)?;
++        let catalog = serde_json::to_value(catalog)?;
++        crate::provider::pi_translate::cache_catalog(&catalog);
++        let models = catalog["models"].as_array().ok_or_else(|| anyhow::anyhow!("AgentdInvalidModels"))?;
++        let provider = crate::provider::pi_translate::translate(view, models, &defaults).map_err(anyhow::Error::msg)?;
++        let config = serde_json::json!({"defaultModel":{"provider":provider["id"],"id":provider["models"][0]["id"]},
++            "providers":[provider]});
++        client.call(Command::Validate(protocol::Apply { config: Some(config), credentials: None }))?;
++        Ok(())
++    }
+     fn provider_apply(&self, id: &str) -> anyhow::Result<Value> {
+         let (generation, selected) = crate::provider::selection::snapshot();
+         if selected != id { return Ok(serde_json::json!({"applied":false,"superseded":true})); }
+@@ -74,10 +87,15 @@ impl AgentBackend for PiBackend {
+         let catalog = client.call(Command::Catalog(Empty {}));
+         if !current() { return Ok(superseded()); }
+         let catalog = protocol::Catalog::parse(catalog?)?;
+-        let config = crate::provider::pi_translate::config(id, &serde_json::to_value(catalog)?).map_err(anyhow::Error::msg)?;
++        let catalog = serde_json::to_value(catalog)?;
++        crate::provider::pi_translate::cache_catalog(&catalog);
++        let config = crate::provider::pi_translate::config(id, &catalog).map_err(anyhow::Error::msg)?;
+         let pid = client.status.lock().pid;
+         if !current() { return Ok(superseded()); }
+         if last.as_ref() == Some(&(pid, config.clone())) { return Ok(serde_json::json!({"applied":true})); }
++        let validation = client.call(Command::Validate(protocol::Apply { config: Some(config.clone()), credentials: None }));
++        if !current() { return Ok(superseded()); }
++        validation?;
+         let result = self.apply_config(Some(config.clone()), None);
+         if !current() { *last = None; return Ok(superseded()); }
+         let result = result?;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
+index 05f3289..e525973 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/process.rs
+@@ -25,6 +25,7 @@ impl Process {
+         let mut command = Command::new(&config.node);
+         command.args(&config.node_args).arg(&config.entry).args(&config.args)
+             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
++        config.network.configure(command.as_std_mut())?;
+         #[cfg(windows)]
+         crate::doctor::pi_shell::configure(command.as_std_mut(), config).map_err(anyhow::Error::msg)?;
+         if let Some(path) = crate::provider::credential_file::provider_store_path() {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+index 6c627fa..121acf4 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+@@ -26,6 +26,7 @@ pub enum Command {
+     #[serde(rename = "abort")] Abort(Session),
+     #[serde(rename = "close")] Close(Session),
+     #[serde(rename = "config.apply")] Apply(Apply),
++    #[serde(rename = "config.validate")] Validate(Apply),
+ }
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ #[serde(rename_all = "kebab-case")]
+@@ -112,6 +113,15 @@ pub struct Apply {
+ }
+ #[derive(Debug, Clone, Deserialize)]
+ pub struct WireError { pub code: String, pub message: String, pub paths: Option<Vec<String>> }
++impl std::fmt::Display for WireError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "{}: {}", self.code, self.message)?;
++        if let Some(paths) = &self.paths {
++            if !paths.is_empty() { write!(f, " [paths: {}]", paths.join(", "))?; }
++        }
++        Ok(())
++    }
++}
+ #[derive(Debug, Deserialize)]
+ #[serde(tag = "type")]
+ pub enum Frame {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+index 138ace1..406836d 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+@@ -69,7 +69,7 @@ impl State {
+                 let id = id.ok_or_else(|| anyhow::anyhow!("AgentdProtocolError: uncorrelated response"))?;
+                 if let Some(pending) = self.pending.remove(&id) {
+                     let result = if ok { Ok(result.unwrap_or(Value::Null)) }
+-                        else { Err(error.map(|e| format!("{}: {}", e.code, e.message)).unwrap_or_else(|| "AgentdResponseError".into())) };
++                        else { Err(error.map(|e| e.to_string()).unwrap_or_else(|| "AgentdResponseError".into())) };
+                     if self.expert_response(&id, &result) { return Ok(()); }
+                     if pending.ping {
+                         let checked = result.and_then(|v| super::protocol::check_ping(v.clone())
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/pi.rs b/src-tauri/crates/polaris-kernel/src/doctor/pi.rs
+index cbd442c..10cdfbd 100644
+--- a/src-tauri/crates/polaris-kernel/src/doctor/pi.rs
++++ b/src-tauri/crates/polaris-kernel/src/doctor/pi.rs
+@@ -68,6 +68,7 @@ pub fn ping(config: &Agentd) -> Result<Ping, String> {
+         let mut cmd = tokio::process::Command::new(&config.node);
+         cmd.args(&config.node_args).arg(&config.entry).args(&config.args)
+             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
++        config.network.configure(cmd.as_std_mut()).map_err(|_| "AgentNetworkConfigInvalid")?;
+         #[cfg(windows)]
+         super::pi_shell::configure(cmd.as_std_mut(), config)?;
+         crate::runtime::procs::no_window(cmd.as_std_mut());
+@@ -157,7 +158,11 @@ fn finish_report(node: ToolStatus, mut runtime: AgentRuntimeReport, shell: Optio
+ }
+ pub fn verify() -> VerifyReport {
+     let (report, shell) = report_with_shell();
+-    verify_report(report, shell.as_ref())
++    let mut verified = verify_report(report, shell.as_ref());
++    let step = network::check();
++    if step.status != "ok" { verified.ok = false; }
++    verified.steps.push(step);
++    verified
+ }
+ fn verify_report(report: EnvReport, shell: Option<&ResolvedShell>) -> VerifyReport {
+     let r = &report.agent_runtime;
+@@ -180,3 +185,6 @@ fn shell_detail(shell: Option<&ResolvedShell>) -> String {
+ #[cfg(test)]
+ #[path = "pi_tests.rs"]
+ mod tests;
++
++#[path = "pi_network.rs"]
++mod network;
+diff --git a/src-tauri/crates/polaris-kernel/src/doctor/pi_network.rs b/src-tauri/crates/polaris-kernel/src/doctor/pi_network.rs
+new file mode 100644
+index 0000000..101e978
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/doctor/pi_network.rs
+@@ -0,0 +1,72 @@
++//! Run a bounded, unauthenticated HEAD through agentd's actual dispatcher.
++use super::*;
++use serde::Deserialize;
++
++const PROXY_HELP: &str = "支持 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 或 POLARIS_AGENT_CONFIG 的 agentd.network.proxy；Windows 系统代理/PAC 不会自动读取，请配置代理软件的 HTTP 监听地址并重启 Polaris";
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Reachability { reachable: bool, proxy: bool }
++
++pub(super) fn check() -> VerifyStep {
++    let start = std::time::Instant::now();
++    let result = (|| -> Result<Reachability, String> {
++        let config = Config::load().map_err(|_| "AgentConfigInvalid")?;
++        let (_, selected) = crate::provider::selection::snapshot();
++        let views = crate::provider::store::pi_views();
++        let view = views.iter().find(|view| view.id == selected).ok_or("ProviderNotFound")?;
++        let target = if view.base_url.is_empty() || matches!(view.id.as_str(), "codex" | "claude-official") {
++            crate::provider::pi_translate::credential_id(&view.id)
++        } else { &view.base_url };
++        probe(&config.agentd, target)
++    })();
++    let (status, detail) = match result {
++        Ok(result) => (if result.reachable { "ok" } else { "fail" }, format!("{}；代理={}。{PROXY_HELP}",
++            if result.reachable { "可达" } else { "不可达" }, if result.proxy { "是" } else { "否" })),
++        Err(_) => ("fail", format!("不可达（探测未完成）；代理=未知。{PROXY_HELP}")),
++    };
++    VerifyStep { key: "model-network".into(), name: "模型网络连通性".into(), status: status.into(),
++        detail, command: None, output: None, ms: start.elapsed().as_millis() as u64 }
++}
++fn probe(config: &Agentd, target: &str) -> Result<Reachability, String> {
++    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
++        .map_err(|_| "AgentdProbeRuntimeFailed")?;
++    runtime.block_on(async {
++        let mut command = tokio::process::Command::new(&config.node);
++        command.args(&config.node_args).arg(&config.entry).arg("--probe-network").arg(target)
++            .args(&config.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
++        config.network.configure(command.as_std_mut()).map_err(|_| "AgentNetworkConfigInvalid")?;
++        crate::runtime::procs::no_window(command.as_std_mut());
++        let mut child = command.spawn().map_err(|_| "AgentdSpawnFailed")?;
++        let outcome = tokio::time::timeout(Duration::from_millis(config.request_timeout_ms), async {
++            let output = child.stdout.take().ok_or("AgentdStdoutMissing")?;
++            let mut reader = BufReader::new(output.take(config.max_line_bytes as u64 + 1));
++            let mut bytes = Vec::new();
++            reader.read_until(b'\n', &mut bytes).await.map_err(|_| "AgentdReadFailed")?;
++            if bytes.len() > config.max_line_bytes { return Err("AgentdInvalidFrame"); }
++            serde_json::from_slice(&bytes).map_err(|_| "AgentdInvalidFrame")
++        }).await;
++        let _ = child.start_kill();
++        let _ = tokio::time::timeout(Duration::from_millis(config.shutdown_timeout_ms), child.wait()).await;
++        outcome.map_err(|_| "AgentdProbeTimeout".to_string())?.map_err(str::to_owned)
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn probe_passes_host_proxy_and_returns_only_reachability() -> Result<(), Box<dyn std::error::Error>> {
++        let file = std::env::temp_dir().join(format!("p7-doctor-network-{}.mjs", std::process::id()));
++        std::fs::write(&file, r#"
++const config = JSON.parse(process.env.POLARIS_AGENTD_NETWORK);
++console.log(JSON.stringify({reachable: process.argv[2] === '--probe-network', proxy: !!config.proxy}));
++"#)?;
++        let mut config = Agentd::default();
++        config.entry = file.clone();
++        config.network.proxy = Some("http://user:secret@localhost:80".into());
++        let result = probe(&config, "https://example.invalid")?;
++        assert!(result.reachable && result.proxy);
++        std::fs::remove_file(file)?;
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/pi_model.rs b/src-tauri/crates/polaris-kernel/src/provider/pi_model.rs
+new file mode 100644
+index 0000000..1dcec57
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/provider/pi_model.rs
+@@ -0,0 +1,45 @@
++//! Shared translated-model constraints. Paths refer to the provider editor input.
++use serde_json::Value;
++
++pub fn validate(model: &Value, index: usize) -> Result<(), String> {
++    let invalid = |field: &str| format!("ProviderModelInvalid [paths: /settingsConfig/models/{index}/{field}]");
++    for field in ["id", "name"] {
++        if model[field].as_str().is_none_or(|s| s.trim().is_empty()) { return Err(invalid(field)); }
++    }
++    if !model["reasoning"].is_boolean() { return Err(invalid("reasoning")); }
++    for field in ["contextWindow", "maxTokens"] {
++        if model[field].as_u64().is_none_or(|n| n == 0 || n > 2147483647) { return Err(invalid(field)); }
++    }
++    if model["maxTokens"].as_u64() > model["contextWindow"].as_u64() { return Err(invalid("maxTokens")); }
++    if model["input"].as_array().is_none_or(|a| a.is_empty() || a.iter().any(|s| s != "text" && s != "image")) {
++        return Err(invalid("input"));
++    }
++    validate_cost(&model["cost"], false).map_err(|field| invalid(&format!("cost/{field}")))?;
++    if let Some(tiers) = model["cost"].get("tiers") {
++        let tiers = tiers.as_array().ok_or_else(|| invalid("cost/tiers"))?;
++        for (tier, value) in tiers.iter().enumerate() {
++            validate_cost(value, true).map_err(|field| invalid(&format!("cost/tiers/{tier}/{field}")))?;
++        }
++    }
++    Ok(())
++}
++
++fn validate_cost(value: &Value, tier: bool) -> Result<(), String> {
++    let object = value.as_object().ok_or_else(|| "".to_string())?;
++    let rates = ["input", "output", "cacheRead", "cacheWrite"];
++    for field in rates {
++        // SDK negative rates explicitly mean unknown/dynamic pricing (P5d).
++        if object.get(field).and_then(Value::as_f64).is_none_or(|n| !n.is_finite()) {
++            return Err(field.into());
++        }
++    }
++    if tier && value["inputTokensAbove"].as_f64().is_none_or(|n| !n.is_finite() || n < 0.0) {
++        return Err("inputTokensAbove".into());
++    }
++    for field in object.keys() {
++        if !rates.contains(&field.as_str()) && field != if tier { "inputTokensAbove" } else { "tiers" } {
++            return Err(field.replace('~', "~0").replace('/', "~1"));
++        }
++    }
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/pi_translate.rs b/src-tauri/crates/polaris-kernel/src/provider/pi_translate.rs
+index 2cefdce..2c1c399 100644
+--- a/src-tauri/crates/polaris-kernel/src/provider/pi_translate.rs
++++ b/src-tauri/crates/polaris-kernel/src/provider/pi_translate.rs
+@@ -1,6 +1,8 @@
+ //! Polaris -> Pi config. Credentials never enter the returned configuration.
+ use super::*;
+ use super::pi_config::PiSettings;
++#[path = "pi_model.rs"]
++mod pi_model;
+ 
+ /// Legacy protocol names describe wire formats, not model vendors. Pi 1.0.4
+ /// API names are verified against pi-ai/dist/api/*.d.ts and models.md.
+@@ -23,50 +25,70 @@ const MODEL_VARIABLES: &[&str] = &[
+ fn text<'a>(value: &'a Value, key: &str) -> &'a str { value.get(key).and_then(Value::as_str).unwrap_or("") }
+ fn model(value: &Value, defaults: &PiSettings) -> Result<Value, String> {
+     let id = value.as_str().unwrap_or_else(|| text(value, "id"));
+-    if id.trim().is_empty() { return Err("ProviderModelInvalid".into()); }
++    if id.trim().is_empty() { return Err("ProviderModelInvalid [paths: /settingsConfig/models]".into()); }
+     let mut result = json!({"id":id,"name":id,"reasoning":defaults.reasoning,
+         "input":defaults.input,"cost":defaults.cost,"contextWindow":defaults.context_window,"maxTokens":defaults.max_tokens});
+     for key in ["name", "reasoning", "input", "cost", "contextWindow", "maxTokens"] {
+         if let Some(v) = value.get(key) { result[key] = v.clone(); }
+     }
+-    if !result["name"].is_string() || !result["reasoning"].is_boolean()
+-        || result["contextWindow"].as_u64().is_none_or(|n| n == 0)
+-        || result["maxTokens"].as_u64().is_none_or(|n| n == 0)
+-        || result["input"].as_array().is_none_or(|a| a.is_empty() || a.iter().any(|s| s != "text" && s != "image"))
+-        || ["input", "output", "cacheRead", "cacheWrite"].iter()
+-            .any(|k| result["cost"][k].as_f64().is_none_or(|n| !n.is_finite() || n < 0.0)) {
+-        return Err("ProviderModelInvalid".into());
+-    }
+     Ok(result)
+ }
++static CATALOG: Lazy<parking_lot::RwLock<Option<Vec<Value>>>> = Lazy::new(|| parking_lot::RwLock::new(None));
++
++/// Only successful SDK catalog reads refresh this process-local, non-secret cache.
++pub fn cache_catalog(catalog: &Value) {
++    if let Some(models) = catalog.get("models").and_then(Value::as_array) {
++        *CATALOG.write() = Some(models.clone());
++    }
++}
++pub fn validate_local(view: &ProviderView) -> Result<(), String> {
++    let catalog = CATALOG.read().clone();
++    let defaults = super::pi_config::load()?;
++    translate_inner(view, catalog.as_deref().unwrap_or_default(), &defaults, catalog.is_some()).map(|_| ())
++}
+ pub fn translate(view: &ProviderView, catalog: &[Value], defaults: &PiSettings) -> Result<Value, String> {
++    translate_inner(view, catalog, defaults, true)
++}
++fn translate_inner(view: &ProviderView, catalog: &[Value], defaults: &PiSettings, complete: bool) -> Result<Value, String> {
++    let native = matches!(view.id.as_str(), "codex" | "claude-official");
+     let api = PROTOCOL_APIS.iter().find(|(p, _)| *p == view.protocol)
+-        .map(|(_, a)| *a).ok_or("ProviderProtocolUnsupported")?;
++        .map(|(_, a)| *a).ok_or("ProviderProtocolUnsupported [paths: /protocol]")?;
+     let builtin = defaults.aliases.get(&view.id).map(String::as_str).unwrap_or(&view.id);
+     let matching: Vec<&Value> = catalog.iter().filter(|m| text(m, "provider") == builtin).collect();
+     let supplied = view.settings_config.get("models");
+     let sources: Vec<Value> = if let Some(supplied) = supplied {
+-        supplied.as_array().filter(|a| !a.is_empty()).ok_or("ProviderModelsInvalid")?.clone()
++        supplied.as_array().filter(|a| !a.is_empty()).ok_or("ProviderModelsInvalid [paths: /settingsConfig/models]")?.clone()
+     } else {
+         let env: Vec<Value> = MODEL_VARIABLES.iter().filter_map(|key| {
+             view.settings_config.get("env")?.get(*key)?.as_str().filter(|s| !s.trim().is_empty()).map(|s| json!(s))
+         }).collect();
+         if env.is_empty() { matching.iter().map(|m| (*m).clone()).collect() } else { env }
+     };
+-    if sources.is_empty() { return Err("ProviderModelsMissing: configure settingsConfig.models".into()); }
++    if complete && sources.is_empty() { return Err("ProviderModelsMissing [paths: /settingsConfig/models]".into()); }
+     let mut seen = HashSet::new();
+     let mut models = Vec::new();
+-    for source in sources {
+-        let m = model(&source, defaults)?;
++    for (index, source) in sources.into_iter().enumerate() {
++        let id = source.as_str().map_or_else(|| text(&source, "id"), |id| id);
++        let known = matching.iter().find(|m| text(m, "id") == id);
++        let mut m = model(known.copied().unwrap_or(&source), defaults)?;
++        if source.is_object() {
++            for key in ["name", "reasoning", "input", "cost", "contextWindow", "maxTokens"] {
++                if let Some(value) = source.get(key) { m[key] = value.clone(); }
++            }
++        }
++        pi_model::validate(&m, index)?;
+         if seen.insert(text(&m, "id").to_string()) { models.push(m); }
+     }
++    if native {
++        return Ok(json!({"id":credential_id(&view.id),"models":models}));
++    }
+     let base = if view.base_url.is_empty() {
+         matching.first().map(|m| text(m, "baseUrl")).unwrap_or("")
+     } else { &view.base_url };
+     let authority = base.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
+-    if !(base.starts_with("https://") || base.starts_with("http://")) || base.contains("${")
+-        || authority.is_empty() || authority.contains('@') || base.contains('?') || base.contains('#') {
+-        return Err("ProviderBaseUrlInvalid".into());
++    if (!base.is_empty() || complete) && (!(base.starts_with("https://") || base.starts_with("http://")) || base.contains("${")
++        || authority.is_empty() || authority.contains('@') || base.contains('?') || base.contains('#')) {
++        return Err("ProviderBaseUrlInvalid [paths: /settingsConfig/env/ANTHROPIC_BASE_URL]".into());
+     }
+     let bearer = api == "anthropic-messages" && view.token_field == "ANTHROPIC_AUTH_TOKEN"
+         && view.id != "claude-official";
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/store/commands.rs b/src-tauri/crates/polaris-kernel/src/provider/store/commands.rs
+index 7474b73..ee60bda 100644
+--- a/src-tauri/crates/polaris-kernel/src/provider/store/commands.rs
++++ b/src-tauri/crates/polaris-kernel/src/provider/store/commands.rs
+@@ -96,12 +96,20 @@ pub fn provider_set_route_mode(route: bool) -> Result<bool, String> {
+ 
+ #[cfg_attr(feature = "desktop", tauri::command(async))]
+ pub fn provider_save(input: ProviderInput) -> Result<String, String> {
++    save(input, pi_translate::is_pi())
++}
++
++// The legacy adapter preserves its historical endpoint-only save contract.
++pub(super) fn save(input: ProviderInput, pi: bool) -> Result<String, String> {
+     let token_field = input
+         .token_field
+         .clone()
+         .filter(|s| !s.is_empty())
+         .unwrap_or_else(|| DEFAULT_TOKEN_FIELD.to_string());
+ 
++    if pi && !input.settings_config.is_object() {
++        return Err("ProviderConfigInvalid [paths: /settingsConfig]".into());
++    }
+     // settings_config 兜底为 {env:{}}
+     let cfg = if input.settings_config.is_object() {
+         input.settings_config.clone()
+@@ -134,7 +142,7 @@ pub fn provider_save(input: ProviderInput) -> Result<String, String> {
+     let protocol = match input.protocol.as_deref().map(str::trim) {
+         None | Some("") => String::new(),
+         Some(p) if pi_translate::PROTOCOL_APIS.iter().any(|(name, _)| *name == p) => p.into(),
+-        _ => return Err("ProviderProtocolUnsupported".into()),
++        _ => return Err("ProviderProtocolUnsupported [paths: /protocol]".into()),
+     };
+ 
+     let clear_key = !preserve_key && cfg_env_str(&cfg, &token_field).is_empty()
+@@ -150,6 +158,14 @@ pub fn provider_save(input: ProviderInput) -> Result<String, String> {
+         settings_config: cfg,
+     };
+ 
++    if pi {
++        let mut candidate = STORE.read().clone();
++        candidate.items.retain(|i| i.id != id);
++        candidate.items.push(item.clone());
++        let view = build_views(&candidate).into_iter().find(|v| v.id == id)
++            .ok_or("ProviderNotFound")?;
++        pi_translate::validate_local(&view)?;
++    }
+     let mutation = PROVIDER_MUTATION.lock();
+     let mut store = STORE.write();
+     if let Some(existing) = store.items.iter_mut().find(|i| i.id == id) {
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/store/tests.rs b/src-tauri/crates/polaris-kernel/src/provider/store/tests.rs
+index c4b79bb..0909160 100644
+--- a/src-tauri/crates/polaris-kernel/src/provider/store/tests.rs
++++ b/src-tauri/crates/polaris-kernel/src/provider/store/tests.rs
+@@ -1,4 +1,9 @@
+ use super::*;
++// These tests cover the retained Claude CLI store/routing contract. Pi save
++// validation is exercised through public commands in tests/native_provider.rs.
++fn legacy_save(input: ProviderInput) -> Result<String, String> {
++    super::commands::save(input, false)
++}
+ #[cfg(test)]
+ mod volc_ark_tests {
+     use super::*;
+@@ -64,7 +69,7 @@ mod key_mask_tests {
+     use super::*;
+ 
+     fn save(id: &str, token_field: Option<&str>, cfg: Value) {
+-        provider_save(ProviderInput {
++        legacy_save(ProviderInput {
+             id: Some(id.to_string()),
+             name: format!("掩码测试 {id}"),
+             note: String::new(),
+@@ -229,7 +234,7 @@ mod local_route_tests {
+     use super::*;
+ 
+     fn save_openai(id: &str, cfg: Value) {
+-        provider_save(ProviderInput {
++        legacy_save(ProviderInput {
+             id: Some(id.to_string()),
+             name: format!("测试 {id}"),
+             note: String::new(),
+@@ -303,7 +308,7 @@ mod local_route_tests {
+         assert!(route_target("t-openai-nokey").is_err());
+ 
+         // Anthropic 兼容供应商 → 透传目标(路由总开关下会被指到 /p/{id}, 目标始终可解析)
+-        provider_save(ProviderInput {
++        legacy_save(ProviderInput {
+             id: Some("t-anthropic-direct".into()),
+             name: "直连".into(),
+             note: String::new(),
+@@ -329,7 +334,7 @@ mod local_route_tests {
+     /// ②开关开 → cfg 改指 /p/{id}、真 key 摘出换占位、模型钉选保留; ③开关关 → 原配置直连。
+     #[test]
+     fn route_all_switch_reroutes_anthropic_provider() {
+-        provider_save(ProviderInput {
++        legacy_save(ProviderInput {
+             id: Some("t-anthropic-routed".into()),
+             name: "透传测试".into(),
+             note: String::new(),
+diff --git a/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs b/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs
+index 381d615..6657b1b 100644
+--- a/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs
++++ b/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs
+@@ -102,6 +102,12 @@ async function dispatch({ id, method, params: p }) {
+       return response(id, { aborted: true });
+     }
+     case 'close': sessions.delete(p.sessionId); return response(id, { closed: true });
++    case 'config.validate':
++      if (p.config?.providers?.[0]?.models?.[0]?.id === 'invalid-wire-config') {
++        return send({type:'response', id, ok:false, error:{code:'INVALID_CONFIG', message:'配置字段校验失败。',
++          paths:['/providers/0/models/0/name']}});
++      }
++      return response(id, { valid: true });
+     case 'config.apply':
+       await gate('--gate-apply');
+       applied = p.config;
+diff --git a/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-samples.jsonl b/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-samples.jsonl
+index 04e6dbd..41efffd 100644
+--- a/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-samples.jsonl
++++ b/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-samples.jsonl
+@@ -37,3 +37,4 @@
+ {"id":"auth-poll","method":"provider.auth","params":{"provider":"anthropic","operation":"poll"}}
+ {"id":"builtin-catalog","method":"models.catalog","params":{}}
+ {"type":"response","id":"catalog-v6","ok":true,"result":{"models":[{"provider":"anthropic","id":"sample","name":"Sample","api":"anthropic-messages","baseUrl":"","input":["text","image"],"reasoning":false,"cost":{"input":-1,"output":2,"cacheRead":0,"cacheWrite":0,"tiers":[{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"inputTokensAbove":1000}]},"contextWindow":128000,"maxTokens":8192}]}}
++{"id":"validate","method":"config.validate","params":{"config":{"providers":[]}}}
+diff --git a/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256 b/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256
+index 8379d61..b03ed57 100644
+--- a/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256
++++ b/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256
+@@ -1,2 +1,2 @@
+-0ff1ce56e064891f9862a693d6591d06b00c1ee9fd819c6af2474b0a342258a9
++69d562546710fc525a367c3151f6af060a5e44dfa5f6df6cf61ade6b1efbec01
+ 9428de7fcc61f782205d49b7c0dfe539993eb7a7d8ab9f485e576f614dbf10c8
+diff --git a/src-tauri/crates/polaris-kernel/tests/native_provider.rs b/src-tauri/crates/polaris-kernel/tests/native_provider.rs
+new file mode 100644
+index 0000000..90b478a
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/tests/native_provider.rs
+@@ -0,0 +1,52 @@
++//! Real Rust command -> agentd -> Pi registration, isolated from user credentials.
++use polaris_kernel::{chat::backend, provider};
++use serde_json::json;
++use std::{fs, path::Path};
++
++#[test]
++fn save_and_switch_native_and_reject_invalid_save_with_paths() -> Result<(), Box<dyn std::error::Error>> {
++    let dir = std::env::temp_dir().join(format!("p7-provider-{}", std::process::id()));
++    fs::create_dir_all(&dir)?;
++    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
++    let config = dir.join("agent.json");
++    let daemon_config = dir.join("daemon.json");
++    fs::write(&daemon_config, serde_json::to_vec(&json!({"sessionDir":dir.join("sessions"),"usageDir":dir.join("usage")}))?)?;
++    fs::write(&config, serde_json::to_vec(&json!({"agent":{"backend":"pi"},"agentd":{
++        "entry":repo.join("agentd/src/main.ts"),"args":["--config",daemon_config],
++        "nodeArgs":["--import",repo.join("agentd/node_modules/tsx/dist/loader.mjs")],
++        "isolation":"shared",
++        "sessionMap":dir.join("session-map"),"requestTimeoutMs":30000
++    }}))?)?;
++    std::env::set_var("POLARIS_AGENT_CONFIG", &config);
++    std::env::set_var("POLARIS_PROVIDER_STORE", dir.join("providers.json"));
++    let input = |models| serde_json::from_value(json!({"id":"codex","name":"Drill subscription","settingsConfig":{"models":models}}));
++    let backend = backend::selected()?;
++    for name in ["gpt-6-astra", "polaris-out-of-catalog-test"] {
++        assert_eq!(provider::provider_save(input(json!([name]))?)?, "codex");
++        assert_eq!(provider::provider_switch("codex".into())?, "codex");
++        let models = backend.models()?;
++        let model = models["models"].as_array().ok_or("missing catalog")?.iter()
++            .find(|m| m["provider"] == "openai-codex" && m["id"] == name).ok_or("missing native model")?;
++        assert_eq!(model["api"], "openai-codex-responses");
++        if name == "polaris-out-of-catalog-test" {
++            assert_eq!(model["contextWindow"], 128000);
++            assert_eq!(model["maxTokens"], 8192);
++            assert_eq!(model["cost"], json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0}));
++        }
++    }
++    let error = provider::provider_save(input(json!([{"id":"bad","maxTokens":0}]))?)
++        .err().ok_or("invalid save accepted")?;
++    assert!(error.contains("/settingsConfig/models/0/maxTokens"), "{error}");
++    assert_eq!(provider::provider_switch("codex".into())?, "codex", "invalid save must not replace valid config");
++    // Exercise the exact WireError -> String return consumed by Tauri and HTTP.
++    let pi = backend::pi::PiBackend::new(backend::config::Config::load()?.agentd)?;
++    let error = pi.apply_config(Some(json!({"providers":[{"id":"openai-codex","models":[]}]})), None)
++        .err().ok_or("invalid wire config accepted")?.to_string();
++    assert!(error.contains("INVALID_CONFIG") && error.contains("/providers/0/models"), "{error}");
++    use backend::AgentBackend;
++    pi.shutdown();
++    backend.shutdown();
++    std::env::remove_var("POLARIS_AGENT_CONFIG");
++    fs::remove_dir_all(dir)?;
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-kernel/tests/provider_offline_save.rs b/src-tauri/crates/polaris-kernel/tests/provider_offline_save.rs
+new file mode 100644
+index 0000000..7f4e1b6
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/tests/provider_offline_save.rs
+@@ -0,0 +1,45 @@
++//! Saving must work with no backend, identity, model cache or network.
++use polaris_kernel::provider;
++use serde_json::json;
++use std::fs;
++
++#[test]
++fn save_without_backend_then_validate_cached_metadata() -> Result<(), Box<dyn std::error::Error>> {
++    let dir = std::env::temp_dir().join(format!("p7-offline-save-{}", std::process::id()));
++    fs::create_dir_all(&dir)?;
++    let config = dir.join("agent.json");
++    fs::write(&config, serde_json::to_vec(&json!({"agentd":{
++        "isolation":"per-account","node":"/does-not-exist","entry":"/does-not-exist"
++    }}))?)?;
++    std::env::set_var("POLARIS_AGENT_CONFIG", &config);
++    std::env::set_var("POLARIS_PROVIDER_STORE", dir.join("providers.json"));
++    let input = |models: Option<serde_json::Value>| {
++        let mut settings = json!({});
++        if let Some(models) = models { settings["models"] = models; }
++        serde_json::from_value(json!({"id":"codex","name":"Offline subscription","settingsConfig":settings}))
++    };
++    // No SDK catalog yet: absence of inferred model metadata is not a save error.
++    assert_eq!(provider::provider_save(input(None)?)?, "codex");
++    assert_eq!(provider::provider_save(input(Some(json!(["offline-model"])))?)?, "codex");
++    let before = serde_json::to_value(provider::store::pi_views())?;
++    let error = provider::provider_save(input(Some(json!([{"id":"bad","maxTokens":0}])))?)
++        .err().ok_or("invalid model accepted")?;
++    assert!(error.contains("/settingsConfig/models/0/maxTokens"));
++    assert_eq!(serde_json::to_value(provider::store::pi_views())?, before);
++    // Only cached metadata supplies the tiny context: structural defaults alone
++    // would accept this output limit, but the cached translation must reject it.
++    provider::pi_translate::cache_catalog(&json!({"models":[{
++        "provider":"openai-codex","id":"cached","name":"cached","contextWindow":100,
++        "maxTokens":50,"reasoning":false,"input":["text"],
++        "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}
++    }]}));
++    let error = provider::provider_save(input(Some(json!([{"id":"cached","maxTokens":101}])))?)
++        .err().ok_or("cached context ignored")?;
++    assert!(error.contains("/settingsConfig/models/0/maxTokens"));
++    assert_eq!(serde_json::to_value(provider::store::pi_views())?, before);
++    assert_eq!(provider::provider_save(input(Some(json!(["cached"])))?)?, "codex");
++    // The full switch still requires a usable backend and authenticated isolation.
++    assert!(provider::provider_switch("codex".into()).is_err());
++    fs::remove_dir_all(dir)?;
++    Ok(())
++}
+diff --git a/src-tauri/src/mesh/connections.rs b/src-tauri/src/mesh/connections.rs
+index 7a2aa0e..316e706 100644
+--- a/src-tauri/src/mesh/connections.rs
++++ b/src-tauri/src/mesh/connections.rs
+@@ -3,7 +3,7 @@ use super::*;
+ 
+ #[cfg(feature = "collab-net")]
+ fn login_peer(port: u16, assertion: &str) -> Result<String, String> {
+-    let resp = agent()
++    let resp = agent()?
+         .post(&format!(
+             "http://127.0.0.1:{port}/api/collab/login_assertion"
+         ))
+@@ -22,7 +22,7 @@ fn login_peer(port: u16, assertion: &str) -> Result<String, String> {
+ /// 不能证明 tunnel 仍 connected、session 没被撤销；用轻量 `/api/collab/me` 才是事实。
+ #[cfg(feature = "collab-net")]
+ fn probe_peer_session(port: u16, token: &str) -> Result<(), String> {
+-    agent()
++    agent()?
+         .get(&format!("http://127.0.0.1:{port}/api/collab/me"))
+         .set("Authorization", &format!("Bearer {token}"))
+         .call()
+@@ -311,7 +311,7 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
+     let me = my_node_id();
+     let my_name_s = my_name();
+     let got = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        let challenge_resp = agent()
++        let challenge_resp = agent()?
+             .post(&format!(
+                 "http://127.0.0.1:{port}/api/collab/connect/challenge"
+             ))
+@@ -326,7 +326,7 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
+             .ok_or("对方没返回连接挑战 —— 请先升级对方的 Polaris")?;
+         let signature = crate::collab::identity::sign_connect_proof(&me, &access, challenge)?;
+ 
+-        let resp = agent()
++        let resp = agent()?
+             .post(&format!("http://127.0.0.1:{port}/api/collab/connect"))
+             .send_json(json!({
+                 "code": access,
+diff --git a/src-tauri/src/mesh/login.rs b/src-tauri/src/mesh/login.rs
+index 7170055..b322954 100644
+--- a/src-tauri/src/mesh/login.rs
++++ b/src-tauri/src/mesh/login.rs
+@@ -14,7 +14,7 @@ pub async fn account_send_code(
+     let url = validate_authority_url(&authority_of(url)?, allowInsecureHttp.unwrap_or(false))?;
+     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+         crate::collab::authority::pin_explicit(&url)?;
+-        agent()
++        agent()?
+             .post(&format!("{url}/api/account/send_code"))
+             .send_json(json!({ "email": email.trim() }))
+             .map_err(cloud_err)?;
+@@ -63,7 +63,7 @@ pub async fn account_login_code(
+         move || -> Result<Value, String> {
+             crate::collab::authority::pin_explicit(&url)?;
+             // ① 验证码 → 身份断言(账号不存在则当场建号,由账号中心决定)。
+-            let resp = agent()
++            let resp = agent()?
+                 .post(&format!("{url}/api/account/login_code"))
+                 .send_json(json!({ "email": email.trim(), "code": code.trim() }))
+                 .map_err(cloud_err)?;
+@@ -132,7 +132,7 @@ pub(super) fn enroll_with_assertion(
+     };
+ 
+     // ④ 本地两道前置闸均通过后，才去云端换长期设备密钥。
+-    let resp = agent()
++    let resp = agent()?
+         .post(&format!("{url}/api/mesh/enroll"))
+         .send_json(json!({
+             "assertion": assertion,
+@@ -245,7 +245,7 @@ pub async fn account_login_password(
+     let endpoint = url.clone();
+     let assertion = tokio::task::spawn_blocking(move || -> Result<String, String> {
+         crate::collab::authority::pin_explicit(&endpoint)?;
+-        let response: Value = agent().post(&format!("{endpoint}/api/account/login"))
++        let response: Value = agent()?.post(&format!("{endpoint}/api/account/login"))
+             .send_json(json!({"username": username, "password": password}))
+             .map_err(cloud_err)?.into_json().map_err(|e| format!("账号中心 JSON 无效: {e}"))?;
+         crate::collab::interconnect::apply_received_relays(&response)?;
+diff --git a/src-tauri/src/mesh/policy_commands.rs b/src-tauri/src/mesh/policy_commands.rs
+index 92d6840..4cc3935 100644
+--- a/src-tauri/src/mesh/policy_commands.rs
++++ b/src-tauri/src/mesh/policy_commands.rs
+@@ -69,7 +69,7 @@ pub async fn mesh_rename(nodeId: String, name: String) -> Result<Value, String>
+         return Err("本机还没登录".into());
+     };
+     tokio::task::spawn_blocking(move || -> Result<(), String> {
+-        agent()
++        agent()?
+             .post(&format!("{}/api/mesh/rename", c.url))
+             .set("Authorization", &format!("Bearer {}", c.key))
+             .send_json(json!({ "nodeId": nodeId, "name": name }))
+@@ -107,7 +107,7 @@ pub async fn mesh_kick(nodeId: String) -> Result<Value, String> {
+     };
+     let nid = nodeId.clone();
+     tokio::task::spawn_blocking(move || -> Result<(), String> {
+-        agent()
++        agent()?
+             .post(&format!("{}/api/mesh/revoke", c.url))
+             .set("Authorization", &format!("Bearer {}", c.key))
+             .send_json(json!({ "nodeId": nid }))
+diff --git a/src-tauri/src/mesh/security.rs b/src-tauri/src/mesh/security.rs
+index d1f2f5c..51c00cd 100644
+--- a/src-tauri/src/mesh/security.rs
++++ b/src-tauri/src/mesh/security.rs
+@@ -1,6 +1,11 @@
+ //! Local console policy B adapters and frontend notification endpoints.
+ use super::*;
+ 
++pub(super) fn watch_agent(interval: u64) -> Result<ureq::Agent, String> {
++    crate::collab::interconnect::http_client::agent(
++        ureq::AgentBuilder::new().timeout(Duration::from_secs(interval + 5)))
++}
++
+ static WATCHING: AtomicBool = AtomicBool::new(false);
+ 
+ pub(super) fn start_watch() {
+@@ -16,7 +21,7 @@ pub(super) fn start_watch() {
+                 .map_or(30, |config| config.security.revocation_poll_secs);
+             let previous = cursor.clone();
+             let response = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-                ureq::AgentBuilder::new().timeout(Duration::from_secs(interval + 5)).build()
++                watch_agent(interval)?
+                     .get(&format!("{}/api/mesh/security/watch", config.url))
+                     .query("cursor", &previous)
+                     .set("Authorization", &format!("Bearer {}", config.key)).call()
+@@ -65,7 +70,7 @@ async fn call(path: &'static str, payload: Option<Value>) -> Result<Value, Strin
+     let config = cfg().ok_or("本机尚未入网")?;
+     tokio::task::spawn_blocking(move || {
+         let url = format!("{}{path}", config.url);
+-        let request = if payload.is_some() { agent().post(&url) } else { agent().get(&url) }
++        let request = if payload.is_some() { agent()?.post(&url) } else { agent()?.get(&url) }
+             .set("Authorization", &format!("Bearer {}", config.key));
+         let response = match payload {
+             Some(payload) => request.send_json(payload),
+diff --git a/src-tauri/src/mesh/tls_tests.rs b/src-tauri/src/mesh/tls_tests.rs
+new file mode 100644
+index 0000000..748d8c3
+--- /dev/null
++++ b/src-tauri/src/mesh/tls_tests.rs
+@@ -0,0 +1,83 @@
++//! Both mesh constructors must consume the authority CA, including long polling.
++use super::*;
++use std::{fs, io::{Read, Write}, net::TcpListener, process::Command, sync::Arc};
++use ureq::rustls::{self, pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject}};
++
++type TestResult = Result<(), Box<dyn std::error::Error>>;
++#[test]
++fn ordinary_and_watch_clients_share_private_ca_policy() -> TestResult {
++    let dir = std::env::temp_dir().join(format!("p7-mesh-tls-{}", std::process::id()));
++    fs::create_dir_all(&dir)?;
++    let config_path = dir.join("interconnect.json");
++    let previous = std::env::var_os("POLARIS_INTERCONNECT_CONFIG");
++    struct Restore(Option<std::ffi::OsString>, std::path::PathBuf);
++    impl Drop for Restore {
++        fn drop(&mut self) {
++            match &self.0 {
++                Some(value) => std::env::set_var("POLARIS_INTERCONNECT_CONFIG", value),
++                None => std::env::remove_var("POLARIS_INTERCONNECT_CONFIG"),
++            }
++            let _ = fs::remove_dir_all(&self.1);
++        }
++    }
++    let _restore = Restore(previous, dir.clone());
++    std::env::set_var("POLARIS_INTERCONNECT_CONFIG", &config_path);
++    fs::write(&config_path, json!({"authority":{"extraCaPem":"/missing/p7-mesh-ca.pem"}}).to_string())?;
++    assert!(transport::agent().is_err());
++    assert!(security::watch_agent(1).is_err());
++    let openssl = |args: &[&str]| -> TestResult {
++        let output = Command::new("openssl").args(args).current_dir(&dir).output()?;
++        if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned().into()); }
++        Ok(())
++    };
++    openssl(&["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=Mesh Test CA",
++        "-addext", "basicConstraints=critical,CA:TRUE", "-keyout", "ca.key", "-out", "ca.pem"])?;
++    openssl(&["req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
++        "-keyout", "server.key", "-out", "server.csr"])?;
++    fs::write(dir.join("extensions"), "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\nbasicConstraints=critical,CA:FALSE\n")?;
++    openssl(&["x509", "-req", "-days", "1", "-in", "server.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
++        "-CAcreateserial", "-extfile", "extensions", "-out", "server.pem"])?;
++    let certificates = CertificateDer::pem_slice_iter(&fs::read(dir.join("server.pem"))?).collect::<Result<Vec<_>, _>>()?;
++    let key = PrivateKeyDer::from_pem_slice(&fs::read(dir.join("server.key"))?)?;
++    let tls = Arc::new(rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
++        .with_safe_default_protocol_versions()?.with_no_client_auth().with_single_cert(certificates, key)?);
++    let listener = TcpListener::bind("127.0.0.1:0")?;
++    let port = listener.local_addr()?.port();
++    listener.set_nonblocking(true)?;
++    let server = std::thread::spawn(move || -> Result<(), String> {
++        let deadline = std::time::Instant::now() + Duration::from_secs(20);
++        let mut attempts = 0;
++        while attempts < 6 && std::time::Instant::now() < deadline {
++            let (socket, _) = match listener.accept() {
++                Ok(socket) => socket,
++                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
++                    std::thread::sleep(Duration::from_millis(5)); continue;
++                }
++                Err(error) => return Err(error.to_string()),
++            };
++            attempts += 1;
++            socket.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
++            socket.set_write_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
++            let connection = rustls::ServerConnection::new(tls.clone()).map_err(|e| e.to_string())?;
++            let mut stream = rustls::StreamOwned::new(connection, socket);
++            if stream.read(&mut [0; 4096]).is_ok() {
++                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
++            }
++        }
++        if attempts != 6 { return Err("missing TLS attempts".into()); }
++        Ok(())
++    });
++    for trusted in [false, true] {
++        let ca = trusted.then(|| dir.join("ca.pem"));
++        fs::write(&config_path, json!({"authority":{"extraCaPem":ca}}).to_string())?;
++        for client in [transport::agent()?, security::watch_agent(1)?] {
++            assert_eq!(client.get(&format!("https://localhost:{port}")).call().is_ok(), trusted);
++            if trusted {
++                let error = client.get(&format!("https://127.0.0.1:{port}")).call().err().ok_or("hostname mismatch accepted")?;
++                assert!(cloud_err(error).contains("InterconnectTlsCertificateError"));
++            }
++        }
++    }
++    server.join().map_err(|_| "TLS server panicked")??;
++    Ok(())
++}
+diff --git a/src-tauri/src/mesh/transport.rs b/src-tauri/src/mesh/transport.rs
+new file mode 100644
+index 0000000..b6f0666
+--- /dev/null
++++ b/src-tauri/src/mesh/transport.rs
+@@ -0,0 +1,117 @@
++//! Authority HTTP and transport policy.
++use super::*;
++
++// ────────────────────────────── 与云端目录通信 ──────────────────────────────
++
++pub(super) fn agent() -> Result<ureq::Agent, String> {
++    crate::collab::interconnect::http_client::agent(ureq::AgentBuilder::new()
++        .timeout_connect(CLOUD_TIMEOUT)
++        .timeout_read(CLOUD_TIMEOUT))
++}
++
++/// 把 ureq 错误翻成人话。云端明确给的业务错误原样透传(「设备已被移出设备网」这类
++/// 必须让用户看见原文,糊成「网络错误」会让人对着正确的账号反复试)。
++pub(super) fn cloud_err(e: ureq::Error) -> String {
++    match e {
++        ureq::Error::Status(code, resp) => {
++            let body = resp.into_string().unwrap_or_default();
++            serde_json::from_str::<Value>(&body)
++                .ok()
++                .and_then(|v| v.get("error").and_then(|x| x.as_str()).map(String::from))
++                .unwrap_or_else(|| format!("HTTP {code}"))
++        }
++        error => crate::collab::interconnect::http_client::diagnostic(&error),
++    }
++}
++
++pub(super) fn norm_url(u: &str) -> String {
++    let t = u.trim().trim_end_matches('/');
++    if t.starts_with("http://") || t.starts_with("https://") {
++        t.to_string()
++    } else {
++        format!("https://{t}")
++    }
++}
++
++fn loopback_http(url: &str) -> bool {
++    let Some(rest) = url.strip_prefix("http://") else {
++        return false;
++    };
++    let authority = rest.split('/').next().unwrap_or("");
++    let host = authority.rsplit('@').next().unwrap_or(authority);
++    host == "localhost"
++        || host.starts_with("localhost:")
++        || host == "127.0.0.1"
++        || host.starts_with("127.0.0.1:")
++        || host == "[::1]"
++        || host.starts_with("[::1]:")
++}
++
++/// 登录凭据、OTP、assertion 与长期 meshKey 都会经过账号中心。公网 HTTP 必须显式确认，
++/// 不能再因为用户把“高级地址”留空，就静默把整套身份发到明文 IP。
++pub(super) fn validate_authority_url(raw: &str, allow_insecure_http: bool) -> Result<String, String> {
++    if raw.trim().is_empty() {
++        return Err("未配置权威；当前可继续使用本地模式".into());
++    }
++    let url = norm_url(raw);
++    if url == "https://" || url == "http://" {
++        return Err("请填写账号中心地址".into());
++    }
++    if url.starts_with("https://") || loopback_http(&url) {
++        return Ok(url);
++    }
++    if url.starts_with("http://") {
++        if allow_insecure_http {
++            return Ok(url);
++        }
++        return Err(format!(
++            "账号中心 {url} 使用明文 HTTP，邮箱、验证码和设备密钥可能被窃取。请改用 HTTPS；若这是你明确信任的旧服务，请在高级设置勾选‘仍使用不安全 HTTP’后重试"
++        ));
++    }
++    Err("账号中心地址只支持 https://（本机调试可用 http://localhost）".into())
++}
++
++pub(super) fn authority_transport_state(url: &str) -> &'static str {
++    if url.starts_with("https://") || loopback_http(url) {
++        "secure"
++    } else {
++        "insecure_legacy"
++    }
++}
++
++/// 心跳 + 取同账号设备清单。
++pub(super) fn announce(c: &Cfg) -> Result<Value, String> {
++    crate::collab::authority::pin_explicit(&c.url)?;
++    crate::collab::db::meta_set("mesh_node_id", &my_node_id())?;
++    let resp = agent()?
++        .post(&format!("{}/api/mesh/announce", c.url))
++        .set("Authorization", &format!("Bearer {}", c.key))
++        .send_json(json!({ "name": my_name(), "os": my_os(), "ver": my_ver() }))
++        .map_err(cloud_err)?;
++    let v: Value = resp
++        .into_json()
++        .map_err(|e| format!("云端返回的不是 JSON:{e}"))?;
++    if let Some(uid) = v.get("uid").and_then(|x| x.as_str()) {
++        let _ = crate::collab::db::meta_set(K_UID, uid);
++    }
++    security::publish(&v);
++    Ok(v)
++}
++
++/// 取一张新的身份断言(5 分钟有效),用来进对端主机的门。
++pub(super) fn fresh_assertion(c: &Cfg) -> Result<String, String> {
++    crate::collab::authority::pin_explicit(&c.url)?;
++    let resp = agent()?
++        .post(&format!("{}/api/mesh/assert", c.url))
++        .set("Authorization", &format!("Bearer {}", c.key))
++        .send_json(json!({}))
++        .map_err(cloud_err)?;
++    let v: Value = resp
++        .into_json()
++        .map_err(|e| format!("云端返回的不是 JSON:{e}"))?;
++    v.get("assertion")
++        .and_then(|x| x.as_str())
++        .map(String::from)
++        .ok_or_else(|| "云端没返回身份断言".into())
++}
++
+diff --git a/src-tauri/tests/provider_http.rs b/src-tauri/tests/provider_http.rs
+new file mode 100644
+index 0000000..169a7da
+--- /dev/null
++++ b/src-tauri/tests/provider_http.rs
+@@ -0,0 +1,62 @@
++#![cfg(all(feature = "server", not(feature = "desktop")))]
++//! Exercise the public HTTP error envelope and the shared Tauri command return.
++use axum::{body::{Body, to_bytes}, http::{Request, StatusCode}};
++use polaris_app_lib::{apihub::{api_router, ApiState}, host::AppHandle};
++use polaris_kernel::{provider, chat::backend};
++use serde_json::{json, Value};
++use std::{fs, sync::Arc, path::Path};
++use tower::ServiceExt;
++
++#[tokio::test(flavor = "multi_thread")]
++async fn invalid_native_save_preserves_paths_through_http_and_command_return() -> Result<(), Box<dyn std::error::Error>> {
++    let dir = std::env::temp_dir().join(format!("p7-http-{}", std::process::id()));
++    fs::create_dir_all(&dir)?;
++    std::env::set_var("POLARIS_COLLAB_DB", dir.join("collab.db"));
++    std::env::set_var("POLARIS_INTERCONNECT_CONFIG", dir.join("interconnect.json"));
++    fs::write(dir.join("interconnect.json"), "{}")?;
++    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
++    let config = dir.join("agent.json");
++    fs::write(&config, serde_json::to_vec(&json!({"agent":{"backend":"pi"},"agentd":{
++        "entry":repo.join("src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs"),
++        "isolation":"shared","sessionMap":dir.join("sessions"),
++        "expertSettings":dir.join("experts.json"),"requestTimeoutMs":30000
++    }}))?)?;
++    std::env::set_var("POLARIS_AGENT_CONFIG", &config);
++    std::env::set_var("POLARIS_PROVIDER_STORE", dir.join("providers.json"));
++    let (tx, _) = tokio::sync::broadcast::channel(32);
++    let router = api_router(ApiState { app: AppHandle::new(tx.clone()), tx,
++        auth_token: Arc::new(Some("p7-http-test-token".into())), open_no_auth: false });
++    // Saving validates locally; switching still preserves SDK WireError.paths.
++    let input = json!({"id":"codex","name":"bad","settingsConfig":{"models":[{"id":"invalid","maxTokens":0}]}});
++    let response = router.clone().oneshot(Request::post("/api/invoke")
++        .header("content-type", "application/json").header("authorization", "Bearer p7-http-test-token")
++        .body(Body::from(json!({"cmd":"provider_save","args":{"input":input}}).to_string()))?).await?;
++    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
++    let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await?)?;
++    let expected = provider::provider_save(serde_json::from_value(input)?).err().ok_or("invalid save accepted")?;
++    assert_eq!(body["error"], expected);
++    assert!(expected.contains("/settingsConfig/models/0/maxTokens"), "{expected}");
++    provider::provider_save(serde_json::from_value(json!({"id":"codex","name":"SDK rejected",
++        "settingsConfig":{"models":["invalid-wire-config"]}}))?)?;
++    let response = router.clone().oneshot(Request::post("/api/invoke")
++        .header("content-type", "application/json").header("authorization", "Bearer p7-http-test-token")
++        .body(Body::from(json!({"cmd":"provider_switch","args":{"id":"codex"}}).to_string()))?).await?;
++    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
++    let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await?)?;
++    assert!(body["error"].as_str().is_some_and(|error| error.contains("/providers/0/models/0/name")));
++    for (cmd, args) in [
++        ("provider_save", json!({"input":{"id":"codex","name":"Drill subscription","settingsConfig":{"models":["gpt-6-astra"]}}})),
++        ("provider_switch", json!({"id":"codex"})),
++    ] {
++        let response = router.clone().oneshot(Request::post("/api/invoke")
++            .header("content-type", "application/json").header("authorization", "Bearer p7-http-test-token")
++            .body(Body::from(json!({"cmd":cmd,"args":args}).to_string()))?).await?;
++        let status = response.status();
++        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await?)?;
++        assert_eq!(status, StatusCode::OK, "{cmd}: {body}");
++        assert_eq!(body, "codex");
++    }
++    backend::selected()?.shutdown();
++    fs::remove_dir_all(dir)?;
++    Ok(())
++}
+
+commit f3157ff5b9244f860077dd3d8bdaf6936c9582b2
+Author: Glen Church <GlenChurchcbh@gmx.es>
+Date:   Fri Oct 16 03:59:15 2026 +0900
+
+    fix(docker): agentd 阶段复制整个 scripts/runtime/（真实镜像构建发现）
+    
+    Dockerfile 写死只复制 check-wasm.mjs 与 node.mjs，而 pack-agentd 还依赖 contract-files.mjs
+    （P7b 新增）与 node.mjs 依赖的 sources.mjs（P5a-2 新增），镜像构建自 P5a-2 起即失败。
+    改为复制整个目录。
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/Dockerfile b/Dockerfile
+index 434fc6a..0d73c4c 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -33,7 +33,8 @@ COPY agentd/src ./src
+ COPY agentd/config ./config
+ COPY agentd/test ./test
+ COPY scripts/pack-agentd.mjs /build/scripts/pack-agentd.mjs
+-COPY scripts/runtime/check-wasm.mjs scripts/runtime/node.mjs /build/scripts/runtime/
++# Copy the whole helper directory: pack-agentd's imports change over time (a fixed file list broke the build once).
++COPY scripts/runtime/ /build/scripts/runtime/
+ RUN node /build/scripts/pack-agentd.mjs /out/agentd
+ 
+ # ── stage 2: Rust 服务端 ───────────────────────────────────────
+
+commit ab3226e061d186602d5598822717236e8a79fd17
+Author: Glen Church <GlenChurchcbh@gmx.es>
+Date:   Fri Oct 16 04:24:47 2026 +0900
+
+    fix(docker): 运行镜像 UID 1000 冲突（真实镜像构建发现）
+    
+    P5a 把最终阶段基础镜像改为 node:*-bookworm-slim，其自带 UID 1000 的 node 用户，导致
+    useradd polaris 失败。先删除 node 用户，保持 polaris 为 UID 1000 以兼容已有数据卷属主。
+    镜像构建成功（759MB），冒烟：polaris uid=1000、node v22.19.0、polaris-server 就位。
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/Dockerfile b/Dockerfile
+index 0d73c4c..d53408e 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -129,7 +129,8 @@ RUN set -eu; \
+ 
+ # 非 root 运行；数据根 = $HOME/Polaris（server 用 ~/Polaris 当工作目录，
+ # collab.db 落 ~/Polaris/data/；claude 凭证落 ~/.claude）
+-RUN useradd -m -u 1000 -s /bin/bash polaris \
++# The node base image already owns UID 1000 ("node"); keep UID 1000 for existing data volumes.
++RUN userdel -r node 2>/dev/null; useradd -m -u 1000 -s /bin/bash polaris \
+     && mkdir -p /home/polaris/Polaris /home/polaris/.claude /home/polaris/.polaris/agentd /srv/web /app/resources \
+     && printf '%s\n' "$POLARIS_BUILD_REVISION" > /app/polaris-build-revision \
+     && printf '%s\n' "$POLARIS_BUILD_VERSION" > /app/polaris-build-version \

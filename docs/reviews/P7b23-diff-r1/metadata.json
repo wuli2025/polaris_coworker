@@ -1,0 +1,46 @@
+{
+  "started_at": "2026-10-15T19:52:34.286025+00:00",
+  "status": "REVIEW_RECEIVED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "openai-codex",
+  "requested_model": "gpt-6-astra",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P7b-series-brief.md",
+        "bytes": 2103,
+        "lines": 21,
+        "sha256": "3b3fa31c27443cdc92162c907a8e9ed9387605c10dbc23a535233ab08d9f0b4f"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P7b23-diff.patch",
+        "bytes": 126468,
+        "lines": 2330,
+        "sha256": "81c2d882937bee70b0b46b08ba99a57af58b963e8b51890ac20ea216a2a64242"
+      }
+    ],
+    "prompt_sha256": "671d895de73b696abd010903e231129d40675a425c65ea69358c5ebc151b8e16",
+    "prompt_bytes": 143646
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "provider": "openai-codex",
+  "model": "gpt-6-astra",
+  "usage": {
+    "input": 42567,
+    "output": 828,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 43395,
+    "cost": {
+      "input": 0.21283500000000002,
+      "output": 0.02484,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.23767500000000003
+    }
+  },
+  "session_id": "01a1411f-e683-772c-946b-6605e0971dff",
+  "finished_at": "2026-10-15T19:53:33.465436+00:00"
+}

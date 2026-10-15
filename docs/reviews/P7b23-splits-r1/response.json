@@ -1,0 +1,21 @@
+{
+  "text": "## 审查模式\npacket；无可用工具，仅审查内联编号材料，未运行测试。\n\n## 结论\n**INCOMPLETE**\n\n已提供的搬移代码未见明确新增的业务逻辑遗漏，但关键新增模块未提供，无法完成语义等价性及统一 CA 路径审查。\n\n## 范围与缺失材料\n- 范围：`P7b23-splits.patch` 中 authority、membership、mesh 命令及测试拆分。\n- 缺少 `src-tauri/src/mesh/transport.rs`、`mesh/tls_tests.rs`、统一 `http_client` 实现及相关配置授权路径。\n- 缺少最终完整文件、功能树更新，以及明确对应拆分后版本的测试命令与输出。brief 的测试总结不能确认本次最终状态。\n- 已完整提供的新增文件均不超过 500 行（319、430、102、272、87 行）；其余文件无法完整核实。\n\n## 问题\n\n### 1. 高：关键迁移目标缺失，无法确认网络语义保留\n- **位置：** `src-tauri/src/mesh.rs`，补丁行 1796–1911、2283–2285。\n- **证据：** 原 `agent`、错误转换、URL 校验、announce、assertion 请求被删除，改用 `mod transport`；另声明 `mod tls_tests`，但未内联这两个文件。\n- **影响：** 无法确认超时、HTTPS 限制、认证头、私有 CA 和错误脱敏是否完整保留。若文件实际不存在，构建会失败；材料不足以认定实际缺文件。\n- **最小处理：** 补充两个模块及 `http_client` 完整实现，并提供最终版本构建证据。\n\n### 2. 中：认领停用账号仍返回成功状态（既有缺陷，非拆分引入）\n- **位置：** `src-tauri/crates/polaris-collab/src/collab/authority/membership.rs:59–95,176–207`（补丁行 1091–1127、1208–1239）。\n- **证据：** 邮箱匹配和旧 owner 认领均未读取 `disabled`；认领后提交身份变更，并返回 `User { disabled: false }`。相比之下，已有 uid 分支明确拒绝停用账号。\n- **可复现影响：** 创建邮箱匹配且 uid 为空的停用本地账号，以匹配邮箱调用 `LocalConsole` 认领，函数可成功修改绑定并报告未停用。最终是否能签发、使用会话，取决于未提供的调用链，不能据此断言完整登录绕过。\n- **最小修复：** 在认领事务内检查目标行的 `disabled`，停用时拒绝且不修改身份；补充邮箱认领和旧 owner 认领的停用回归测试。\n\n## 搬移核对\n- 可见 authority 测试迁移未发现遗漏；两个测试移入 `host_tests.rs`，共享锁仍指向同一 `TEST_LOCK`。\n- 除 CA 客户端接入外，mesh 还把多个锁中毒处理从 panic 改成恢复内部状态（补丁行 2343、2434、2524）。这是额外语义变化，不能描述为纯搬移；目前没有证据证明它造成具体回归。\n\n## 建议验证\n1. 补齐缺失模块后逐项核对请求、超时、URL 限制及错误传播。\n2. 重跑拆分后版本的 desktop/server 构建及相关测试，确认 Tauri 命令重导出可用。\n3. 验证私有 CA 成功路径，以及无 CA、错误主机名、过期证书、无效 PEM 均安全失败且不回退。\n4. 增加停用账号认领测试；核实锁中毒恢复是否有状态一致性保障。\n\n以上为静态审查结果；没有执行或确认测试通过。",
+  "stopReason": "stop",
+  "model": "gpt-6-astra",
+  "provider": "openai-codex",
+  "usage": {
+    "input": 42275,
+    "output": 910,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 43185,
+    "cost": {
+      "input": 0.211375,
+      "output": 0.0273,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.238675
+    }
+  },
+  "session_id": "01a1411f-e672-7f6f-b818-5ca10f1627d6"
+}
