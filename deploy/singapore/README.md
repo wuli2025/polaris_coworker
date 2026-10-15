@@ -67,6 +67,8 @@ HAProxy 版本发布日期见[官方 3.2 发布目录](https://www.haproxy.org/d
 ## 主机、DNS 与防火墙
 
 运行环境最低规划：Linux，2 vCPU、4 GiB 内存、20 GiB 可用持久 SSD，Docker Engine + Compose v2（支持 `--wait`），Bash、Python **3.11+**、`flock`、`realpath`。
+备份宿主还须安装 `age`（默认）或 GnuPG：Debian/Ubuntu 运维可执行 `sudo apt-get install age` 或 `sudo apt-get install gnupg`。
+这些是服务器侧工具，不加入 Cargo/npm/Python 依赖；工具缺失或加密失败不会退回明文。
 这是低流量起点，不是压测容量承诺；镜像构建建议在独立构建机完成。relay 流量与出口带宽/流量配额通常更值得监控。
 宿主准确同步时间。一个稳定公网地址即可，确认运营商允许入站 TCP/UDP 和出站 SMTP、ACME。
 
@@ -166,14 +168,20 @@ Caddy 从受控 Docker 网络接受 PROXY v2，覆盖 XFF/X-Real-IP，忽略外�
 
 ## 备份、恢复、升级与回滚
 
-- `scripts/backup.sh`：互斥锁→记录运行状态→停止 authority→复制数据→SQLite backup API 归并 WAL→校验→原子产出 tar→恢复原运行状态。
+- `scripts/backup.sh`：互斥锁→检查加密配置→记录运行状态→停止 authority→复制数据→SQLite backup API 归并 WAL→校验→加密并原子产出归档→清理明文→恢复原运行状态。
   备份仅含 `collab.db`、`account_authority.key` 和清单（含实际运行镜像引用与 SHA-256），不包含 SMTP 密码和 TLS 缓存。
   保存 `.env` 与 ACME volumes 需要独立的加密备份；数据库覆盖账号、吊销等权威状态，不能只备份主 DB 而漏 WAL。
-  每次调用追加一份快照，不覆盖旧备份。**快照含明文签名私钥，0600 不是加密**，请存入加密介质或按已有密钥托管流程加密后异地保存。
+  每次调用追加一份快照，不覆盖旧备份。默认要求 `BACKUP_ENCRYPT=age` 与 `BACKUP_RECIPIENT`；生成 `.tar.age`，也支持 gpg 的 `.tar.gpg`。
+  未配置时拒绝；仅明确确认 `BACKUP_DIR` 是加密介质后设 `BACKUP_PLAINTEXT_ACK=1` 才允许 `.tar`，stderr 有醒目 WARNING。
   不默认设置自动删除保留策略；按容量与保留要求自行配置定时任务。
-- `scripts/restore.sh /absolute/path/authority-....tar`：先校验归档白名单、校验和、SQLite、32 字节种子格式，再备份现状、停机、恢复。
+- `scripts/restore.sh /absolute/path/authority-....tar.age`：先检查预期指纹、解密并校验归档白名单、校验和、SQLite、32 字节种子格式，再备份现状、停机、恢复。
+  接受 `.tar.age`、`.tar.gpg` 与历史 `.tar`；age 需 `BACKUP_IDENTITY`，gpg 用运维用户密钥环（非交互，私钥解锁须事先准备）。
+  有现存数据库时，备份现状同样须配置收件人或明确确认明文例外；解密能力不能代替备份加密配置。
   拒绝路径穿越、重复成员、链接和未知文件；移除旧 WAL/SHM；失败保持停止，避免半恢复库上线。
-  无现有库时支持空卷恢复；若原容器停止，恢复后仍停止。再启动并 smoke 核对原指纹。
+  重启后从容器内 `/api/account/pubkey` 获取公钥，调用 `probe.py fingerprint` 比对 `EXPECTED_FINGERPRINT`。
+  不符、无法取得公钥或响应无效均停止 authority 并非零退出；指引核对可信指纹与原备份，不能直接接受新指纹。
+  无现有库时支持空卷恢复；若原容器停止，临时启动核验后恢复停止状态。公网 smoke 仍需运维另跑。
+  缺少预期指纹默认在写入前拒绝；仅灾难恢复人工确认时可设 `RESTORE_UNPINNED_ACK=1`，会告警并输出实际指纹，不能证明身份可信。
   哈希只检查完整性，不证明备份来源可信，恢复文件应来自受控备份库。
 - 升级前将 `.env` 的 `AUTHORITY_IMAGE` 改成审核的新版本 digest，再运行 `scripts/upgrade.sh`。
   脚本拉新权威镜像、备份现状、记录 `.generated/previous-authority-image.txt`、只升级 authority、等待健康并核对公网指纹。
@@ -184,6 +192,30 @@ Caddy 从受控 Docker 网络接受 PROXY v2，覆盖 XFF/X-Real-IP，忽略外�
   恢复旧库可能恢复已经吊销的设备状态，需从故障快照/审计核对并重施吊销；不能把回滚当无损撤销。
 - relay/代理维护另开窗口：先保留旧 digest/配置和证书卷，再 pull、逐个重建、完整 smoke；客户端两端互通仍要另测。
   避免 `docker compose down -v`，它会删除身份与数据库卷。
+
+加密配置切换示例（修改 `.env`，不要仅设置同名 shell 环境变量）：
+
+```dotenv
+BACKUP_ENCRYPT=age
+BACKUP_RECIPIENT=age1替换为可信收件人公钥
+BACKUP_PLAINTEXT_ACK=0
+BACKUP_IDENTITY=/secure/offline-recovery/age-identity.txt
+RESTORE_UNPINNED_ACK=0
+RESTORE_VERIFY_TIMEOUT_SECS=30
+```
+
+age 备份只需公钥，恢复私钥应独立保管，恢复时再提供。切换 GnuPG：`BACKUP_ENCRYPT=gpg`，
+`BACKUP_RECIPIENT` 填已导入密钥环且经独立核对的完整公钥指纹，`BACKUP_IDENTITY` 留空。
+收件人由工具校验密钥格式；配置先拒绝空白/选项形式、未知加密模式，ACK 仅允许 `0/1`，identity 须绝对路径，恢复等待预算为 `1..300` 秒。
+gpg 显式信任指定收件人，所以运维必须核对指纹；不会交互询问信任，也不支持本包传递私钥口令。
+确需加密介质上的明文快照：`BACKUP_ENCRYPT=`、`BACKUP_RECIPIENT=`、`BACKUP_PLAINTEXT_ACK=1`；恢复默认策略时填回加密配置并将 ACK 改为 `0`。
+历史 `.env` 自动合并新增默认值，因此旧部署未补加密配置时 backup/upgrade/恢复前备份会拒绝；历史归档内容格式无迁移。
+
+复制、归并、校验与解密的临时明文放在系统临时目录（可通过 `TMPDIR` 指定），目录 0700、CLI 文件 0600。
+成功和可捕获失败路径都会覆盖、fsync、删除临时文件，部分密文也会删除；备份失败恢复原运行状态，恢复写入失败保持停止。
+CoW、SSD、日志文件系统不保证覆盖能抹除历史块，断电/SIGKILL 也无法执行清理；应使用加密盘或 tmpfs 的 `TMPDIR`，不能把删除当作介质级擦除。
+例如为大库准备足够容量的受控加密临时盘，再执行 `TMPDIR=/mnt/encrypted-tmp ./scripts/backup.sh`（恢复同理）。
+不要把恢复私钥放进快照或版本库；定期在隔离环境使用真实工具演练加密备份及解密恢复。
 
 ## 排查
 

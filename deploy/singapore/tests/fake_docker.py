@@ -28,6 +28,10 @@ if args[0] == 'compose':
         state['running'] = False
     elif action in ('start', 'up'):
         state['running'] = True
+    elif action == 'exec':
+        if not state['running'] or args[-1] != 'http://127.0.0.1:8080/api/account/pubkey':
+            sys.exit(21)
+        print((root / 'pubkey.json').read_text())
     elif action == 'run':
         script = args[-1]
         if 'test -s' in script:
@@ -35,6 +39,8 @@ if args[0] == 'compose':
         elif 'tar -xf' in script:
             if os.environ.get('FAKE_FAIL') == 'extract':
                 sys.exit(18)
+            for suffix in ('-wal', '-shm'):
+                (root / 'data' / ('collab.db' + suffix)).unlink(missing_ok=True)
             with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:
                 for member in archive:
                     if member.name in ('collab.db', 'account_authority.key'):
@@ -55,6 +61,7 @@ elif args[0] == 'inspect':
         raise RuntimeError('unhandled inspect')
 elif args[0] == 'cp':
     if os.environ.get('FAKE_FAIL') == 'cp':
+        shutil.copy(root / 'data/account_authority.key', Path(args[2]) / 'account_authority.key')
         sys.exit(19)
     shutil.copytree(root / 'data', args[2], dirs_exist_ok=True)
 else:

@@ -33,24 +33,34 @@ stop_authority() {
   [[ $(docker inspect -f '{{.State.Running}}' "$SG_CONTAINER") == false ]]
 }
 backup_authority() {
-  local target scratch
-  target=$(value BACKUP_DIR)
-  [[ $target = /* ]] || target="$SG_ROOT/$target"
-  mkdir -p "$target"
-  target=$(cd "$target" && pwd)
-  scratch=$(mktemp -d "$target/.snapshot.XXXXXX")
-  # 停服务后复制，SQLite backup API 归并 WAL；失败不产出成功标记。
-  stop_authority
-  trap 'restart_original' EXIT
-  if ! docker cp "$SG_CONTAINER:/home/polaris/Polaris/data/." "$scratch/"; then
-    echo "备份读取失败；临时目录含敏感数据：$scratch" >&2
-    return 1
-  fi
-  python3 "$SG_ROOT/scripts/snapshot.py" pack "$scratch" "$target" \
-    "$(docker inspect -f '{{.Config.Image}}' "$SG_CONTAINER")"
-  rm -rf -- "$scratch"
-  restart_original
-  SG_WAS_RUNNING=0
-  trap - EXIT
-  echo '备份含未加密签名私钥；请立即转存加密介质，勿上传明文。' >&2
+  python3 "$SG_ROOT/scripts/snapshot.py" policy "$SG_ENV_FILE"
+  SG_CONTAINER=$(dc ps -aq authority)
+  # 独立 trap 不覆盖 restore 的明文清理与失败停机 trap。
+  (
+    local target scratch
+    target=$(value BACKUP_DIR)
+    [[ $target = /* ]] || target="$SG_ROOT/$target"
+    mkdir -p "$target"
+    target=$(cd "$target" && pwd)
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/polaris-snapshot.XXXXXX")
+    SG_WAS_RUNNING=0
+    finish_backup() {
+      local status=$?
+      trap - EXIT
+      python3 "$SG_ROOT/scripts/snapshot.py" clean "$scratch" || status=1
+      restart_original || status=1
+      exit "$status"
+    }
+    trap finish_backup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    # 停服务后复制，SQLite backup API 归并 WAL；失败不产出成功标记。
+    stop_authority
+    if ! docker cp "$SG_CONTAINER:/home/polaris/Polaris/data/." "$scratch/"; then
+      echo '备份读取失败；清理临时明文并恢复原运行状态。' >&2
+      exit 1
+    fi
+    TMPDIR="$scratch" python3 "$SG_ROOT/scripts/snapshot.py" pack "$scratch" "$target" \
+      "$(docker inspect -f '{{.Config.Image}}' "$SG_CONTAINER")" "$SG_ENV_FILE"
+  )
 }

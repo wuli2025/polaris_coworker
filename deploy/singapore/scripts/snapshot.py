@@ -4,12 +4,17 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tarfile
-import tempfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+
+from backup_crypto import clean, decrypt, encrypt, policy, workspace
+from config import load, validate
 
 PAYLOAD = ('collab.db', 'account_authority.key')
 MEMBERS = {*PAYLOAD, 'manifest.json'}
@@ -23,24 +28,25 @@ def key_check(data):
 
 
 def check_db(path):
-    with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as db:
+    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
         if db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
             raise ValueError('SQLite 完整性检查失败')
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone():
             raise ValueError('拒绝备份/恢复空数据库')
 
 
-def pack(source, destination, image):
+def pack(source, destination, image, env):
+    mode = policy(env)
     source, destination = Path(source).resolve(), Path(destination).resolve()
     for name in PAYLOAD:
         if (source / name).is_symlink() or not (source / name).is_file():
             raise ValueError(f'缺失或不安全的备份文件: {name}')
     key_check((source / PAYLOAD[1]).read_bytes())
-    with tempfile.TemporaryDirectory(dir=destination, prefix='.normalize-') as folder:
+    with workspace() as folder:
         normalized = Path(folder)
         # source 是停止后复制的目录；普通读写打开以正确恢复 WAL，不使用 immutable=1。
-        with sqlite3.connect(source / 'collab.db') as src:
-            with sqlite3.connect(normalized / 'collab.db') as dst:
+        with closing(sqlite3.connect(source / 'collab.db')) as src:
+            with closing(sqlite3.connect(normalized / 'collab.db')) as dst:
                 src.backup(dst)
         check_db(normalized / 'collab.db')
         (normalized / PAYLOAD[1]).write_bytes((source / PAYLOAD[1]).read_bytes())
@@ -50,9 +56,12 @@ def pack(source, destination, image):
         (normalized / 'manifest.json').write_text(json.dumps(manifest, indent=2))
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
         target = destination / ('authority-' + stamp + '.tar')
-        partial = target.with_suffix('.partial')
+        if mode:
+            target = target.with_suffix('.tar.' + mode)
+        partial = target.with_name(target.name + '.partial')
+        plaintext = normalized / 'snapshot.tar'
         try:
-            with tarfile.open(partial, 'x') as archive:
+            with tarfile.open(plaintext, 'x') as archive:
                 for name in sorted(MEMBERS):
                     info = archive.gettarinfo(str(normalized / name), arcname=name)
                     info.uid = info.gid = 1000
@@ -60,9 +69,14 @@ def pack(source, destination, image):
                     info.mode = 0o600
                     with (normalized / name).open('rb') as body:
                         archive.addfile(info, body)
-            verify(partial)
+            verify(plaintext)
+            if mode:
+                encrypt(plaintext, partial, mode, env['BACKUP_RECIPIENT'])
+            else:
+                with plaintext.open('rb') as body, partial.open('xb') as output:
+                    shutil.copyfileobj(body, output)
             partial.rename(target)
-        except Exception:
+        except BaseException:
             partial.unlink(missing_ok=True)
             raise
         print(target)
@@ -81,7 +95,7 @@ def verify(path):
         manifest = json.load(meta)
         if manifest.get('format') != 1 or set(manifest.get('sha256', {})) != set(PAYLOAD):
             raise ValueError('不支持的备份格式')
-        with tempfile.TemporaryDirectory(prefix='polaris-verify-') as folder:
+        with workspace() as folder:
             for name in PAYLOAD:
                 digest = hashlib.sha256()
                 target = Path(folder) / name
@@ -96,15 +110,38 @@ def verify(path):
     return manifest
 
 
+def unpack(source, destination, env):
+    if Path(source).suffix == '.tar':
+        # Historic plaintext archives remain readable; new backups require policy().
+        verify(source)
+        return str(source)
+    target = Path(destination) / 'snapshot.tar'
+    decrypt(source, target, env)
+    verify(target)
+    return str(target)
+
+
+def settings(path):
+    env = load(path)
+    validate(env)
+    return env
+
+
 if __name__ == '__main__':
     os.umask(0o077)
     try:
         if sys.argv[1] == 'pack':
-            pack(*sys.argv[2:])
+            pack(*sys.argv[2:5], settings(sys.argv[5]))
+        elif sys.argv[1] == 'policy':
+            policy(settings(sys.argv[2]))
+        elif sys.argv[1] == 'unpack':
+            print(unpack(*sys.argv[2:4], settings(sys.argv[4])))
+        elif sys.argv[1] == 'clean':
+            clean(sys.argv[2])
         elif sys.argv[1] == 'verify':
             verify(sys.argv[2])
             print('备份格式、校验和、SQLite、私钥种子格式：PASS')
         else:
             raise ValueError('未知动作')
-    except (OSError, ValueError, sqlite3.Error, tarfile.TarError) as error:
+    except (OSError, ValueError, sqlite3.Error, tarfile.TarError, subprocess.CalledProcessError) as error:
         sys.exit(str(error))

@@ -44,6 +44,9 @@ class ConfigurationTests(unittest.TestCase):
                            ('RELAY_FALLBACK', '1'), ('SMTP_PORT', '65536'),
                            ('SMTP_USER', 'partial'), ('AUTH_REQUESTS_PER_10S', '0'),
                            ('REVOCATION_POLL_SECS', '1.5'), ('EXPECTED_FINGERPRINT', 'abcd'),
+                           ('BACKUP_ENCRYPT', 'openssl'), ('BACKUP_RECIPIENT', '--output=x'),
+                           ('BACKUP_PLAINTEXT_ACK', 'true'), ('BACKUP_IDENTITY', 'relative'),
+                           ('RESTORE_UNPINNED_ACK', 'yes'), ('RESTORE_VERIFY_TIMEOUT_SECS', '301'),
                            ('RELAY_URLS', 'http://relay.example.invalid'),
                            ('AUTHORITY_CPUS', 'nan'), ('SMOKE_SIGNUP', '1')]:
             with self.subTest(key=key), self.assertRaises(ValueError):
@@ -134,7 +137,7 @@ class ProbeTests(unittest.TestCase):
                 self.assertEqual(request.call_count, count)
 
 
-class MaintenanceTests(unittest.TestCase):
+class MaintenanceFixture:
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -150,8 +153,15 @@ class MaintenanceTests(unittest.TestCase):
         shutil.copy(ROOT / 'tests/fake_docker.py', self.bin / 'docker')
         (self.bin / 'docker').chmod(0o755)
         self.env = os.environ | {'PATH': str(self.bin) + ':' + os.environ['PATH'],
-                                'FAKE_DOCKER_ROOT': str(self.fake)}
-        values = inputs() | {'BACKUP_DIR': str(self.root / 'backups'), 'EXPECTED_FINGERPRINT': 'a' * 64}
+                                'FAKE_DOCKER_ROOT': str(self.fake),
+                                'SG_ENV_FILE': str(self.package / '.env'),
+                                'TMPDIR': str(self.root / 'scratch')}
+        (self.root / 'scratch').mkdir()
+        self.pubkey = ProbeTests().document()
+        (self.fake / 'pubkey.json').write_text(json.dumps(self.pubkey))
+        values = inputs() | {'BACKUP_DIR': str(self.root / 'backups'),
+                             'EXPECTED_FINGERPRINT': self.pubkey['fingerprint'],
+                             'BACKUP_PLAINTEXT_ACK': '1'}
         (self.package / '.env').write_text(''.join(f'{k}={v}\n' for k, v in values.items()))
         # Deliberately synthetic invalid-for-production seed; temporary directory only.
         (self.fake / 'data/account_authority.key').write_bytes(base64.urlsafe_b64encode(b'\x00' * 32).rstrip(b'='))
@@ -174,6 +184,19 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return sorted((self.root / 'backups').glob('*.tar'))[-1]
 
+    def configure(self, **updates):
+        path = self.package / '.env'
+        values = config.read_env(path) | updates
+        path.write_text(''.join(f'{k}={v}\n' for k, v in values.items()))
+
+    def assert_no_plaintext_scratch(self):
+        self.assertEqual(list((self.root / 'scratch').iterdir()), [])
+        backups = self.root / 'backups'
+        if backups.exists():
+            self.assertFalse(any(p.is_dir() or p.name.endswith('.partial') for p in backups.iterdir()))
+
+
+class MaintenanceTests(MaintenanceFixture, unittest.TestCase):
     def test_backup_includes_committed_wal_and_preserves_running_state(self):
         archive = self.backup()
         self.assertTrue(json.loads(self.state.read_text())['running'])
@@ -192,6 +215,7 @@ class MaintenanceTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(json.loads(self.state.read_text())['running'])
         self.assertEqual(list((self.root / 'backups').glob('*.tar')), [])
+        self.assert_no_plaintext_scratch()
 
     def test_restore_repeated_and_failed_extraction_stays_stopped(self):
         archive = self.backup()
@@ -200,9 +224,12 @@ class MaintenanceTests(unittest.TestCase):
             result = self.run_script('restore.sh', archive)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(json.loads(self.state.read_text())['running'])
+            self.assertIn('EXPECTED_FINGERPRINT 一致', result.stdout)
+            self.assert_no_plaintext_scratch()
         result = self.run_script('restore.sh', archive, fail='extract')
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(json.loads(self.state.read_text())['running'])
+        self.assert_no_plaintext_scratch()
 
     def test_tampered_or_traversal_archive_rejected_before_docker(self):
         archive = self.backup()

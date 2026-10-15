@@ -70,7 +70,8 @@ def validate(env):
             raise ValueError(f'{key}: 镜像必须固定版本')
         if value.split('@')[0].rsplit(':', 1)[1] in ('latest', 'main', 'stable', 'alpine'):
             raise ValueError(f'{key}: 不允许浮动版本')
-    for key in ('ACCOUNT_OPEN_SIGNUP', 'SMOKE_SIGNUP'):
+    for key in ('ACCOUNT_OPEN_SIGNUP', 'SMOKE_SIGNUP', 'BACKUP_PLAINTEXT_ACK',
+                'RESTORE_UNPINNED_ACK'):
         if env[key] not in ('0', '1'):
             raise ValueError(f'{key}: 仅允许 0/1')
     if env['RELAY_FALLBACK'] not in ('true', 'false'):
@@ -78,7 +79,7 @@ def validate(env):
     limits = {'SMTP_PORT': 65535, 'REVOCATION_POLL_SECS': 3600,
               'REVOCATION_MAX_AGE_SECS': 86400, 'NEW_DEVICE_WINDOW_HOURS': 720,
               'APPROVAL_TIMEOUT_SECS': 3600, 'SMOKE_TIMEOUT_SECS': 120,
-              'LOG_MAX_FILES': 100}
+              'LOG_MAX_FILES': 100, 'RESTORE_VERIFY_TIMEOUT_SECS': 300}
     for key in ('AUTH_REQUESTS_PER_10S', 'RELAY_ACCEPT_PER_SEC', 'RELAY_ACCEPT_BURST',
                 'RELAY_RX_BYTES_PER_SEC', 'RELAY_RX_BURST_BYTES'):
         limits[key] = 2**32 - 1
@@ -94,6 +95,13 @@ def validate(env):
         raise ValueError('LOG_MAX_SIZE: 需要正整数 m')
     if not env['BACKUP_DIR'].strip():
         raise ValueError('BACKUP_DIR 不能为空')
+    if env['BACKUP_ENCRYPT'] not in ('', 'age', 'gpg'):
+        raise ValueError('BACKUP_ENCRYPT: 仅允许 age/gpg/空值')
+    recipient = env['BACKUP_RECIPIENT']
+    if recipient and (recipient.startswith('-') or any(c.isspace() for c in recipient)):
+        raise ValueError('BACKUP_RECIPIENT: 需要单个公钥/指纹，不允许选项或空白')
+    if env['BACKUP_IDENTITY'] and not Path(env['BACKUP_IDENTITY']).is_absolute():
+        raise ValueError('BACKUP_IDENTITY: 需要绝对文件路径')
     smtp = [env[k] for k in ('SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM')]
     if any(smtp) and not all(smtp):
         raise ValueError('SMTP_HOST/USER/PASS/FROM 必须全部填写或全部留空')

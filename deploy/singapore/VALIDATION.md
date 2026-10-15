@@ -2,6 +2,7 @@
 
 日期：2026-10-15。只产出 `deploy/singapore/` 和功能树入口；未连接用户服务器，未部署，未 commit/push。
 执行报告不等于验收，最终由 Claude 重跑、Pi 独立审查后决定。
+本文件保留 P6c 原始执行记录；后续默认加密、恢复指纹核验与 Caddy 清理见 [R10 报告](../../docs/execution/R10/report.md)。
 
 ## 文件与行为
 
