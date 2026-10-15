@@ -1,0 +1,23 @@
+{
+  "suites": [
+    { "id": "agentd", "cwd": "agentd", "command": ["npm", "test"] },
+    { "id": "vitest", "cwd": ".", "command": ["npm", "run", "test:unit"] },
+    { "id": "runtime", "cwd": ".", "command": ["node", "--test", "scripts/runtime/node.test.mjs", "scripts/runtime/sources.test.mjs"] },
+    { "id": "deploy", "cwd": ".", "command": ["python3", "-m", "unittest", "discover", "-s", "deploy/singapore/tests", "-p", "test_*.py"] },
+    { "id": "docker-update", "cwd": ".", "command": ["bash", "docker/test-update-e2e.sh"] },
+    { "id": "boundaries", "cwd": ".", "command": ["npm", "run", "check:boundaries"] },
+    { "id": "drill-harness", "cwd": ".", "command": ["node", "--test", "drills/test/harness.test.mjs"] },
+    { "id": "drill-fixture", "cwd": ".", "command": ["python3", "-B", "-m", "unittest", "discover", "-s", "drills/test", "-p", "test_*.py"] },
+    { "id": "rust-desktop", "cwd": "src-tauri", "command": ["cargo", "test", "-p", "polaris-app", "--lib", "--tests"] },
+    { "id": "rust-server", "cwd": "src-tauri", "command": ["cargo", "test", "-p", "polaris-app", "--no-default-features", "--features", "server,collab-net", "--lib", "--tests"] }
+  ],
+  "builds": [
+    { "id": "desktop", "cwd": "src-tauri", "command": ["cargo", "build", "-p", "polaris-app", "--bin", "polaris-app"] },
+    { "id": "server", "cwd": "src-tauri", "command": ["cargo", "build", "-p", "polaris-app", "--no-default-features", "--features", "server,collab-net", "--bin", "polaris-server"] },
+    { "id": "frontend", "cwd": ".", "command": ["npm", "run", "build"] }
+  ],
+  "lineRoots": ["drills", "agentd/src", "agentd/test", "src", "src-tauri/src", "src-tauri/crates", "deploy/singapore", "scripts"],
+  "extensions": [".mjs", ".ts", ".vue", ".rs", ".py", ".sh", ".json", ".md", ".toml", ".yml"],
+  "maxLines": 500,
+  "maxColumns": 500
+}

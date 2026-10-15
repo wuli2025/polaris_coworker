@@ -1,0 +1,20 @@
+{
+  "host": {
+    "pingIntervalMs": 500,
+    "idleMs": 600000,
+    "failureThreshold": 4,
+    "stableResetMs": 3600000,
+    "restartBaseMs": 200,
+    "restartMaxMs": 2000,
+    "restartJitterMs": 0
+  },
+  "sandbox": { "memoryBytes": 4294967296, "cpus": 2 },
+  "interconnect": {
+    "pollSeconds": 3,
+    "maxAgeSeconds": 30,
+    "approvalSeconds": 60,
+    "windowHours": 24,
+    "loginRequests": 20,
+    "caddyImage": "caddy:2.10.2-alpine"
+  }
+}
