@@ -281,6 +281,8 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+mod source_ip;
+use source_ip::client_ip;
 mod login_routes;
 use login_routes::*;
 mod connect_routes;

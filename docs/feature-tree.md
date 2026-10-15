@@ -129,7 +129,7 @@ Pi `useSandbox` 在 P3 路由 bash/write/edit 到宿主容器桥；不可用或�
 | tunnel → `C/collab/tunnel.rs:204,256,374,539,575,743` | 主机监听、共享出站 Endpoint、TCP↔iroh 双向流、connect/disconnect/status、relay 配置 | →identity/iroh；collab-net；POLARIS_DEVICE_KEY、POLARIS_RELAYS、POLARIS_TUNNEL_UPSTREAM、POLARIS_TUNNEL_STRICT（`:192,317,92,421`） |
 | relay 配置 → `C/collab/tunnel.rs:256,317,334,343` | apply_relay_config、自定义 relay 列表、mDNS | 默认 n0 relay（`:12`）；HTTP 配置入口 `C/collab/http.rs:3460,4667`；运行中的 Endpoint 不会就地重建（tunnel `:255`），不是已部署自有 relay 的证据 |
 | gateway → `C/collab/gateway.rs:15,109,167,284,368` | 网关注册主机、单 Endpoint 连多个主机、HTTP/WS `/h/:id` 反代 | →tunnel 协议/CollabState；collab-host+collab-net；POLARIS_GATEWAY_KEY（`:69`），独立 gateway.key；不是 iroh-relay 服务 |
-| http → `C/collab/http.rs`、`http/email_routes.rs`、`mail/requests.rs` | collab_router；双壳共用路由；R11 匿名发码后台投递、统一验码错误 | →auth/db/mail；CodeRequest/verify_code；沿用 SMTP/注册开关，无迁移/新依赖；[R11 配置与验证](execution/R11/report.md)；业务 invoke 在 `H/apihub.rs:2218` |
+| http → `C/collab/http.rs`、`http/source_ip.rs`、`mail/{requests,delivery,verify}.rs` | 双壳路由；R11 匿名响应；R13 可信代理来源、原子验码、有界后台邮件与脱敏阶段日志 | →auth/db/interconnect；无新依赖/数据库迁移；ingress/mailDelivery 默认、校验、切换及部署网络迁移：[R13 入口与验证](execution/R13/report.md)；[R11](execution/R11/report.md)；桌面 serve 装配 `H/hosting/serve.rs` |
 
 ## 互联客户端与协作业务分支
 

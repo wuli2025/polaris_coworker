@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Deployment inputs: strict dotenv subset, no shell execution; stdlib only."""
+import ipaddress
 import json
 import math
 import os
@@ -47,6 +48,16 @@ def integer(env, key, maximum=2**32 - 1):
 
 
 def validate(env):
+    networks = [ipaddress.ip_network(env[key], strict=True) for key in ('EDGE_SUBNET', 'ACCOUNT_SUBNET')]
+    if any(n.version != 4 or not n.is_private or n.prefixlen < 16 or n.prefixlen > 28 for n in networks):
+        raise ValueError('EDGE_SUBNET/ACCOUNT_SUBNET 需要私有 IPv4 /16../28 网络')
+    if networks[0].overlaps(networks[1]):
+        raise ValueError('EDGE_SUBNET 与 ACCOUNT_SUBNET 不得重叠')
+    integer(env, 'MAIL_DELIVERY_CAPACITY', 1024)
+    integer(env, 'MAIL_DELIVERY_CONCURRENCY', 64)
+    integer(env, 'MAIL_DELIVERY_TIMEOUT_SECS', 300)
+    if int(env['MAIL_DELIVERY_CONCURRENCY']) > int(env['MAIL_DELIVERY_CAPACITY']):
+        raise ValueError('MAIL_DELIVERY_CONCURRENCY 不得超过 MAIL_DELIVERY_CAPACITY')
     for key in ('AUTHORITY_DOMAIN', 'RELAY_DOMAIN', 'SMTP_HOST'):
         value = env[key]
         if key == 'SMTP_HOST' and not value:
@@ -127,7 +138,7 @@ def relay_urls(env):
 
 
 def interconnect(env, client=False):
-    return {
+    result = {
         'authority': {'url': 'https://' + env['AUTHORITY_DOMAIN'] if client else None,
                       'publicKeyFingerprints': [env['EXPECTED_FINGERPRINT']] if client else []},
         'relay': {'urls': relay_urls(env), 'fallback': env['RELAY_FALLBACK'] == 'true'},
@@ -136,6 +147,13 @@ def interconnect(env, client=False):
                      'newDeviceWindowHours': int(env['NEW_DEVICE_WINDOW_HOURS']),
                      'approvalTimeoutSecs': int(env['APPROVAL_TIMEOUT_SECS'])},
     }
+    if not client:
+        result['ingress'] = {'trustedProxyCidrs': [env['EDGE_SUBNET'], env['ACCOUNT_SUBNET']]}
+        result['mailDelivery'] = {'capacity': int(env['MAIL_DELIVERY_CAPACITY']),
+                                  'concurrency': int(env['MAIL_DELIVERY_CONCURRENCY']),
+                                  'timeoutSecs': int(env['MAIL_DELIVERY_TIMEOUT_SECS'])}
+    return result
+
 
 
 def prepare(env):

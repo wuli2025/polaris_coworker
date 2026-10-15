@@ -46,8 +46,9 @@ async fn wire(response: Response) -> Result<(StatusCode, Vec<u8>), String> {
 }
 
 async fn send(email: &str, purpose: &str, letters: Letters) -> Result<(StatusCode, Vec<u8>), String> {
-    let (response, task) = send_code_with(HeaderMap::new(), json!({"email":email,"purpose":purpose}),
-        move |to, subject, body| {
+    let (response, task) = send_code_with("unknown-peer".into(), json!({"email":email,"purpose":purpose}),
+        mail::delivery::Pool::configured()?,
+        move |to, subject, body, _| {
             letters.lock().push((to.into(), subject.into(), body.into()));
             Ok(())
         }).await;
@@ -152,7 +153,8 @@ async fn response_does_not_wait_for_smtp_or_expose_delivery_failure() -> Result<
         clear_rates()?;
         let (release, wait) = std::sync::mpsc::channel();
         let (response, task) = tokio::time::timeout(Duration::from_secs(2), send_code_with(
-            HeaderMap::new(), json!({"email":email,"purpose":purpose}), move |_, _, _| {
+            "unknown-peer".into(), json!({"email":email,"purpose":purpose}),
+            mail::delivery::Pool::configured()?, move |_, _, _, _| {
                 wait.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?;
                 Err("fake SMTP failure".into())
             },
@@ -230,17 +232,61 @@ async fn public_handler_keeps_configuration_and_input_errors() -> Result<(), Str
     let _fixture = Fixture::new()?;
     for request in [json!({"email":"known@example.com","purpose":"invalid"}),
         json!({"email":"bad","purpose":"signup"})] {
-        assert!(!collab_email_send_code(HeaderMap::new(), Json(request)).await.status().is_success());
+        assert!(!collab_email_send_code(None, HeaderMap::new(), Json(request)).await.status().is_success());
     }
     db::meta_set("email_signup", "0")?;
-    let closed = collab_email_send_code(HeaderMap::new(), Json(json!({"email":"new@example.com","purpose":"signup"}))).await;
+    let closed = collab_email_send_code(None, HeaderMap::new(), Json(json!({"email":"new@example.com","purpose":"signup"}))).await;
     assert!(!closed.status().is_success());
     db::meta_set("smtp_pass", "")?;
     for purpose in ["signup", "reset", "login"] {
-        let known = wire(collab_email_send_code(HeaderMap::new(), Json(json!({"email":"known@example.com","purpose":purpose}))).await).await?;
-        let unknown = wire(collab_email_send_code(HeaderMap::new(), Json(json!({"email":"new@example.com","purpose":purpose}))).await).await?;
+        let known = wire(collab_email_send_code(None, HeaderMap::new(), Json(json!({"email":"known@example.com","purpose":purpose}))).await).await?;
+        let unknown = wire(collab_email_send_code(None, HeaderMap::new(), Json(json!({"email":"new@example.com","purpose":purpose}))).await).await?;
         assert_eq!(known, unknown);
         assert!(!known.0.is_success());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn queue_full_response_is_identical_for_every_account_state() -> Result<(), String> {
+    let _fixture = Fixture::new()?;
+    let pool = mail::delivery::Pool::new(&crate::collab::interconnect::hardening::MailDelivery {
+        capacity: 1, concurrency: 1, timeout_secs: 10,
+    })?;
+    let (release, wait) = std::sync::mpsc::channel();
+    let held = pool.submit(move |_| {
+        wait.recv_timeout(Duration::from_secs(5)).map_err(|_| mail::delivery::Stage::Smtp)?;
+        Ok(())
+    }).ok_or("no slot")?;
+    for purpose in ["signup", "reset", "login"] {
+        clear_rates()?;
+        for email in ["known@example.com", "new@example.com"] {
+            let (response, task) = send_code_with("192.0.2.1".into(),
+                json!({"email":email,"purpose":purpose}), &pool,
+                |_, _, _, _| Err("must not send".into())).await;
+            assert!(task.is_none());
+            assert_eq!(wire(response).await?, (StatusCode::OK, br#"{"ok":true}"#.to_vec()));
+        }
+    }
+    release.send(()).map_err(|e| e.to_string())?;
+    held.await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_smtp_does_not_store_a_code_and_releases_capacity() -> Result<(), String> {
+    let _fixture = Fixture::new()?;
+    let pool = mail::delivery::Pool::new(&crate::collab::interconnect::hardening::MailDelivery {
+        capacity: 1, concurrency: 1, timeout_secs: 1,
+    })?;
+    let (response, task) = send_code_with("192.0.2.1".into(),
+        json!({"email":"new@example.com","purpose":"signup"}), &pool,
+        |_, _, _, remaining| { std::thread::sleep(remaining + Duration::from_millis(30)); Ok(()) }).await;
+    assert_eq!(wire(response).await?, (StatusCode::OK, br#"{"ok":true}"#.to_vec()));
+    task.ok_or("no task")?.await.map_err(|e| e.to_string())?;
+    let count: i64 = db::open_db()?.query_row("SELECT count(*) FROM email_codes", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    assert_eq!(count, 0);
+    pool.submit(|_| Ok(())).ok_or("slot leaked after timeout")?.await.map_err(|e| e.to_string())?;
     Ok(())
 }

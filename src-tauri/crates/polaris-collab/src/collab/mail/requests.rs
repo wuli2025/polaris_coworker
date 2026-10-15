@@ -1,5 +1,7 @@
 //! Anonymous email requests: account-independent admission, private background delivery.
-use super::{auth, configured, db, deliver_code, rate_check, signup_open};
+use super::delivery::{Attempt, Stage};
+use std::time::Duration;
+use super::{auth, configured, db, rate_check, signup_open};
 
 enum Purpose {
     Signup,
@@ -42,19 +44,32 @@ impl CodeRequest {
 
     /// Must run off the HTTP response path; sender is explicit for offline behavior tests.
     pub fn deliver(self, sender: impl FnOnce(&str, &str, &str) -> Result<(), String>) -> Result<(), String> {
-        let exists = auth::find_user_by_email(&self.email)?.is_some();
+        let timeout = crate::collab::interconnect::load()?.mail_delivery.timeout_secs;
+        self.deliver_tracked(&Attempt::new(Duration::from_secs(timeout)),
+            |to, subject, body, _| sender(to, subject, body))
+            .map_err(|stage| format!("邮件投递失败: {}", stage.name()))
+    }
+
+    pub fn deliver_tracked(self, attempt: &Attempt,
+        sender: impl FnOnce(&str, &str, &str, Duration) -> Result<(), String>,
+    ) -> Result<(), Stage> {
+        let exists = attempt.run(Stage::Lookup, || auth::find_user_by_email(&self.email))?.is_some();
         match (self.purpose, exists) {
             (Purpose::Signup, true) => {
-                // A previously issued signup code must not survive a later account binding.
-                db::open_db()?.execute(
-                    "DELETE FROM email_codes WHERE email=?1 AND purpose='signup'",
-                    [&self.email],
-                ).map_err(|e| e.to_string())?;
-                sender(&self.email, "【Polaris】账号提醒", include_str!("existing_account.txt"))
+                attempt.run(Stage::Store, || {
+                    db::open_db()?.execute(
+                        "DELETE FROM email_codes WHERE email=?1 AND purpose='signup'",
+                        [&self.email],
+                    ).map_err(|e| e.to_string())?;
+                    Ok(())
+                })?;
+                let remaining = attempt.remaining()?;
+                attempt.run(Stage::Smtp, || sender(&self.email, "【Polaris】账号提醒",
+                    include_str!("existing_account.txt"), remaining))
             }
-            (Purpose::Signup, false) => deliver_code(&self.email, "signup", sender),
-            (Purpose::Reset, true) => deliver_code(&self.email, "reset", sender),
-            (Purpose::Login, true) => deliver_code(&self.email, "login", sender),
+            (Purpose::Signup, false) => super::code::deliver_tracked(&self.email, "signup", attempt, sender),
+            (Purpose::Reset, true) => super::code::deliver_tracked(&self.email, "reset", attempt, sender),
+            (Purpose::Login, true) => super::code::deliver_tracked(&self.email, "login", attempt, sender),
             (Purpose::Reset | Purpose::Login, false) => Ok(()),
         }
     }

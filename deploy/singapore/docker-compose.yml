@@ -97,9 +97,15 @@ services:
       retries: 3
 
 networks:
-  edge: {}
+  edge:
+    ipam:
+      config:
+        - subnet: ${EDGE_SUBNET:-172.30.80.0/24}
   # 不设 internal:true：权威需要出站 SMTP，但此网络没有任何宿主发布端口。
-  account: {}
+  account:
+    ipam:
+      config:
+        - subnet: ${ACCOUNT_SUBNET:-172.30.81.0/24}
 volumes:
   authority-data: {}
   relay-certs: {}

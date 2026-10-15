@@ -126,37 +126,20 @@ pub(super) fn not_authority() -> Response {
         .into_response()
 }
 
-/// 请求来源 IP。没有反代头就返回空串 —— 调用方(频控)对空 key 一律放行,
-/// 不误伤直连场景;那时按邮箱的那道闸还在。
-///
-/// 只认 `X-Real-IP` 与 `X-Forwarded-For` 的**第一段**。XFF 是客户端可伪造的头,
-/// 所以这个值只配用来做频控(伪造它只能让攻击者绕过自己的限速,伤不到别人的账号),
-/// **绝不能**拿去做鉴权或白名单。
-pub(super) fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_default()
-}
-
 /// 发一枚**登录**验证码。整套账号体系唯一的公开发码口。
 ///
 /// 刻意不回答「这个邮箱有没有注册过」——不管有没有,响应都一样。否则这个端点就成了
 /// 一台免费的「查某人是不是 Polaris 用户」的机器。首登自动建号也让这个区分本就没意义了。
 ///
 /// 频控见 [`crate::collab::mail`]:按邮箱 + 按来源 IP 两道,都**落库**(重启不清零)。
-pub(super) async fn account_send_code(headers: HeaderMap, Json(v): Json<Value>) -> Response {
-    let ip = client_ip(&headers);
+pub(super) async fn account_send_code(
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap, Json(v): Json<Value>,
+) -> Response {
+    let ip = match client_ip(&headers, peer) {
+        Ok(ip) => ip,
+        Err(error) => return err_resp(error),
+    };
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         // 成员主机:替客户端跑一趟公网。手机常常只连得上家里这台机器、连不上云机 ——
         // 没有这条转发,「用邮箱登录」在那种网络下直接不可用,只能退回粘连接码。

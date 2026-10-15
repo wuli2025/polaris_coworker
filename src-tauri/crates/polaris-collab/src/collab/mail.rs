@@ -16,6 +16,9 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use rusqlite::params;
 
+pub mod delivery;
+mod code;
+use code::deliver_code;
 mod requests;
 pub use requests::CodeRequest;
 
@@ -107,6 +110,10 @@ pub fn save_config(
 
 /// 发一封纯文本信。阻塞(SMTP 往返数秒),调用方须放 spawn_blocking。
 pub fn send_mail(to: &str, subject: &str, body: &str) -> Result<(), String> {
+    send_mail_timeout(to, subject, body, std::time::Duration::from_secs(20))
+}
+
+pub fn send_mail_timeout(to: &str, subject: &str, body: &str, timeout: std::time::Duration) -> Result<(), String> {
     let cfg = config().ok_or("邮箱服务未配置:请管理员先在「邮箱服务设置」填好 SMTP")?;
     let from = format!("Polaris 设备联盟 <{}>", cfg.from);
     let msg = Message::builder()
@@ -126,7 +133,7 @@ pub fn send_mail(to: &str, subject: &str, body: &str) -> Result<(), String> {
     let mailer = builder
         .port(cfg.port)
         .credentials(Credentials::new(cfg.user.clone(), cfg.pass.clone()))
-        .timeout(Some(std::time::Duration::from_secs(20)))
+        .timeout(Some(timeout))
         .build();
     mailer
         .send(&msg)
@@ -182,98 +189,13 @@ pub fn issue_code_from(email: &str, purpose: &str, ip: &str) -> Result<(), Strin
     deliver_code(&email, purpose, send_mail)
 }
 
-fn deliver_code(
-    email: &str,
-    purpose: &str,
-    sender: impl FnOnce(&str, &str, &str) -> Result<(), String>,
-) -> Result<(), String> {
-    let code = gen_code()?;
-    let phc = auth::hash_password(&code)?;
-    // 文案要如实说明这封信是干什么用的 —— 收信人据此判断「这是不是我本人在操作」,
-    // 把登录码写成「找回密码」会让人放过一次真正的盗号尝试。
-    let action = match purpose {
-        "signup" => "注册账号",
-        "login" => "登录",
-        _ => "找回密码",
-    };
-    let body = format!(
-        "你正在 Polaris 设备联盟{action},验证码:\n\n    {code}\n\n10 分钟内有效。如果这不是你本人的操作,请忽略这封邮件。"
-    );
-    // 先发信后落库:失败不替换旧码;频控已计入请求,重试仍须等重发间隔。
-    sender(email, &format!("【Polaris】{action}验证码 {code}"), &body)?;
-    let t = now();
-    let conn = open_db()?;
-    conn.execute(
-        "INSERT INTO email_codes(email,purpose,code_hash,attempts,created_at,expires_at) \
-         VALUES(?1,?2,?3,0,?4,?5) \
-         ON CONFLICT(email,purpose) DO UPDATE SET code_hash=excluded.code_hash, \
-         attempts=0, created_at=excluded.created_at, expires_at=excluded.expires_at",
-        params![email, purpose, phc, t, t + CODE_TTL],
-    )
-    .map_err(|e| format!("验证码落库失败: {e}"))?;
-    Ok(())
-}
-
 /// 兼容无来源 IP 的内部调用;匿名 HTTP 使用 CodeRequest 分离请求与后台投递。
 pub fn issue_code(email: &str, purpose: &str) -> Result<(), String> {
     issue_code_from(email, purpose, "")
 }
 
-/// 校验验证码:过期/超试错即作废,校验成功即销毁(一次性)。
-pub fn verify_code(email: &str, purpose: &str, code: &str) -> Result<(), String> {
-    let email = auth::validate_email(email)?;
-    let code = code.trim();
-    if code.is_empty() {
-        return Err(INVALID_CODE.into());
-    }
-    // 无记录/过期/耗尽也做一次同参数 Argon2,避免用错误码请求的耗时探测账号。
-    let invalid = || -> Result<(), String> {
-        auth::hash_password(code)?;
-        Err(INVALID_CODE.into())
-    };
-    let conn = open_db()?;
-    let row = conn.query_row(
-        "SELECT code_hash,attempts,expires_at FROM email_codes WHERE email=?1 AND purpose=?2",
-        params![email, purpose],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        },
-    );
-    let (phc, attempts, expires_at) = match row {
-        Ok(v) => v,
-        Err(_) => return invalid(),
-    };
-    let gone = |conn: &rusqlite::Connection| {
-        let _ = conn.execute(
-            "DELETE FROM email_codes WHERE email=?1 AND purpose=?2",
-            params![email, purpose],
-        );
-    };
-    if now() > expires_at {
-        gone(&conn);
-        return invalid();
-    }
-    if attempts >= MAX_ATTEMPTS {
-        gone(&conn);
-        return invalid();
-    }
-    if !auth::verify_password(code, &phc) {
-        let _ = conn.execute(
-            "UPDATE email_codes SET attempts=attempts+1 WHERE email=?1 AND purpose=?2",
-            params![email, purpose],
-        );
-        return Err(INVALID_CODE.into());
-    }
-    gone(&conn);
-    if purpose == "signup" && auth::find_user_by_email(&email)?.is_some() {
-        return Err(INVALID_CODE.into());
-    }
-    Ok(())
-}
+mod verify;
+pub use verify::verify_code;
 
 #[cfg(test)]
 mod tests {

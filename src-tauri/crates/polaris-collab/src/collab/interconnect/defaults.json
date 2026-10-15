@@ -26,5 +26,13 @@
     "gatewayUrl": null,
     "requestTimeoutSecs": 10,
     "maxPeers": 32
+  },
+  "ingress": {
+    "trustedProxyCidrs": []
+  },
+  "mailDelivery": {
+    "capacity": 32,
+    "concurrency": 2,
+    "timeoutSecs": 30
   }
 }

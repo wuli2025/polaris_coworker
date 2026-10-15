@@ -244,3 +244,26 @@ SMTP 参数与注册策略、独立测试账号、带宽预算、加密备份路
 以上信息不写入版本库。真实指纹只能由用户服务器初始化后取得。
 本地 Docker 不可用且网络代理不可达：未构建、拉镜像、原生校验代理配置、签证书、发邮件或探测任何服务器。
 Claude 重跑验证、Pi 独立审查后决定模块是否完成。
+
+## R13 来源 IP 与投递限制
+
+生成的 `authority.json` 将 `ingress.trustedProxyCidrs` 设置为 Caddy 所在的 `EDGE_SUBNET`
+及 HAProxy 直接连接权威的 `ACCOUNT_SUBNET`。默认分别为 `172.30.80.0/24`、`172.30.81.0/24`，
+Compose 的 IPAM 使用同一配置；只有受控容器可加入这些网络。链路是公网 → HAProxy TCP →
+Caddy TLS → HAProxy HTTP → 权威。Caddy 覆盖 X-Real-IP 与 X-Forwarded-For；权威先验证 TCP
+对端可信，再自右向左剥离可信 XFF 跳，取第一个不可信地址。直连伪造头无效。
+通用安装默认可信列表为空；`POLARIS_TRUST_PROXY=1` 是旧宿主来源闸开关，不替代这个 CIDR 列表。
+
+若默认子网与宿主网络冲突，在 `.env` 设置 `EDGE_SUBNET=172.29.10.0/24`、
+`ACCOUNT_SUBNET=172.29.11.0/24` 后重新 prepare，并在维护窗口重建 Compose 网络。
+校验要求不重叠的私有 IPv4 `/16` 至 `/28` 网络；禁止复用有不受信容器的网络。
+已有网络迁移需要停机并重建网络，数据卷无需迁移；不要删除数据卷。
+
+后台匿名邮件默认总容量 32（含执行中）、并发 2、期限 30 秒。
+`.env` 可设 `MAIL_DELIVERY_CAPACITY=64`、`MAIL_DELIVERY_CONCURRENCY=4`、
+`MAIL_DELIVERY_TIMEOUT_SECS=45`；分别校验 `1..1024`、`1..64`、`1..300`，并发不得大于容量。
+prepare 后重启权威生效。满队列仍返回相同匿名成功响应并记录告警；额度已扣，不自动重试。
+期限含排队、查询、哈希、SMTP 与存储，SMTP I/O 超时取剩余预算；超时后不进入后续步骤。
+阻塞 SMTP/系统 DNS 无法强行取消，仍执行中的任务保留许可直到返回，防止并发突破上限；
+超时可能已投出邮件但不会保存可用新码。日志只含进程内关联 ID、固定事件和 lookup/hash/smtp/store 阶段。
+离线行为验证见 [R13 执行报告](../../docs/execution/R13/report.md)，不替代真实 SMTP 与 Docker 部署验证。

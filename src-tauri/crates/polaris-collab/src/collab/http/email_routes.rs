@@ -68,28 +68,33 @@ pub(super) async fn collab_email_status() -> Response {
 }
 
 /// 匿名发码:仅配置、格式和频控错误同步返回;账号查询、哈希与 SMTP 均在后台。
-pub(super) async fn collab_email_send_code(headers: HeaderMap, Json(v): Json<Value>) -> Response {
-    send_code_with(headers, v, crate::collab::mail::send_mail).await.0
+pub(super) async fn collab_email_send_code(
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap, Json(v): Json<Value>,
+) -> Response {
+    let ip = match client_ip(&headers, peer) {
+        Ok(ip) => ip,
+        Err(error) => return err_resp(error),
+    };
+    let pool = match crate::collab::mail::delivery::Pool::configured() {
+        Ok(pool) => pool,
+        Err(error) => return err_resp(error),
+    };
+    send_code_with(ip, v, pool, crate::collab::mail::send_mail_timeout).await.0
 }
 
 async fn send_code_with(
-    headers: HeaderMap,
-    v: Value,
-    sender: impl FnOnce(&str, &str, &str) -> Result<(), String> + Send + 'static,
+    ip: String, v: Value,
+    pool: &crate::collab::mail::delivery::Pool,
+    sender: impl FnOnce(&str, &str, &str, Duration) -> Result<(), String> + Send + 'static,
 ) -> (Response, Option<tokio::task::JoinHandle<()>>) {
-    let ip = client_ip(&headers);
     let prepared = tokio::task::spawn_blocking(move || {
         crate::collab::mail::CodeRequest::prepare(&s_of(&v, "email"), &s_of(&v, "purpose"), &ip)
     }).await;
     match prepared {
         Ok(Ok(request)) => {
-            let task = tokio::task::spawn_blocking(move || {
-                if request.deliver(sender).is_err() {
-                    // 不记录邮箱、验证码或 SMTP 原始错误;失败不改变匿名响应。
-                    eprintln!("[collab-mail] background delivery failed");
-                }
-            });
-            (Json(json!({"ok": true})).into_response(), Some(task))
+            let task = pool.submit(move |attempt| request.deliver_tracked(attempt, sender));
+            (Json(json!({"ok": true})).into_response(), task)
         }
         other => (unwrap_api(other.map(|result| result.map(|_| json!({"ok": true})))), None),
     }

@@ -86,3 +86,33 @@ async fn production_router_installs_rate_gate_before_security_authentication() -
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn forged_headers_cannot_change_direct_peer_but_trusted_proxy_separates_clients() -> Result<(), String> {
+    let env = setup()?;
+    let path = "/api/account/login";
+    let router = Router::new().route(path, any(|| async { StatusCode::ACCEPTED }))
+        .layer(axum::middleware::from_fn(middleware));
+    let peer: SocketAddr = "192.0.2.9:1234".parse().map_err(|e| format!("{e}"))?;
+    for i in 1..=3 {
+        let request = Request::builder().uri(path)
+            .extension(ConnectInfo(peer))
+            .header("x-real-ip", format!("198.51.100.{i}"))
+            .header("x-forwarded-for", format!("198.51.100.{i}"))
+            .body(Body::empty()).map_err(|e| e.to_string())?;
+        let response = router.clone().oneshot(request).await.map_err(|e| e.to_string())?;
+        assert_eq!(response.status(), if i == 3 { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::ACCEPTED });
+    }
+    std::fs::write(env.directory.join("config.json"),
+        r#"{"ingress":{"trustedProxyCidrs":["10.0.0.0/8"]},"rateLimit":{"loginRequests":2}}"#)
+        .map_err(|e| e.to_string())?;
+    let proxy: SocketAddr = "10.0.0.1:1234".parse().map_err(|e| format!("{e}"))?;
+    for i in 1..=3 {
+        let request = Request::builder().uri(path)
+            .extension(ConnectInfo(proxy))
+            .header("x-forwarded-for", format!("6.6.6.6, 198.51.100.{i}, 10.0.0.2"))
+            .body(Body::empty()).map_err(|e| e.to_string())?;
+        assert_eq!(router.clone().oneshot(request).await.map_err(|e| e.to_string())?.status(), StatusCode::ACCEPTED);
+    }
+    Ok(())
+}

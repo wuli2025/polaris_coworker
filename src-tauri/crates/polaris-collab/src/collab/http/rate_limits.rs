@@ -51,9 +51,11 @@ fn check(path: &str, source: &str, credential: Option<&str>) -> Result<(), Strin
 pub(super) async fn middleware(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
     if category(&path).is_none() { return next.run(request).await; }
-    // Never trust caller-controlled X-Forwarded-For. Shells without ConnectInfo share a bounded bucket.
-    let source = request.extensions().get::<ConnectInfo<SocketAddr>>()
-        .map_or_else(|| "unknown-peer".to_string(), |peer| peer.0.ip().to_string());
+    let source = match super::client_ip(request.headers(),
+        request.extensions().get::<ConnectInfo<SocketAddr>>().copied()) {
+        Ok(source) => source,
+        Err(error) => return super::err_resp(error),
+    };
     let credential = request.headers().get("authorization").and_then(|v| v.to_str().ok())
         .filter(|value| value.starts_with("Bearer ")).map(String::from);
     let result = tokio::task::spawn_blocking(move || check(&path, &source, credential.as_deref())).await;

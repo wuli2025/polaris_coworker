@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
+pub mod hardening;
 pub mod gate;
 pub mod notifications;
 pub mod risk;
@@ -26,6 +27,8 @@ pub struct Config {
     pub security: Security,
     pub rate_limit: RateLimit,
     pub browser: browser::Config,
+    pub ingress: hardening::Ingress,
+    pub mail_delivery: hardening::MailDelivery,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -139,6 +142,8 @@ pub fn resolve(
         if value == 0 || value > max { return Err(format!("rateLimit.{name} 须为 1..={max} 的整数")); }
     }
     config.browser.validate()?;
+    config.ingress.validate()?;
+    config.mail_delivery.validate()?;
     Ok(config)
 }
 
