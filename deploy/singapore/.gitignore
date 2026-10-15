@@ -1,0 +1,6 @@
+.env
+.generated/
+backups/
+*.tar
+*.tar.gz
+__pycache__/

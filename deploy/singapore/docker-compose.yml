@@ -1,0 +1,107 @@
+name: polaris-singapore
+x-runtime: &runtime
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "${LOG_MAX_SIZE:-10m}"
+      max-file: "${LOG_MAX_FILES:-3}"
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+
+services:
+  authority:
+    <<: *runtime
+    image: ${AUTHORITY_IMAGE:?请填写经审核的 polaris-server 镜像 digest}
+    entrypoint: [/usr/local/bin/polaris-server]
+    user: "1000:1000"
+    environment:
+      HOME: /home/polaris
+      POLARIS_PORT: "8080"
+      POLARIS_ACCOUNT_AUTHORITY: "1"
+      POLARIS_AUTHORITY_ONLY: "1"
+      POLARIS_REQUIRE_LOGIN: "1"
+      POLARIS_TRUST_PROXY: "1"
+      POLARIS_TUNNEL_AUTOSTART: "0"
+      POLARIS_COLLAB_DB: /home/polaris/Polaris/data/collab.db
+      POLARIS_ACCOUNT_KEY: /home/polaris/Polaris/data/account_authority.key
+      POLARIS_INTERCONNECT_CONFIG: /etc/polaris/interconnect.json
+      POLARIS_ACCOUNT_OPEN_SIGNUP: ${ACCOUNT_OPEN_SIGNUP:-0}
+      POLARIS_EMAIL_SIGNUP: ${ACCOUNT_OPEN_SIGNUP:-0}
+      POLARIS_SMTP_HOST: ${SMTP_HOST:-}
+      POLARIS_SMTP_PORT: ${SMTP_PORT:-465}
+      POLARIS_SMTP_USER: ${SMTP_USER:-}
+      POLARIS_SMTP_PASS: ${SMTP_PASS:-}
+      POLARIS_SMTP_FROM: ${SMTP_FROM:-}
+    volumes:
+      - authority-data:/home/polaris/Polaris
+      - ./.generated/authority.json:/etc/polaris/interconnect.json:ro
+    networks: [account]
+    mem_limit: ${AUTHORITY_MEMORY:-1g}
+    cpus: ${AUTHORITY_CPUS:-1.0}
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, curl, -fsS, --max-time, "5", http://127.0.0.1:8080/api/account/pubkey]
+      interval: 30s
+      timeout: 6s
+      retries: 5
+      start_period: 30s
+
+  iroh-relay:
+    <<: *runtime
+    image: ${RELAY_IMAGE:?请填写按 Dockerfile.relay 构建的 1.0.1 镜像 digest}
+    command: [--config-path, /etc/iroh/relay.toml]
+    volumes:
+      - relay-certs:/data
+      - ./.generated/relay.toml:/etc/iroh/relay.toml:ro
+    ports: ["7824:7824/udp"]
+    networks: [edge]
+    mem_limit: ${RELAY_MEMORY:-512m}
+    cpus: ${RELAY_CPUS:-1.0}
+    healthcheck:
+      test: [CMD, curl, -fsS, --max-time, "5", http://127.0.0.1:8080/generate_204]
+      interval: 30s
+      timeout: 6s
+      retries: 5
+      start_period: 60s
+
+  caddy:
+    <<: *runtime
+    image: ${CADDY_IMAGE:-caddy:2.10.2-alpine}
+    volumes:
+      - ./.generated/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [edge]
+    mem_limit: ${CADDY_MEMORY:-256m}
+    cpus: ${CADDY_CPUS:-0.5}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:2019/config/]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  gateway:
+    <<: *runtime
+    image: ${GATEWAY_IMAGE:-haproxy:3.2.26-alpine}
+    volumes:
+      - ./.generated/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports: ["80:8080/tcp", "443:8443/tcp"]
+    networks: [edge, account]
+    mem_limit: ${GATEWAY_MEMORY:-128m}
+    cpus: ${GATEWAY_CPUS:-0.5}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8404/health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  edge: {}
+  # 不设 internal:true：权威需要出站 SMTP，但此网络没有任何宿主发布端口。
+  account: {}
+volumes:
+  authority-data: {}
+  relay-certs: {}
+  caddy-data: {}
+  caddy-config: {}

@@ -1,0 +1,20 @@
+# 构建官方 crate，不修改源码、不增加项目 Cargo 依赖。
+FROM rust:1.95.0-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends cmake clang pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+ADD https://static.crates.io/crates/iroh-relay/iroh-relay-1.0.1.crate /build/relay.crate
+RUN echo '9f16a5505939f9250297ff2f1210b5142d13618f496eab03ce3f964fc47e2e2b  relay.crate' | sha256sum -c - \
+    && tar -xzf relay.crate \
+    && cargo install --path iroh-relay-1.0.1 --locked --features server --bin iroh-relay --root /out \
+    && /out/bin/iroh-relay --version \
+    && cd /out/bin && sha256sum iroh-relay > iroh-relay.sha256
+FROM debian:12.11-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -u 1000 -m relay && mkdir /data && chown relay:relay /data
+COPY --from=build /out/bin/iroh-relay /usr/local/bin/iroh-relay
+COPY --from=build /out/bin/iroh-relay.sha256 /usr/local/share/iroh-relay.sha256
+USER 1000:1000
+WORKDIR /data
+ENTRYPOINT ["/usr/local/bin/iroh-relay"]

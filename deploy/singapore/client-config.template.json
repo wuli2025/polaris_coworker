@@ -1,0 +1,16 @@
+{
+  "authority": {
+    "url": "https://id.example.invalid",
+    "publicKeyFingerprints": ["REPLACE_WITH_FULL_SHA256_FROM_INIT_KEYS"]
+  },
+  "relay": {
+    "urls": ["https://relay.example.invalid"],
+    "fallback": false
+  },
+  "security": {
+    "revocationPollSecs": 30,
+    "revocationMaxAgeSecs": 600,
+    "newDeviceWindowHours": 24,
+    "approvalTimeoutSecs": 300
+  }
+}

@@ -1,0 +1,22 @@
+http_bind_addr = "0.0.0.0:8080"
+enable_relay = true
+enable_quic_addr_discovery = true
+enable_metrics = false
+access = "everyone"
+
+[tls]
+https_bind_addr = "0.0.0.0:8443"
+quic_bind_addr = "0.0.0.0:7824"
+hostname = "@RELAY_DOMAIN@"
+cert_mode = "LetsEncrypt"
+cert_dir = "/data"
+contact = "@ACME_EMAIL@"
+prod_tls = true
+
+[limits]
+accept_conn_limit = @RELAY_ACCEPT_PER_SEC@.0
+accept_conn_burst = @RELAY_ACCEPT_BURST@
+
+[limits.client.rx]
+bytes_per_second = @RELAY_RX_BYTES_PER_SEC@
+max_burst_bytes = @RELAY_RX_BURST_BYTES@
