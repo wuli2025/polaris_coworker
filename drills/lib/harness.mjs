@@ -119,7 +119,10 @@ export async function json(path) { return JSON.parse(await readFile(path, 'utf8'
 export async function save(path, value) { await writeFile(path, JSON.stringify(value, null, 2), { mode: 0o600 }); }
 export function childEnv(h, extra = {}) {
   // Deliberately no inherited model keys, POLARIS_*, NODE_OPTIONS or user data paths.
-  return { PATH: process.env.PATH, LANG: 'C.UTF-8', HOME: h.home, TMPDIR: h.secrets,
+  // Proxy settings are network routing, not secrets: drills must exercise the product's proxy support.
+  const proxy = Object.fromEntries(['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
+    .filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
+  return { PATH: process.env.PATH, LANG: 'C.UTF-8', HOME: h.home, TMPDIR: h.secrets, ...proxy,
     XDG_CONFIG_HOME: join(h.home, '.config'), XDG_CACHE_HOME: join(h.home, '.cache'),
     XDG_DATA_HOME: join(h.home, '.local/share'), ...extra };
 }

@@ -11,9 +11,15 @@ export function respondDuring(api, turn, decision) {
       seen.add(event.text);
       const payload = JSON.parse(event.text);
       const response = decision(payload);
-      if (response) await api.invoke('chat_permission_respond', { response: {
-        sessionId: payload.sessionId, callId: payload.callId, decision: response,
-      } });
+      if (!response) continue;
+      try {
+        await api.invoke('chat_permission_respond', { response: {
+          sessionId: payload.sessionId, callId: payload.callId, decision: response,
+        } });
+      } catch (error) {
+        // Cancelling a turn expires its pending approvals by design; a late answer is expected then.
+        if (!(turn.cancelled && error.serverCode === 'APPROVAL_NOT_FOUND')) throw error;
+      }
     }
   })().catch(error => { turn.approvalError = error; });
   return turn;

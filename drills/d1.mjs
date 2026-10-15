@@ -61,6 +61,7 @@ const steps = {
     const t = respondDuring(h.api, await h.api.begin(c.id, 'Use bash to execute sleep 120, then write finished.txt.'), p => p.tool === 'bash' ? 'allow' : 'deny');
     await h.api.event(t.req, e => e.kind === 'tool' && e.tool === 'bash' && e.text?.includes('sleep 120'));
     const cancelAt = performance.now();
+    t.cancelled = true;
     await h.api.invoke('chat_cancel', { reqId: t.req });
     const r = await h.api.end(t, true);
     check(r.done.at >= cancelAt, 'Turn completed before cancellation');
