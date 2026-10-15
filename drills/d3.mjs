@@ -41,7 +41,8 @@ const steps = {
       const t = await h.api.begin(c.id, `Use write exactly once with path ${path} and content ESCAPED. Do not normalize the path or retry.`, { permissionMode: 'auto_current' });
       respondDuring(h.api, t, () => 'deny');
       const r = await h.api.end(t, true);
-      check(r.events.some(e => e.kind === 'permission.request' && JSON.parse(JSON.parse(e.text).summary).path === path), 'Exact traversal path was not submitted for permission');
+      // `summary` is human-readable text, not JSON; it must still carry the exact unnormalized path.
+      check(r.events.some(e => e.kind === 'permission.request' && String(JSON.parse(e.text).summary ?? '').includes(path)), 'Exact traversal path was not submitted for permission');
       check(r.events.some(e => e.kind === 'error'), 'No rejected tool event');
       check(!await exists(join(outside, 'blocked.txt')), 'Escaped project boundary');
       results.push({ path, denied: true });
