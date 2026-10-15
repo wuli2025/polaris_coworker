@@ -1,0 +1,1395 @@
+diff --git a/agentd/src/daemon.ts b/agentd/src/daemon.ts
+index ab2897c..0c8741f 100644
+--- a/agentd/src/daemon.ts
++++ b/agentd/src/daemon.ts
+@@ -98,7 +98,7 @@ export class Daemon {
+       case "provider.auth": return this.logins.handle(request.params.provider, request.params.operation, request.params.input);
+       case "permission.respond": return this.sessions.respondPermission(request.params.sessionId, request.params.callId, request.params.decision);
+       case "sandbox.respond": return this.sessions.respondSandbox(request.params.sessionId, request.params.callId, request.params);
+-      case "ping": return { status: "ok", sessions: this.sessions.size, usagePersistFailures: this.usagePersistFailures, ...versions };
++      case "ping": return { experts: { ...this.config.experts }, status: "ok", sessions: this.sessions.size, usagePersistFailures: this.usagePersistFailures, ...versions };
+       case "models.list": return { models: this.models.list() };
+       case "models.catalog": return { models: this.models.builtinCatalog } satisfies Catalog;
+       case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd, request.params);
+diff --git a/agentd/src/events/usage-store.ts b/agentd/src/events/usage-store.ts
+index bccf4f2..2eecd2d 100644
+--- a/agentd/src/events/usage-store.ts
++++ b/agentd/src/events/usage-store.ts
+@@ -2,14 +2,20 @@ import { mkdirSync, openSync, closeSync, writeFileSync, fsyncSync, renameSync, r
+ import { join } from "node:path";
+ import { createHash, randomUUID } from "node:crypto";
+ import type { AssistantMessage } from "@earendil-works/pi-ai";
++import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+ import { Value } from "typebox/value";
+ import { UsageSchema } from "../protocol/events.ts";
+ 
+ /** One atomic record per provider request; no prompts, headers, or credentials. */
+ export function recordUsage(directory: string, sessionId: string, turnId: string, ordinal: number,
+-  message: AssistantMessage): void {
++  message: AssistantMessage, runtime: Pick<ModelRuntime, "getModel">): void {
+   if (!directory) return;
+   if (!Value.Check(UsageSchema, message.usage) || !Number.isFinite(message.timestamp)) throw new Error("UsageInvalid");
++  const cost = runtime.getModel(message.provider, message.model)?.cost;
++  const rates = cost ? [cost.input, cost.output, cost.cacheRead, cost.cacheWrite] : [];
++  // A zero-cost request can still use a priced model. Missing/all-zero definitions are unpriced.
++  const priceAvailable = rates.every((rate) => Number.isFinite(rate) && rate >= 0)
++    && rates.some((rate) => rate > 0);
+   const date = new Date(message.timestamp).toISOString().slice(0, 10);
+   const requestId = message.responseId || `${sessionId}:${turnId}:${ordinal}`;
+   const id = createHash("sha256").update(JSON.stringify([date, message.provider, requestId])).digest("hex");
+@@ -18,7 +24,7 @@ export function recordUsage(directory: string, sessionId: string, turnId: string
+   const path = join(dir, `${id}.json`);
+   const temp = `${path}.${randomUUID()}.tmp`;
+   const row = { version: 1, sessionId, turnId, requestId, provider: message.provider,
+-    model: message.model, timestamp: message.timestamp, date, usage: message.usage,
++    model: message.model, timestamp: message.timestamp, date, usage: message.usage, priceAvailable,
+     // Only Anthropic's native message id can identify a copied legacy CLI row.
+     legacyMessageId: message.api === "anthropic-messages" ? message.responseId : undefined };
+   try {
+diff --git a/agentd/src/protocol/schema.ts b/agentd/src/protocol/schema.ts
+index 45610c9..37d70d0 100644
+--- a/agentd/src/protocol/schema.ts
++++ b/agentd/src/protocol/schema.ts
+@@ -40,6 +40,7 @@ export type SessionOptions = Static<typeof SessionOptionsSchema>;
+ export type ImageAttachment = Static<typeof ImageSchema>;
+ export const PingSchema = Type.Object({ status: Type.Literal("ok"), sessions: Type.Integer({ minimum: 0 }),
+   usagePersistFailures: Type.Integer({ minimum: 0 }),
++  experts: Type.Optional(Type.Object({ enabled: Type.Boolean(), prompt: Type.String() }, { additionalProperties: false })),
+   version: text, piVersion: text, protocolVersion: Type.Literal(PROTOCOL_VERSION) });
+ // Keep every command explicit so unknown fields/methods cannot reach SDK APIs.
+ export const SandboxResultSchema = Type.Object({
+diff --git a/agentd/src/sessions/registry.ts b/agentd/src/sessions/registry.ts
+index e693d84..6cdec06 100644
+--- a/agentd/src/sessions/registry.ts
++++ b/agentd/src/sessions/registry.ts
+@@ -198,7 +198,7 @@ export class SessionRegistry {
+     const unsubscribe = session.subscribe((event) => {
+       armIdle(); // All SDK events count, including tool progress and retry/compaction events.
+       if (event.type === "message_end" && event.message.role === "assistant") {
+-        try { recordUsage(this.config().usageDir, id, run.id, usageOrdinal++, event.message); }
++        try { recordUsage(this.config().usageDir, id, run.id, usageOrdinal++, event.message, session.modelRuntime); }
+         catch {
+           this.usagePersistFailed();
+           run.mapper.error("USAGE_PERSIST_FAILED", "Usage record could not be persisted");
+diff --git a/agentd/test/expert-settings.test.ts b/agentd/test/expert-settings.test.ts
+new file mode 100644
+index 0000000..40d4879
+--- /dev/null
++++ b/agentd/test/expert-settings.test.ts
+@@ -0,0 +1,42 @@
++import assert from 'node:assert/strict';
++import { test } from 'node:test';
++import { fauxAssistantMessage } from '@earendil-works/pi-ai';
++import { harness, result } from './helpers.ts';
++
++test('actual expert state defaults off; config.apply affects new and reopened idle sessions', async () => {
++  let context = '';
++  const capture = (value: unknown) => { context = JSON.stringify(value); return fauxAssistantMessage('done'); };
++  const h = await harness([capture, capture, capture, capture]);
++  const prompt = async (sessionId: string) => {
++    context = '';
++    result(await h.request('prompt', { sessionId, text: 'hello' }));
++    await h.daemon.sessions.wait(sessionId);
++    return context;
++  };
++  try {
++    const state = () => h.request('ping').then(r => result<{ experts: { enabled: boolean } }>(r).experts);
++    assert.equal((await state()).enabled, false);
++    const options = { cwd: h.dir, expertPrompt: 'request-expert-marker' };
++    const { sessionId } = result<{ sessionId: string }>(await h.request('session.open', options));
++    assert.ok(!(await prompt(sessionId)).includes('request-expert-marker'));
++    result(await h.request('config.apply', { config: { experts: { enabled: true, prompt: 'configured-expert-marker' } } }));
++    assert.equal((await state()).enabled, true);
++    assert.match(await prompt(sessionId), /request-expert-marker/);
++    const fresh = result<{ sessionId: string }>(await h.request('session.open', options));
++    const enabledContext = await prompt(fresh.sessionId);
++    assert.match(enabledContext, /configured-expert-marker/);
++    assert.match(enabledContext, /request-expert-marker/);
++    result(await h.request('config.apply', { config: { experts: { enabled: false, prompt: 'configured-expert-marker' } } }));
++    assert.equal((await state()).enabled, false);
++    const disabled = result<{ sessionId: string }>(await h.request('session.open', options));
++    const disabledContext = await prompt(disabled.sessionId);
++    assert.ok(!disabledContext.includes('configured-expert-marker'));
++    assert.ok(!disabledContext.includes('request-expert-marker'));
++    for (const enabled of ['true', 1, null]) {
++      const response = await h.request('config.apply', { config: { experts: { enabled, prompt: '' } } });
++      assert.equal(response.ok, false);
++      if (!response.ok) assert.equal(response.error.code, 'INVALID_CONFIG');
++      assert.equal((await state()).enabled, false);
++    }
++  } finally { await h.close(); }
++});
+diff --git a/agentd/test/provider-usage-pricing.test.ts b/agentd/test/provider-usage-pricing.test.ts
+new file mode 100644
+index 0000000..a5b28c7
+--- /dev/null
++++ b/agentd/test/provider-usage-pricing.test.ts
+@@ -0,0 +1,101 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage } from "@earendil-works/pi-ai";
++import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
++import { recordUsage } from "../src/events/usage-store.ts";
++import { harness, providerConfig, result, until } from "./helpers.ts";
++
++function readRows(directory: string) {
++  return readdirSync(directory).flatMap((date) => readdirSync(join(directory, date))
++    .map((file) => JSON.parse(readFileSync(join(directory, date, file), "utf8"))));
++}
++
++test("usage pricing follows each model rate, independently of the request cost", () => {
++  const dir = mkdtempSync(join(tmpdir(), "usage-pricing-"));
++  const faux = registerFauxProvider({ models: [{ id: "priced-test" }] });
++  const model = faux.getModel();
++  const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
++  try {
++    const definitions = [undefined, zero,
++      ...Object.keys(zero).map((key) => ({ ...zero, [key]: 2 })),
++      { ...zero, input: NaN, output: 2 }, { ...zero, input: Infinity },
++      { ...zero, input: -1, output: 2 }];
++    let ordinal = 0;
++    for (const cost of definitions) {
++      for (const total of [0, 3]) {
++        const message = { ...fauxAssistantMessage("private"), provider: model.provider, model: model.id };
++        message.usage.cost.total = total;
++        const runtime = { getModel(provider: string, id: string) {
++          assert.equal(provider, model.provider);
++          assert.equal(id, model.id);
++          return cost ? { ...model, cost } : undefined;
++        } };
++        recordUsage(dir, "session", "turn", ordinal++, message, runtime);
++      }
++    }
++    const rows = readRows(dir);
++    assert.equal(rows.length, definitions.length * 2);
++    for (let index = 0; index < definitions.length; index++) {
++      for (let request = 0; request < 2; request++) {
++        const row = rows.find((row) => row.requestId === `session:turn:${index * 2 + request}`);
++        assert.ok(row);
++        assert.equal(row.priceAvailable, index >= 2 && index < 6);
++        assert.equal(row.usage.cost.total, request === 0 ? 0 : 3);
++      }
++    }
++  } finally {
++    faux.unregister();
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++for (const priced of [true, false]) {
++  test(`session usage persists priceAvailable=${priced} from ModelRuntime`, async () => {
++    const h = await harness([fauxAssistantMessage("zero request cost")]);
++    try {
++      const provider = providerConfig(h.faux.getModel());
++      provider.models[0].cost = { input: priced ? 2 : 0, output: 0, cacheRead: 0, cacheWrite: 0 };
++      const usageDir = join(h.dir, "usage");
++      result(await h.request("config.apply", { config: { usageDir, providers: [provider] } }));
++      const { sessionId } = result<{ sessionId: string }>(await h.request("session.open", { cwd: h.dir }));
++      result(await h.request("prompt", { sessionId, text: "record usage" }));
++      await h.daemon.sessions.wait(sessionId);
++      const rows = readRows(usageDir);
++      assert.equal(rows.length, 1);
++      assert.equal(rows[0].priceAvailable, priced);
++      assert.equal(rows[0].usage.cost.total, 0);
++      assert.equal(rows[0].provider, provider.id);
++      assert.equal(rows[0].model, provider.models[0].id);
++    } finally { await h.close(); }
++  });
++}
++
++test("an in-flight session records its own pricing after configuration replaces ModelRuntime", async () => {
++  let release: ((message: ReturnType<typeof fauxAssistantMessage>) => void) | undefined;
++  const h = await harness([() => new Promise((resolve) => { release = resolve; })]);
++  try {
++    const provider = providerConfig(h.faux.getModel());
++    provider.models[0].cost = { input: 2, output: 0, cacheRead: 0, cacheWrite: 0 };
++    const usageDir = join(h.dir, "usage");
++    result(await h.request("config.apply", { config: { usageDir, providers: [provider] } }));
++    const { sessionId } = result<{ sessionId: string }>(await h.request("session.open", { cwd: h.dir }));
++    result(await h.request("prompt", { sessionId, text: "wait for configuration" }));
++    await until(() => !!release);
++    const replacement = providerConfig(h.faux.getModel());
++    replacement.models[0].cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
++    result(await h.request("config.apply", { config: { providers: [replacement] } }));
++    assert.equal(h.daemon.models.runtime.getModel(provider.id, provider.models[0].id)?.cost.input, 0);
++    assert.ok(release);
++    release(fauxAssistantMessage("finished on original runtime"));
++    await h.daemon.sessions.wait(sessionId);
++    const rows = readRows(usageDir);
++    assert.equal(rows.length, 1);
++    assert.equal(rows[0].priceAvailable, true);
++  } finally {
++    release?.(fauxAssistantMessage("cleanup"));
++    await h.close();
++  }
++});
+diff --git a/agentd/test/provider-usage.test.ts b/agentd/test/provider-usage.test.ts
+index 4b109de..bbe4d35 100644
+--- a/agentd/test/provider-usage.test.ts
++++ b/agentd/test/provider-usage.test.ts
+@@ -11,18 +11,20 @@ test("usage replay deduplicates a request; distinct requests/days remain separat
+   const message = { ...fauxAssistantMessage("content must not be persisted"),
+     api: "anthropic-messages", provider: "anthropic", model: "test-model",
+     timestamp: Date.UTC(2026, 9, 14), responseId: "msg-1" };
++  const runtime = { getModel: () => undefined };
+   try {
+-    recordUsage(dir, "session-a", "turn-a", 0, message);
+-    recordUsage(dir, "session-a", "turn-a", 0, message);
++    recordUsage(dir, "session-a", "turn-a", 0, message, runtime);
++    recordUsage(dir, "session-a", "turn-a", 0, message, runtime);
+     const files = readdirSync(join(dir, "2026-10-14"));
+     assert.equal(files.length, 1);
+     const row = JSON.parse(readFileSync(join(dir, "2026-10-14", files[0]), "utf8"));
+     assert.equal(row.legacyMessageId, "msg-1");
+     assert.equal(row.sessionId, "session-a");
++    assert.equal(row.priceAvailable, false);
+     assert.deepEqual(row.usage, message.usage);
+     assert.ok(!JSON.stringify(row).includes("content must not"));
+-    recordUsage(dir, "session-a", "turn-a", 1, { ...message, responseId: "msg-2" });
+-    recordUsage(dir, "session-a", "turn-b", 0, { ...message, timestamp: message.timestamp + 86400000 });
++    recordUsage(dir, "session-a", "turn-a", 1, { ...message, responseId: "msg-2" }, runtime);
++    recordUsage(dir, "session-a", "turn-b", 0, { ...message, timestamp: message.timestamp + 86400000 }, runtime);
+     assert.equal(readdirSync(join(dir, "2026-10-14")).length, 2);
+     assert.equal(readdirSync(join(dir, "2026-10-15")).length, 1);
+   } finally { rmSync(dir, { recursive: true, force: true }); }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+index 01c2506..c29bb76 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/config.rs
+@@ -63,6 +63,7 @@ pub struct Agentd {
+     pub control_poll_ms: u64,
+     pub session_map: PathBuf,
+     pub attachments: super::images::ImageLimits,
++    pub expert_settings: PathBuf,
+ }
+ impl Default for Agentd {
+     fn default() -> Self {
+@@ -82,6 +83,7 @@ impl Default for Agentd {
+             supervisor_tick_ms: 10, shutdown_timeout_ms: 1000, control_poll_ms: 1,
+             session_map: crate::runtime::paths::data_dir().join("agent-session-map"),
+             attachments: super::images::ImageLimits::default(),
++            expert_settings: crate::runtime::paths::data_file("expert-settings.json"),
+         }
+     }
+ }
+@@ -126,6 +128,8 @@ impl Config {
+         BackendKind::parse(&self.agent.backend)?;
+         let c = &self.agentd;
+         c.attachments.validate()?;
++        anyhow::ensure!(c.expert_settings.is_absolute() && c.expert_settings.file_name().is_some(),
++            "InvalidAgentConfig: expertSettings must be an absolute file path");
+         anyhow::ensure!(!c.sandbox_container.is_empty() && !c.sandbox_container.starts_with('-')
+             && c.sandbox_container.chars().all(|ch| ch.is_ascii_alphanumeric() || "_.-".contains(ch)),
+             "InvalidAgentConfig: sandboxContainer must be a Docker container name");
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+index 3280209..f48e2fc 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+@@ -95,6 +95,9 @@ impl BackendStatus {
+     }
+ }
+ pub trait AgentBackend: Send + Sync {
++    fn experts_enabled(&self, _enabled: Option<bool>) -> anyhow::Result<bool> {
++        anyhow::bail!("ExpertConfigUnsupported")
++    }
+     fn provider_apply(&self, _id: &str) -> anyhow::Result<serde_json::Value> {
+         anyhow::bail!("ProviderApplyUnsupported")
+     }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/experts.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/experts.rs
+new file mode 100644
+index 0000000..bb45161
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/experts.rs
+@@ -0,0 +1,126 @@
++//! Persisted host override, delivered using config.apply and verified using ping.
++use super::{PiBackend, Command, Empty};
++use serde::{Deserialize, Serialize};
++use std::{fs, path::Path};
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct ExpertConfig { pub enabled: bool, pub prompt: String }
++
++pub fn load(path: &Path) -> anyhow::Result<Option<ExpertConfig>> {
++    match fs::read(path) {
++        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)
++            .map_err(|e| anyhow::anyhow!("ExpertConfigInvalid: {e}"))?)),
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
++        Err(e) => Err(anyhow::anyhow!("ExpertConfigReadFailed: {e}")),
++    }
++}
++
++fn persist(path: &Path, config: &ExpertConfig) -> anyhow::Result<()> {
++    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
++    crate::provider::atomic_write(path, &serde_json::to_string_pretty(config)?)
++        .map_err(|e| anyhow::anyhow!("ExpertConfigWriteFailed: {e}"))
++}
++
++impl PiBackend {
++    fn actual_experts(&self) -> anyhow::Result<ExpertConfig> {
++        let ping = self.client()?.call(Command::Ping(Empty {}))?;
++        super::protocol::check_ping(ping)?.experts
++            .ok_or_else(|| anyhow::anyhow!("ExpertConfigReadUnsupported"))
++    }
++
++    fn apply_experts(&self, config: &ExpertConfig) -> anyhow::Result<()> {
++        self.apply_config(Some(serde_json::json!({ "experts": config })), None)?;
++        anyhow::ensure!(self.actual_experts()? == *config, "ExpertConfigApplyMismatch");
++        Ok(())
++    }
++
++    fn restore_experts(&self) -> anyhow::Result<()> {
++        if let Some(saved) = load(&self.config.expert_settings)? {
++            if self.actual_experts()? != saved { self.apply_experts(&saved)?; }
++        }
++        Ok(())
++    }
++
++    pub(super) fn sync_experts(&self) -> anyhow::Result<()> {
++        let _guard = self.expert_lock.lock();
++        self.restore_experts()
++    }
++
++    pub(super) fn expert_state(&self, enabled: Option<bool>) -> anyhow::Result<bool> {
++        let _guard = self.expert_lock.lock();
++        self.restore_experts()?;
++        let before = self.actual_experts()?;
++        let Some(enabled) = enabled else { return Ok(before.enabled); };
++        let config = ExpertConfig { enabled, prompt: before.prompt.clone() };
++        self.apply_experts(&config)?;
++        if let Err(error) = persist(&self.config.expert_settings, &config) {
++            if let Err(rollback) = self.apply_experts(&before) {
++                anyhow::bail!("{error}; ExpertConfigRollbackFailed: {rollback}");
++            }
++            return Err(error);
++        }
++        Ok(enabled)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::chat::backend::AgentBackend;
++
++    #[test]
++    fn setter_delivers_persists_and_restores_after_host_restart() -> anyhow::Result<()> {
++        let mut config = super::super::tests::config();
++        let root = config.session_map.with_extension("experts-test");
++        fs::create_dir_all(&root)?;
++        config.expert_settings = root.join("settings.json");
++        let backend = PiBackend::new(config.clone())?;
++        assert!(!backend.experts_enabled(None)?);
++        assert!(backend.experts_enabled(Some(true))?);
++        let saved = load(&config.expert_settings)?.ok_or_else(|| anyhow::anyhow!("missing settings"))?;
++        assert!(saved.enabled);
++        assert_eq!(saved.prompt, "deployment-prompt");
++        backend.shutdown();
++        let restarted = PiBackend::new(config)?;
++        assert!(restarted.experts_enabled(None)?);
++        assert!(!restarted.experts_enabled(Some(false))?);
++        assert!(!restarted.experts_enabled(None)?);
++        restarted.shutdown();
++        fs::remove_dir_all(root)?;
++        Ok(())
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn failed_persistence_rolls_runtime_back() -> anyhow::Result<()> {
++        use std::os::unix::fs::PermissionsExt;
++        let mut config = super::super::tests::config();
++        let root = config.session_map.with_extension("experts-rollback");
++        fs::create_dir_all(&root)?;
++        config.expert_settings = root.join("settings.json");
++        let backend = PiBackend::new(config)?;
++        assert!(!backend.experts_enabled(None)?);
++        fs::set_permissions(&root, fs::Permissions::from_mode(0o500))?;
++        let result = backend.experts_enabled(Some(true));
++        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
++        assert!(result.is_err_and(|e| e.to_string().contains("ExpertConfigWriteFailed")));
++        assert!(!backend.actual_experts()?.enabled);
++        backend.shutdown();
++        fs::remove_dir(root)?;
++        Ok(())
++    }
++    #[test]
++    fn persisted_settings_validate_and_survive_reload() -> anyhow::Result<()> {
++        let path = std::env::temp_dir().join(format!("p5d-experts-{}.json", std::process::id()));
++        let _ = fs::remove_file(&path);
++        assert!(load(&path)?.is_none());
++        let config = ExpertConfig { enabled: true, prompt: "configured expert".into() };
++        persist(&path, &config)?;
++        assert_eq!(load(&path)?, Some(config));
++        fs::write(&path, r#"{"enabled":"true","prompt":""}"#)?;
++        assert!(load(&path).is_err());
++        fs::remove_file(path)?;
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+index 54678be..f953d90 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+@@ -1,6 +1,7 @@
+ //! Shared daemon adapter. Per-account fails closed until the shell can supply
+ //! authenticated OS isolation; different working directories are not a sandbox.
+ mod client;
++mod experts;
+ mod process;
+ pub mod protocol;
+ mod routes;
+@@ -24,13 +25,14 @@ pub struct PiBackend {
+     client: once_cell::sync::OnceCell<Arc<Client>>,
+     preparing: Arc<Mutex<HashSet<String>>>,
+     cancelled: Arc<Mutex<HashSet<String>>>,
++    expert_lock: Mutex<()>,
+     provider_config: Mutex<Option<(Option<u32>, Value)>>,
+ }
+ impl PiBackend {
+     pub fn new(config: config::Agentd) -> anyhow::Result<Self> {
+         config::Config { agent: config::Agent::default(), agentd: config.clone() }.validate()?;
+         Ok(Self { config, client: once_cell::sync::OnceCell::new(),
+-            provider_config: Mutex::new(None),
++            provider_config: Mutex::new(None), expert_lock: Mutex::new(()),
+             preparing: Arc::new(Mutex::new(HashSet::new())), cancelled: Arc::new(Mutex::new(HashSet::new())) })
+     }
+     fn client(&self) -> anyhow::Result<Arc<Client>> {
+@@ -51,6 +53,7 @@ impl PiBackend {
+     }
+ }
+ impl AgentBackend for PiBackend {
++    fn experts_enabled(&self, enabled: Option<bool>) -> anyhow::Result<bool> { self.expert_state(enabled) }
+     fn auth(&self, operation: &str, provider: &str, input: Option<String>) -> anyhow::Result<Value> {
+         self.client()?.call(Command::Auth(protocol::Auth { operation: operation.into(), provider: provider.into(), input }))
+     }
+@@ -98,6 +101,7 @@ impl AgentBackend for PiBackend {
+                 if self.provider_apply(&id)?["superseded"] != true { break; }
+             }
+         }
++        self.sync_experts()?;
+         let client = self.client()?;
+         if client.status.lock().circuit_open { return Err(BackendError::CircuitOpen.into()); }
+         let (sender, stream) = stream::Mailbox::channel(self.config.channel_capacity, self.config.max_line_bytes);
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+index 012c18c..6c627fa 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/protocol.rs
+@@ -89,6 +89,7 @@ pub struct Prompt {
+ pub struct Ping {
+     pub status: String, pub sessions: u64, pub version: String,
+     pub pi_version: String, pub protocol_version: u64, pub usage_persist_failures: u64,
++    pub experts: Option<super::experts::ExpertConfig>,
+ }
+ pub fn check_ping(value: Value) -> anyhow::Result<Ping> {
+     anyhow::ensure!(value.get("protocolVersion").and_then(Value::as_u64) == Some(PROTOCOL_VERSION),
+diff --git a/src-tauri/crates/polaris-kernel/src/claude_md.rs b/src-tauri/crates/polaris-kernel/src/claude_md.rs
+index d008caa..1f9883f 100644
+--- a/src-tauri/crates/polaris-kernel/src/claude_md.rs
++++ b/src-tauri/crates/polaris-kernel/src/claude_md.rs
+@@ -9,6 +9,7 @@
+ //! placeholder marker: 顶部含 `polaris:placeholder` 行表示「未填写」, 不注入
+ 
+ use crate::conv;
++pub mod context;
+ #[cfg(not(feature = "desktop"))]
+ use crate::host::AppHandle;
+ use anyhow::Result;
+diff --git a/src-tauri/crates/polaris-kernel/src/claude_md/context.rs b/src-tauri/crates/polaris-kernel/src/claude_md/context.rs
+new file mode 100644
+index 0000000..35e63d2
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/claude_md/context.rs
+@@ -0,0 +1,120 @@
++//! Backend-neutral editor contract. A selection pins both the cwd and filename.
++use serde::{Deserialize, Serialize};
++use std::{fs, io, path::{Component, Path, PathBuf}};
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct Selection {
++    pub root: String,
++    pub file_name: String,
++    pub relative_path: String,
++    pub agents_exists: bool,
++    pub claude_exists: bool,
++    pub exists: bool,
++}
++
++fn io_error(error: io::Error) -> String {
++    let name = match error.kind() {
++        io::ErrorKind::NotFound => "ContextNotFound",
++        io::ErrorKind::PermissionDenied => "ContextPermissionDenied",
++        _ => "ContextIoFailed",
++    };
++    format!("{name}: {error}")
++}
++
++fn filename(name: &str) -> Result<(), String> {
++    if matches!(name, "AGENTS.md" | "CLAUDE.md") { Ok(()) }
++    else { Err("ContextPathRejected: expected AGENTS.md or CLAUDE.md".into()) }
++}
++
++fn canonical_root(root: &Path) -> Result<PathBuf, String> {
++    if root.components().any(|c| c == Component::ParentDir) {
++        return Err("ContextPathRejected: parent component".into());
++    }
++    let root = root.canonicalize().map_err(io_error)?;
++    if !root.is_dir() { return Err("ContextPathRejected: root is not a directory".into()); }
++    Ok(root)
++}
++
++fn target(root: &Path, name: &str) -> Result<(PathBuf, bool), String> {
++    filename(name)?;
++    let path = root.join(name);
++    match fs::symlink_metadata(&path) {
++        Ok(meta) => {
++            // Reject even dangling links: absence must never authorize following a link on write.
++            if meta.file_type().is_symlink() || !meta.is_file() {
++                return Err("ContextPathRejected: context must be a regular file".into());
++            }
++            let canonical = path.canonicalize().map_err(io_error)?;
++            if !crate::runtime::paths::path_contains(root, &canonical) {
++                return Err("ContextPathRejected: outside project".into());
++            }
++            Ok((canonical, true))
++        }
++        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok((path, false)),
++        Err(e) => Err(io_error(e)),
++    }
++}
++
++pub fn select(root: &Path, create_file: &str) -> Result<Selection, String> {
++    filename(create_file)?;
++    let root = canonical_root(root)?;
++    let (_, agents_exists) = target(&root, "AGENTS.md")?;
++    let (_, claude_exists) = target(&root, "CLAUDE.md")?;
++    let name = if agents_exists { "AGENTS.md" } else if claude_exists { "CLAUDE.md" } else { create_file };
++    Ok(Selection { root: root.to_string_lossy().into_owned(), file_name: name.into(),
++        relative_path: name.into(), agents_exists, claude_exists, exists: agents_exists || claude_exists })
++}
++
++fn pinned(root: &Path, selection: &Selection) -> Result<PathBuf, String> {
++    let root = canonical_root(root)?;
++    if root.to_string_lossy() != selection.root || selection.relative_path != selection.file_name {
++        return Err("ContextSelectionStale: project directory or selection changed".into());
++    }
++    target(&root, &selection.file_name).map(|(path, _)| path)
++}
++
++pub fn read(root: &Path, selection: &Selection) -> Result<String, String> {
++    fs::read_to_string(pinned(root, selection)?).map_err(io_error)
++}
++
++pub fn write(root: &Path, selection: &Selection, content: &str) -> Result<(), String> {
++    let path = pinned(root, selection)?;
++    let mut options = fs::OpenOptions::new();
++    options.write(true).create(true).truncate(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        options.custom_flags(libc::O_NOFOLLOW);
++    }
++    use std::io::Write;
++    options.open(path).map_err(io_error)?.write_all(content.as_bytes()).map_err(io_error)
++}
++
++fn project_directory(project_id: &str) -> Result<PathBuf, String> {
++    if !crate::conv::list_active_projects().iter().any(|p| p.id == project_id) {
++        return Err("ContextProjectNotFound".into());
++    }
++    let work_dir = crate::conv::project_work_dir(project_id);
++    // Same resolver as actual chat dispatch, including the development/installed fallback.
++    Ok(crate::chat::backend::claude_cli::pipeline::effective_cwd(work_dir.as_deref().map(Path::new)))
++}
++
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub fn context_file_metadata(project_id: String, create_file: Option<String>) -> Result<Selection, String> {
++    select(&project_directory(&project_id)?, create_file.as_deref().unwrap_or("AGENTS.md"))
++}
++
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub fn context_file_read(project_id: String, selection: Selection) -> Result<String, String> {
++    read(&project_directory(&project_id)?, &selection)
++}
++
++#[cfg_attr(feature = "desktop", tauri::command)]
++pub fn context_file_write(project_id: String, selection: Selection, content: String) -> Result<(), String> {
++    write(&project_directory(&project_id)?, &selection, &content)
++}
++
++#[cfg(test)]
++#[path = "context_tests.rs"]
++mod tests;
+diff --git a/src-tauri/crates/polaris-kernel/src/claude_md/context_tests.rs b/src-tauri/crates/polaris-kernel/src/claude_md/context_tests.rs
+new file mode 100644
+index 0000000..c4294e6
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/claude_md/context_tests.rs
+@@ -0,0 +1,87 @@
++use super::*;
++
++fn fixture() -> Result<PathBuf, Box<dyn std::error::Error>> {
++    let dir = std::env::temp_dir().join(format!("context-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
++    fs::create_dir_all(&dir)?;
++    Ok(dir)
++}
++
++#[test]
++fn selection_priority_and_missing_policy() -> Result<(), Box<dyn std::error::Error>> {
++    for (agents, claude, expected) in [(false, false, "AGENTS.md"), (false, true, "CLAUDE.md"),
++        (true, false, "AGENTS.md"), (true, true, "AGENTS.md")] {
++        let dir = fixture()?;
++        if agents { fs::write(dir.join("AGENTS.md"), "agents")?; }
++        if claude { fs::write(dir.join("CLAUDE.md"), "claude")?; }
++        let selected = select(&dir, "AGENTS.md")?;
++        assert_eq!(selected.file_name, expected);
++        assert_eq!(selected.agents_exists, agents);
++        assert_eq!(selected.claude_exists, claude);
++        assert_eq!(selected.relative_path, expected);
++        if selected.exists { assert!(!read(&dir, &selected)?.is_empty()); }
++        else {
++            assert!(read(&dir, &selected).is_err_and(|e| e.starts_with("ContextNotFound")));
++            let alternate = select(&dir, "CLAUDE.md")?;
++            assert_eq!(alternate.file_name, "CLAUDE.md");
++            write(&dir, &alternate, "explicit legacy creation")?;
++            assert!(!dir.join("AGENTS.md").exists());
++            write(&dir, &selected, "default creation")?;
++            assert_eq!(read(&dir, &selected)?, "default creation");
++            assert_eq!(read(&dir, &alternate)?, "explicit legacy creation");
++        }
++        fs::remove_dir_all(dir)?;
++    }
++    Ok(())
++}
++
++#[test]
++fn writing_pins_selection_even_after_priority_changes() -> Result<(), Box<dyn std::error::Error>> {
++    let dir = fixture()?;
++    fs::write(dir.join("CLAUDE.md"), "old")?;
++    let selected = select(&dir, "AGENTS.md")?;
++    fs::write(dir.join("AGENTS.md"), "keep")?;
++    write(&dir, &selected, "changed")?;
++    assert_eq!(fs::read_to_string(dir.join("CLAUDE.md"))?, "changed");
++    assert_eq!(fs::read_to_string(dir.join("AGENTS.md"))?, "keep");
++    fs::remove_dir_all(dir)?;
++    Ok(())
++}
++
++#[test]
++fn paths_and_stale_roots_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
++    let dir = fixture()?;
++    let other = fixture()?;
++    let mut selected = select(&dir, "AGENTS.md")?;
++    assert!(write(&other, &selected, "bad").is_err());
++    for name in ["../AGENTS.md", "/tmp/CLAUDE.md", "sub/AGENTS.md", "invalid"] {
++        assert!(select(&dir, name).is_err());
++        selected.file_name = name.into();
++        selected.relative_path = name.into();
++        assert!(write(&dir, &selected, "bad").is_err());
++    }
++    assert!(select(&dir.join(".."), "AGENTS.md").is_err());
++    fs::remove_dir_all(dir)?;
++    fs::remove_dir_all(other)?;
++    Ok(())
++}
++
++#[cfg(unix)]
++#[test]
++fn permission_denied_is_not_missing_and_links_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
++    use std::os::unix::fs::{symlink, PermissionsExt};
++    let dir = fixture()?;
++    let file = dir.join("AGENTS.md");
++    fs::write(&file, "secret")?;
++    fs::write(dir.join("CLAUDE.md"), "fallback must not be read")?;
++    let selected = select(&dir, "AGENTS.md")?;
++    fs::set_permissions(&file, fs::Permissions::from_mode(0))?;
++    let result = read(&dir, &selected);
++    fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
++    assert!(result.is_err_and(|e| e.starts_with("ContextPermissionDenied")));
++    fs::remove_file(&file)?;
++    symlink("/tmp/outside-context-missing", &file)?;
++    assert!(select(&dir, "AGENTS.md").is_err());
++    assert!(write(&dir, &selected, "bad").is_err());
++    fs::remove_dir_all(dir)?;
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/pi_usage.rs b/src-tauri/crates/polaris-kernel/src/provider/pi_usage.rs
+index e645cc9..f5948d2 100644
+--- a/src-tauri/crates/polaris-kernel/src/provider/pi_usage.rs
++++ b/src-tauri/crates/polaris-kernel/src/provider/pi_usage.rs
+@@ -4,6 +4,9 @@ use super::*;
+ pub struct Row {
+     pub date: String,
+     pub provider: String,
++    #[serde(default)]
++    pub model: String,
++    pub price_available: Option<bool>,
+     pub request_id: String,
+     pub legacy_message_id: Option<String>,
+     pub usage: crate::chat::backend::pi::protocol::Usage,
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/usage.rs b/src-tauri/crates/polaris-kernel/src/provider/usage.rs
+index 2d24b64..7047954 100644
+--- a/src-tauri/crates/polaris-kernel/src/provider/usage.rs
++++ b/src-tauri/crates/polaris-kernel/src/provider/usage.rs
+@@ -2,38 +2,12 @@ use super::*;
+ 
+ // ───────────────────────── Commands: 用量看板 ─────────────────────────
+ 
+-#[derive(Debug, Clone, Default, Serialize)]
+-#[serde(rename_all = "camelCase")]
+-pub struct TokenBucket {
+-    pub input: u64,
+-    pub output: u64,
+-    pub cache_read: u64,
+-    pub cache_creation: u64,
+-    pub total: u64,
+-    pub requests: u64,
+-    pub cost: f64,
+-}
+-
+-impl TokenBucket {
+-    fn add(&mut self, u: &Usage, cost: f64) {
+-        self.input += u.input;
+-        self.output += u.output;
+-        self.cache_read += u.cache_read;
+-        self.cache_creation += u.cache_creation;
+-        self.total += u.input + u.output + u.cache_read + u.cache_creation;
+-        self.requests += 1;
+-        self.cost += cost;
+-    }
+-}
+-
+-#[derive(Debug, Clone, Serialize)]
+-#[serde(rename_all = "camelCase")]
+-pub struct DailyUsage {
+-    pub date: String,
+-    pub label: String,
+-    pub total: u64,
+-    pub cost: f64,
+-}
++#[path = "usage_costs.rs"]
++mod costs;
++#[path = "usage_prices.rs"]
++mod prices;
++pub use costs::{TokenBucket, DailyUsage};
++use prices::line_cost;
+ 
+ #[derive(Debug, Clone, Serialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -53,42 +27,6 @@ struct Usage {
+     cache_creation: u64,
+ }
+ 
+-/// 模型 → (input, output, cache_write, cache_read) USD / 1M tokens。估算用。
+-fn model_price(model: &str) -> (f64, f64, f64, f64) {
+-    let m = model.to_ascii_lowercase();
+-    if m.contains("opus") {
+-        (15.0, 75.0, 18.75, 1.5)
+-    } else if m.contains("haiku") {
+-        (0.8, 4.0, 1.0, 0.08)
+-    } else if m.contains("sonnet") {
+-        (3.0, 15.0, 3.75, 0.3)
+-    } else if m.contains("gpt") || m.contains("codex") || m.starts_with("o1") || m.starts_with("o3")
+-    {
+-        (1.25, 10.0, 1.5625, 0.125)
+-    } else if m.contains("gemini") {
+-        (1.25, 10.0, 1.625, 0.31)
+-    } else if m.contains("deepseek") {
+-        (0.27, 1.1, 0.027, 0.027)
+-    } else if m.contains("glm") {
+-        (0.6, 2.2, 0.11, 0.11)
+-    } else if m.contains("kimi") || m.contains("moonshot") {
+-        (0.6, 2.5, 0.15, 0.15)
+-    } else if m.contains("qwen") || m.contains("minimax") {
+-        (0.4, 1.2, 0.08, 0.08)
+-    } else {
+-        (3.0, 15.0, 3.75, 0.3) // 未知 → Sonnet 档
+-    }
+-}
+-
+-fn line_cost(u: &Usage, model: &str) -> f64 {
+-    let (pin, pout, pcw, pcr) = model_price(model);
+-    (u.input as f64 * pin
+-        + u.output as f64 * pout
+-        + u.cache_creation as f64 * pcw
+-        + u.cache_read as f64 * pcr)
+-        / 1_000_000.0
+-}
+-
+ // command(async): WalkDir 全量遍历 ~/.claude/projects 并逐行解析 jsonl(一年后可达
+ // 数百 MB), 同步命令会钉住 UI 主线程(v1.5.2 同族问题)。属性形式挪到工作线程,
+ // fn 保持同步签名(server dispatch 直调不受影响)。
+@@ -103,8 +41,13 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+     if let Some(d) = private_claude_home().map(|d| d.join("projects")) {
+         dirs.push(d);
+     }
+-    dirs.retain(|d| d.exists());
+     let pi_dir = credential_file::provider_store_path().and_then(|p| p.parent().map(|p| p.join("pi-usage")));
++    summarize(dirs, pi_dir)
++}
++
++fn summarize(mut dirs: Vec<PathBuf>, pi_dir: Option<PathBuf>) -> Result<UsageSummary, String> {
++    let price_rules = std::sync::Arc::new(prices::load()?);
++    dirs.retain(|d| d.exists());
+     if dirs.is_empty() && !pi_dir.as_ref().is_some_and(|p| p.exists()) {
+         return Ok(empty_summary());
+     }
+@@ -124,7 +67,7 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+         trend_window.push((s, label));
+     }
+     let trend_set: HashSet<String> = trend_window.iter().map(|(s, _)| s.clone()).collect();
+-    let mut by_day: HashMap<String, (u64, f64)> = HashMap::new();
++    let mut by_day: HashMap<String, TokenBucket> = HashMap::new();
+ 
+     let mut today = TokenBucket::default();
+     let mut week = TokenBucket::default();
+@@ -158,7 +101,9 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+         date: String,
+         usage: Usage,
+         cost: f64,
+-        line_tokens: u64,
++        has_price: bool,
++        source: String,
++        model: String,
+     }
+ 
+     // 并发宽度:默认按核数取(2~8)。`POLARIS_USAGE_SCAN_PAR=1` 可退回单线程 ——
+@@ -179,6 +124,7 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+     let year_cut_shared = std::sync::Arc::new(year_cut.clone());
+     let mut handles = Vec::with_capacity(workers);
+     for _ in 0..workers {
++        let price_rules = std::sync::Arc::clone(&price_rules);
+         let files = std::sync::Arc::clone(&files);
+         let cursor = std::sync::Arc::clone(&cursor);
+         let year_cut = std::sync::Arc::clone(&year_cut_shared);
+@@ -191,7 +137,7 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+                     continue;
+                 };
+                 let reader = BufReader::new(file);
+-                parse_lines(reader, &year_cut, &mut out);
++                parse_lines(reader, &year_cut, &price_rules, &mut out);
+             }
+             out
+         }));
+@@ -203,7 +149,9 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+             let u = Usage { input: row.usage.input as u64, output: row.usage.output as u64,
+                 cache_read: row.usage.cache_read as u64, cache_creation: row.usage.cache_write as u64 };
+             records.push(Rec { msg_id: Some(row.dedup_key()), date: row.date,
+-                line_tokens: u.input + u.output + u.cache_read + u.cache_creation,
++                // agentd snapshots the model's pricing; absent legacy flags stay unknown, even with a cost.
++                has_price: row.price_available == Some(true),
++                source: format!("pi:{}", row.provider), model: row.model,
+                 cost: row.usage.cost.total, usage: u });
+         }
+     }
+@@ -219,30 +167,28 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+                 continue;
+             }
+         }
+-        let (u, cost, date, line_tokens) = (r.usage, r.cost, r.date, r.line_tokens);
++        let (u, cost, date) = (r.usage, r.cost, r.date);
+         if date.as_str() >= year_cut.as_str() {
+-            year.add(&u, cost);
++            year.add(&u, cost, r.has_price, &r.source, &r.model);
+             if date.as_str() >= month_cut.as_str() {
+-                month.add(&u, cost);
++                month.add(&u, cost, r.has_price, &r.source, &r.model);
+                 if date.as_str() >= week_cut.as_str() {
+-                    week.add(&u, cost);
++                    week.add(&u, cost, r.has_price, &r.source, &r.model);
+                     if date == today_str {
+-                        today.add(&u, cost);
++                        today.add(&u, cost, r.has_price, &r.source, &r.model);
+                     }
+                 }
+             }
+         }
+         if trend_set.contains(&date) {
+-            let e = by_day.entry(date).or_insert((0, 0.0));
+-            e.0 += line_tokens;
+-            e.1 += cost;
++            by_day.entry(date).or_default().add(&u, cost, r.has_price, &r.source, &r.model);
+         }
+     }
+ 
+     // 逐行解析(从原地内联的循环原样搬出,判定顺序与取值一字未改)。
+     // `year_cut`:一年窗口之外的行对四个桶和 14 天趋势都无贡献,直接在解析阶段丢掉,
+     // 省下把它们搬进汇总阶段的内存与去重成本(旧实现是一路带到最后才被条件过滤掉)。
+-    fn parse_lines<R: BufRead>(reader: R, year_cut: &str, out: &mut Vec<Rec>) {
++    fn parse_lines<R: BufRead>(reader: R, year_cut: &str, prices: &[prices::PriceRule], out: &mut Vec<Rec>) {
+         for line in reader.lines() {
+             let Ok(line) = line else { continue };
+             if line.trim().is_empty() || !line.contains("\"usage\"") {
+@@ -286,7 +232,7 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+                 continue;
+             }
+             let model = msg.get("model").and_then(|x| x.as_str()).unwrap_or("");
+-            let cost = line_cost(&u, model);
++            let cost = line_cost(&u, model, prices);
+ 
+             let date = v
+                 .get("timestamp")
+@@ -308,8 +254,10 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+                     .map(|s| format!("request:{date}:{s}")),
+                 date,
+                 usage: u,
+-                cost,
+-                line_tokens,
++                cost: cost.unwrap_or(0.0),
++                has_price: cost.is_some(),
++                source: "claude-history".into(),
++                model: model.into(),
+             });
+         }
+     }
+@@ -317,12 +265,14 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
+     let daily: Vec<DailyUsage> = trend_window
+         .into_iter()
+         .map(|(date, label)| {
+-            let (total, cost) = by_day.get(&date).copied().unwrap_or((0, 0.0));
++            let bucket = by_day.remove(&date).unwrap_or_default();
+             DailyUsage {
+                 date,
+                 label,
+-                total,
+-                cost,
++                total: bucket.total,
++                cost: bucket.cost,
++                unpriced_requests: bucket.unpriced_requests,
++                has_unknown_costs: bucket.has_unknown_costs,
+             }
+         })
+         .collect();
+@@ -347,3 +297,7 @@ fn empty_summary() -> UsageSummary {
+         daily: Vec::new(),
+     }
+ }
++
++#[cfg(test)]
++#[path = "usage_tests.rs"]
++mod tests;
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/usage_costs.rs b/src-tauri/crates/polaris-kernel/src/provider/usage_costs.rs
+new file mode 100644
+index 0000000..407038c
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/provider/usage_costs.rs
+@@ -0,0 +1,101 @@
++use super::Usage;
++use serde::Serialize;
++
++#[derive(Debug, Clone, Default, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ModelCost {
++    pub source: String,
++    pub model: String,
++    pub has_price: bool,
++    pub priced_requests: u64,
++    pub unpriced_requests: u64,
++    pub cost: f64,
++}
++
++#[derive(Debug, Clone, Default, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct TokenBucket {
++    pub input: u64,
++    pub output: u64,
++    pub cache_read: u64,
++    pub cache_creation: u64,
++    pub total: u64,
++    pub requests: u64,
++    /// Recorded/estimated priced portion, retained even when the total is incomplete.
++    pub cost: f64,
++    pub unpriced_requests: u64,
++    pub has_unknown_costs: bool,
++    pub models: Vec<ModelCost>,
++}
++
++impl TokenBucket {
++    pub(super) fn add(&mut self, u: &Usage, cost: f64, has_price: bool, source: &str, model: &str) {
++        self.input += u.input;
++        self.output += u.output;
++        self.cache_read += u.cache_read;
++        self.cache_creation += u.cache_creation;
++        self.total += u.input + u.output + u.cache_read + u.cache_creation;
++        self.requests += 1;
++        self.cost += cost;
++        if !has_price { self.unpriced_requests += 1; self.has_unknown_costs = true; }
++        let index = match self.models.iter().position(|m| m.source == source && m.model == model) {
++            Some(index) => index,
++            None => {
++                self.models.push(ModelCost { source: source.into(), model: model.into(), ..Default::default() });
++                self.models.len() - 1
++            }
++        };
++        let row = &mut self.models[index];
++        row.cost += cost;
++        if has_price { row.priced_requests += 1; } else { row.unpriced_requests += 1; }
++        row.has_price = row.unpriced_requests == 0;
++    }
++}
++
++#[derive(Debug, Clone, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct DailyUsage {
++    pub date: String,
++    pub label: String,
++    pub total: u64,
++    pub cost: f64,
++    pub unpriced_requests: u64,
++    pub has_unknown_costs: bool,
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn complete_mixed_and_unknown_costs_preserve_priced_subtotal() {
++        let usage = Usage { input: 1_000_000, output: 0, cache_read: 0, cache_creation: 0 };
++        for flags in [[true, true], [true, false], [false, false]] {
++            let mut bucket = TokenBucket::default();
++            for priced in flags {
++                bucket.add(&usage, if priced { 3.0 } else { 0.0 }, priced, "test", "model");
++            }
++            let unknown = flags.iter().filter(|p| !**p).count() as u64;
++            assert_eq!(bucket.unpriced_requests, unknown);
++            assert_eq!(bucket.has_unknown_costs, unknown != 0);
++            assert_eq!(bucket.models[0].has_price, unknown == 0);
++            assert_eq!(bucket.models[0].unpriced_requests, unknown);
++            assert_eq!(bucket.cost, (2 - unknown) as f64 * 3.0);
++            assert_eq!(bucket.requests, 2);
++        }
++    }
++    #[test]
++    fn explicit_free_prices_are_known_and_unknown_models_are_not_sonnet() -> Result<(), String> {
++        let prices = super::super::prices::parse(include_str!("usage_prices.json"))?;
++        let usage = Usage { input: 100, output: 20, cache_read: 0, cache_creation: 0 };
++        assert!(super::super::prices::line_cost(&usage, "unlisted-model", &prices).is_none());
++        assert!(super::super::prices::line_cost(&usage, "claude-sonnet", &prices).is_some());
++        let mut bucket = TokenBucket::default();
++        bucket.add(&usage, 0.0, true, "pi", "free");
++        bucket.add(&usage, 1.25, false, "pi", "historical-partial");
++        assert!(bucket.models[0].has_price);
++        assert!(!bucket.models[1].has_price);
++        assert_eq!(bucket.unpriced_requests, 1);
++        assert_eq!(bucket.cost, 1.25);
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/usage_prices.json b/src-tauri/crates/polaris-kernel/src/provider/usage_prices.json
+new file mode 100644
+index 0000000..b63c17e
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/provider/usage_prices.json
+@@ -0,0 +1,11 @@
++[
++  {"contains": ["opus"], "rates": [15, 75, 18.75, 1.5]},
++  {"contains": ["haiku"], "rates": [0.8, 4, 1, 0.08]},
++  {"contains": ["sonnet"], "rates": [3, 15, 3.75, 0.3]},
++  {"contains": ["gpt", "codex"], "prefixes": ["o1", "o3"], "rates": [1.25, 10, 1.5625, 0.125]},
++  {"contains": ["gemini"], "rates": [1.25, 10, 1.625, 0.31]},
++  {"contains": ["deepseek"], "rates": [0.27, 1.1, 0.027, 0.027]},
++  {"contains": ["glm"], "rates": [0.6, 2.2, 0.11, 0.11]},
++  {"contains": ["kimi", "moonshot"], "rates": [0.6, 2.5, 0.15, 0.15]},
++  {"contains": ["qwen", "minimax"], "rates": [0.4, 1.2, 0.08, 0.08]}
++]
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/usage_prices.rs b/src-tauri/crates/polaris-kernel/src/provider/usage_prices.rs
+new file mode 100644
+index 0000000..ee4a054
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/provider/usage_prices.rs
+@@ -0,0 +1,63 @@
++//! Legacy estimates are configurable; absence of a matching rule means unknown.
++use super::Usage;
++use serde::Deserialize;
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(super) struct PriceRule {
++    #[serde(default)]
++    contains: Vec<String>,
++    #[serde(default)]
++    prefixes: Vec<String>,
++    /// USD per million: input, output, cache write, cache read.
++    rates: [f64; 4],
++}
++
++pub(super) fn parse(text: &str) -> Result<Vec<PriceRule>, String> {
++    let rules: Vec<PriceRule> = serde_json::from_str(text).map_err(|e| format!("UsagePricesInvalid: {e}"))?;
++    for rule in &rules {
++        if rule.rates.iter().any(|n| !n.is_finite() || *n < 0.0)
++            || rule.contains.iter().chain(&rule.prefixes).any(|s| s.trim().is_empty())
++            || (rule.contains.is_empty() && rule.prefixes.is_empty()) {
++            return Err("UsagePricesInvalid: nonnegative rates and nonempty matchers required".into());
++        }
++    }
++    Ok(rules)
++}
++
++pub(super) fn load() -> Result<Vec<PriceRule>, String> {
++    let text = match std::env::var_os("POLARIS_USAGE_PRICES") {
++        Some(path) => std::fs::read_to_string(path).map_err(|e| format!("UsagePricesReadFailed: {e}"))?,
++        None => include_str!("usage_prices.json").into(),
++    };
++    parse(&text)
++}
++
++pub(super) fn line_cost(u: &Usage, model: &str, rules: &[PriceRule]) -> Option<f64> {
++    let model = model.to_ascii_lowercase();
++    let rule = rules.iter().find(|rule| {
++        rule.contains.iter().any(|s| model.contains(&s.to_ascii_lowercase()))
++            || rule.prefixes.iter().any(|s| model.starts_with(&s.to_ascii_lowercase()))
++    })?;
++    let [input, output, write, read] = rule.rates;
++    Some((u.input as f64 * input + u.output as f64 * output
++        + u.cache_creation as f64 * write + u.cache_read as f64 * read) / 1_000_000.0)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn price_config_defaults_overrides_and_validation() -> Result<(), String> {
++        assert!(!parse(include_str!("usage_prices.json"))?.is_empty());
++        let usage = Usage { input: 1_000_000, output: 0, cache_read: 0, cache_creation: 0 };
++        let rules = parse(r#"[{"contains":["custom"],"rates":[2,3,0,0]}]"#)?;
++        assert_eq!(line_cost(&usage, "CUSTOM-model", &rules), Some(2.0));
++        assert_eq!(line_cost(&usage, "unknown", &rules), None);
++        for invalid in [r#"[{"contains":[""],"rates":[1,2,3,4]}]"#,
++            r#"[{"prefixes":["model"],"rates":[-1,2,3,4]}]"#, r#"{}"#] {
++            assert!(parse(invalid).is_err());
++        }
++        Ok(())
++    }
++}
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/usage_tests.rs b/src-tauri/crates/polaris-kernel/src/provider/usage_tests.rs
+new file mode 100644
+index 0000000..f4658f8
+--- /dev/null
++++ b/src-tauri/crates/polaris-kernel/src/provider/usage_tests.rs
+@@ -0,0 +1,91 @@
++use super::*;
++
++#[test]
++fn pi_aggregation_complete_partial_unknown_and_legacy_records() -> Result<(), String> {
++    let dir = std::env::temp_dir().join(format!("usage-contract-{}", std::process::id()));
++    let date = ymd_string(today_utc_days());
++    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
++    let run = (|| {
++        for flags in [[true, true], [true, false], [false, false]] {
++            for (i, priced) in flags.iter().enumerate() {
++                let row = json!({ "date": date, "provider": "custom", "model": format!("model-{i}"),
++                    "requestId": format!("request-{i}"), "priceAvailable": priced,
++                    "usage": { "input": 100, "output": 20, "cacheRead": 0, "cacheWrite": 0,
++                        "totalTokens": 120, "cost": { "input": 0, "output": 0, "cacheRead": 0,
++                            "cacheWrite": 0, "total": if *priced { 2.5 } else { 0.0 } } } });
++                fs::write(dir.join(format!("{i}.json")), row.to_string()).map_err(|e| e.to_string())?;
++            }
++            let summary = summarize(vec![], Some(dir.clone()))?;
++            let unknown = flags.iter().filter(|v| !**v).count() as u64;
++            for bucket in [&summary.today, &summary.week, &summary.month, &summary.year] {
++                assert_eq!(bucket.requests, 2);
++                assert_eq!(bucket.unpriced_requests, unknown);
++                assert_eq!(bucket.has_unknown_costs, unknown > 0);
++                assert_eq!(bucket.cost, (2 - unknown) as f64 * 2.5);
++                assert_eq!(bucket.models.len(), 2);
++            }
++            let daily = summary.daily.iter().find(|d| d.date == date).ok_or("missing today")?;
++            assert_eq!(daily.unpriced_requests, unknown);
++            assert_eq!(daily.cost, summary.today.cost);
++        }
++        // Pre-contract Pi rows have no evidence of completeness. Preserve their amount.
++        let path = dir.join("0.json");
++        let mut historical: Value = serde_json::from_str(&fs::read_to_string(&path)
++            .map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
++        historical.as_object_mut().ok_or("invalid fixture")?.remove("priceAvailable");
++        historical["usage"]["cost"]["total"] = json!(1.25);
++        fs::write(path, historical.to_string()).map_err(|e| e.to_string())?;
++        let summary = summarize(vec![], Some(dir.clone()))?;
++        assert_eq!(summary.today.cost, 1.25);
++        assert_eq!(summary.today.unpriced_requests, 2);
++        Ok(())
++    })();
++    let _ = fs::remove_dir_all(dir);
++    run
++}
++
++#[test]
++fn pi_price_flag_is_typed_optional_and_independent_of_amount() -> Result<(), String> {
++    let dir = std::env::temp_dir().join(format!("usage-price-flag-{}", std::process::id()));
++    let date = ymd_string(today_utc_days());
++    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
++    let run = (|| {
++        let path = dir.join("request.json");
++        for flag in [Some(true), Some(false), None] {
++            for cost in [0.0, 1.25] {
++                let mut row = json!({ "version": 1, "date": date, "provider": "custom", "model": "model",
++                    "requestId": "request", "usage": { "input": 100, "output": 20,
++                        "cacheRead": 0, "cacheWrite": 0, "totalTokens": 120,
++                        "cost": { "input": cost, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": cost } } });
++                if let Some(priced) = flag { row["priceAvailable"] = json!(priced); }
++                fs::write(&path, row.to_string()).map_err(|e| e.to_string())?;
++                let rows = super::super::pi_usage::read(&dir)?;
++                assert_eq!(rows.len(), 1);
++                assert_eq!(rows[0].price_available, flag);
++                let summary = summarize(vec![], Some(dir.clone()))?;
++                let unknown = u64::from(flag != Some(true));
++                for bucket in [&summary.today, &summary.week, &summary.month, &summary.year] {
++                    assert_eq!(bucket.requests, 1);
++                    assert_eq!(bucket.total, 120);
++                    assert_eq!(bucket.cost, cost);
++                    assert_eq!(bucket.unpriced_requests, unknown);
++                    assert_eq!(bucket.has_unknown_costs, unknown != 0);
++                    let model = bucket.models.first().ok_or("missing model")?;
++                    assert_eq!(model.has_price, flag == Some(true));
++                    assert_eq!(model.priced_requests, 1 - unknown);
++                    assert_eq!(model.unpriced_requests, unknown);
++                }
++                let daily = summary.daily.iter().find(|d| d.date == date).ok_or("missing today")?;
++                assert_eq!(daily.cost, cost);
++                assert_eq!(daily.unpriced_requests, unknown);
++                assert_eq!(daily.has_unknown_costs, unknown != 0);
++                row["priceAvailable"] = json!("true");
++                fs::write(&path, row.to_string()).map_err(|e| e.to_string())?;
++                assert!(matches!(summarize(vec![], Some(dir.clone())), Err(error) if error == "PiUsageInvalid"));
++            }
++        }
++        Ok(())
++    })();
++    let _ = fs::remove_dir_all(dir);
++    run
++}
+diff --git a/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs b/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs
+index 0fdb9a4..381d615 100644
+--- a/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs
++++ b/src-tauri/crates/polaris-kernel/tests/fixtures/fake-agentd.mjs
+@@ -7,6 +7,7 @@ const record = recordIndex < 0 ? undefined : process.argv[recordIndex + 1];
+ if (process.argv.includes('--crash-start')) process.exit(7);
+ const sessions = new Map();
+ let applied;
++let experts = { enabled: false, prompt: "deployment-prompt" };
+ async function gate(option) {
+   const index = process.argv.indexOf(option);
+   if (index < 0) return;
+@@ -66,7 +67,7 @@ async function dispatch({ id, method, params: p }) {
+     case 'ping':
+       if (process.argv.includes('--ping-hang')) return;
+       return response(id, { status: 'ok', sessions: sessions.size, version: '0.1.0', piVersion: '1.0.4',
+-        usagePersistFailures: 7, protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 6 });
++        usagePersistFailures: 7, experts, protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 6 });
+     case 'models.catalog':
+       await gate('--gate-catalog');
+       return response(id, { models: [] });
+@@ -104,6 +105,7 @@ async function dispatch({ id, method, params: p }) {
+     case 'config.apply':
+       await gate('--gate-apply');
+       applied = p.config;
++      if (p.config?.experts) experts = p.config.experts;
+       return response(id, { applied: true, reopenRequired: [...sessions.keys()] });
+     case 'steer': case 'followUp': return response(id, { turnId: sessions.get(p.sessionId)?.turn, disposition: 'queued' });
+     default: return error(id, 'INVALID_REQUEST');
+diff --git a/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256 b/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256
+index 1a65714..8379d61 100644
+--- a/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256
++++ b/src-tauri/crates/polaris-kernel/tests/fixtures/protocol-schema.sha256
+@@ -1,2 +1,2 @@
+-fd3fd8b6b02276f7bab24865b2832eb2df3c757d60a757906483e8e93ab9fcf5
++0ff1ce56e064891f9862a693d6591d06b00c1ee9fd819c6af2474b0a342258a9
+ 9428de7fcc61f782205d49b7c0dfe539993eb7a7d8ab9f485e576f614dbf10c8
+diff --git a/src-tauri/src/apihub/chat_services.rs b/src-tauri/src/apihub/chat_services.rs
+index 1ac78f4..4d86279 100644
+--- a/src-tauri/src/apihub/chat_services.rs
++++ b/src-tauri/src/apihub/chat_services.rs
+@@ -40,6 +40,15 @@ fn dispatch_chat_and_services(cmd: &str, a: &Args, app: AppHandle) -> Result<Val
+         "project_run" => ok(project::project_run(app, req_str(a, "root")?)?),
+         "project_stop" => ok(project::project_stop(app, req_str(a, "root")?)?),
+ 
++        "context_file_metadata" => ok(claude_md::context::context_file_metadata(
++            req_str(a, "projectId")?, opt_str(a, "createFile"))?),
++        "context_file_read" => ok(claude_md::context::context_file_read(
++            req_str(a, "projectId")?, serde_json::from_value(a.get("selection").cloned()
++                .ok_or("Missing selection")?).map_err(|e| format!("ContextSelectionInvalid: {e}"))?)?),
++        "context_file_write" => ok(claude_md::context::context_file_write(
++            req_str(a, "projectId")?, serde_json::from_value(a.get("selection").cloned()
++                .ok_or("Missing selection")?).map_err(|e| format!("ContextSelectionInvalid: {e}"))?,
++            req_str(a, "content")?)?),
+         // ── CLAUDE.md ──
+         "claude_md_list_projects" => ok(claude_md::claude_md_list_projects()),
+         "claude_md_kb_info" => ok(claude_md::claude_md_kb_info()),
+diff --git a/src-tauri/src/apihub/engines.rs b/src-tauri/src/apihub/engines.rs
+index db87b8d..49d0f70 100644
+--- a/src-tauri/src/apihub/engines.rs
++++ b/src-tauri/src/apihub/engines.rs
+@@ -301,6 +301,9 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
+         )?),
+ 
+         // ── Expert / 专家团（Docker/web 版同样要能用专家市场、向导推荐、一键入驻）──
++        "expert_enabled_get" => ok(expert::settings::expert_enabled_get()?),
++        "expert_enabled_set" => ok(expert::settings::expert_enabled_set(
++            a.get("enabled").and_then(Value::as_bool).ok_or("ExpertEnabledInvalid: expected boolean")?)?),
+         "expert_list" => ok(expert::expert_list()),
+         "expert_list_by_group" => ok(expert::expert_list_by_group(req_str(a, "group")?)),
+         "expert_groups" => ok(expert::expert_groups()),
+diff --git a/src-tauri/src/desktop_commands.rs b/src-tauri/src/desktop_commands.rs
+index f7ea0d0..e47427d 100644
+--- a/src-tauri/src/desktop_commands.rs
++++ b/src-tauri/src/desktop_commands.rs
+@@ -132,6 +132,8 @@ tauri::generate_handler![
+             persona::persona_list,
+             persona::persona_apply,
+             // 百人专家团
++            expert::settings::expert_enabled_get,
++            expert::settings::expert_enabled_set,
+             expert::expert_list,
+             expert::expert_list_by_group,
+             expert::expert_groups,
+@@ -196,6 +198,9 @@ tauri::generate_handler![
+             project::project_run,
+             project::project_stop,
+             // CLAUDE.md
++            claude_md::context::context_file_metadata,
++            claude_md::context::context_file_read,
++            claude_md::context::context_file_write,
+             claude_md::claude_md_list_projects,
+             claude_md::claude_md_kb_info,
+             claude_md::claude_md_read,
+diff --git a/src-tauri/src/expert.rs b/src-tauri/src/expert.rs
+index eed0e82..4c74d58 100644
+--- a/src-tauri/src/expert.rs
++++ b/src-tauri/src/expert.rs
+@@ -13,6 +13,8 @@ mod teams;
+ 
+ pub use teams::ExpertTeam;
+ 
++pub mod settings;
++
+ use chrono::Utc;
+ use serde::{Deserialize, Serialize};
+ use std::collections::HashMap;
+diff --git a/src-tauri/src/expert/settings.rs b/src-tauri/src/expert/settings.rs
+new file mode 100644
+index 0000000..d8a237c
+--- /dev/null
++++ b/src-tauri/src/expert/settings.rs
+@@ -0,0 +1,18 @@
++use serde::Serialize;
++
++#[derive(Serialize)]
++pub struct ExpertState { enabled: bool }
++
++#[cfg_attr(feature = "desktop", tauri::command(async))]
++pub fn expert_enabled_get() -> Result<ExpertState, String> {
++    polaris_kernel::chat::backend::selected()
++        .and_then(|backend| backend.experts_enabled(None))
++        .map(|enabled| ExpertState { enabled }).map_err(|e| e.to_string())
++}
++
++#[cfg_attr(feature = "desktop", tauri::command(async))]
++pub fn expert_enabled_set(enabled: bool) -> Result<ExpertState, String> {
++    polaris_kernel::chat::backend::selected()
++        .and_then(|backend| backend.experts_enabled(Some(enabled)))
++        .map(|enabled| ExpertState { enabled }).map_err(|e| e.to_string())
++}

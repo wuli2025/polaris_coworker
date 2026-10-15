@@ -1,0 +1,2090 @@
+diff --git a/src/App.vue b/src/App.vue
+index 069a32b..6a37eaa 100644
+--- a/src/App.vue
++++ b/src/App.vue
+@@ -187,7 +187,7 @@ onMounted(() => {
+   void listen<{ message?: string }>("provider://failover", (p) => {
+     if (p?.message) toast.info(p.message);
+   });
+-  // 环境静默托管(后端 doctor::autopilot):缺 Claude Code 时后台自己装,用户**不用点任何东西**。
++  // 环境状态由 doctor::autopilot 播报；Pi 仅诊断，安装动作由兼容后端守卫。
+   // 这里只做**被动播报**——装的时候说一声、装完/失败给个结果,绝不弹窗、不要求操作。
+   // 绝大多数启动什么都不缺 → 后端根本不发事件,这里全程静默。
+   void listen<{ running?: boolean; finished?: boolean; ok?: boolean; step?: string; message?: string }>(
+diff --git a/src/components/AddProviderModal.vue b/src/components/AddProviderModal.vue
+index 0ae2914..c18db7e 100644
+--- a/src/components/AddProviderModal.vue
++++ b/src/components/AddProviderModal.vue
+@@ -1,4 +1,7 @@
+ <script setup lang="ts">
++import { runtimeCopy as copy } from "../features/runtime/copy";
++import { protocolOptions, validateProviderConfig } from "../features/runtime/providerConfig";
++import ProviderModelHelp from "../features/runtime/components/ProviderModelHelp.vue";
+ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+ import { X, Check, Eye, EyeOff, Sparkles, Link2 } from "@lucide/vue";
+ import SearchGlass from "./icons/SearchGlass.vue";
+@@ -24,7 +27,7 @@ const form = reactive({
+   websiteUrl: "",
+   tokenField: "ANTHROPIC_AUTH_TOKEN",
+   /** "" = Anthropic 兼容(直连); "openai" = OpenAI 协议(经 Polaris 本地路由翻译转发) */
+-  protocol: "" as "" | "openai",
++  protocol: "" as string,
+   baseUrl: "",
+   apiKey: "",
+   model: "",
+@@ -89,7 +92,7 @@ function applyProvider(p: ProviderView) {
+   form.note = p.note || "";
+   form.websiteUrl = p.websiteUrl || "";
+   form.tokenField = p.tokenField || "ANTHROPIC_AUTH_TOKEN";
+-  form.protocol = p.protocol === "openai" ? "openai" : "";
++  form.protocol = p.protocol || "";
+   form.baseUrl = p.baseUrl || "";
+   form.apiKey = p.authToken || "";
+   form.model =
+@@ -136,7 +139,7 @@ const isOpenAiProto = computed(() => form.protocol === "openai");
+ // OpenAI 协议(本地路由)供应商: 模型字段留空时自动预填默认 gpt5.6-sol 并钉四档,
+ // 用户无需手输即得正确模型名; 已有钉选值则尊重, 不覆盖。
+ watch(isOpenAiProto, (on) => {
+-  if (on && !form.model.trim()) {
++  if (store.legacyActions && on && !form.model.trim()) {
+     form.model = DEFAULT_OPENAI_MODEL;
+     onModel();
+   }
+@@ -272,6 +275,8 @@ async function submit() {
+     localErr.value = "OpenAI 协议供应商必须填写请求地址(如 https://api.openai.com/v1)";
+     return;
+   }
++  const configError = validateProviderConfig(cfg, form.protocol);
++  if (configError) { localErr.value = configError; return; }
+   saving.value = true;
+   const id = await store.save({
+     id: form.id,
+@@ -313,7 +318,7 @@ function dotColor(p: ProviderView) {
+         <!-- tabs -->
+         <div class="m-tabs">
+           <button class="m-tab" :class="{ on: tab === 'claude' }" @click="tab = 'claude'">
+-            Claude 供应商
++            API 供应商
+           </button>
+           <button class="m-tab" :class="{ on: tab === 'universal' }" @click="tab = 'universal'">
+             统一供应商
+@@ -322,7 +327,7 @@ function dotColor(p: ProviderView) {
+ 
+         <div class="m-body">
+           <p v-if="tab === 'universal'" class="universal-note">
+-            统一供应商会同步到 Claude / Codex / Gemini —— Polaris 当前对 <b>Claude Code</b> 生效，配置方式一致。
++            {{ copy.providerScope }}
+           </p>
+ 
+           <!-- 预设网格 -->
+@@ -355,7 +360,7 @@ function dotColor(p: ProviderView) {
+ 
+           <!-- OAuth 提示 -->
+           <div v-if="isOauth" class="oauth-note">
+-            <b>{{ form.name }}</b> 说 OpenAI 协议，需 OAuth 授权 + 翻译代理才能直连 Claude Code（轻量版未内置路由）。Codex 可在左下角「供应商坞」用官方 CLI 授权。
++            {{ copy.login }} {{ copy.credentials }}
+           </div>
+ 
+           <!-- 表单 -->
+@@ -403,17 +408,11 @@ function dotColor(p: ProviderView) {
+ 
+             <label class="field">
+               <span class="f-lab">上游协议</span>
+-              <div v-if="canPickProtocol" class="field-toggle">
+-                <button :class="{ sel: form.protocol === '' }" @click="form.protocol = ''">Anthropic 兼容 · 直连</button>
+-                <button :class="{ sel: form.protocol === 'openai' }" @click="form.protocol = 'openai'">OpenAI 协议 · 本地路由</button>
+-              </div>
+-              <p v-else class="hint">
+-                {{ isOpenAiProto ? "OpenAI 协议 · 请求经 Polaris 本地路由翻译转发" : "Anthropic 兼容 · Claude Code 直连该端点" }}
+-              </p>
+-              <p v-if="canPickProtocol && isOpenAiProto" class="hint">
+-                💡 GPT 等只说 OpenAI 协议的端点选这档：Claude Code 把请求发到 Polaris 本地路由
+-                (127.0.0.1)，由它实时翻译并转发到下方地址——同 cc-switch 的本地转发，改 Key/换模型即刻生效。
+-              </p>
++              <select v-if="canPickProtocol" v-model="form.protocol">
++                <option v-for="p in (store.legacyActions ? protocolOptions.slice(0, 2) : protocolOptions)" :key="p.value" :value="p.value">{{ p.label }}</option>
++              </select>
++              <p v-else class="hint">{{ form.protocol || 'anthropic' }}</p>
++              <p class="hint">{{ store.legacyActions ? copy.legacyScope : copy.protocol }}</p>
+             </label>
+ 
+             <label class="field">
+@@ -433,17 +432,13 @@ function dotColor(p: ProviderView) {
+               <input
+                 v-model="form.model"
+                 list="model-presets"
+-                :placeholder="isOpenAiProto ? '默认 gpt5.6-sol（可下拉选择，或手输其他模型名）' : '例如：MiniMax-M3（留空则用 Claude 默认模型名）'"
++                :placeholder="copy.modelPlaceholder"
+                 @input="onModel"
+               />
+               <datalist id="model-presets">
+                 <option v-for="m in MODEL_PRESETS" :key="m" :value="m" />
+               </datalist>
+-              <p class="hint">
+-                💡 第三方供应商通常需指定自家模型名。填一个值会同时钉主模型与 Opus/Sonnet/Haiku
+-                三档默认，连后台小任务也走它，避免回落到最低档。OpenAI 协议默认已预填
+-                <code>gpt5.6-sol</code>，无需手输。
+-              </p>
++              <ProviderModelHelp />
+             </label>
+ 
+             <!-- 配置 JSON + 开关 -->
+@@ -451,7 +446,7 @@ function dotColor(p: ProviderView) {
+               <span class="f-lab">配置 JSON</span>
+               <button class="fmt-btn" @click="formatJson"><Sparkles :size="12" :stroke-width="1.8" /> 格式化</button>
+             </div>
+-            <div class="toggles">
++            <div v-if="store.legacyActions" class="toggles">
+               <label v-for="t in toggleDefs" :key="t.key" class="tg">
+                 <input
+                   type="checkbox"
+diff --git a/src/components/ClaudeMdPanel.vue b/src/components/ClaudeMdPanel.vue
+index c8f1e71..93fcc49 100644
+--- a/src/components/ClaudeMdPanel.vue
++++ b/src/components/ClaudeMdPanel.vue
+@@ -1,4 +1,11 @@
+ <script setup lang="ts">
++import ContextRuntimeNotice from "../features/runtime/components/ContextRuntimeNotice.vue";
++import ContextFileEditor from "../features/runtime/components/ContextFileEditor.vue";
++import { runtimeCopy as copy } from "../features/runtime/copy";
++import { useBackendStatus } from "../features/runtime/useBackendStatus";
++import { contextEditingAvailable } from "../features/runtime/contextPolicy";
++const { status, refreshBackend } = useBackendStatus();
++const editable = computed(() => contextEditingAvailable(status.value?.backend));
+ import { computed, onMounted, ref } from "vue";
+ import {
+   claudeMd,
+@@ -70,6 +77,8 @@ const selectedMeta = computed(() => {
+ });
+ 
+ async function refresh() {
++  await refreshBackend();
++  if (!editable.value) return;
+   loading.value = true;
+   // 用 allSettled + 超时：任一命令失败/卡住都不再让整个面板空转，且能在顶部看到原因。
+   const [psR, kbR, prR, metaR] = await Promise.allSettled([
+@@ -182,6 +191,7 @@ async function loadContent(area: ClaudeMdArea, projectId?: string) {
+ }
+ 
+ async function save() {
++  if (!editable.value) return;
+   if (!selected.value || !dirty.value) return;
+   saving.value = true;
+   message.value = null;
+@@ -225,10 +235,9 @@ onMounted(refresh);
+   <div class="cmd-root">
+     <div class="cmd-head">
+       <div>
+-        <div class="title">人格 · 项目的灵魂与专属知识库</div>
++        <div class="title">{{ copy.contextTitle }}</div>
+         <div class="sub">
+-          每个项目就是一个人格(它的 <code>CLAUDE.md</code>)。可一键套用预设人格,
+-          并绑定该人格的专属知识库范围。发消息前自动注入(身份+人格+时间+对应知识库)。
++          {{ copy.contextPriority }}
+         </div>
+       </div>
+       <button class="btn ghost" @click="refresh" :disabled="loading">
+@@ -236,7 +245,9 @@ onMounted(refresh);
+       </button>
+     </div>
+ 
+-    <div class="cmd-body">
++    <ContextFileEditor v-if="status?.backend === 'pi'" />
++    <ContextRuntimeNotice v-else-if="!editable" />
++    <div v-else class="cmd-body">
+       <!-- Left: list -->
+       <aside class="list">
+         <div class="grp-head">知识库 · 全局共享</div>
+diff --git a/src/components/EnvDoctor.vue b/src/components/EnvDoctor.vue
+index 11fe8ee..0b35910 100644
+--- a/src/components/EnvDoctor.vue
++++ b/src/components/EnvDoctor.vue
+@@ -1,4 +1,7 @@
+ <script setup lang="ts">
++import RuntimeDiagnostics from "../features/runtime/components/RuntimeDiagnostics.vue";
++import { legacyDoctorActions } from "../features/runtime/presentation";
++import { runtimeCopy as copy } from "../features/runtime/copy";
+ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
+ import {
+   envDoctor,
+@@ -28,6 +31,7 @@ const READY_FLAG = "polaris.env.ready.v1";
+ type Phase = "checking" | "ready-skip" | "panel";
+ const phase = ref<Phase>("checking");
+ const report = ref<EnvReport | null>(null);
++const legacy = computed(() => legacyDoctorActions(report.value));
+ 
+ // 安装 / 修复 / 更新 的进行态
+ const busyKind = ref<
+@@ -108,8 +112,8 @@ onBeforeUnmount(() => {
+ 
+ // 进入面板 / 跳过页且 Claude Code 已安装时, 自动静默检测一次更新
+ watch(phase, (p) => {
+-  if ((p === "panel" || p === "ready-skip") && isTauri) {
+-    if (report.value?.claude.found && !updateInfo.value && !checkingUpdate.value) {
++  if ((p === "panel" || p === "ready-skip") && report.value?.os !== "browser") {
++    if (legacy.value && report.value?.claude.found && !updateInfo.value && !checkingUpdate.value) {
+       checkClaudeUpdate();
+     }
+     if (report.value?.uv.found && !uvCache.value) {
+@@ -117,7 +121,7 @@ watch(phase, (p) => {
+     }
+     // 快速校验 (不发请求, ~1-3s) 在侧栏「环境」页自动跑一次。
+     // 启动关 (gate) 不自动跑: 那里要的是尽快放行, 不该为了一份诊断多等几秒。
+-    if (!props.gate && p === "panel" && !verify.value && !verifying.value) {
++    if ((!props.gate || !legacy.value) && !verify.value && !verifying.value) {
+       runVerify(false);
+     }
+   }
+@@ -130,7 +134,7 @@ async function runVerify(deep = false) {
+   if (verifying.value) return;
+   verifying.value = deep ? "deep" : "quick";
+   try {
+-    verify.value = await envDoctor.verify(deep);
++    verify.value = await envDoctor.verify(legacy.value && deep);
+   } catch (e) {
+     banner.value = { kind: "err", text: `深度校验失败：${String(e)}` };
+   } finally {
+@@ -157,7 +161,7 @@ async function finishInstall(ok: boolean, message: string) {
+   if (r.ready) localStorage.setItem(READY_FLAG, "1");
+   // 装好 / 更新完后重新检测版本, 让「更新」按钮翻成「已是最新」
+   updateInfo.value = null;
+-  if (r.claude.found) checkClaudeUpdate();
++  if (legacy.value && r.claude.found) checkClaudeUpdate();
+   // 刚装完 uv → 刷新缓存信息卡
+   if (justFinished === "uv") loadUvCache();
+   // 装/更新过之后旧的校验结论就作废了 (最典型: 刚装完那份可能与老的那份并存) → 重跑快速校验
+@@ -170,6 +174,7 @@ async function finishInstall(ok: boolean, message: string) {
+ // 装 Claude Code。默认 "direct"：直抓平台包 tgz (R2 优先 → npmmirror → npmjs) 解压到
+ // ~/.local/bin，**不经 npm**（后者下 80MB optional 依赖常卡死）。"native" = 官方脚本兜底。
+ async function installClaude(method: "native" | "direct" = "direct") {
++  if (!legacy.value) return;
+   if (busyKind.value) return; // 防双发:已有安装流程在跑
+   banner.value = null;
+   logs.value = [];
+@@ -190,6 +195,7 @@ async function installClaude(method: "native" | "direct" = "direct") {
+ }
+ 
+ async function installNode() {
++  if (!legacy.value) return;
+   if (busyKind.value) return; // 防双发
+   banner.value = null;
+   logs.value = [];
+@@ -268,7 +274,7 @@ async function cleanUvCache() {
+ // 检测 Claude Code 是否有新版本 (静默, 不打扰; 仅在已安装时有意义)
+ async function checkClaudeUpdate() {
+   if (checkingUpdate.value || busy.value) return;
+-  if (!report.value?.claude.found) return;
++  if (!legacy.value || !report.value?.claude.found) return;
+   checkingUpdate.value = true;
+   try {
+     updateInfo.value = await envDoctor.checkClaudeUpdate();
+@@ -281,6 +287,7 @@ async function checkClaudeUpdate() {
+ 
+ // 一键更新 Claude Code (走国内 npmmirror), 复用安装的流式日志管线
+ async function updateClaude() {
++  if (!legacy.value) return;
+   banner.value = null;
+   logs.value = [];
+   busyKind.value = "claude-update";
+@@ -296,6 +303,7 @@ async function updateClaude() {
+ }
+ 
+ async function fixPath() {
++  if (!legacy.value) return;
+   banner.value = null;
+   busyKind.value = "path";
+   try {
+@@ -351,7 +359,7 @@ function statusText(t: ToolStatus): string {
+   // 随安装包内置的那份: 免安装、免管理员, 如实说明来源, 不显示成「用户装好了」
+   if (t.found && t.bundled) return "已就绪 · 随应用内置";
+   if (t.key === "pwsh" && !t.found) {
+-    return report.value?.shellReady ? "可选 · 已内置 Git Bash" : "未安装 · 建议";
++    return report.value?.shellReady ? "可选 · shell 已就绪" : "未安装 · 建议";
+   }
+   // uv 缺席不是缺陷: Python 走内置解释器 + pip --user 即可, uv 只是更省事
+   if (t.key === "uv" && !t.found) return "可选 · 未安装（不影响使用）";
+@@ -387,13 +395,13 @@ const isWin = computed(() => osName.value === "windows");
+ const tools = computed<ToolStatus[]>(() => {
+   if (!report.value) return [];
+   const r = report.value;
+-  const all = [r.claude, r.pwsh, r.node, r.npm, r.uv, r.python];
++  const all = legacy.value ? [r.claude, r.pwsh, r.node, r.npm, r.uv, r.python] : [r.uv, r.python];
+   // PowerShell 7 仅 Windows 上是 Claude 的可用 shell; mac/Linux 自带 sh/zsh, 不展示该行。
+   return isWin.value ? all : all.filter((t) => t.key !== "pwsh");
+ });
+ const pathNeedsFix = computed(
+   () =>
+-    !!report.value &&
++    legacy.value && !!report.value &&
+     report.value.claude.found &&
+     !report.value.claudeDirOnUserPath
+ );
+@@ -418,11 +426,7 @@ const dockerUpdateHint = computed(() => {
+       <!-- 头 -->
+       <div class="badge"><span class="star"></span></div>
+       <h1 class="title">环境检测与配置</h1>
+-      <p class="lead">
+-        北极星依托 <strong>Claude Code</strong> 在你本机干活。跑 Python 脚本与命令所需的
+-        <strong>Python、Git Bash 已随应用内置</strong>——免安装、免管理员权限，装好即用（uv 只是可选加速器，
+-        不装也不影响）。Claude Code 会在<strong>后台自动装好</strong>，你不用点任何东西。
+-      </p>
++      <p class="lead">{{ copy.intro }}</p>
+ 
+       <!-- 检测中 -->
+       <div v-if="phase === 'checking'" class="checking">
+@@ -430,6 +434,7 @@ const dockerUpdateHint = computed(() => {
+       </div>
+ 
+       <template v-else>
++        <RuntimeDiagnostics v-if="report && !legacy" :report="report" :verify="verify" />
+         <!-- 工具清单 -->
+         <ul class="tools">
+           <li v-for="t in tools" :key="t.key" class="tool">
+@@ -537,7 +542,7 @@ const dockerUpdateHint = computed(() => {
+         </p>
+ 
+         <!-- 安装 Claude 的方式说明 + 兜底 (默认直抓平台包 tgz, R2 优先多源; 官方脚本仅境外网络兜底) -->
+-        <p v-else-if="report && !report.claude.found" class="alt">
++        <p v-else-if="legacy && report && !report.claude.found" class="alt">
+           默认<strong>直接下载</strong>官方平台包（<code>@anthropic-ai/claude-code</code> 原生二进制），
+           四源逐个自证 <strong>R2 → npmmirror(阿里) → yarn → npmjs</strong>（各源下载+解压+试跑一次），解压到 <code>~/.local/bin</code> 即用、<strong>不经 npm</strong>（避免下载卡死）。
+           <button class="link" :disabled="busy" @click="installClaude('native')">
+@@ -563,7 +568,7 @@ const dockerUpdateHint = computed(() => {
+              (Windows 从注册表重建机器级+用户级 PATH), 所以它跟应用内那条是两个独立结论。 -->
+         <div v-if="!props.gate" class="verify">
+           <div class="v-head">
+-            <span class="v-title">深度校验</span>
++            <span class="v-title">{{ copy.verify }}</span>
+             <span v-if="verifying" class="v-sub">
+               <span class="spinner sm"></span>
+               {{ verifying === "deep" ? "正在真发一次请求…" : "正在实跑验证…" }}
+@@ -571,13 +576,13 @@ const dockerUpdateHint = computed(() => {
+             <span v-else-if="verify" class="v-sub" :class="verify.ok ? 'ok' : 'warn'">
+               {{ verify.summary }}
+             </span>
+-            <span v-else class="v-sub">检测安装冲突，并实测 Claude Code 是否真能跑起来</span>
++            <span v-else class="v-sub">{{ copy.verifyHint }}</span>
+             <div class="spacer"></div>
+             <button class="btn sm" :disabled="busy || !!verifying" @click="runVerify(false)">
+               {{ verify ? "重新校验" : "开始校验" }}
+             </button>
+             <button
+-              class="btn sm primary"
++              v-if="legacy" class="btn sm primary"
+               :disabled="busy || !!verifying || !verify?.appRunnable"
+               title="真的发一次最小请求（几十 token），确证「装好了 + 能连上 + 有凭据」整条链路通"
+               @click="runVerify(true)"
+@@ -589,7 +594,7 @@ const dockerUpdateHint = computed(() => {
+           <template v-if="verify">
+             <!-- ① 安装冲突。零冲突要明说 (否则用户以为没检测), 但**只在真验成功时才敢说**——
+                  claude 都没跑起来时冲突数当然是 0, 那时说「只有一份、两边一致」是在撒谎。 -->
+-            <div v-if="conflictCount === 0 && verify.appRunnable" class="v-clean">
++            <div v-if="legacy && conflictCount === 0 && verify.appRunnable" class="v-clean">
+               未发现安装冲突 —— 本机只有一份 Claude Code，终端与应用跑的是同一份。
+             </div>
+             <ul v-else class="conflicts">
+@@ -606,7 +611,7 @@ const dockerUpdateHint = computed(() => {
+                   <div v-for="(p, i) in c.paths" :key="i" class="cf-path" :title="p">{{ p }}</div>
+                 </div>
+                 <button
+-                  v-if="c.fixable"
++                  v-if="legacy && c.fixable"
+                   class="btn sm"
+                   :disabled="busy || !!verifying"
+                   @click="fixPath"
+@@ -636,7 +641,8 @@ const dockerUpdateHint = computed(() => {
+               v-if="!verify.deep || highConflictCount > 0 || hasFixableConflict"
+               class="v-foot"
+             >
+-              <template v-if="!verify.deep">
++              <template v-if="!legacy && !verify.deep">{{ copy.noInference }}</template>
++              <template v-else-if="!verify.deep">
+                 「深度检测」会真发一次最小请求，是确认<strong>真正可用</strong>（凭据、网络、上游全通）的唯一硬证据。
+               </template>
+               <template v-else-if="highConflictCount > 0">
+diff --git a/src/components/ExpertCenter.vue b/src/components/ExpertCenter.vue
+index 98a6579..b7f40e1 100644
+--- a/src/components/ExpertCenter.vue
++++ b/src/components/ExpertCenter.vue
+@@ -5,9 +5,11 @@
+  * 让 AI 更懂你：
+  *  ① 按当前项目的知识库反推「该配哪支专家团」，一键入驻；
+  *  ② 浏览全部专家 + 业务团（介绍 / 头像 / 下载 / 匹配测试）；
+- *  ③ 高级：直接编辑本项目的人格档案 CLAUDE.md。
++ *  ③ 高级：兼容上下文编辑器；Pi 优先 AGENTS.md。
+  */
+ import { ref, computed, onMounted, watch } from "vue";
++import ExpertRuntimeNotice from "../features/runtime/components/ExpertRuntimeNotice.vue";
++import { runtimeCopy as copy } from "../features/runtime/copy";
+ import ExpertTeam from "./ExpertTeam.vue";
+ import ClaudeMdPanel from "./ClaudeMdPanel.vue";
+ import { expert, avatarSlot, type KbRecommendation } from "../tauri";
+@@ -55,7 +57,7 @@ onMounted(async () => {
+ watch(projectId, loadRecommendation);
+ 
+ // 召唤 = 把这支团/这位专家入驻到当前项目并切回对话区(由 ChatPanel 统一落地:
+-// expert.apply/teamApply + 设模式 + 记最近召唤 + 显示专家团工作台)。没有当前项目则提示。
++// 请求级 expertSelection + 设模式 + 记最近召唤 + 显示专家团工作台)。没有当前项目则提示。
+ function summonTeam(id: string) {
+   if (!app.currentProjectId) { toast.error("请先在对话区选择或新建一个项目，再召唤专家团"); return; }
+   app.requestSummon("team", id);
+@@ -85,7 +87,7 @@ function onSelectExpert(id: string) {
+       <div class="ec-title-wrap">
+         <div class="ec-title">🧭 专家团 · 让 AI 更懂你</div>
+         <div class="ec-sub">
+-          按你的知识库与偏好，自动给你配好对应业务的专家团；也可手动浏览全部专家入驻本项目。
++          {{ copy.expertRequest }}
+         </div>
+       </div>
+       <div class="ec-proj">
+@@ -96,6 +98,7 @@ function onSelectExpert(id: string) {
+       </div>
+     </header>
+ 
++    <ExpertRuntimeNotice />
+     <!-- KB 智能推荐横幅 -->
+     <section class="ec-rec" :class="{ has: rec?.team }">
+       <div v-if="recLoading" class="ec-rec-loading">正在按知识库反推最适合你的专家团…</div>
+@@ -111,7 +114,7 @@ function onSelectExpert(id: string) {
+             <span v-for="t in rec.matchedTopics.slice(0, 6)" :key="t" class="ec-topic">{{ t }}</span>
+           </div>
+         </div>
+-        <button class="ec-rec-apply" @click="applyRecommended">一键入驻</button>
++        <button class="ec-rec-apply" @click="applyRecommended">{{ copy.expertAction }}</button>
+       </template>
+       <template v-else>
+         <div class="ec-rec-body">
+@@ -124,7 +127,7 @@ function onSelectExpert(id: string) {
+     <!-- Tab -->
+     <div class="ec-tabs">
+       <button class="ec-tab" :class="{ on: tab === 'market' }" @click="tab = 'market'">专家市场</button>
+-      <button class="ec-tab" :class="{ on: tab === 'advanced' }" @click="tab = 'advanced'">人格档案 · 高级</button>
++      <button class="ec-tab" :class="{ on: tab === 'advanced' }" @click="tab = 'advanced'">上下文文件 · 高级</button>
+     </div>
+ 
+     <!-- 内容 -->
+diff --git a/src/components/ExpertTeam.vue b/src/components/ExpertTeam.vue
+index 7611fb0..2ffb53a 100644
+--- a/src/components/ExpertTeam.vue
++++ b/src/components/ExpertTeam.vue
+@@ -7,6 +7,9 @@
+  *  ② 全部专家：按领域浏览 / 搜索，单独入驻（emit select-expert）
+  * 附：每个专家/团可「下载」CLAUDE.md；「智能匹配测试」面板可调试路由命中。
+  */
++import { useBackendStatus } from "../features/runtime/useBackendStatus";
++import { runtimeCopy as copy } from "../features/runtime/copy";
++const { legacy } = useBackendStatus();
+ import { ref, onMounted } from "vue";
+ import {
+   expert,
+@@ -81,6 +84,11 @@ function avatarUrl(id: string, icon: string): string {
+ // 下载某专家/团的 CLAUDE.md
+ async function downloadDoc(kind: "expert" | "team", id: string, name: string, ev: Event) {
+   ev.stopPropagation();
++  if (!legacy.value) {
++    if (kind === "team") emit("select-team", id);
++    else emit("select-expert", id);
++    return;
++  }
+   try {
+     const text =
+       kind === "team" ? await expert.exportTeam(id) : await expert.exportExpert(id);
+@@ -177,7 +185,7 @@ const emit = defineEmits<{
+           <div class="team-meta">{{ tm.memberIds.length + 1 }} 人 · {{ tm.tags.slice(0, 3).join(" / ") }}</div>
+         </div>
+         <div class="card-actions">
+-          <span class="dl-inline" title="下载该团 CLAUDE.md" @click.stop="downloadDoc('team', tm.id, tm.name, $event)">⬇</span>
++          <span class="dl-inline" :title="legacy ? '下载该团 CLAUDE.md' : copy.expertAction" @click.stop="downloadDoc('team', tm.id, tm.name, $event)">{{ legacy ? "⬇" : "→" }}</span>
+           <span class="summon-pill" title="召唤这支团" @click.stop="emit('select-team', tm.id)">召唤</span>
+         </div>
+       </button>
+@@ -218,7 +226,7 @@ const emit = defineEmits<{
+           <div class="exp-role">{{ exp.role }}</div>
+         </div>
+         <div class="card-actions">
+-          <span class="dl-inline" title="下载该专家 CLAUDE.md" @click.stop="downloadDoc('expert', exp.id, exp.name, $event)">⬇</span>
++          <span class="dl-inline" :title="legacy ? '下载该专家 CLAUDE.md' : copy.expertAction" @click.stop="downloadDoc('expert', exp.id, exp.name, $event)">{{ legacy ? "⬇" : "→" }}</span>
+           <span class="summon-pill sm" title="召唤这位专家" @click.stop="emit('select-expert', exp.id)">召唤</span>
+         </div>
+       </button>
+diff --git a/src/components/FeishuSettings.vue b/src/components/FeishuSettings.vue
+index 5873dc0..618783e 100644
+--- a/src/components/FeishuSettings.vue
++++ b/src/components/FeishuSettings.vue
+@@ -1,4 +1,5 @@
+ <script setup lang="ts">
++import { runtimeCopy as copy } from "../features/runtime/copy";
+ // 「聊天机器人」—— 飞书（暂时只保留飞书）。
+ // 配置 App ID/Secret → 启动长连接网关 → 飞书 @机器人/私聊 走 Polaris 真对话管线
+ // (Claude Code 带工具执行、消息落库 UI 可见) → 回复发回飞书。支持开机自动启动 + 防断守护。
+@@ -167,8 +168,7 @@ onUnmounted(() => {
+         <span class="status" :class="gwState">{{ stateLabel() }}</span>
+       </div>
+       <div class="sub">
+-        飞书里 <b>@机器人</b>（或私聊）的指令，会经长连接进来交给 <b>Claude Code</b>（在「飞书机器人」项目里、带工具执行、可操作软件），
+-        过程在 Polaris 里实时可见，结果发回飞书。
++        {{ copy.feishu }}
+       </div>
+     </div>
+ 
+@@ -261,7 +261,7 @@ onUnmounted(() => {
+         <span class="eng-state" :class="gwState">{{ stateLabel() }}</span>
+       </div>
+       <p class="eng-desc">
+-        启动后挂飞书长连接收发消息。内置<b>防断守护</b>（断线/崩溃自动重连重起），来消息才跑 Claude，空闲几乎零开销。首启会自动 npm 装飞书 SDK（需 Node.js）。
++        {{ copy.feishuStart }}
+       </p>
+       <label class="fld check auto">
+         <input type="checkbox" v-model="cfg.autoStart" @change="toggleAutoStart" />
+diff --git a/src/components/ProviderDock.vue b/src/components/ProviderDock.vue
+index 84b985c..d7c1c5d 100644
+--- a/src/components/ProviderDock.vue
++++ b/src/components/ProviderDock.vue
+@@ -1,4 +1,6 @@
+ <script setup lang="ts">
++import { pricedCost, unknownCosts } from "../features/runtime/usageCosts";
++import { runtimeCopy as copy } from "../features/runtime/copy";
+ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
+ // 懒加载:绘图供应商面板只在 Dock 展开到对应页时才渲染,静态 import 会把它
+ // (连同其依赖)吸进首屏 chunk。ProviderDock 本体保持静态 —— 首屏可能立刻用。
+@@ -69,8 +71,8 @@ const periods: { key: Period; label: string }[] = [
+ ];
+ 
+ // 注:这里曾有个「Claude Code ⇄ Codex」分段器, 已删。它把 Codex 说成一个与
+-// Claude Code 并列的「后端/CLI」, 而 Polaris 从不 spawn codex CLI —— 对话永远由
+-// claude CLI 跑, 「Codex」只是「ChatGPT 订阅」这一家供应商(经本地翻译代理, 上游
++// Claude Code 并列的「后端/CLI」。Codex 在此是订阅供应商，对话由
++// 当前 Agent 后端跑；Pi 使用原生协议，claude-cli 兼容分支使用本地翻译代理(上游
+ // 写死 chatgpt.com)。那个二元框架凭空让人以为能「在 Codex 下选 MiniMax」, 实际
+ // MiniMax 等各家本就在下方供应商列表里点选即用。真相只有一层: 选哪家供应商。
+ onMounted(() => {
+@@ -135,7 +137,7 @@ function fmt(n: number): string {
+   return String(n);
+ }
+ function fmtCost(n: number): string {
+-  return "$" + n.toFixed(4);
++  return pricedCost(n);
+ }
+ function hostOf(url: string): string {
+   if (!url) return "本地 / 订阅";
+@@ -267,8 +269,7 @@ function openBoard() {
+ function importExport() {
+   // 占位:先给轻提示;下版接真 UI
+   alert(
+-    "导入/导出:把 ~/.claude/settings.json 拖入或复制 env 块即可。\n" +
+-    "下一版提供完整 UI(目前供应商增删改已覆盖大部分场景)。"
++    copy.importHint
+   );
+ }
+ async function removeProvider(p: ProviderView) {
+@@ -539,7 +540,7 @@ function subtitleOf(p: ProviderView): string {
+ 
+               <!-- 联动/隔离开关:隔离(默认)只影响 Polaris 自己 spawn 的 claude,
+                    联动才写 ~/.claude/settings.json 让终端 CLI 跟着切 -->
+-              <div class="link-row">
++              <div v-if="store.legacyActions" class="link-row">
+                 <div class="link-info">
+                   <span class="link-title">联动系统 CLI</span>
+                   <span class="link-desc">{{
+@@ -560,9 +561,11 @@ function subtitleOf(p: ProviderView): string {
+                 </button>
+               </div>
+ 
++              <p v-if="store.backendStatus?.lastError === 'BrowserPreview'" class="codex-note">{{ copy.preview }}</p>
++              <p v-if="!store.legacyActions" class="codex-note">{{ copy.providerScope }} {{ copy.credentials }}</p>
+               <!-- 本地路由总开关(cc-switch 式代理模式):开 = 所有供应商统一经
+                    127.0.0.1 本地路由转发,Key 由路由实时注入,改 Key/切换即刻生效 -->
+-              <div class="link-row">
++              <div v-if="store.legacyActions" class="link-row">
+                 <div class="link-info">
+                   <span class="link-title">本地路由 · 热切换</span>
+                   <span class="link-desc">{{
+@@ -613,7 +616,7 @@ function subtitleOf(p: ProviderView): string {
+                       </template>
+                       <template v-else>
+                         {{ hostOf(current.baseUrl) }}<span v-if="currentModel"> · {{ currentModel }}</span>
+-                        <span v-if="store.routeLocal && store.codexProxy?.running"> · 本地路由 127.0.0.1:{{ store.codexProxy.port }}</span>
++                        <span v-if="store.legacyActions && store.routeLocal && store.codexProxy?.running"> · 本地路由 127.0.0.1:{{ store.codexProxy.port }}</span>
+                       </template>
+                     </div>
+                   </div>
+@@ -902,7 +905,9 @@ function subtitleOf(p: ProviderView): string {
+                     <p class="codex-ok">
+                       <ShieldCheck :size="14" :stroke-width="2" /> 已授权 ChatGPT
+                     </p>
+-                    <p v-if="store.currentId === 'codex'" class="codex-note">
++                    <p v-if="store.backendStatus?.lastError === 'BrowserPreview'" class="codex-note">{{ copy.preview }}</p>
++              <p v-if="!store.legacyActions" class="codex-note">{{ copy.loginSaved }}</p>
++                    <p v-else-if="store.currentId === 'codex'" class="codex-note">
+                       Claude Code 正经本地翻译代理使用你的 ChatGPT 订阅(<code>gpt5.6-sol</code>)<template
+                         v-if="store.codexProxy?.running"
+                       > · 127.0.0.1:{{ store.codexProxy.port }}</template
+@@ -911,7 +916,7 @@ function subtitleOf(p: ProviderView): string {
+                     <p v-else class="codex-note">
+                       凭据已写入 <code>~/.codex/auth.json</code>。点「用 GPT 对话」即让 Claude Code 经本地翻译代理用上 ChatGPT 订阅(<code>gpt5.6-sol</code>)。
+                     </p>
+-                    <p v-if="store.codexProxy?.lastError" class="codex-fail">
++                    <p v-if="store.legacyActions && store.codexProxy?.lastError" class="codex-fail">
+                       代理上次报错:{{ store.codexProxy.lastError }}
+                     </p>
+                     <div class="ed-actions">
+@@ -933,11 +938,7 @@ function subtitleOf(p: ProviderView): string {
+ 
+                   <!-- 未授权:显著大按钮 -->
+                   <template v-else>
+-                    <p class="codex-note">
+-                      用 ChatGPT 账号授权一次(无需安装 codex CLI)。点击后会打开验证网址并给出一个效验码,
+-                      在网页填码即完成,凭据写入 <code>~/.codex/auth.json</code>。
+-                      <b>授权后 Claude Code(经本地翻译代理)与 codex CLI 都直接用上这份 ChatGPT 订阅。</b>
+-                    </p>
++                    <p class="codex-note">{{ copy.login }}</p>
+                     <div class="ed-actions">
+                       <button class="ed-cancel" @click="codexOpen = false">关闭</button>
+                       <button
+@@ -951,7 +952,7 @@ function subtitleOf(p: ProviderView): string {
+                       </button>
+                     </div>
+                     <button
+-                      class="codex-alt"
++                      v-if="store.legacyActions" class="codex-alt"
+                       @click="startCodexAuth(false)"
+                       :disabled="codexBusy"
+                     >
+@@ -983,10 +984,7 @@ function subtitleOf(p: ProviderView): string {
+                     <p class="codex-ok claude">
+                       <ShieldCheck :size="14" :stroke-width="2" /> 已登录 Claude 订阅
+                     </p>
+-                    <p class="codex-note">
+-                      凭据已写入 <code>~/.claude/.credentials.json</code>,Polaris 与终端
+-                      <code>claude</code> 都会复用这份订阅,无需在外壳里再登录。
+-                    </p>
++                    <p class="codex-note">{{ copy.loginSaved }}</p>
+                     <div class="ed-actions">
+                       <button class="ed-cancel" @click="startClaudeAuth()" :disabled="claudeBusy">
+                         <RefreshCw :size="13" :stroke-width="2" /> 重新授权
+@@ -1049,11 +1047,7 @@ function subtitleOf(p: ProviderView): string {
+ 
+                   <!-- 未授权:发起按钮 -->
+                   <template v-else>
+-                    <p class="codex-note">
+-                      用 Claude 账号登录订阅(Pro / Max)。点击后将打开浏览器,
+-                      登录并点「Authorize」即自动完成授权,凭据写入
+-                      <code>~/.claude/.credentials.json</code>。
+-                    </p>
++                    <p class="codex-note">{{ copy.login }}</p>
+                     <div class="ed-actions">
+                       <button class="ed-cancel" @click="claudeOpen = false">关闭</button>
+                       <button
+@@ -1104,13 +1098,13 @@ function subtitleOf(p: ProviderView): string {
+                     </button>
+                   </div>
+                   <div v-if="activeBucket" class="mini-foot">
+-                    <span>成本估算 <b>{{ fmtCost(activeBucket.cost) }}</b></span>
++                    <span>已标价 / 已记录成本 <b>{{ fmtCost(activeBucket.cost) }}</b> · {{ unknownCosts(activeBucket) }}</span>
+                     <span>输入 {{ fmt(activeBucket.input) }} · 输出 {{ fmt(activeBucket.output) }}</span>
+                     <span>{{ activeBucket.requests }} 次</span>
+                   </div>
+                 </template>
+                 <div v-else class="usage-empty">
+-                  暂无用量数据<br /><span>(尚未通过 Claude Code 产生会话)</span>
++                  暂无用量数据<br /><span>{{ copy.usageEmpty }}</span>
+                 </div>
+ 
+                 <div class="util-row">
+diff --git a/src/components/Sidebar.vue b/src/components/Sidebar.vue
+index 19a3862..2d26abe 100644
+--- a/src/components/Sidebar.vue
++++ b/src/components/Sidebar.vue
+@@ -1,4 +1,5 @@
+ <script setup lang="ts">
++import { agentRuntime } from "../tauri";
+ import { onMounted, ref, computed } from "vue";
+ import {
+   MessagesSquare,
+@@ -214,7 +215,7 @@ async function archiveProj(proj: { id: string; name: string }) {
+ }
+ 
+ // ─────────── 入驻专家 / 专家团（写项目 CLAUDE.md，复用 persona_apply）───────────
+-// 在「…」菜单点「入驻专家 / 专家团」→ 弹浮层选单专家或专家团 → 选中即注入本项目 CLAUDE.md。
++// Pi 转到请求级专家入口；仅 claude-cli 兼容分支使用下方项目文件写入流程。
+ // 单专家=一段人设皮肤；专家团=战略师领衔的编排型 CLAUDE.md（按情况组阵、四模式默认单 agent）。
+ const personaPickerPid = ref<string | null>(null);
+ const personaPresets = ref<PersonaPreset[]>([]);
+@@ -224,6 +225,10 @@ const singlePresets = computed(() => personaPresets.value.filter((p) => p.kind !
+ 
+ async function openPersonaPicker(pid: string) {
+   openMenuPid.value = null;
++  try {
++    const status = await agentRuntime.status();
++    if (status.backend !== "claude-cli") { app.setView("claude_md"); return; }
++  } catch (e) { toast.error(String(e)); return; }
+   personaPickerPid.value = pid;
+   if (personaPresets.value.length === 0) {
+     try {
+diff --git a/src/components/UsageBoard.vue b/src/components/UsageBoard.vue
+index 851cda4..56001c0 100644
+--- a/src/components/UsageBoard.vue
++++ b/src/components/UsageBoard.vue
+@@ -1,4 +1,6 @@
+ <script setup lang="ts">
++import { runtimeCopy as copy } from "../features/runtime/copy";
++import { pricedCost, unknownCosts } from "../features/runtime/usageCosts";
+ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+ import {
+   X,
+@@ -15,17 +17,10 @@ import type { TokenBucket, ProviderBalance } from "../tauri";
+ 
+ const store = useProvidersStore();
+ 
+-type Source = "all" | "claude" | "codex" | "gemini";
+ type Period = "today" | "week" | "month" | "year";
+-const source = ref<Source>("all");
++const source = ref("all");
+ const period = ref<Period>("today");
+-
+-const sources: { key: Source; label: string }[] = [
+-  { key: "all", label: "全部" },
+-  { key: "claude", label: "Claude Code" },
+-  { key: "codex", label: "Codex" },
+-  { key: "gemini", label: "Gemini" },
+-];
++const sources = [{ key: "all", label: copy.usageSource }];
+ const periods: { key: Period; label: string }[] = [
+   { key: "today", label: "当天" },
+   { key: "week", label: "近 7 天" },
+@@ -33,8 +28,8 @@ const periods: { key: Period; label: string }[] = [
+   { key: "year", label: "近 1 年" },
+ ];
+ 
+-// 我们的数据全部来自 ~/.claude/projects(Claude Code)。
+-const hasData = computed(() => source.value === "all" || source.value === "claude");
++// 后端返回 Pi 与 Claude 历史的合并汇总，无法按来源拆分。
++const hasData = computed(() => source.value === "all");
+ 
+ onMounted(async () => {
+   store.refreshUsage();
+@@ -84,7 +79,7 @@ function fmtK(n: number): string {
+   return String(n);
+ }
+ function fmtCost(n: number): string {
+-  return "$" + n.toFixed(4);
++  return pricedCost(n);
+ }
+ function cacheTotal(b: TokenBucket): number {
+   return b.cacheRead + b.cacheCreation;
+@@ -99,7 +94,7 @@ function cacheTotal(b: TokenBucket): number {
+         <header class="ub-head">
+           <div>
+             <div class="ub-title">使用统计</div>
+-            <div class="ub-sub">查看 AI 模型的使用情况和成本统计 · 数据源 ~/.claude/projects</div>
++            <div class="ub-sub">{{ copy.usageSource }}</div>
+           </div>
+           <button class="icon-btn" @click="store.closeUsage()"><X :size="18" :stroke-width="1.8" /></button>
+         </header>
+@@ -177,6 +172,7 @@ function cacheTotal(b: TokenBucket): number {
+             </div>
+           </section>
+ 
++          <p>{{ copy.usageLimit }}</p>
+           <template v-if="bucket">
+             <!-- 4 卡片 -->
+             <div class="cards">
+@@ -190,10 +186,11 @@ function cacheTotal(b: TokenBucket): number {
+ 
+               <div class="card">
+                 <div class="c-head">
+-                  <span class="c-lab">总成本<span class="c-est">估算</span></span>
++                  <span class="c-lab">已标价 / 已记录成本<span class="c-est">估算</span></span>
+                   <span class="c-ic green"><DollarSign :size="15" :stroke-width="2" /></span>
+                 </div>
+                 <div class="c-num">{{ fmtCost(bucket.cost) }}</div>
++                <div class="c-sub">{{ unknownCosts(bucket) }}</div>
+               </div>
+ 
+               <div class="card">
+@@ -232,7 +229,7 @@ function cacheTotal(b: TokenBucket): number {
+                   v-for="(d, i) in daily"
+                   :key="d.date + i"
+                   class="bar-col"
+-                  :title="`${d.label}: ${fmtInt(d.total)} tokens · ${fmtCost(d.cost)}`"
++                  :title="`${d.label}: ${fmtInt(d.total)} tokens · ${fmtCost(d.cost)} · ${unknownCosts(d)}`"
+                 >
+                   <div class="bar-wrap">
+                     <div
+@@ -249,11 +246,11 @@ function cacheTotal(b: TokenBucket): number {
+ 
+           <div v-else-if="store.usage && !store.usage.available" class="empty">
+             <div class="empty-big">暂无用量数据</div>
+-            <div class="empty-sub">尚未通过 Claude Code 产生会话</div>
++            <div class="empty-sub">{{ copy.usageEmpty }}</div>
+           </div>
+           <div v-else class="empty">
+-            <div class="empty-big">{{ source === "codex" ? "Codex" : "Gemini" }} 暂无数据</div>
+-            <div class="empty-sub">该看板仅聚合 Claude Code 日志；{{ source === "codex" ? "Codex" : "Gemini" }} 用量需对应 CLI 自身记录</div>
++            <div class="empty-big">{{ copy.usageEmpty }}</div>
++            <div class="empty-sub">{{ copy.usageSource }}</div>
+           </div>
+         </div>
+       </div>
+diff --git a/src/components/chat/ChatComposer.vue b/src/components/chat/ChatComposer.vue
+index 0061882..741e350 100644
+--- a/src/components/chat/ChatComposer.vue
++++ b/src/components/chat/ChatComposer.vue
+@@ -1,4 +1,5 @@
+ <script setup lang="ts">
++import { runtimeCopy as copy } from "../../features/runtime/copy";
+ // 输入区(自 ChatPanel 拆出,逻辑原样搬移):输入卡片 + 工具条(工作模式/技能/模式/
+ // 智能体/供应商弹层) + 授权栏 + 语音听写 + 附件/贴图 + 发送/停止/清空上下文。
+ // 状态尽量下沉本组件;与父层(消息区)共享的只有 agentMode(v-model,消息区要显示
+@@ -95,7 +96,7 @@ const showSkillPanel = ref(false);
+ const skillSearch = ref("");
+ const skillsList = ref<Skill[]>([]);
+ 
+-// ─────────── 目标模式 (Claude Code goal) ───────────
++// ─────────── 目标模式 (Agent goal) ───────────
+ // 开启后，主输入框里写的内容即「完成条件」：Claude 会持续推进直到达成，
+ // 不中途收尾、不反问。开关随会话持续生效（贴近 session-scoped /goal），手动关闭。
+ const goalMode = ref(false);
+@@ -511,7 +512,7 @@ const activeModeSummary = computed(() => {
+ // 快速模式(默认): 「快速调用知识库 + 快速回答」。强制走知识库召回的「快档」(双车道融合但跳过
+ //   重排 API, ~1.8s→~0.25s)+ 工具精简(弃 Task/NotebookEdit)+ 提示词瘦身(跳「可运行项目」「长
+ //   任务」约定)+ 上下文预算调小 + 默认自动批准 —— 一切为秒级查库、秒级回答。
+-// 工作模式: 纯 Claude Code —— 放开全套工具 + 注入全部约定(可运行项目/长任务)+ 全质量召回(带
++// 工作模式: Pi 工作模式 —— 放开全套工具 + 注入全部约定(可运行项目/长任务)+ 全质量召回(带
+ //   重排)+ 手动授权, 面向写代码 / 跑项目 / 产出复杂成品。随设备记忆(localStorage), 默认快速。
+ const workMode = ref<WorkMode>(
+   localStorage.getItem("polaris.workMode") === "work" ? "work" : "fast"
+@@ -530,12 +531,12 @@ const workModeOptions: { mode: WorkMode; name: string; desc: string }[] = [
+   {
+     mode: "work",
+     name: "工作模式",
+-    desc: "纯 Claude Code：全套工具 + 全部约定 + 全质量召回 + 手动授权；写代码·跑项目·产复杂成品时切到这",
++    desc: copy.workMode,
+   },
+ ];
+ // 切换工作模式即套用该模式的聪明默认(用户随后仍可手动覆盖):
+ //   快速 = 自动批准编辑(少弹窗) + 默认开知识库(本模式本职就是快速调用知识库);
+-//   工作 = 手动授权(纯 Claude Code, 改东西逐步确认) + 默认关知识库(要查再开)。
++//   工作 = 手动授权(Pi 工作模式, 改东西逐步确认) + 默认关知识库(要查再开)。
+ function applyModeDefaults(m: WorkMode) {
+   permMode.value = m === "work" ? "manual" : "auto_current";
+   kbMode.value = m === "fast";
+@@ -962,7 +963,7 @@ function recallHistory(dir: 1 | -1): boolean {
+   return true;
+ }
+ 
+-// ─────────── 常驻 claude 进程预热(输入区触发) ───────────
++// ─────────── Agent 会话预热(输入区触发) ───────────
+ // 输入框首次聚焦/首个键入 = 「马上要发消息」的最强信号: 立刻预热常驻进程, 让 CLI
+ // ~6.4s 的自举在用户打字期间跑完, 首条消息首响 ~10s → ~3s。每对话只发一次(切对话
+ // 后对新对话再发; store 内另有 60s 去抖兜底), 传输入区**当下真实档位**(权限/工作
+@@ -1302,7 +1303,7 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
+           sending
+             ? '生成中 …（按 Esc 或点 ■ 停止本轮）'
+             : goalMode
+-            ? '目标模式：在此写下完成条件，Claude 会持续推进直到达成 (Enter 发送) …'
++            ? copy.goalPlaceholder
+             : '请输入消息 (Enter 发送 · Shift + Enter 换行，可拖文件进来作为附件) …'
+         "
+         rows="2"
+@@ -1325,7 +1326,7 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
+               <div class="btn-tooltip-inner">
+                 快速 / 工作 两套预设
+                 <div class="btn-tooltip-sub">
+-                  快速模式：强制快速查库 + 快速回答（精简工具、跳重排、瘦身提示词、自动批准）；工作模式：纯 Claude Code 全套
++                  {{ copy.modeHint }}
+                 </div>
+               </div>
+             </div>
+@@ -1350,7 +1351,7 @@ defineExpose({ setInput, attachPaths: onDropFiles, sendOptions });
+               <div class="btn-tooltip-inner">
+                 使用 LLM 大规模联网搜索相关内容
+                 <div class="btn-tooltip-sub">
+-                  激活后 Claude 会自动检索多来源信息并交叉验证
++                  {{ copy.research }}
+                 </div>
+               </div>
+             </div>
+diff --git a/src/features/interconnect/InterconnectView.vue b/src/features/interconnect/InterconnectView.vue
+index 2cfaa69..408ff47 100644
+--- a/src/features/interconnect/InterconnectView.vue
++++ b/src/features/interconnect/InterconnectView.vue
+@@ -1,4 +1,5 @@
+ <script setup lang="ts">
++import { runtimeCopy as copy } from "../runtime/copy";
+ import { errMsg } from "../../lib/err";
+ /**
+  * 互联 · 设备联盟 —— 与「协作(项目/任务)」彻底分开的独立板块。
+@@ -1566,7 +1567,7 @@ onUnmounted(() => {
+                 {{ execPolicy.mode === "shell" ? "立即落回白名单" : "临时解锁 Shell 模式(30 分钟)" }}
+               </button>
+               <span class="ex-note">
+-                白名单模式够日常用(git/npm/cargo/claude…)。需要管道、重定向或在册外的命令时才解锁 Shell,到点自动回收。
++                {{ copy.execAllowlist }}
+               </span>
+             </div>
+ 
+diff --git a/src/features/runtime/components/ContextFileEditor.vue b/src/features/runtime/components/ContextFileEditor.vue
+new file mode 100644
+index 0000000..34eaf84
+--- /dev/null
++++ b/src/features/runtime/components/ContextFileEditor.vue
+@@ -0,0 +1,88 @@
++<script setup lang="ts">
++import { onMounted, ref } from 'vue';
++import { convApi } from '../../../tauri';
++import { contextFiles, type ContextSelection } from '../contracts';
++
++const projects = ref<{ id: string; name: string }[]>([]);
++const projectId = ref('');
++const createFile = ref<ContextSelection['fileName']>('AGENTS.md');
++const selection = ref<ContextSelection | null>(null);
++const content = ref('');
++const original = ref('');
++const busy = ref(false);
++const error = ref('');
++const saved = ref(false);
++
++async function load() {
++  if (busy.value) return;
++  if (content.value !== original.value && !confirm('重新读取会丢失未保存修改，继续？')) return;
++  busy.value = true;
++  error.value = '';
++  saved.value = false;
++  selection.value = null;
++  content.value = original.value = '';
++  try {
++    const selected = await contextFiles.metadata(projectId.value, createFile.value);
++    const text = selected.exists ? await contextFiles.read(projectId.value, selected) : '';
++    loadedProject.value = projectId.value;
++    selection.value = selected;
++    content.value = original.value = text;
++  } catch (e) { error.value = String(e); }
++  finally { busy.value = false; }
++}
++// Bind edits to the loaded project, so changing the dropdown cannot redirect a save.
++const loadedProject = ref('');
++async function open() { await load(); }
++async function save() {
++  const selected = selection.value;
++  if (!selected || busy.value) return;
++  busy.value = true;
++  error.value = '';
++  saved.value = false;
++  try {
++    await contextFiles.write(loadedProject.value, selected, content.value);
++    original.value = content.value;
++    selection.value = { ...selected, exists: true,
++      agentsExists: selected.agentsExists || selected.fileName === 'AGENTS.md',
++      claudeExists: selected.claudeExists || selected.fileName === 'CLAUDE.md' };
++    saved.value = true;
++  } catch (e) { error.value = String(e); }
++  finally { busy.value = false; }
++}
++onMounted(async () => {
++  try {
++    projects.value = await convApi.listProjects();
++    projectId.value = projects.value[0]?.id ?? '';
++    if (projectId.value) await open();
++  } catch (e) { error.value = String(e); }
++});
++</script>
++<template>
++  <section class="context-editor">
++    <p>Pi 按项目实际工作目录优先读取 AGENTS.md，否则读取 CLAUDE.md；保存始终写回本次选中的文件。</p>
++    <label>项目 <select v-model="projectId" :disabled="busy">
++      <option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option>
++    </select></label>
++    <label>两者都不存在时创建 <select v-model="createFile" :disabled="busy">
++      <option>AGENTS.md</option><option>CLAUDE.md</option>
++    </select></label>
++    <button :disabled="busy || !projectId" @click="open">读取 / 重新扫描</button>
++    <template v-if="selection">
++      <p>已选择：<strong>{{ selection.fileName }}</strong> · 相对路径：{{ selection.relativePath }}</p>
++      <p>实际工作目录：{{ selection.root }}</p>
++      <p>AGENTS.md：{{ selection.agentsExists ? '存在' : '不存在' }}；CLAUDE.md：{{ selection.claudeExists ? '存在' : '不存在' }}</p>
++      <p v-if="!selection.exists">文件不存在，保存时创建 {{ selection.fileName }}。</p>
++      <textarea v-model="content" :disabled="busy" :aria-label="selection.fileName" spellcheck="false" />
++      <button :disabled="busy" @click="save">{{ busy ? '处理中…' : `保存 ${selection.fileName}` }}</button>
++    </template>
++    <p v-if="saved" role="status">已保存；新会话读取更新后的上下文。</p>
++    <p v-if="error" role="alert">{{ error }}</p>
++    <p v-if="!projects.length && !error">暂无项目。</p>
++  </section>
++</template>
++<style scoped>
++.context-editor { padding: 20px; overflow: auto; }
++label { display: inline-block; margin: 8px; }
++textarea { display: block; width: 100%; min-height: 320px; margin: 12px 0; font-family: monospace; }
++[role=alert] { color: var(--danger, #dc2626); }
++</style>
+diff --git a/src/features/runtime/components/ContextRuntimeNotice.vue b/src/features/runtime/components/ContextRuntimeNotice.vue
+new file mode 100644
+index 0000000..b35ce60
+--- /dev/null
++++ b/src/features/runtime/components/ContextRuntimeNotice.vue
+@@ -0,0 +1,12 @@
++<script setup lang="ts">
++import { runtimeCopy as copy } from '../copy';
++</script>
++<template>
++  <div role="status">
++    <p>{{ copy.contextPriority }}</p>
++    <p>{{ copy.contextBlocked }}</p>
++  </div>
++</template>
++<style scoped>
++div { padding: 16px; line-height: 1.6; font-size: 13px; }
++</style>
+diff --git a/src/features/runtime/components/ExpertRuntimeNotice.vue b/src/features/runtime/components/ExpertRuntimeNotice.vue
+new file mode 100644
+index 0000000..aec7d33
+--- /dev/null
++++ b/src/features/runtime/components/ExpertRuntimeNotice.vue
+@@ -0,0 +1,24 @@
++<script setup lang="ts">
++import { useBackendStatus } from '../useBackendStatus';
++import { runtimeCopy as copy } from '../copy';
++import { watch } from 'vue';
++import { useExpertSettings } from '../useExpertSettings';
++const { legacy, isPi } = useBackendStatus();
++const { enabled, busy, error, refresh, set } = useExpertSettings();
++watch(isPi, value => { if (value) void refresh(); }, { immediate: true });
++</script>
++<template>
++  <aside v-if="!legacy">
++    <p>{{ copy.expertRequest }}</p>
++    <label><input type="checkbox" :disabled="busy || enabled === null || !isPi" :checked="enabled === true"
++      @change="set(($event.target as HTMLInputElement).checked)" />
++      专家团：{{ enabled === null ? '状态未知' : enabled ? '已开启' : '已关闭' }}（默认关闭）</label>
++    <button :disabled="busy || !isPi" @click="refresh">刷新状态</button>
++    <p>设置会持久化到宿主；新会话立即生效，空闲会话自动重开，正在执行的会话于本轮结束后生效。</p>
++    <p v-if="error" role="alert">{{ error }}</p>
++  </aside>
++</template>
++<style scoped>
++aside { padding: 12px 20px; font-size: 12px; line-height: 1.6; color: var(--muted); }
++p { margin: 4px 0; }
++</style>
+diff --git a/src/features/runtime/components/ProviderModelHelp.vue b/src/features/runtime/components/ProviderModelHelp.vue
+new file mode 100644
+index 0000000..4bae403
+--- /dev/null
++++ b/src/features/runtime/components/ProviderModelHelp.vue
+@@ -0,0 +1,14 @@
++<script setup lang="ts">
++import { modelConfigExample } from '../providerConfig';
++import { runtimeCopy as copy } from '../copy';
++</script>
++<template>
++  <details>
++    <summary>{{ copy.models }}</summary>
++    <pre>{{ modelConfigExample }}</pre>
++  </details>
++</template>
++<style scoped>
++details { font-size: 12px; margin: 10px 0; color: var(--muted); }
++pre { white-space: pre-wrap; }
++</style>
+diff --git a/src/features/runtime/components/RuntimeDiagnostics.vue b/src/features/runtime/components/RuntimeDiagnostics.vue
+new file mode 100644
+index 0000000..06497c7
+--- /dev/null
++++ b/src/features/runtime/components/RuntimeDiagnostics.vue
+@@ -0,0 +1,26 @@
++<script setup lang="ts">
++import { computed } from 'vue';
++import type { EnvReport, VerifyReport } from '../../../tauri';
++import { runtimeRows } from '../presentation';
++import { runtimeCopy as copy } from '../copy';
++const props = defineProps<{ report: EnvReport; verify: VerifyReport | null }>();
++const rows = computed(() => runtimeRows(props.report, props.verify));
++</script>
++<template>
++  <section aria-label="Agent 运行时诊断">
++    <p v-if="report.os === 'browser'">{{ copy.preview }}</p>
++    <p>后端：{{ report.agentRuntime.backend }} · {{ report.ready && report.shellReady ? copy.ready : copy.notReady }}</p>
++    <dl>
++      <template v-for="row in rows" :key="row.label">
++        <dt>{{ row.label }}</dt><dd>{{ row.value }} <small v-if="row.detail"> · {{ row.detail }}</small></dd>
++      </template>
++    </dl>
++    <p v-if="report.agentRuntime.error">{{ report.agentRuntime.error }}</p>
++    <p v-if="!verify?.deep">{{ copy.noInference }}</p>
++  </section>
++</template>
++<style scoped>
++section { margin: 16px 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
++dl { display: grid; grid-template-columns: 100px 1fr; gap: 6px; }
++dd { margin: 0; } small { color: var(--muted); }
++</style>
+diff --git a/src/features/runtime/contextPolicy.ts b/src/features/runtime/contextPolicy.ts
+new file mode 100644
+index 0000000..caf3a9d
+--- /dev/null
++++ b/src/features/runtime/contextPolicy.ts
+@@ -0,0 +1,4 @@
++/** Existing claude_md_* endpoints cannot choose AGENTS.md or report its existence. */
++export function contextEditingAvailable(backend: string | undefined): boolean {
++  return backend === 'claude-cli';
++}
+diff --git a/src/features/runtime/contracts.ts b/src/features/runtime/contracts.ts
+new file mode 100644
+index 0000000..5195c2a
+--- /dev/null
++++ b/src/features/runtime/contracts.ts
+@@ -0,0 +1,23 @@
++import { invoke } from '../../tauri';
++
++export interface ContextSelection {
++  root: string;
++  fileName: 'AGENTS.md' | 'CLAUDE.md';
++  relativePath: string;
++  agentsExists: boolean;
++  claudeExists: boolean;
++  exists: boolean;
++}
++export const contextFiles = {
++  metadata: (projectId: string, createFile: ContextSelection['fileName'] = 'AGENTS.md') =>
++    invoke<ContextSelection>('context_file_metadata', { projectId, createFile }),
++  read: (projectId: string, selection: ContextSelection) =>
++    invoke<string>('context_file_read', { projectId, selection }),
++  write: (projectId: string, selection: ContextSelection, content: string) =>
++    invoke<void>('context_file_write', { projectId, selection, content }),
++};
++export interface ExpertState { enabled: boolean }
++export const expertSettings = {
++  get: () => invoke<ExpertState>('expert_enabled_get'),
++  set: (enabled: boolean) => invoke<ExpertState>('expert_enabled_set', { enabled }),
++};
+diff --git a/src/features/runtime/copy.ts b/src/features/runtime/copy.ts
+new file mode 100644
+index 0000000..ffa8a3b
+--- /dev/null
++++ b/src/features/runtime/copy.ts
+@@ -0,0 +1,47 @@
++/** Runtime-facing copy stays here so desktop, server and preview agree. */
++export const runtimeCopy = {
++  intro: '默认使用 Pi 运行时。就绪状态以 Node、agentd 握手、shell 与凭据检查为准。',
++  preview: '浏览器预览 · 未连接真实运行时，以下不是就绪证明。',
++  unknown: '未知',
++  configured: '已配置',
++  unconfigured: '未配置',
++  ready: '已就绪',
++  notReady: '未就绪',
++  noInference: '未做计费推理；Pi 校验只检查运行时、ping 与凭据配置，不验证上游授权或模型响应。',
++  verify: '运行时校验',
++  verifyHint: '检查运行时、shell 与凭据配置',
++  providerScope: 'Pi 原生连接提供商；联动系统 CLI 与本地翻译代理不适用。',
++  legacyScope: '当前为 Claude CLI 兼容后端。',
++  credentials: 'Pi 凭据保存在 ~/Polaris/data/providers.json；首次迁移需重新登录。',
++  login: '在供应商坞完成订阅授权，按返回的授权页、配对码或回贴提示操作。',
++  loginSaved: '订阅已授权，可选择此提供商开始对话。',
++  protocol: 'Pi 按所选协议直连上游。自定义提供商需填写真实模型 ID 与端点。',
++  models: 'JSON 编辑区对应 settingsConfig；models 优先于 env 模型变量和内置目录。未标价模型的成本未知。',
++  modelPlaceholder: '填写上游真实模型 ID；多个模型在 JSON 的 models 中配置',
++  importHint: '在添加/编辑供应商的 JSON 区配置 settingsConfig；模型清单使用 models，协议在上方选择。',
++  usageSource: 'Pi 权威记录 + Claude 历史',
++  usageLimit: '金额保留已标价及历史已记录部分；未标价请求另行列出，不视为免费。Claude 历史按内置模型价格估算。',
++  usageEmpty: '尚无 Pi 或 Claude 历史用量记录',
++  contextTitle: '上下文文件 · AGENTS.md / CLAUDE.md',
++  contextPriority: 'Pi 在同一目录优先读取 AGENTS.md，不存在时读取 CLAUDE.md；不会自动改名用户文件。',
++  contextBlocked: '尚未确认当前后端，请检查运行时连接后重新扫描。',
++  expertRequest: 'Pi 专家按请求装载。选择专家后在对话中发送；人格不会写入项目上下文文件。',
++  expertAction: '选择并进入对话',
++  expertSwitch: '专家团后端开关（默认关闭；当前状态未知）',
++  expertBlocked: '后端尚未公开专家开关读写接口。启用需修改 agentd 配置并重开会话；选择专家不等于已启用。',
++  expertConfig: '{"experts":{"enabled":true,"prompt":""}}',
++  sandbox: '只挂载当前项目（可写）与知识库（只读）；每次工具路由前执行挂载与安全策略校验。容器运行不代表本轮已经在沙箱执行。',
++  serverSandbox: '服务端形态暂不支持沙箱（SANDBOX_UNAVAILABLE）。',
++  sandboxUnknown: '正在确认宿主形态，沙箱操作暂不可用。',
++  cube: '端点连通性不代表 Pi 工具已路由至 E2B；当前 Pi 桌面路由使用受校验的 Docker executor。',
++  sandboxCommand: 'pwd',
++  sandboxPlaceholder: '在沙箱内执行诊断命令（如 pwd）',
++  runtimeMissing: '运行时不可用，请到「环境」页检查 Pi 的 Node、agentd 与 shell 配置；兼容后端请检查对应运行时。',
++  workMode: 'Pi 工作模式：全套工具 + 全部约定 + 全质量召回 + 手动授权；适合代码与项目任务',
++  modeHint: '快速模式使用精简工具与快速检索；工作模式使用 Pi 全套工具，按权限设置执行。',
++  goalPlaceholder: '目标模式：在此写下完成条件，Pi 会按目标推进 (Enter 发送) …',
++  research: '激活后 Pi 会自动检索多来源信息并交叉验证',
++  feishu: '飞书指令交给当前 Agent 后端（默认 Pi），在「飞书机器人」项目内按权限执行工具并回复。',
++  feishuStart: '长连接接收消息后调用当前 Agent 后端（默认 Pi），支持断线重连。首次启动需 Node.js 安装飞书 SDK。',
++  execAllowlist: '执行名单由主机配置提供；Pi 本身不需要开放 claude 命令。管道、重定向或名单外命令需临时解锁 Shell，到期自动回收。',
++} as const;
+diff --git a/src/features/runtime/presentation.ts b/src/features/runtime/presentation.ts
+new file mode 100644
+index 0000000..31ae87f
+--- /dev/null
++++ b/src/features/runtime/presentation.ts
+@@ -0,0 +1,32 @@
++import type { EnvReport, VerifyReport } from '../../tauri';
++import type { AgentBackendStatus } from '../../types/agentRuntime';
++import { runtimeCopy as copy } from './copy';
++
++export function legacyProviderActions(status: AgentBackendStatus | null): boolean {
++  return status?.backend === 'claude-cli';
++}
++export function legacyDoctorActions(report: EnvReport | null): boolean {
++  return report?.agentRuntime?.backend === 'claude-cli' && report.agentRuntime.legacyActions === true;
++}
++export function runtimeRows(report: EnvReport, verify: VerifyReport | null = null) {
++  const r = report.agentRuntime;
++  const flag = (value: boolean) => value ? copy.ready : copy.notReady;
++  return [
++    { label: 'Node', value: flag(r.nodeReady), detail: [report.node.version, report.node.path].filter(Boolean).join(' · ') },
++    { label: 'agentd 入口', value: flag(r.entryExists) },
++    { label: 'ping', value: flag(r.handshake) },
++    { label: '协议版本', value: String(r.protocolVersion ?? copy.unknown) },
++    { label: 'Pi 版本', value: r.piVersion ?? copy.unknown },
++    { label: 'agentd 版本', value: r.agentdVersion ?? copy.unknown },
++    { label: 'shell', value: flag(report.shellReady),
++      detail: verify?.steps.find(s => s.key === 'shell')?.detail ?? copy.unknown },
++    { label: '凭据', value: r.credentialsConfigured ? copy.configured : copy.unconfigured },
++  ];
++}
++/** Current summaries omit price completeness. Never infer a total from a partial sum. */
++export function usageCost(cost: number, pricesComplete = false): string {
++  return pricesComplete && Number.isFinite(cost) && cost >= 0 ? `$${cost.toFixed(4)}` : copy.unknown;
++}
++export function recordedCost(cost: number): string {
++  return Number.isFinite(cost) && cost > 0 ? `$${cost.toFixed(4)}` : copy.unknown;
++}
+diff --git a/src/features/runtime/providerConfig.ts b/src/features/runtime/providerConfig.ts
+new file mode 100644
+index 0000000..01d0063
+--- /dev/null
++++ b/src/features/runtime/providerConfig.ts
+@@ -0,0 +1,42 @@
++export const protocolOptions = [
++  { value: '', label: 'Anthropic Messages' },
++  { value: 'openai', label: 'OpenAI Completions' },
++  { value: 'responses', label: 'OpenAI Responses' },
++  { value: 'chatgpt', label: 'ChatGPT / Codex Responses' },
++  { value: 'google', label: 'Google Generative AI' },
++] as const;
++export const modelConfigExample = JSON.stringify({
++  env: { ANTHROPIC_BASE_URL: 'https://gateway.example/v1' },
++  models: ['model-a', 'model-b'],
++}, null, 2);
++
++function object(value: unknown): value is Record<string, unknown> {
++  return value !== null && typeof value === 'object' && !Array.isArray(value);
++}
++/** Optional models preserve the backend's env/catalog fallback. Validate explicit overrides. */
++export function validateProviderConfig(config: unknown, protocol: string): string | null {
++  if (!['', 'anthropic', 'openai', 'responses', 'chatgpt', 'google'].includes(protocol)) return '不支持的提供商协议';
++  if (!object(config)) return 'settingsConfig 必须是 JSON 对象';
++  if (config.env !== undefined && !object(config.env)) return 'env 必须是对象';
++  if (config.models === undefined) return null;
++  if (!Array.isArray(config.models) || !config.models.length) return 'models 必须是非空数组';
++  for (const model of config.models) {
++    if (typeof model === 'string' && model.trim()) continue;
++    if (!object(model) || typeof model.id !== 'string' || !model.id.trim()) return '每个模型需要非空 ID';
++    if (model.name !== undefined && typeof model.name !== 'string') return '模型 name 必须是字符串';
++    if (model.reasoning !== undefined && typeof model.reasoning !== 'boolean') return 'reasoning 必须是布尔值';
++    for (const field of ['contextWindow', 'maxTokens']) {
++      if (model[field] !== undefined && (!Number.isSafeInteger(model[field]) || Number(model[field]) <= 0)) return `${field} 必须是正整数`;
++    }
++    if (model.input !== undefined && (!Array.isArray(model.input) || !model.input.length ||
++      model.input.some((v: unknown) => v !== 'text' && v !== 'image'))) return 'input 只支持 text / image 非空数组';
++    if (model.cost !== undefined) {
++      if (!object(model.cost)) return 'cost 必须包含 input/output/cacheRead/cacheWrite 四项价格';
++      for (const key of ['input', 'output', 'cacheRead', 'cacheWrite']) {
++        const price = model.cost[key];
++        if (typeof price !== 'number' || !Number.isFinite(price) || price < 0) return '模型价格必须是有限非负数';
++      }
++    }
++  }
++  return null;
++}
+diff --git a/src/features/runtime/usageCosts.ts b/src/features/runtime/usageCosts.ts
+new file mode 100644
+index 0000000..1a627b2
+--- /dev/null
++++ b/src/features/runtime/usageCosts.ts
+@@ -0,0 +1,11 @@
++import type { PriceCompleteness } from '../../types/usageCosts';
++
++export function pricedCost(cost: number): string {
++  return Number.isFinite(cost) && cost >= 0 ? `$${cost.toFixed(4)}` : '未知';
++}
++export function unknownCosts(value: Partial<PriceCompleteness>): string {
++  if (typeof value.unpricedRequests !== 'number' || typeof value.hasUnknownCosts !== 'boolean') {
++    return '价格完整性未知';
++  }
++  return value.hasUnknownCosts ? `另有 ${value.unpricedRequests} 次请求未标价` : '全部请求已标价';
++}
+diff --git a/src/features/runtime/useBackendStatus.ts b/src/features/runtime/useBackendStatus.ts
+new file mode 100644
+index 0000000..b6ed8c6
+--- /dev/null
++++ b/src/features/runtime/useBackendStatus.ts
+@@ -0,0 +1,22 @@
++import { computed, onMounted, ref } from 'vue';
++import { agentRuntime } from '../../tauri';
++import type { AgentBackendStatus } from '../../types/agentRuntime';
++import { legacyProviderActions } from './presentation';
++
++export function useBackendStatus() {
++  const status = ref<AgentBackendStatus | null>(null);
++  const error = ref('');
++  async function refreshBackend() {
++    try {
++      status.value = await agentRuntime.status();
++      error.value = '';
++    } catch (e) {
++      status.value = null;
++      error.value = String(e);
++    }
++  }
++  onMounted(refreshBackend);
++  return { status, error, refreshBackend,
++    legacy: computed(() => legacyProviderActions(status.value)),
++    isPi: computed(() => status.value?.backend === 'pi') };
++}
+diff --git a/src/features/runtime/useExpertSettings.ts b/src/features/runtime/useExpertSettings.ts
+new file mode 100644
+index 0000000..3dbef8a
+--- /dev/null
++++ b/src/features/runtime/useExpertSettings.ts
+@@ -0,0 +1,26 @@
++import { ref } from 'vue';
++import { expertSettings } from './contracts';
++
++export function useExpertSettings() {
++  const enabled = ref<boolean | null>(null);
++  const busy = ref(false);
++  const error = ref('');
++  async function refresh() {
++    busy.value = true;
++    error.value = '';
++    try { enabled.value = (await expertSettings.get()).enabled; }
++    catch (e) { enabled.value = null; error.value = String(e); }
++    finally { busy.value = false; }
++  }
++  async function set(value: boolean) {
++    if (busy.value) return;
++    busy.value = true;
++    error.value = '';
++    try { enabled.value = (await expertSettings.set(value)).enabled; }
++    catch (e) {
++      enabled.value = null;
++      error.value = String(e);
++    } finally { busy.value = false; }
++  }
++  return { enabled, busy, error, refresh, set };
++}
+diff --git a/src/features/sandbox/components/SandboxStatus.vue b/src/features/sandbox/components/SandboxStatus.vue
+index 6da6037..7cfea90 100644
+--- a/src/features/sandbox/components/SandboxStatus.vue
++++ b/src/features/sandbox/components/SandboxStatus.vue
+@@ -1,5 +1,7 @@
+ <script setup lang="ts">
+-import { ref, onMounted, onActivated } from "vue";
++import { envDoctor, type EnvReport } from "../../../tauri";
++import { runtimeCopy as copy } from "../../runtime/copy";
++import { ref, computed, onMounted, onActivated } from "vue";
+ import {
+   sandbox,
+   cube,
+@@ -18,7 +20,9 @@ const emit = defineEmits<{ ready: [] }>();
+ const status = ref<SandboxStatus | null>(null);
+ const log = ref<string[]>([]);
+ const busy = ref(false);
+-const execCmd = ref("claude --version");
++const execCmd = ref<string>(copy.sandboxCommand);
++const host = ref<EnvReport | null>(null);
++const supported = computed(() => !!host.value && !host.value.imageManaged && host.value.os !== "browser");
+ const execOut = ref("");
+ 
+ // CubeSandbox (E2B) 后端配置
+@@ -28,6 +32,9 @@ const cubeBusy = ref(false);
+ 
+ async function refresh() {
+   try {
++    host.value = null;
++    host.value = await envDoctor.check();
++    if (!supported.value) return;
+     status.value = await sandbox.status();
+   } catch (e: any) {
+     log.value.unshift(`[refresh] ${e?.message ?? e}`);
+@@ -42,6 +49,7 @@ async function loadCube() {
+   }
+ }
+ async function saveCube() {
++  if (!supported.value) return;
+   cubeBusy.value = true;
+   try {
+     cubeCfg.value = await cube.configSet(cubeCfg.value);
+@@ -54,6 +62,7 @@ async function saveCube() {
+   }
+ }
+ async function testCube() {
++  if (!supported.value) return;
+   cubeBusy.value = true;
+   try {
+     cubeStat.value = await cube.status();
+@@ -63,8 +72,8 @@ async function testCube() {
+ }
+ onMounted(() => {
+   // 不 await：状态异步填入即可，不被 docker 慢查询拖住
+-  refresh();
+-  loadCube();
++  // Pi 工具路由目前未接通 E2B；保留兼容后端的配置入口。
++  void refresh().then(() => { if (supported.value) loadCube(); });
+   // 等数字人 / 状态卡片画出来后再通知 App 收起加载条（遮住挂载那一下的卡顿）
+   setTimeout(() => emit("ready"), 420);
+ });
+@@ -75,6 +84,7 @@ onActivated(() => {
+ });
+ 
+ async function build() {
++  if (!supported.value) return;
+   busy.value = true;
+   log.value.unshift("[build] 开始构建镜像 polaris-sandbox:alpine …");
+   try {
+@@ -88,6 +98,7 @@ async function build() {
+   }
+ }
+ async function stop() {
++  if (!supported.value) return;
+   busy.value = true;
+   try {
+     log.value.unshift(await sandbox.stop());
+@@ -99,6 +110,7 @@ async function stop() {
+   }
+ }
+ async function runCmd() {
++  if (!supported.value) return;
+   if (!execCmd.value.trim()) return;
+   busy.value = true;
+   execOut.value = "(running …)";
+@@ -117,8 +129,7 @@ async function runCmd() {
+     <div class="head">
+       <div class="title">安全沙箱层</div>
+       <div class="sub">
+-        基于 <code>alpine:3.20</code> 的极简镜像 · 原生二进制
+-        <code>claude-code</code> (apk 装, 无 Node) · 镜像 ~120MB
++        {{ host?.imageManaged ? copy.serverSandbox : host?.os === "browser" ? copy.preview : copy.sandbox }}
+       </div>
+     </div>
+ 
+@@ -126,7 +137,8 @@ async function runCmd() {
+     <Workstations />
+ 
+     <!-- CubeSandbox (E2B) 后端：替换 Docker 方案的可选后端 -->
+-    <div class="cube">
++    <p v-if="!host">{{ copy.sandboxUnknown }}</p>
++    <div v-if="supported && host?.agentRuntime.backend === 'claude-cli'" class="cube">
+       <div class="cube-head">
+         <span class="cube-title">沙箱后端 · CubeSandbox (E2B)</span>
+         <span
+@@ -146,9 +158,7 @@ async function runCmd() {
+         </span>
+       </div>
+       <div class="cube-desc">
+-        CubeSandbox 是腾讯云基于 RustVMM+KVM 的微虚机沙箱，兼容 E2B。它需运行在
+-        <strong>Linux/KVM</strong>（远程主机 / WSL2 / 云），把端点 URL 填到这里即可把执行从
+-        Docker 切到 CubeSandbox。
++        {{ copy.cube }}
+       </div>
+       <div class="cube-row">
+         <label>后端</label>
+@@ -179,7 +189,7 @@ async function runCmd() {
+       <div v-if="cubeStat?.note" class="cube-note">▸ {{ cubeStat.note }}</div>
+     </div>
+ 
+-    <div class="status-grid">
++    <div v-if="supported" class="status-grid">
+       <div class="stat-card" :class="{ ok: status?.docker_installed }">
+         <div class="stat-label">Docker CLI</div>
+         <div class="stat-value">
+@@ -212,12 +222,12 @@ async function runCmd() {
+       <div v-for="(n, i) in status.notes" :key="i" class="note">▸ {{ n }}</div>
+     </div>
+ 
+-    <SandboxProject :disabled="busy" :notes="status?.notes" @log="log.unshift($event)" @changed="refresh" />
++    <SandboxProject v-if="supported" :disabled="busy || !supported" :notes="status?.notes" @log="log.unshift($event)" @changed="refresh" />
+     <div class="actions">
+-      <button class="primary-btn" :disabled="busy" @click="build">
++      <button class="primary-btn" :disabled="busy || !supported" @click="build">
+         构建镜像
+       </button>
+-      <button class="secondary-btn" :disabled="busy" @click="stop">
++      <button class="secondary-btn" :disabled="busy || !supported" @click="stop">
+         停止容器
+       </button>
+       <button class="secondary-btn" @click="refresh">刷新状态</button>
+@@ -226,10 +236,10 @@ async function runCmd() {
+     <div class="exec-row">
+       <input
+         v-model="execCmd"
+-        placeholder="在沙箱内执行命令(如 claude --version)"
++        :placeholder="copy.sandboxPlaceholder"
+         @keydown.enter="runCmd"
+       />
+-      <button class="primary-btn" :disabled="busy" @click="runCmd">执行</button>
++      <button class="primary-btn" :disabled="busy || !supported" @click="runCmd">执行</button>
+     </div>
+     <pre v-if="execOut" class="exec-out">{{ execOut }}</pre>
+ 
+diff --git a/src/lib/humanizeError.ts b/src/lib/humanizeError.ts
+index f58ad8f..042d49a 100644
+--- a/src/lib/humanizeError.ts
++++ b/src/lib/humanizeError.ts
+@@ -1,3 +1,4 @@
++import { runtimeCopy } from "../features/runtime/copy";
+ // 错误 → 人话。所有展示给用户的错误先过这里:常见模式映射成可行动的提示,
+ // 兜底保留原文(截断)但不再裸漏 Rust panic / HTTP 状态码。
+ export function humanizeError(err: unknown): string {
+@@ -33,7 +34,7 @@ export function humanizeError(err: unknown): string {
+   if (/http 5\d\d|"?5\d\d"? (internal|bad gateway|service)/.test(s) || s.includes("overloaded"))
+     return "服务端暂时不可用(5xx)——通常稍等片刻重试即可。";
+   if (s.includes("program not found") || s.includes("claude") && s.includes("not found"))
+-    return "找不到 Claude Code——请到「环境」页检测并安装。";
++    return runtimeCopy.runtimeMissing;
+   if (s.includes("permission denied") || s.includes("access is denied") || s.includes("拒绝访问"))
+     return "文件被占用或没有权限——关闭占用该文件的程序后重试。";
+   if (s.includes("no such file") || s.includes("not found") || s.includes("找不到"))
+diff --git a/src/stores/app.ts b/src/stores/app.ts
+index 012c7a7..4feb452 100644
+--- a/src/stores/app.ts
++++ b/src/stores/app.ts
+@@ -21,7 +21,7 @@ export type ViewKey =
+   | "graph"
+   | "automation"
+   | "sandbox"
+-  | "claude_md"
++  | "claude_md" // 兼容路由键：专家中心 / 上下文文件
+   | "skill_center"
+   | "env_doctor"
+   | "mcp"
+@@ -361,7 +361,7 @@ export const useAppStore = defineStore("app", () => {
+     await convApi.openProjectDir(projectId);
+   }
+ 
+-  /** 设置(或清除)项目的工作目录：本项目下所有对话以此为 claude cwd（终端 cd 进 repo 同款）。
++  /** 设置(或清除)项目的工作目录：本项目下所有对话以此为 Agent cwd（终端 cd 进 repo 同款）。
+    *  workDir 传 null/空 = 解绑回落默认。成功后就地更新本地项目的 workDir。 */
+   async function setProjectWorkDir(projectId: string, workDir: string | null) {
+     await convApi.setWorkDir(projectId, workDir);
+diff --git a/src/stores/chat.ts b/src/stores/chat.ts
+index 5b4551c..5dd33eb 100644
+--- a/src/stores/chat.ts
++++ b/src/stores/chat.ts
+@@ -254,8 +254,8 @@ export const useChatStore = defineStore("chatRuntime", () => {
+     }
+   }
+ 
+-  // ── 常驻 claude 进程预热 ──
+-  // claude CLI spawn 后立即自举(~6.4s), 不等首条消息 —— 在「打开/切换对话」「输入框
++  // ── Agent 会话预热 ──
++  // Agent 会话按后端能力预热, 不等首条消息 —— 在「打开/切换对话」「输入框
+   // 聚焦/首个键入」时提前 spawn, 首条消息首响 ~10s → ~3s。fire-and-forget:
+   // 后端 best-effort 永不报错, 这里再兜一层 catch。
+   // 每对话 60s 去抖: 后端指纹一致本就 no-op, 去抖只为省无谓 IPC; 不做"永久一次"是
+@@ -419,7 +419,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
+         const n = parseInt(ev.text ?? "", 10);
+         if (!Number.isNaN(n)) tokensByConv.value[cid] = n;
+       } else if (ev.kind === "error") {
+-        // Claude CLI 会把普通诊断写到 stderr；这不代表本轮失败，后续正文仍应正常展示。
++        // Agent 后端可能输出普通诊断；这不代表本轮失败，后续正文仍应正常展示。
+         // 新 emitter 可直接给 severity；旧 emitter 继续用稳定的 [stderr] 前缀兼容判定。
+         const raw = ev.text ?? "";
+         const warning = ev.severity === "warning" || /^\[stderr\]/i.test(raw.trim());
+diff --git a/src/stores/providers.ts b/src/stores/providers.ts
+index 3336d31..5b3ed81 100644
+--- a/src/stores/providers.ts
++++ b/src/stores/providers.ts
+@@ -1,3 +1,7 @@
++import { agentRuntime } from "../tauri";
++import type { AgentBackendStatus } from "../types/agentRuntime";
++import { legacyProviderActions } from "../features/runtime/presentation";
++import { runtimeCopy } from "../features/runtime/copy";
+ import { defineStore } from "pinia";
+ import { ref, computed } from "vue";
+ import {
+@@ -15,6 +19,8 @@ import {
+ } from "../tauri";
+ 
+ export const useProvidersStore = defineStore("providers", () => {
++  const backendStatus = ref<AgentBackendStatus | null>(null);
++  const legacyActions = computed(() => legacyProviderActions(backendStatus.value));
+   const providers = ref<ProviderView[]>([]);
+   const currentId = ref<string>("claude-official");
+   /** true = 联动系统 CLI(写 ~/.claude/settings.json); false = 隔离, 仅 Polaris 内生效 */
+@@ -61,6 +67,8 @@ export const useProvidersStore = defineStore("providers", () => {
+   async function refresh() {
+     loading.value = true;
+     try {
++      backendStatus.value = null;
++      backendStatus.value = await agentRuntime.status();
+       const res = await providerApi.list();
+       providers.value = res.providers;
+       currentId.value = res.currentId || "claude-official";
+@@ -129,6 +137,7 @@ export const useProvidersStore = defineStore("providers", () => {
+   }
+ 
+   async function refreshCodexProxy() {
++    if (!legacyActions.value) { codexProxy.value = null; return; }
+     try {
+       codexProxy.value = await providerApi.codexProxyInfo();
+     } catch (e) {
+@@ -219,6 +228,7 @@ export const useProvidersStore = defineStore("providers", () => {
+   /** 切换「联动系统 CLI / 隔离」模式;开联动会把当前供应商写入全局 settings.json,
+    *  关联动会把全局清回官方(终端 CLI 立刻恢复干净)、Polaris 内选择不变 */
+   async function setLinkMode(link: boolean): Promise<boolean> {
++    if (!legacyActions.value) { error.value = runtimeCopy.providerScope; return false; }
+     error.value = null;
+     try {
+       linkGlobal.value = await providerApi.setLinkMode(link);
+@@ -231,6 +241,7 @@ export const useProvidersStore = defineStore("providers", () => {
+ 
+   /** 本地路由总开关(cc-switch 式);后端会立即对当前供应商重新生效(开=改走本地路由,关=回直连) */
+   async function setRouteMode(route: boolean): Promise<boolean> {
++    if (!legacyActions.value) { error.value = runtimeCopy.providerScope; return false; }
+     error.value = null;
+     try {
+       routeLocal.value = await providerApi.setRouteMode(route);
+@@ -280,6 +291,7 @@ export const useProvidersStore = defineStore("providers", () => {
+   }
+ 
+   return {
++    backendStatus, legacyActions,
+     providers,
+     currentId,
+     linkGlobal,
+diff --git a/src/tauri.ts b/src/tauri.ts
+index f068acc..aa4511c 100644
+--- a/src/tauri.ts
++++ b/src/tauri.ts
+@@ -1,3 +1,8 @@
++import type { BucketCosts, PriceCompleteness } from "./types/usageCosts";
++import { runtimeCopy } from "./features/runtime/copy";
++import type { AgentBackendStatus } from "./types/agentRuntime";
++export type { AgentBackendStatus } from "./types/agentRuntime";
++import { previewBackendStatus } from "./types/agentRuntime";
+ import type { AgentRuntimeReport } from "./types/doctor";
+ /**
+  * Typed wrappers around Tauri commands.
+@@ -1501,6 +1506,8 @@ export interface KbClaudeMd {
+ 
+ export type ClaudeMdArea = "kb" | "project";
+ 
++export const agentRuntime = { status: () => invoke<AgentBackendStatus>("agent_backend_status") };
++
+ export const claudeMd = {
+   listProjects: () => invoke<ProjectClaudeMd[]>("claude_md_list_projects"),
+   kbInfo: () => invoke<KbClaudeMd>("claude_md_kb_info"),
+@@ -1855,7 +1862,7 @@ export interface ProviderSaveInput {
+   /** 完整 settings_config（env 含 base_url + token + 开关） */
+   settingsConfig: any;
+ }
+-export interface TokenBucket {
++export interface TokenBucket extends BucketCosts {
+   input: number;
+   output: number;
+   cacheRead: number;
+@@ -1864,7 +1871,7 @@ export interface TokenBucket {
+   requests: number;
+   cost: number;
+ }
+-export interface DailyUsage {
++export interface DailyUsage extends PriceCompleteness {
+   date: string;
+   label: string;
+   total: number;
+@@ -2118,7 +2125,7 @@ export interface EnvConflict {
+ }
+ /** 一条实跑验证的结果 —— 每条都真的起了子进程 */
+ export interface VerifyStep {
+-  key: "exec" | "terminal" | "shell" | "config" | "auth" | "smoke";
++  key: "exec" | "terminal" | "shell" | "config" | "auth" | "smoke" | "node" | "agentd-entry" | "ping" | "credentials";
+   name: string;
+   status: "ok" | "fail" | "warn" | "skip";
+   detail: string;
+@@ -2454,9 +2461,8 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
+     case "provider_switch":
+       return String(_args?.id ?? "claude-official");
+     case "provider_set_link_mode":
+-      return Boolean(_args?.link);
+     case "provider_set_route_mode":
+-      return Boolean(_args?.route);
++      throw new Error("Unsupported: Pi browser preview");
+     case "provider_save":
+       return "custom-stub";
+     case "provider_delete":
+@@ -2481,16 +2487,9 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
+     case "codex_status":
+       return { installed: false, loggedIn: false, authPath: "(browser-only)" };
+     case "codex_start_login":
+-      return {
+-        mode: "device",
+-        deviceCode: "stub-device",
+-        userCode: "WXYZ-1234",
+-        verificationUri: "https://auth.openai.com/codex/device",
+-        interval: 5,
+-        expiresIn: 900,
+-      };
++      throw new Error(runtimeCopy.preview);
+     case "codex_poll_login":
+-      return { status: "ok" };
++      return { status: "pending" };
+     case "codex_login_poll":
+     case "claude_login_poll":
+       return { status: "idle", message: "" };
+@@ -2500,16 +2499,12 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
+     case "claude_oauth_status":
+       return { loggedIn: false, credPath: "(browser-only)" };
+     case "claude_start_login":
+-      return {
+-        mode: "manual",
+-        authorizeUrl: "https://claude.ai/oauth/authorize?code=true",
+-        verifier: "stub-verifier",
+-        state: "stub-state",
+-      };
++      throw new Error(runtimeCopy.preview);
+     case "claude_finish_login":
+-      return { loggedIn: true, credPath: "(browser stub) ~/.claude/.credentials.json" };
++      return { loggedIn: false, credPath: "(browser preview) ~/Polaris/data/providers.json" };
+     case "codex_proxy_info":
+       return { running: false, port: 0, lastError: "" };
++    case "agent_backend_status": return { ...previewBackendStatus };
+     case "env_check": {
+       const tool = (key: string, name: string, found: boolean, required = false): ToolStatus => ({
+         key: key as ToolStatus["key"],
+@@ -2527,10 +2522,10 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
+         agentRuntime: { backend: "pi", nodeReady: false, entryExists: false, handshake: false,
+           protocolVersion: null, piVersion: null, agentdVersion: null, credentialsConfigured: false,
+           legacyActions: false, error: "BrowserPreview" },
+-        claude: tool("claude", "Claude Code", false, true),
++        claude: tool("claude", "Claude Code", false),
+         pwsh: tool("pwsh", "PowerShell 7", false),
+-        node: tool("node", "Node.js", true),
+-        npm: tool("npm", "npm", true),
++        node: tool("node", "Node.js", false, true),
++        npm: tool("npm", "npm", false),
+         uv: tool("uv", "uv", false),
+         python: tool("python", "Python", false),
+         claudeDir: null,
+@@ -2594,14 +2589,14 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
+       const daily = Array.from({ length: 14 }, (_, i) => {
+         const d = new Date(Date.now() - (13 - i) * 86400000);
+         const label = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+-        return { date: label, label, total: Math.round(300000 + Math.random() * 1600000), cost: +(Math.random() * 6).toFixed(4) };
++        return { date: label, label, total: Math.round(300000 + Math.random() * 1600000), cost: +(Math.random() * 6).toFixed(4), unpricedRequests: 1, hasUnknownCosts: true };
+       });
+       return {
+         available: true,
+-        today: { input: 75600, output: 644800, cacheRead: 45506800, cacheCreation: 1637200, total: 720483 + 47144001, requests: 411, cost: 49.107 },
+-        week: { input: 280000, output: 64000, cacheRead: 6100000, cacheCreation: 410000, total: 6854000, requests: 248, cost: 112.4 },
+-        month: { input: 980000, output: 240000, cacheRead: 22000000, cacheCreation: 1400000, total: 24620000, requests: 940, cost: 421.8 },
+-        year: { input: 1900000, output: 520000, cacheRead: 44000000, cacheCreation: 2800000, total: 49220000, requests: 1894, cost: 980.5 },
++        today: { input: 75600, output: 644800, cacheRead: 45506800, cacheCreation: 1637200, total: 720483 + 47144001, requests: 411, cost: 49.107, unpricedRequests: 411, hasUnknownCosts: true, models: [] },
++        week: { input: 280000, output: 64000, cacheRead: 6100000, cacheCreation: 410000, total: 6854000, requests: 248, cost: 112.4, unpricedRequests: 248, hasUnknownCosts: true, models: [] },
++        month: { input: 980000, output: 240000, cacheRead: 22000000, cacheCreation: 1400000, total: 24620000, requests: 940, cost: 421.8, unpricedRequests: 940, hasUnknownCosts: true, models: [] },
++        year: { input: 1900000, output: 520000, cacheRead: 44000000, cacheCreation: 2800000, total: 49220000, requests: 1894, cost: 980.5, unpricedRequests: 1894, hasUnknownCosts: true, models: [] },
+         daily,
+       };
+     }
+@@ -2632,6 +2627,12 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
+       return "";
+     case "expert_recommend_from_kb":
+       return { team: null, reason: "(browser stub)", topExperts: [], matchedTopics: [], corpusSize: 0 };
++    case "context_file_metadata":
++    case "context_file_read":
++    case "context_file_write":
++    case "expert_enabled_get":
++    case "expert_enabled_set":
++      throw new Error("浏览器预览未连接宿主，无法读写实际配置");
+     default:
+       return null;
+   }
+diff --git a/src/types/agentRuntime.ts b/src/types/agentRuntime.ts
+new file mode 100644
+index 0000000..f36f174
+--- /dev/null
++++ b/src/types/agentRuntime.ts
+@@ -0,0 +1,17 @@
++/** agent_backend_status: supervisor snapshot, separate from doctor ping. */
++export interface AgentBackendStatus {
++  backend: string;
++  agentdVersion: string | null;
++  pid: number | null;
++  restarts: number;
++  usagePersistFailures: number;
++  circuitOpen: boolean;
++  healthy: boolean;
++  lastError: string | null;
++}
++
++export const previewBackendStatus: AgentBackendStatus = {
++  backend: 'pi', agentdVersion: null, pid: null, restarts: 0,
++  usagePersistFailures: 0, circuitOpen: false, healthy: false,
++  lastError: 'BrowserPreview',
++};
+diff --git a/src/types/usageCosts.ts b/src/types/usageCosts.ts
+new file mode 100644
+index 0000000..d54ac30
+--- /dev/null
++++ b/src/types/usageCosts.ts
+@@ -0,0 +1,13 @@
++export interface PriceCompleteness {
++  unpricedRequests: number;
++  hasUnknownCosts: boolean;
++}
++export interface ModelCost {
++  source: string;
++  model: string;
++  hasPrice: boolean;
++  pricedRequests: number;
++  unpricedRequests: number;
++  cost: number;
++}
++export interface BucketCosts extends PriceCompleteness { models: ModelCost[] }
+diff --git a/tests/frontend/runtimeContracts.test.ts b/tests/frontend/runtimeContracts.test.ts
+new file mode 100644
+index 0000000..0a21e50
+--- /dev/null
++++ b/tests/frontend/runtimeContracts.test.ts
+@@ -0,0 +1,74 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { contextFiles, expertSettings, type ContextSelection } from '../../src/features/runtime/contracts';
++import { useExpertSettings } from '../../src/features/runtime/useExpertSettings';
++import { pricedCost, unknownCosts } from '../../src/features/runtime/usageCosts';
++
++const invoke = vi.hoisted(() => vi.fn());
++vi.mock('../../src/tauri', () => ({ invoke }));
++beforeEach(() => { invoke.mockReset(); });
++
++describe('context selection contract', () => {
++  it('passes the original selection back to read and write without selecting again', async () => {
++    const selected: ContextSelection = { root: '/project', fileName: 'CLAUDE.md', relativePath: 'CLAUDE.md',
++      agentsExists: false, claudeExists: true, exists: true };
++    invoke.mockResolvedValueOnce(selected).mockResolvedValueOnce('original').mockResolvedValueOnce(undefined);
++    const metadata = await contextFiles.metadata('project');
++    expect(await contextFiles.read('project', metadata)).toBe('original');
++    await contextFiles.write('project', metadata, 'edited');
++    expect(invoke.mock.calls).toEqual([
++      ['context_file_metadata', { projectId: 'project', createFile: 'AGENTS.md' }],
++      ['context_file_read', { projectId: 'project', selection: selected }],
++      ['context_file_write', { projectId: 'project', selection: selected, content: 'edited' }],
++    ]);
++  });
++  it('supports an explicit CLAUDE.md creation policy and propagates permission errors', async () => {
++    invoke.mockRejectedValue(new Error('ContextPermissionDenied'));
++    await expect(contextFiles.metadata('p', 'CLAUDE.md')).rejects.toThrow('ContextPermissionDenied');
++    expect(invoke).toHaveBeenCalledWith('context_file_metadata', { projectId: 'p', createFile: 'CLAUDE.md' });
++  });
++});
++
++describe('expert settings state', () => {
++  it('reads actual state and waits for successful setter response', async () => {
++    const state = useExpertSettings();
++    expect(state.enabled.value).toBeNull();
++    invoke.mockResolvedValueOnce({ enabled: false });
++    await state.refresh();
++    expect(state.enabled.value).toBe(false);
++    let complete!: (value: { enabled: boolean }) => void;
++    invoke.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
++    const pending = state.set(true);
++    expect(state.enabled.value).toBe(false);
++    expect(state.busy.value).toBe(true);
++    expect(invoke).toHaveBeenLastCalledWith('expert_enabled_set', { enabled: true });
++    complete({ enabled: true });
++    await pending;
++    expect(state.enabled.value).toBe(true);
++    expect(state.busy.value).toBe(false);
++  });
++  it('does not report success after a rejected setter or failed read', async () => {
++    const state = useExpertSettings();
++    invoke.mockRejectedValue(new Error('ExpertConfigWriteFailed'));
++    await state.set(true);
++    expect(state.enabled.value).toBeNull();
++    expect(state.error.value).toContain('ExpertConfigWriteFailed');
++    await state.refresh();
++    expect(state.enabled.value).toBeNull();
++    await expect(expertSettings.set(false)).rejects.toThrow('ExpertConfigWriteFailed');
++  });
++});
++
++describe('usage price completeness', () => {
++  it.each([
++    [4.5, 0, false, '$4.5000', '全部请求已标价'],
++    [4.5, 2, true, '$4.5000', '另有 2 次请求未标价'],
++    [0, 3, true, '$0.0000', '另有 3 次请求未标价'],
++  ])('preserves subtotal %s with %s unknown requests', (cost, count, unknown, amount, message) => {
++    expect(pricedCost(cost as number)).toBe(amount);
++    expect(unknownCosts({ unpricedRequests: count as number, hasUnknownCosts: unknown as boolean })).toBe(message);
++  });
++  it('does not fabricate completeness for an old host', () => {
++    expect(unknownCosts({})).toBe('价格完整性未知');
++    expect(pricedCost(NaN)).toBe('未知');
++  });
++});
+diff --git a/tests/frontend/runtimePresentation.test.ts b/tests/frontend/runtimePresentation.test.ts
+new file mode 100644
+index 0000000..f4ac7d0
+--- /dev/null
++++ b/tests/frontend/runtimePresentation.test.ts
+@@ -0,0 +1,83 @@
++import { describe, expect, it } from 'vitest';
++import { createSSRApp } from 'vue';
++import { renderToString } from '@vue/server-renderer';
++import RuntimeDiagnostics from '../../src/features/runtime/components/RuntimeDiagnostics.vue';
++import { legacyDoctorActions, legacyProviderActions, runtimeRows, usageCost, recordedCost } from '../../src/features/runtime/presentation';
++import { validateProviderConfig, modelConfigExample } from '../../src/features/runtime/providerConfig';
++import { contextEditingAvailable } from '../../src/features/runtime/contextPolicy';
++import { previewBackendStatus } from '../../src/types/agentRuntime';
++import type { EnvReport, VerifyReport } from '../../src/tauri';
++
++const report = {
++  os: 'linux', ready: false, shellReady: false, shellBundled: false,
++  node: { version: 'v22.19.0', path: '/runtime/node' },
++  agentRuntime: {
++    backend: 'pi', nodeReady: true, entryExists: true, handshake: true,
++    protocolVersion: 6, piVersion: '1.0.4', agentdVersion: '0.1.0',
++    credentialsConfigured: false, legacyActions: false, error: null,
++  },
++} as EnvReport;
++const verify = {
++  deep: false, steps: [{ key: 'shell', detail: 'source=explicit; shell=/tools/bash', status: 'ok' }],
++} as VerifyReport;
++
++describe('runtime presentation', () => {
++  it('requires BOTH backend and legacyActions for doctor actions', () => {
++    expect(legacyDoctorActions(null)).toBe(false);
++    expect(legacyDoctorActions(report)).toBe(false);
++    expect(legacyDoctorActions({ ...report, agentRuntime: { ...report.agentRuntime, legacyActions: true } })).toBe(false);
++    expect(legacyDoctorActions({ ...report, agentRuntime: { ...report.agentRuntime, backend: 'claude-cli', legacyActions: true } })).toBe(true);
++    expect(legacyDoctorActions({ ...report, agentRuntime: { ...report.agentRuntime, backend: 'claude-cli' } })).toBe(false);
++  });
++  it('only shows proxy switches for the explicitly detected legacy backend', () => {
++    expect(legacyProviderActions(null)).toBe(false);
++    expect(legacyProviderActions(previewBackendStatus)).toBe(false);
++    expect(legacyProviderActions({ ...previewBackendStatus, backend: 'unknown' })).toBe(false);
++    expect(legacyProviderActions({ ...previewBackendStatus, backend: 'claude-cli' })).toBe(true);
++  });
++  it('maps shell source from the verification result rather than guessing from shellBundled', () => {
++    expect(runtimeRows(report).find(r => r.label === 'shell')?.detail).toBe('未知');
++    expect(runtimeRows(report, verify).find(r => r.label === 'shell')?.detail).toContain('source=explicit');
++    expect(runtimeRows(report).find(r => r.label === '凭据')?.value).toBe('未配置');
++    expect(runtimeRows({ ...report, agentRuntime: { ...report.agentRuntime, credentialsConfigured: true } })
++      .find(r => r.label === '凭据')?.value).toBe('已配置');
++  });
++  it('renders the diagnostic contract, preview and no-inference notice', async () => {
++    const html = await renderToString(createSSRApp(RuntimeDiagnostics, { report: { ...report, os: 'browser' }, verify }));
++    for (const text of ['浏览器预览', '未就绪', '未做计费推理', 'Node', 'agentd 入口', 'ping', '1.0.4', 'source=explicit', '未配置']) {
++      expect(html).toContain(text);
++    }
++    expect(html).not.toContain('后台自动装好');
++  });
++  it('keeps partial or unpriced totals unknown, including mixed positive aggregates', () => {
++    for (const value of [0, 1.25, -1, NaN, Infinity]) expect(usageCost(value)).toBe('未知');
++    expect(usageCost(0, true)).toBe('$0.0000');
++    expect(usageCost(1.25, true)).toBe('$1.2500');
++    expect(usageCost(-1, true)).toBe('未知');
++    expect(recordedCost(0)).toBe('未知');
++    expect(recordedCost(1.25)).toBe('$1.2500');
++  });
++  it('blocks the fixed CLAUDE.md writer where AGENTS.md priority cannot be determined', () => {
++    for (const backend of ['pi', 'unknown', undefined]) expect(contextEditingAvailable(backend)).toBe(false);
++    expect(contextEditingAvailable('claude-cli')).toBe(true);
++  });
++});
++
++describe('provider model configuration', () => {
++  it('accepts documented models and preserves env/catalog fallback', () => {
++    expect(validateProviderConfig(JSON.parse(modelConfigExample), 'openai')).toBeNull();
++    expect(validateProviderConfig({ env: {} }, '')).toBeNull();
++    expect(validateProviderConfig({ models: [{ id: 'm', reasoning: false, input: ['text'],
++      cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 8192 }] }, 'responses')).toBeNull();
++    for (const protocol of ['anthropic', 'chatgpt', 'google']) expect(validateProviderConfig({}, protocol)).toBeNull();
++  });
++  it.each([null, [], { env: [] }, { models: [] }, { models: [''] }, { models: [4] },
++    { models: [{ id: 'x', reasoning: 'false' }] }, { models: [{ id: 'x', maxTokens: 0 }] },
++    { models: [{ id: 'x', input: ['video'] }] }, { models: [{ id: 'x', cost: { input: 0 } }] },
++  ])('rejects invalid configuration: %j', value => {
++    expect(validateProviderConfig(value, 'openai')).not.toBeNull();
++  });
++  it('rejects unsupported protocols', () => {
++    expect(validateProviderConfig({}, 'typo')).not.toBeNull();
++  });
++});
+diff --git a/tests/frontend/runtimePreview.test.ts b/tests/frontend/runtimePreview.test.ts
+new file mode 100644
+index 0000000..3b86479
+--- /dev/null
++++ b/tests/frontend/runtimePreview.test.ts
+@@ -0,0 +1,25 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { agentRuntime, envDoctor, provider } from '../../src/tauri';
++import { contextFiles, expertSettings } from '../../src/features/runtime/contracts';
++
++afterEach(() => vi.unstubAllGlobals());
++describe('browser runtime preview', () => {
++  it('never reports a real runtime, shell or credential as ready', async () => {
++    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
++    const status = await agentRuntime.status();
++    expect(status).toMatchObject({ backend: 'pi', healthy: false, lastError: 'BrowserPreview' });
++    const report = await envDoctor.check();
++    expect(report).toMatchObject({ os: 'browser', ready: false, shellReady: false,
++      node: { found: false }, agentRuntime: { handshake: false, credentialsConfigured: false, legacyActions: false } });
++    expect(await envDoctor.verify(true)).toMatchObject({ deep: false, ok: false });
++    await expect(provider.codexStartLogin()).rejects.toThrow('浏览器预览');
++    await expect(provider.claudeStartLogin()).rejects.toThrow('浏览器预览');
++    expect(await provider.claudeFinishLogin('preview', 'preview', 'preview')).toMatchObject({ loggedIn: false });
++    expect(await provider.codexPollLogin('preview', 'preview')).toMatchObject({ status: 'pending' });
++    await expect(provider.setLinkMode(true)).rejects.toThrow('Unsupported');
++    await expect(provider.setRouteMode(true)).rejects.toThrow('Unsupported');
++    await expect(expertSettings.get()).rejects.toThrow('浏览器预览');
++    await expect(expertSettings.set(true)).rejects.toThrow('浏览器预览');
++    await expect(contextFiles.metadata('project')).rejects.toThrow('浏览器预览');
++  });
++});
+diff --git a/tests/frontend/runtimeProviders.test.ts b/tests/frontend/runtimeProviders.test.ts
+new file mode 100644
+index 0000000..1aad261
+--- /dev/null
++++ b/tests/frontend/runtimeProviders.test.ts
+@@ -0,0 +1,41 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { createPinia, setActivePinia } from 'pinia';
++import { previewBackendStatus } from '../../src/types/agentRuntime';
++const ports = vi.hoisted(() => ({ status: vi.fn(), list: vi.fn(), link: vi.fn(), route: vi.fn(), proxy: vi.fn() }));
++vi.mock('../../src/tauri', () => ({
++  agentRuntime: { status: ports.status },
++  provider: { list: ports.list, setLinkMode: ports.link, setRouteMode: ports.route, codexProxyInfo: ports.proxy },
++}));
++import { useProvidersStore } from '../../src/stores/providers';
++
++beforeEach(() => {
++  vi.resetAllMocks();
++  setActivePinia(createPinia());
++  ports.list.mockResolvedValue({ providers: [], currentId: 'test', linkGlobal: false, routeLocal: false });
++});
++describe('provider store backend routing', () => {
++  it('reads backend status and never sends unsupported Pi setters/proxy queries', async () => {
++    ports.status.mockResolvedValue(previewBackendStatus);
++    const store = useProvidersStore();
++    await store.refresh();
++    expect(ports.status).toHaveBeenCalledOnce();
++    expect(store.legacyActions).toBe(false);
++    expect(await store.setLinkMode(true)).toBe(false);
++    expect(await store.setRouteMode(true)).toBe(false);
++    await store.refreshCodexProxy();
++    for (const port of [ports.link, ports.route, ports.proxy]) expect(port).not.toHaveBeenCalled();
++  });
++  it('retains legacy setters but disables them after status detection fails', async () => {
++    ports.status.mockResolvedValue({ ...previewBackendStatus, backend: 'claude-cli' });
++    ports.link.mockResolvedValue(true);
++    const store = useProvidersStore();
++    await store.refresh();
++    expect(await store.setLinkMode(true)).toBe(true);
++    expect(ports.link).toHaveBeenCalledWith(true);
++    ports.status.mockRejectedValue(new Error('offline'));
++    await store.refresh();
++    expect(store.legacyActions).toBe(false);
++    expect(await store.setRouteMode(true)).toBe(false);
++    expect(ports.route).not.toHaveBeenCalled();
++  });
++});
