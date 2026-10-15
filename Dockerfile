@@ -33,7 +33,8 @@ COPY agentd/src ./src
 COPY agentd/config ./config
 COPY agentd/test ./test
 COPY scripts/pack-agentd.mjs /build/scripts/pack-agentd.mjs
-COPY scripts/runtime/check-wasm.mjs scripts/runtime/node.mjs /build/scripts/runtime/
+# Copy the whole helper directory: pack-agentd's imports change over time (a fixed file list broke the build once).
+COPY scripts/runtime/ /build/scripts/runtime/
 RUN node /build/scripts/pack-agentd.mjs /out/agentd
 
 # ── stage 2: Rust 服务端 ───────────────────────────────────────
