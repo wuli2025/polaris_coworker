@@ -7,6 +7,9 @@ import { useSecurity } from './useSecurity';
 import { timing, type Approval, type Device, type Notice, type Progress, type Timing } from './contracts';
 import { interconnectCopy as c } from './copy';
 import { errMsg } from '../../lib/err';
+import { getToken, setBase } from '../collab/api';
+import { interconnectBackendAvailable } from '../../tauri';
+import { createInterconnectCommand } from './browserTransport';
 
 const riskCommands = new Set(['peer_grant_set', 'peer_trust', 'peer_revoke', 'mesh_device_remove',
   'mesh_kick', 'mesh_leave', 'fs_unmount', 'fs_share_save', 'fs_share_set']);
@@ -15,12 +18,15 @@ export function useInterconnect(
   changed: () => Promise<void>, options: Partial<Timing> = {},
 ) {
   const config = timing(options);
-  const login = useLogin(rawInvoke, async token => {
+  const command = createInterconnectCommand({ native: isTauri, invoke: rawInvoke,
+    backend: interconnectBackendAvailable, token: getToken, fetch: (...args) => fetch(...args) });
+  const login = useLogin(command, async token => {
+    if (!isTauri) setBase('');
     await collab.adoptLocalSession(token);
     await account.refresh();
     await changed();
   }, config.slowMs);
-  const security = useSecurity(rawInvoke);
+  const security = useSecurity(command);
   const ports = ref<Record<string, number>>({});
   const stops: (() => void)[] = [];
   let disposed = false;
@@ -28,27 +34,22 @@ export function useInterconnect(
   let retry: ReturnType<typeof setInterval>;
   let polling = false;
   async function refresh() {
-    if (!isTauri || polling || disposed) return;
+    if (polling || disposed) return;
     polling = true;
     try {
       await login.refresh();
       if (collab.authed && login.enrolled.value) {
         await security.refresh();
-        const state = await rawInvoke<{ peers?: { nodeId: string; port: number }[] }>('mesh_status');
-        if (!disposed) ports.value = Object.fromEntries((state.peers || []).map(p => [p.nodeId, p.port]));
+        if (isTauri) {
+          const state = await command<{ peers?: { nodeId: string; port: number }[] }>('mesh_status');
+          if (!disposed) ports.value = Object.fromEntries((state.peers || []).map(p => [p.nodeId, p.port]));
+        }
       }
     } catch (e) { if (!disposed) login.error.value = errMsg(e); }
     finally { polling = false; }
   }
   async function passwordLogin(username: string, password: string) {
-    if (isTauri) await login.login(username, password);
-    else {
-      login.busy.value = true;
-      login.error.value = '';
-      try { await collab.login(username, password); await account.refresh(); }
-      catch (e) { login.error.value = errMsg(e); }
-      finally { login.busy.value = false; }
-    }
+    await login.login(username, password);
     await refresh();
   }
   async function emailDone(info: Record<string, unknown>) {
@@ -64,16 +65,17 @@ export function useInterconnect(
       await account.refresh();
       login.enrolled.value = false;
       login.progress.value = null;
+      login.peers.value = [];
       await changed();
     });
   }
   async function invoke<T>(name: string, args?: Record<string, unknown>): Promise<T> {
-    if (!riskCommands.has(name)) return rawInvoke<T>(name, args);
+    if (!riskCommands.has(name)) return command<T>(name, args);
     const payload = args ? JSON.parse(JSON.stringify(args)) as Record<string, unknown> : undefined;
     let result: T | undefined;
     let completed = false;
     await security.run(async () => {
-      result = await rawInvoke<T>(name, payload);
+      result = await command<T>(name, payload);
       if ((result as { partial?: boolean })?.partial) throw new Error(c.partial);
       completed = true;
       void changed().catch(e => { login.error.value = errMsg(e); });
@@ -85,7 +87,7 @@ export function useInterconnect(
     const nodeId = notice.nodeId;
     const deviceId = notice.deviceId;
     await security.run(async () => {
-      const result = await rawInvoke<{ partial?: boolean }>('mesh_device_remove', { nodeId });
+      const result = await command<{ partial?: boolean }>('mesh_device_remove', { nodeId });
       if (result.partial) throw new Error(c.partial);
       if (!await security.ack(deviceId)) throw new Error(security.error.value);
       await changed();
@@ -104,10 +106,10 @@ export function useInterconnect(
       void subscribe<Notice | Approval>('interconnect:security', event => {
         if (!disposed && collab.authed) security.receive(event);
       });
-      void refresh();
-      poll = setInterval(() => void refresh(), config.pollMs);
-      retry = setInterval(() => void security.tick(), config.retryMs);
     }
+    void refresh();
+    poll = setInterval(() => void refresh(), config.pollMs);
+    retry = setInterval(() => void security.tick(), config.retryMs);
   });
   onUnmounted(() => {
     disposed = true;
@@ -118,6 +120,7 @@ export function useInterconnect(
     clearInterval(retry);
   });
   function withPorts(devices: Device[]) {
+    if (!isTauri) return login.peers.value;
     return devices.filter(d => !d.revoked).map(d => ({ ...d, port: ports.value[d.nodeId] }));
   }
   return { login, security, passwordLogin, emailDone, logout, invoke, revokeNotice, withPorts };

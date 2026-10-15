@@ -10,8 +10,8 @@ vi.mock('../collab/stores/collab', () => ({ useCollabStore: () => ({
 vi.mock('../../stores/account', () => ({ useAccountStore: () => ({ label: 'alice' }) }));
 vi.mock('../../stores/app', () => ({ useAppStore: () => ({}) }));
 vi.mock('./remoteSources', () => ({ loadRemoteSources: () => [], upsertRemoteSource: vi.fn(), removeRemoteSource: vi.fn() }));
-vi.mock('../../tauri', () => ({ isTauri: true, invoke: vi.fn(), listen: vi.fn(), apps: {}, fsmount: {}, openUrl: vi.fn() }));
-vi.mock('../collab/api', () => ({ collabApi: {}, parseConnectCode: vi.fn(), getBase: () => '', getToken: () => '' }));
+vi.mock('../../tauri', () => ({ isTauri: true, interconnectBackendAvailable: vi.fn(), invoke: vi.fn(), listen: vi.fn(), apps: {}, fsmount: {}, openUrl: vi.fn() }));
+vi.mock('../collab/api', () => ({ collabApi: {}, parseConnectCode: vi.fn(), getBase: () => '', getToken: () => '', setBase: vi.fn() }));
 vi.mock('../auth/EmailLogin.vue', () => ({ default: { template: '<form>email login</form>' } }));
 vi.mock('../auth/AccountCenterModal.vue', () => ({ default: { template: '<div />' } }));
 vi.mock('./RemoteTerminal.vue', () => ({ default: { template: '<div />' } }));

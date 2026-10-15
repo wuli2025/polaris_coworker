@@ -58,6 +58,7 @@ pub fn session(token: &str, operation: &str, payload: &Value) -> Result<(), Stri
 
 pub fn session_proven(token: &str, operation: &str, payload: &Value, assertion: Option<&str>) -> Result<(), String> {
     crate::collab::auth::check_session(token)?;
+    if super::browser::risk(token, operation, payload)? { return Ok(()); }
     let binding: Option<(String, String)> = db::with_conn(|conn| conn.query_row(
         "SELECT uid,node_id FROM bound_sessions WHERE token=?1", params![token],
         |r| Ok((r.get(0)?, r.get(1)?)),

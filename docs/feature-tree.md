@@ -26,7 +26,7 @@
 | --- | --- | --- |
 | 桌面壳 → `H/main.rs:1`、`H/lib.rs`、`H/desktop_commands.rs` | Tauri 初始化、命令注册、托盘、退出回收 | app→各业务 crate；`src-tauri/Cargo.toml:161` desktop 特性，`src-tauri/tauri.conf.json:1`；H/UI |
 | 服务壳 → `H/server.rs:1,53,84` | HTTP/WS、初始化引擎、运行健康信息 | app→apihub/collab/各引擎；server 特性与 `.env.server.example:1`；H |
-| P6c/R10 新加坡部署 → `deploy/singapore/docker-compose.yml`、`scripts/` | 权威、iroh-relay、TLS；默认加密备份、恢复后指纹核验；只产出不部署 | 复用 polaris-server/collab-net；`.env.example` 配置；依赖/安装/切换见 [部署说明](../deploy/singapore/README.md)；R10 入口、迁移与真实验证见 [报告](execution/R10/report.md)，原始 [P6c 记录](../deploy/singapore/VALIDATION.md)；镜像 digest 与上线验证 BLOCKED |
+| P6c/R10/R10b 新加坡部署 → `deploy/singapore/docker-compose.yml`、`scripts/` | 权威、iroh-relay、TLS；加密备份、恢复指纹核验；`restore.sh` 限制单次请求，`backup_crypto.py` 加解密超时清理 | 复用 polaris-server/collab-net、Python subprocess；`.env.example` 新增 `BACKUP_CRYPTO_TIMEOUT_SECS=300`，整数校验、旧配置自动补默认；[配置切换](../deploy/singapore/README.md)、[R10b 入口/迁移/验证](execution/R10b/report.md)、[R10 报告](execution/R10/report.md)；镜像 digest 与上线验证 BLOCKED |
 | 服务可执行入口 → `src-tauri/crates/polaris-cli/Cargo.toml:23` | 真正的 `polaris-server` bin 在 CLI crate | cli→app（无默认特性、server）；不能按主 Cargo.toml 注释中的 bin 当现存配置（`src-tauri/Cargo.toml:221`）；`cargo check -p polaris-cli`，CI `:85` |
 | Vue 桌面/Web → `src/App.vue:1`、`src/tauri.ts:445,1130` | 页壳、invoke/listen 适配、状态与组件 | Vue→桥→Tauri 或 HTTP；`package.json:7` dev，`:8` build；UI |
 | 移动端 → `mobile/src/lib/net.ts:315,345`、`mobile/src/lib/chat.ts:208` | HTTP/WS 远程对话、主机/项目切换；不是本地 Agent runtime | mobile→主机 api；`mobile/package.json:6`；移动 |
@@ -141,7 +141,7 @@ Pi `useSandbox` 在 P3 路由 bash/write/edit 到宿主容器桥；不可用或�
 | 设备操作 → `H/mesh.rs:1136,1166,1180,1295,1347` | peer_grant_set、peer_trust/revoke、device_code、connect_by_code | →grants/identity；P6 改默认信任体验，保留显式收紧能力；H |
 | 桌面 hosting → `H/hosting.rs:111,338,441,470,492,558` | 内嵌主机 start/status/stop、自启动、LAN 开关，桥接事件 | →collab router+apihub；collab_host.json、POLARIS_HOST_ALLOW_LAN、POLARIS_AUTH_TOKEN（`:58,102,128`）；H |
 | 账号前端 → `src/features/auth/AccountCenterModal.vue:1`、`src/features/auth/authorityTransport.test.ts:1` | 账号中心、权威传输选择 | →壳 mesh/认证 API；UI，有已有传输策略单测 |
-| 互联前端 → `src/features/interconnect/InterconnectView.vue:1`、`useInterconnect.ts` | P6b：账号密码编排、设备/协作者、安全通知、审批重试；兼容工具默认折叠 | →P6a/P6a2 Tauri/事件、HTTP；无新依赖/DB 迁移；`rateLimit` 默认 60s/读120/写30/登录20，`timing()` 校验轮询参数；入口、切换例、行为测试与实际验证见 [P6b 执行报告](interconnect/p6b-frontend.md) |
+| 互联前端/HTTP → `src/features/interconnect/InterconnectView.vue`、`polaris-collab/src/collab/http/browser_routes.rs` | P6d：密码登录四阶段、会话设备/策略 B、HTTP 网关文件访问、审批名称；P6b 默认界面保留 | 依赖公共 login/auth/mesh/risk/gateway，无新依赖；`browser` 默认/校验/切换、会话表迁移见 [P6d 接口报告](interconnect/p6d-http.md)，[真实验证/文件清单](interconnect/p6d-validation.md)；[P6b](interconnect/p6b-frontend.md) |
 | 协作项目/团队/任务 → `C/collab/mod.rs:39,40,41` | projects/teams/tasks；账号权限和任务状态 | →db/auth；`src/features/collab/api.ts:1`、stores/collab.ts `:1` 为 UI API 与状态入口；C/UI |
 | 协作对话/负责人 → `C/collab/mod.rs:12,36,37` | chat、lead、lead_ai 负责协作者/负责人沟通和任务编排 | 与 kernel/chat 的模型会话不等同；权限由确定性授权表决定（mod `:3`）；C |
 | 独立负责人模型 → `C/collab/lead_ai.rs:41,49,149,193,237,276` | load/save_cfg、ai_decompose/review/task_reply/fuse | OpenAI 兼容 HTTP，配置 `lead_model.json` / POLARIS_LEAD_MODEL_CFG（`:5,28`）；不是 headless/Claude CLI；C |

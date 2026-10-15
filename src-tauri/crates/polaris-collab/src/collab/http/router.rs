@@ -18,6 +18,13 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         // ── 账号权威(云机签发身份断言;成员主机离线验签)──
         // 权威侧发号:公钥、注册(强制绑邮箱)、登录、改密。非权威机上这些路由一律 400,
         // 前端据 /api/account/info 决定登录页往哪儿打,不靠猜。
+        .route("/api/interconnect/login", post(browser_login))
+        .route("/api/interconnect/status", get(browser_status))
+        .route("/api/interconnect/retry", post(browser_retry))
+        .route("/api/interconnect/security/inbox", get(browser_inbox))
+        .route("/api/interconnect/security/ack", post(browser_ack))
+        .route("/api/interconnect/security/decide", post(browser_decide))
+        .route("/api/interconnect/devices/revoke", post(browser_revoke))
         .route("/api/account/info", get(account_info))
         .route("/api/account/pubkey", get(account_pubkey))
         .route("/api/account/signup", post(account_signup))
@@ -209,5 +216,6 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         r = r.route("/ws", get(collab_ws_handler));
     }
     r.layer(axum::middleware::from_fn(risk_middleware))
-        .layer(axum::middleware::from_fn(rate_limits::middleware)).with_state(state)
+        .layer(axum::middleware::from_fn(rate_limits::middleware))
+        .layer(axum::middleware::from_fn(browser_no_store)).with_state(state)
 }

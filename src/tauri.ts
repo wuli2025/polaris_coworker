@@ -440,6 +440,11 @@ function ensureWs(): void {
   }
 }
 
+export async function interconnectBackendAvailable(): Promise<boolean> {
+  await ensureBackend();
+  return backendMode === "http";
+}
+
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isTauri) return rawInvoke<T>(cmd, args);
   await ensureBackend();

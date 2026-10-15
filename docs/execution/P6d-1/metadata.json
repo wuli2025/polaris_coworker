@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-15T06:46:04.601866+00:00",
+  "status": "EXEC_COMPLETED",
+  "exit_code": 0,
+  "cwd": "/home/mi/work/polaris-pi",
+  "sandbox": "workspace-write",
+  "model": null,
+  "prompt_sha256": "cbaa7940919863bff81404990a127bf2f5b7817b7290e2c73a632c9b1740aa11",
+  "cli": "/home/mi/.local/bin/codex-polaris",
+  "version": "codex-cli 0.162.1",
+  "git_before": {
+    "status_porcelain": "?? docs/execution/P6d-1/\n?? docs/reviews/P6b-round1/\n?? docs/reviews/P6c-round2/\n"
+  },
+  "git_after": {
+    "status_porcelain": " M docs/feature-tree.md\n M docs/interconnect/p6b-frontend.md\n M src-tauri/crates/polaris-collab/src/collab/gateway.rs\n M src-tauri/crates/polaris-collab/src/collab/http.rs\n M src-tauri/crates/polaris-collab/src/collab/http/rate_limits.rs\n M src-tauri/crates/polaris-collab/src/collab/http/router.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/defaults.json\n M src-tauri/crates/polaris-collab/src/collab/interconnect/gate.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/mod.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/risk.rs\n M src-tauri/crates/polaris-collab/src/collab/interconnect/schema.json\n M src-tauri/crates/polaris-collab/src/collab/interconnect/security.sql\n M src-tauri/crates/polaris-collab/src/collab/mesh.rs\n M src/features/interconnect/ApprovalPanel.vue\n M src/features/interconnect/DeviceList.vue\n M src/features/interconnect/contracts.ts\n M src/features/interconnect/copy.ts\n M src/features/interconnect/defaultView.test.ts\n M src/features/interconnect/useInterconnect.ts\n M src/features/interconnect/useLogin.ts\n M src/tauri.ts\n?? docs/execution/P6d-1/\n?? docs/interconnect/p6d-http.md\n?? docs/interconnect/p6d-validation.md\n?? src-tauri/crates/polaris-collab/src/collab/gateway/request.rs\n?? src-tauri/crates/polaris-collab/src/collab/http/browser_routes.rs\n?? src-tauri/crates/polaris-collab/src/collab/http/browser_tests.rs\n?? src-tauri/crates/polaris-collab/src/collab/interconnect/browser/\n?? src/features/interconnect/browserTransport.test.ts\n?? src/features/interconnect/browserTransport.ts\n",
+    "diff_stat": " docs/feature-tree.md                               |  4 +-\n docs/interconnect/p6b-frontend.md                  |  4 +-\n .../crates/polaris-collab/src/collab/gateway.rs    | 52 ++--------------------\n src-tauri/crates/polaris-collab/src/collab/http.rs |  4 ++\n .../polaris-collab/src/collab/http/rate_limits.rs  |  7 +--\n .../polaris-collab/src/collab/http/router.rs       | 10 ++++-\n .../src/collab/interconnect/defaults.json          |  7 +++\n .../polaris-collab/src/collab/interconnect/gate.rs |  1 +\n .../polaris-collab/src/collab/interconnect/mod.rs  |  3 ++\n .../polaris-collab/src/collab/interconnect/risk.rs |  9 ++--\n .../src/collab/interconnect/schema.json            | 37 +++++++++++++++\n .../src/collab/interconnect/security.sql           |  4 ++\n src-tauri/crates/polaris-collab/src/collab/mesh.rs |  2 +-\n src/features/interconnect/ApprovalPanel.vue        |  2 +-\n src/features/interconnect/DeviceList.vue           |  5 ++-\n src/features/interconnect/contracts.ts             |  3 +-\n src/features/interconnect/copy.ts                  |  4 +-\n src/features/interconnect/defaultView.test.ts      |  4 +-\n src/features/interconnect/useInterconnect.ts       | 41 +++++++++--------\n src/features/interconnect/useLogin.ts              |  7 ++-\n src/tauri.ts                                       |  5 +++\n 21 files changed, 127 insertions(+), 88 deletions(-)\n"
+  },
+  "finished_at": "2026-10-15T07:33:27.910679+00:00"
+}

@@ -140,7 +140,7 @@ pub fn peers(uid: &str, exclude_node: &str) -> Result<Vec<Peer>, String> {
     let mut st = conn
         .prepare(&format!(
             "SELECT {PEER_COLS} FROM mesh_nodes \
-             WHERE uid=?1 AND revoked=0 AND node_id<>?2 ORDER BY last_seen DESC"
+             WHERE uid=?1 AND revoked=0 AND node_id<>?2 AND node_id NOT GLOB 'web_*' ORDER BY last_seen DESC"
         ))
         .map_err(|e| format!("查设备清单失败: {e}"))?;
     let rows = st

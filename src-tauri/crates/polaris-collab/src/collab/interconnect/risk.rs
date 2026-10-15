@@ -114,14 +114,17 @@ pub fn pending(uid: &str, node: &str) -> Result<Vec<Value>, String> {
     let device = super::devices::active(uid, node)?;
     db::with_conn(|conn| {
         let mut st = conn.prepare(
-            "SELECT a.id,a.operation,a.actor,a.host,a.digest,a.expires_at,a.state FROM mesh_approvals a
-             JOIN mesh_device_ids d ON d.device_id=a.actor WHERE a.uid=?1 AND a.expires_at>?2
-             AND a.state IN ('pending','approved') AND (d.sequence>?3 OR a.actor=?4)",
+            "SELECT a.id,a.operation,a.actor,a.host,a.digest,a.expires_at,a.state,m.name,m.os FROM mesh_approvals a
+             LEFT JOIN mesh_device_ids d ON d.device_id=a.actor AND d.uid=a.uid
+             LEFT JOIN mesh_nodes m ON m.node_id=d.node_id AND m.uid=a.uid AND m.revoked=0
+             WHERE a.uid=?1 AND a.expires_at>?2 AND a.state IN ('pending','approved')
+             AND (d.sequence>?3 OR a.actor=?4 OR d.device_id IS NULL)",
         ).map_err(|e| e.to_string())?;
         let rows = st.query_map(params![uid, db::now(), device.sequence, device.device_id], |r| Ok(json!({
             "id":r.get::<_,String>(0)?, "operation":r.get::<_,String>(1)?, "actor":r.get::<_,String>(2)?,
             "host":r.get::<_,String>(3)?, "digest":r.get::<_,String>(4)?,
             "expiresAt":r.get::<_,i64>(5)?, "state":r.get::<_,String>(6)?,
+            "actorName":r.get::<_,Option<String>>(7)?, "actorPlatform":r.get::<_,Option<String>>(8)?,
         }))).map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     })

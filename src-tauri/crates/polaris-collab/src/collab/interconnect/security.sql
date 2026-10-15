@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS bound_sessions(
     uid TEXT NOT NULL, device_id TEXT NOT NULL, node_id TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS bound_session_device ON bound_sessions(uid,device_id);
+CREATE TABLE IF NOT EXISTS browser_interconnect(
+    token TEXT PRIMARY KEY REFERENCES bound_sessions(token) ON DELETE CASCADE,
+    record TEXT NOT NULL
+);
 -- Backfill independent device IDs; the node primary key keeps migration idempotent.
 INSERT OR IGNORE INTO mesh_device_ids(node_id,uid,device_id,enrolled_at,sequence)
 SELECT node_id,uid,'dev_' || lower(hex(randomblob(16))),first_seen,rowid FROM mesh_nodes;

@@ -12,6 +12,7 @@ pub mod devices;
 pub mod revocations;
 pub mod binding;
 pub mod login;
+pub mod browser;
 pub mod risk_inventory;
 
 pub const DEFAULTS: &str = include_str!("defaults.json");
@@ -24,6 +25,7 @@ pub struct Config {
     pub relay: Relay,
     pub security: Security,
     pub rate_limit: RateLimit,
+    pub browser: browser::Config,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -136,6 +138,7 @@ pub fn resolve(
     ] {
         if value == 0 || value > max { return Err(format!("rateLimit.{name} 须为 1..={max} 的整数")); }
     }
+    config.browser.validate()?;
     Ok(config)
 }
 

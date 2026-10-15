@@ -1,9 +1,10 @@
 import { ref } from 'vue';
 import { errMsg } from '../../lib/err';
 import { interconnectCopy as c } from './copy';
-import type { Command, Progress, RelayConfig } from './contracts';
+import type { Command, Device, Progress, RelayConfig } from './contracts';
 
 export interface LoginResult {
+  peers?: Device[]; devices?: Device[];
   enrolled?: boolean; token?: string; interconnect?: Progress; relayConfig?: RelayConfig;
   authorityConfigured?: boolean; configurationError?: string;
 }
@@ -11,6 +12,7 @@ export function useLogin(command: Command, adopt: (token: string) => Promise<voi
   const progress = ref<Progress | null>(null);
   const relay = ref<RelayConfig>();
   const error = ref('');
+  const peers = ref<Device[]>([]);
   const busy = ref(false);
   const enrolled = ref(false);
   const authorityConfigured = ref<boolean>();
@@ -18,6 +20,7 @@ export function useLogin(command: Command, adopt: (token: string) => Promise<voi
   let disposed = false;
   function receive(result: LoginResult) {
     if (disposed) return;
+    if (result.devices || result.peers) peers.value = result.devices || result.peers || [];
     if (result.interconnect) progress.value = result.interconnect;
     if (result.relayConfig) relay.value = result.relayConfig;
     if (result.enrolled !== undefined) enrolled.value = result.enrolled;
@@ -66,5 +69,5 @@ export function useLogin(command: Command, adopt: (token: string) => Promise<voi
     await refresh();
   }
   function dispose() { disposed = true; }
-  return { progress, relay, error, busy, enrolled, authorityConfigured, receive, refresh, done, login, retry, dispose };
+  return { progress, relay, peers, error, busy, enrolled, authorityConfigured, receive, refresh, done, login, retry, dispose };
 }

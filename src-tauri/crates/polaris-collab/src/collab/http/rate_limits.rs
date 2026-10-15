@@ -12,13 +12,14 @@ const LIMITED: &str = "interconnect_rate_limited";
 
 fn category(path: &str) -> Option<&'static str> {
     match path {
-        "/api/mesh/security/inbox" | "/api/mesh/security/watch" | "/api/mesh/revocations"
+        "/api/interconnect/status" | "/api/interconnect/security/inbox" | "/api/mesh/security/inbox" | "/api/mesh/security/watch" | "/api/mesh/revocations"
         | "/api/mesh/devices" | "/api/mesh/announce" | "/api/mesh/assert" => Some("read"),
-        "/api/mesh/security/ack" | "/api/mesh/risk/decide" | "/api/mesh/risk/authorize"
+        "/api/interconnect/retry" | "/api/interconnect/security/ack" | "/api/interconnect/security/decide"
+        | "/api/interconnect/devices/revoke" | "/api/mesh/security/ack" | "/api/mesh/risk/decide" | "/api/mesh/risk/authorize"
         | "/api/mesh/revoke" | "/api/mesh/rename" | "/api/peer/revoke"
         | "/api/collab/admin/device_revoke" | "/api/account/reset"
         | "/api/collab/email/reset" => Some("write"),
-        "/api/account/login" | "/api/account/login_code" | "/api/account/signup"
+        "/api/interconnect/login" | "/api/account/login" | "/api/account/login_code" | "/api/account/signup"
         | "/api/mesh/enroll" | "/api/collab/login_assertion" | "/api/collab/login"
         | "/api/collab/email/login" | "/api/collab/join" => Some("login"),
         _ => None,

@@ -19,5 +19,12 @@
     "writeRequests": 30,
     "loginRequests": 20,
     "globalMultiplier": 20
+  },
+  "browser": {
+    "deviceName": "Browser session",
+    "platform": "web",
+    "gatewayUrl": null,
+    "requestTimeoutSecs": 10,
+    "maxPeers": 32
   }
 }

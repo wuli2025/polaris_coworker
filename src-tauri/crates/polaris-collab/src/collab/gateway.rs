@@ -114,6 +114,7 @@ pub fn gateway_node_id() -> Result<String, String> {
 // ── Endpoint 惰性初始化 ─────────────────────────────────────────────────────
 
 mod endpoint;
+mod request;
 use endpoint::ensure_endpoint;
 
 /// 取一条到指定主机的健康连接:缓存里已死的丢弃重建。
@@ -365,7 +366,7 @@ pub async fn gateway_proxy(
         }
         Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
     };
-    let qs = build_qs(&q);
+    let qs = request::build_qs(&q);
     // WebSocket 升级(手机 /ws 流式)→ 走双向 pump 反代;普通 HTTP 走下面 ureq。
     if let Some(ws) = ws {
         let backend = format!("ws://127.0.0.1:{port}/{rest}{qs}");
@@ -379,31 +380,12 @@ pub async fn gateway_proxy(
     let url = format!("http://127.0.0.1:{port}/{rest}{qs}");
     let m = method.as_str().to_string();
     // 透传关键请求头(鉴权/内容类型);Host 由 ureq 依 url 自设。
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let ct = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    let forwarded = request::forwarded(&headers);
     let body_vec = body.to_vec();
 
     let out = tokio::task::spawn_blocking(move || -> Result<(u16, String, Vec<u8>), String> {
         let mut req = ureq::request(&m, &url).timeout(Duration::from_secs(600));
-        if let Some(a) = &auth {
-            req = req.set("Authorization", a);
-        }
-        if let Some(c) = &ct {
-            req = req.set("Content-Type", c);
-        }
-        if let Some(a) = &accept {
-            req = req.set("Accept", a);
-        }
+        for (name, value) in &forwarded { req = req.set(name, value); }
         let resp = if body_vec.is_empty() && (m == "GET" || m == "HEAD") {
             req.call()
         } else {
@@ -442,32 +424,6 @@ pub async fn gateway_proxy(
         )
             .into_response(),
     }
-}
-
-/// 最小 URL 编码(query 值透传;与 http.rs urlencode 同款,gateway 内自带避免跨模块 pub)。
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{:02X}", b)),
-        }
-    }
-    out
-}
-
-/// query map → `?k=v&...`(空则空串)。HTTP 与 WS 反代共用。
-fn build_qs(q: &HashMap<String, String>) -> String {
-    if q.is_empty() {
-        return String::new();
-    }
-    let enc: Vec<String> = q
-        .iter()
-        .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
-        .collect();
-    format!("?{}", enc.join("&"))
 }
 
 // ── WS 反代:手机 WebSocket ↔ 后端(经隧道到桌面 apihub /ws) ─────────────────

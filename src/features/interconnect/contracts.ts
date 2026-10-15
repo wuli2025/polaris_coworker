@@ -2,9 +2,10 @@ export type Stage = 'register' | 'discover' | 'relay' | 'connect';
 export interface Progress { stage: Stage; state: string; error?: string | null; retryable: boolean }
 export interface RelayConfig { urls: string[]; state: string; source?: string }
 export interface Notice { kind: 'device_enrolled'; deviceId: string; nodeId: string; name: string; platform: string; time: number }
-export interface Approval { id: string; operation: string; actor: string; host: string; expiresAt: number; state: string }
+export interface Approval { id: string; operation: string; actor: string; actorName?: string | null; actorPlatform?: string | null; host: string; expiresAt: number; state: string }
 export interface Inbox { notifications: Notice[]; approvals: Approval[] }
 export interface Device {
+  storageMode?: 'http';
   nodeId: string; deviceId?: string; name: string; os: string; online: boolean; isSelf: boolean;
   connected: boolean; mounted: boolean; drive: string; error: string; port?: number; revoked: boolean;
 }

@@ -31,11 +31,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 mod account_routes;
+mod browser_routes;
+use browser_routes::*;
 mod mesh_routes;
 mod security_routes;
 use security_routes::*;
 #[cfg(test)]
 mod interconnect_tests;
+#[cfg(test)]
+mod browser_tests;
 #[cfg(test)]
 mod security_tests;
 use account_routes::*;
