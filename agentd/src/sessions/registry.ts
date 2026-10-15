@@ -198,7 +198,7 @@ export class SessionRegistry {
     const unsubscribe = session.subscribe((event) => {
       armIdle(); // All SDK events count, including tool progress and retry/compaction events.
       if (event.type === "message_end" && event.message.role === "assistant") {
-        try { recordUsage(this.config().usageDir, id, run.id, usageOrdinal++, event.message); }
+        try { recordUsage(this.config().usageDir, id, run.id, usageOrdinal++, event.message, session.modelRuntime); }
         catch {
           this.usagePersistFailed();
           run.mapper.error("USAGE_PERSIST_FAILED", "Usage record could not be persisted");

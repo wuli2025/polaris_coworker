@@ -149,6 +149,7 @@ fn summarize(mut dirs: Vec<PathBuf>, pi_dir: Option<PathBuf>) -> Result<UsageSum
             let u = Usage { input: row.usage.input as u64, output: row.usage.output as u64,
                 cache_read: row.usage.cache_read as u64, cache_creation: row.usage.cache_write as u64 };
             records.push(Rec { msg_id: Some(row.dedup_key()), date: row.date,
+                // agentd snapshots the model's pricing; absent legacy flags stay unknown, even with a cost.
                 has_price: row.price_available == Some(true),
                 source: format!("pi:{}", row.provider), model: row.model,
                 cost: row.usage.cost.total, usage: u });

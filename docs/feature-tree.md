@@ -445,8 +445,17 @@ Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列�
 - 迁移：旧 `claude_md_*` 和旧后端路径行为不变；不重命名文件，Pi 面板解除临时禁用。缺文件、权限不足和其它 I/O 错误分别命名。
 - 用量入口：`provider::usage_summary`；桶增加 `models`、`unpricedRequests`、`hasUnknownCosts`，每日趋势同步完整性；UsageBoard/ProviderDock 保留金额并单列未知请求。
 - 用量配置：默认估价表 `provider/usage_prices.json`；`POLARIS_USAGE_PRICES=/absolute/prices.json` 切换，校验匹配规则和四项非负有限价格，未匹配模型不再套 Sonnet 价。
-- 用量迁移缺口：Pi 老账本无 `priceAvailable` 时保留金额并标未知；当前 agentd 生产写入链路仍无此字段。修改该链路超出 TASK DATA 限定范围，扩展授权未收到，不能宣称 Pi 价格完整性闭环。
+- 用量迁移：Pi 老账本无 `priceAvailable` 时保留金额并标未知；P5d-2 在获批范围内补齐 agentd 新记录的模型价格标记，入口与验证见下节。
 - 专家入口：`expert_enabled_get/set` → `AgentBackend::experts_enabled` → Pi `config.apply`；`ExpertRuntimeNotice` 为 ExpertCenter/ExpertTeam 共用实际状态开关。
 - 专家配置：agentd 默认关闭；宿主 `agentd.expertSettings` 默认 `~/Polaris/data/expert-settings.json`，必须绝对文件路径。开关严格布尔，保存现有 prompt；落盘失败回滚 daemon。
 - 专家迁移：宿主启动后首次读取/发轮次会恢复持久配置；新会话生效，空闲会话依原 reopen 机制重开，忙会话延迟。未配置持久文件时读取 daemon 部署实际状态。
 - 验证：两壳实际入口 offline check 均 0 警告；前端 typecheck、61 用例、build 通过。内核 206 单测 + 8 集成用例通过（排除 6 个具名 TCP 沙箱项，另 2 ignored）。agentd typecheck 通过，27 测试文件中 25 通过、2 个既有环境失败，详见报告。
+
+## P5d-2：Pi 用量价格标记
+
+- 状态：实现与定向行为测试已落地；全量验收 **BLOCKED**。仅执行报告，由 Claude 重跑、Pi 独立审查后决定完成；[改动、配置示例和验证证据](pi-migration/p5d2-usage-pricing.md)。
+- 入口：`agentd/src/sessions/registry.ts` 的 assistant `message_end` → `events/usage-store.ts::recordUsage`；传入该会话的 `ModelRuntime.getModel`，按记录的 provider/model 查询单价，写入布尔 `priceAvailable`。
+- 依赖：复用 SDK 模型定义和既有 Rust `provider/pi_usage.rs::Row`、`usage.rs::summarize`；四项单价均有限非负且至少一项非零才为 true，与本次 `usage.cost` 无关；缺模型或全零定义为 false。
+- 配置：沿用 `providers[].models[].cost`（input/output/cacheRead/cacheWrite，USD/百万 tokens）；已有 schema 校验。独立 agentd 的 `usageDir` 默认空串禁用写入，宿主默认 `Polaris/data/pi-usage`；切换示例见报告，无新依赖或开关。
+- 迁移：记录仍为 version 1；缺字段保留 `None`，聚合按未知计数并保留已有金额。false 同样增加 `unpricedRequests`；true 即使本次费用为 0 也已标价。不回填旧账本，不改前端协议。
+- 验证：agentd typecheck、6 个用量行为用例、两壳 offline check（0 警告）、Vitest 61 用例通过；全量 agentd 26/28 文件通过，kernel 207 单测通过、6 失败、2 ignored，补跑 8 个集成用例通过；失败名和限制见报告。
