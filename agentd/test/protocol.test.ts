@@ -43,7 +43,7 @@ test("invalid JSON/UTF-8 are named errors and do not poison following lines", ()
 test("writer flushes complete lines in order despite backpressure and redacts nested secrets", async () => {
   const lines: string[] = [];
   const sink = new Writable({ highWaterMark: 1, write(chunk, _encoding, callback) {
-    setTimeout(() => { lines.push(String(chunk)); callback(); }, 2);
+    setImmediate(() => { lines.push(String(chunk)); callback(); });
   } });
   const redactor = new Redactor();
   redactor.add("super-secret");

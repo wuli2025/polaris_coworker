@@ -10,9 +10,11 @@ import { Value } from "typebox/value";
 import { JsonlReader } from "../src/protocol/jsonl.ts";
 import { EventSchema, type ProtocolEvent } from "../src/protocol/events.ts";
 import { ResponseSchema, type Response } from "../src/protocol/schema.ts";
-import { until, result } from "./helpers.ts";
+import { result } from "./helpers.ts";
 
-test("main.ts subprocess speaks JSONL through a real SDK tool round and shuts down via EOF/SIGTERM", { timeout: 15000 }, async () => {
+import { Changes, bounded, WAIT_MS } from "./synchronization.ts";
+
+test("main.ts subprocess speaks JSONL through a real SDK tool round and shuts down via EOF/SIGTERM", { timeout: WAIT_MS * 20 }, async () => {
   for (const signal of [false, true]) {
     const dir = mkdtempSync(join(tmpdir(), "agentd-e2e-"));
     const config = join(dir, "config.json");
@@ -26,13 +28,19 @@ test("main.ts subprocess speaks JSONL through a real SDK tool round and shuts do
     }));
     const child = spawn(process.execPath, ["--import", "tsx", "--import", "./test/fixtures/preload.ts",
       "src/main.ts", "--config", config], { cwd: fileURLToPath(new URL("..", import.meta.url)),
-      stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NODE_TEST_CONTEXT: undefined, PI_OFFLINE: "1" } });
-    const exited = once(child, "exit");
+      stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NODE_TEST_CONTEXT: undefined, PI_OFFLINE: "1",
+        POLARIS_USAGE_DIR: join(dir, "usage"), POLARIS_PROVIDER_STORE: join(dir, "providers.json") } });
+    const exited = once(child, "close");
+    const changes = new Changes();
+    const until = (predicate: () => boolean) => changes.wait(predicate, "JSONL response/event");
     const records: (Response | ProtocolEvent)[] = [];
     const parseErrors: string[] = [];
     let stderr = "";
-    const reader = new JsonlReader(() => 1000000, (value) => records.push(value as Response | ProtocolEvent),
+    const reader = new JsonlReader(() => 1000000, (value) => { records.push(value as Response | ProtocolEvent); changes.notify(); },
       (error) => parseErrors.push(error.code));
+    child.once("close", () => changes.close(new Error(`Daemon closed: ${child.exitCode}; ${stderr}`)));
+    child.once("error", (error) => changes.close(error));
+    child.stdin.on("error", (error) => changes.close(error));
     child.stdout.on("data", (chunk: Buffer) => reader.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
     let id = 0;
@@ -64,7 +72,7 @@ test("main.ts subprocess speaks JSONL through a real SDK tool round and shuts do
       await until(() => records.some((r) => r.type === "event" && r.event === "turn.started" && r.turnId === second));
       if (signal) child.kill("SIGTERM");
       else child.stdin.end();
-      const [code, exitSignal] = await exited;
+      const [code, exitSignal] = await bounded(exited, "daemon shutdown");
       assert.equal(code, 0, stderr);
       assert.equal(exitSignal, null);
       assert.ok(records.some((r) => r.type === "event" && r.event === "turn.completed" && r.turnId === second && r.status === "aborted"));
@@ -77,7 +85,7 @@ test("main.ts subprocess speaks JSONL through a real SDK tool round and shuts do
       assert.ok(stderr.trim().split("\n").every((line) => JSON.parse(line).level));
     } finally {
       if (child.exitCode === null) child.kill("SIGKILL");
-      await exited;
+      await bounded(exited, "daemon cleanup");
       rmSync(dir, { recursive: true, force: true });
     }
   }

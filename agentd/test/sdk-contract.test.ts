@@ -18,6 +18,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { bounded } from "./synchronization.ts";
+
 const FAUX_KEY = "faux-key";
 const TOOL_NAME = "polaris_echo";
 
@@ -84,13 +86,20 @@ test("prompt runs a custom tool and streams the final answer", async () => {
 });
 
 test("abort stops a running turn and leaves the session usable", async () => {
+	let entered!: () => void;
+	const started = new Promise<void>((resolve) => { entered = resolve; });
 	const { session, close } = await fauxSession([
-		() => new Promise((resolve) => setTimeout(() => resolve(fauxAssistantMessage("late")), 5_000)),
+		(_context, options) => new Promise((resolve) => {
+			const abort = () => resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
+			options?.signal?.addEventListener("abort", abort, { once: true });
+			if (options?.signal?.aborted) abort();
+			entered();
+		}),
 		fauxAssistantMessage("after abort"),
 	]);
 	try {
 		const running = session.prompt("slow").catch(() => undefined);
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		await bounded(started, "SDK model entered");
 		await session.abort();
 		await running;
 		await session.prompt("again");

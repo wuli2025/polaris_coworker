@@ -1,0 +1,48 @@
+(node:117) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+TAP version 13
+# Subtest: unresponsive backend fails fast, caches failure, and retries after TTL
+ok 1 - unresponsive backend fails fast, caches failure, and retries after TTL
+  ---
+  duration_ms: 7.979968
+  type: 'test'
+  ...
+# Subtest: successful probe is shared and cached, config rejects invalid probe limits
+ok 2 - successful probe is shared and cached, config rejects invalid probe limits
+  ---
+  duration_ms: 34.22518
+  type: 'test'
+  ...
+# Subtest: Pi bash preserves failure {"exitCode":7,"signal":null,"timedOut":false}
+ok 3 - Pi bash preserves failure {"exitCode":7,"signal":null,"timedOut":false}
+  ---
+  duration_ms: 509.26091
+  type: 'test'
+  ...
+# Subtest: Pi bash preserves failure {"exitCode":137,"signal":9,"timedOut":false}
+ok 4 - Pi bash preserves failure {"exitCode":137,"signal":9,"timedOut":false}
+  ---
+  duration_ms: 199.679731
+  type: 'test'
+  ...
+# Subtest: Pi bash preserves failure {"exitCode":137,"signal":9,"timedOut":true}
+ok 5 - Pi bash preserves failure {"exitCode":137,"signal":9,"timedOut":true}
+  ---
+  duration_ms: 318.934581
+  type: 'test'
+  ...
+# Subtest: sandbox session probes before even a read-only tool and fails without approval
+ok 6 - sandbox session probes before even a read-only tool and fails without approval
+  ---
+  duration_ms: 256.680065
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1335.362555

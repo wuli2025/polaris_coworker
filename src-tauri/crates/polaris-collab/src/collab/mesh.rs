@@ -85,7 +85,15 @@ pub fn enroll(uid: &str, node_id: &str, name: &str, os: &str, ver: &str) -> Resu
         return Err("缺账号 uid".into());
     }
     let key = new_key()?;
-    let conn = open_db()?;
+    let mut connection = open_db()?;
+    let conn = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let existing_uid: Option<String> = conn.query_row(
+        "SELECT uid FROM mesh_nodes WHERE node_id=?1", params![node_id], |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if existing_uid.is_some_and(|existing| existing != uid.trim()) {
+        return Err("该 NodeId 已登记到其他账号".into());
+    }
     // first_seen 用 excluded 会被重登覆盖 —— 这里刻意保留旧值(COALESCE 兜住老行的 0),
     // 因为台账要回答的是「这台机器什么时候第一次出现在我账号里」,不是「上次重登是几点」。
     conn.execute(
@@ -93,11 +101,14 @@ pub fn enroll(uid: &str, node_id: &str, name: &str, os: &str, ver: &str) -> Resu
          VALUES(?1,?2,?3,?4,?5,?6,?7,?7,0,?7) \
          ON CONFLICT(node_id) DO UPDATE SET \
            uid=excluded.uid, name=excluded.name, os=excluded.os, ver=excluded.ver, \
-           key_hash=excluded.key_hash, last_seen=excluded.last_seen, revoked=0, \
+           key_hash=excluded.key_hash, created_at=excluded.created_at, last_seen=excluded.last_seen, revoked=0, \
            first_seen=CASE WHEN mesh_nodes.first_seen>0 THEN mesh_nodes.first_seen ELSE excluded.first_seen END",
         params![node_id, uid.trim(), name.trim(), os.trim(), ver.trim(), hash_key(&key), now()],
     )
     .map_err(|e| format!("设备入网失败: {e}"))?;
+    super::interconnect::devices::enrolled(&conn, uid, node_id)?;
+    conn.commit().map_err(|e| e.to_string())?;
+    super::interconnect::notifications::wake();
     db::audit(uid, "mesh.enroll", node_id, name);
     Ok(key)
 }
@@ -219,7 +230,9 @@ pub fn announce(key: &str, name: &str, os: &str, ver: &str) -> Result<(String, V
 /// 把自己账号名下的一台设备移出设备网(丢了电脑的应急操作)。
 /// 只能踢**同 uid** 的设备 —— 拿着自己的密钥踢不掉别人账号的机器。
 pub fn revoke(uid: &str, node_id: &str) -> Result<(), String> {
-    let conn = open_db()?;
+    let mut connection = open_db()?;
+    let conn = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
     let n = conn
         .execute(
             "UPDATE mesh_nodes SET revoked=1 WHERE node_id=?1 AND uid=?2",
@@ -229,6 +242,9 @@ pub fn revoke(uid: &str, node_id: &str) -> Result<(), String> {
     if n == 0 {
         return Err("这台设备不在你账号的设备网里".into());
     }
+    super::interconnect::devices::revoked(&conn, uid, node_id)?;
+    conn.commit().map_err(|e| e.to_string())?;
+    super::interconnect::notifications::wake();
     db::audit(uid, "mesh.revoke", node_id, "");
     Ok(())
 }

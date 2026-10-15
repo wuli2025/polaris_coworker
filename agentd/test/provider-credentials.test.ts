@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { FileCredentials } from "../src/models/file-credentials.ts";
+import { until } from "./helpers.ts";
 import { Redactor } from "../src/models/credentials.ts";
 
 test("SDK refresh persists and serializes across store instances with fake clock/endpoint", async (t) => {
@@ -16,12 +17,22 @@ test("SDK refresh persists and serializes across store instances with fake clock
   const now = 1800000000000;
   t.mock.method(Date, "now", () => now);
   await stores[0].modify("anthropic", async () => ({ type: "oauth", access: "old-access-secret", refresh: "old-refresh-secret", expires: now - 1 }));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let attempted = 0;
+  for (const store of stores) {
+    const modify = store.modify.bind(store);
+    t.mock.method(store, "modify", (...args: Parameters<typeof modify>) => {
+      attempted++;
+      return modify(...args);
+    });
+  }
   let refreshes = 0;
   t.mock.method(globalThis, "fetch", async (input: unknown, options?: RequestInit) => {
     assert.match(String(input), /oauth\/token/);
     refreshes++;
     assert.match(String(options?.body), /old-refresh-secret/);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await gate;
     return new Response(JSON.stringify({ access_token: "new-access-secret", refresh_token: "new-refresh-secret", expires_in: 3600 }),
       { headers: { "content-type": "application/json" } });
   });
@@ -31,7 +42,10 @@ test("SDK refresh persists and serializes across store instances with fake clock
     const before = await readFile(path, "utf8");
     const oldFile = await open(path, "r");
     t.after(() => oldFile.close());
-    const results = await Promise.all(runtimes.map((runtime) => runtime.getAuth("anthropic")));
+    const pending = Promise.all(runtimes.map((runtime) => runtime.getAuth("anthropic")));
+    await until(() => attempted === 2 && refreshes === 1);
+    release();
+    const results = await pending;
     assert.equal(refreshes, 1);
     const disk = JSON.parse(await readFile(path, "utf8"));
     assert.equal(disk.credentials.anthropic.access, "new-access-secret");
@@ -48,7 +62,7 @@ test("SDK refresh persists and serializes across store instances with fake clock
     assert.ok(stored.expires > now);
     assert.equal(redactor.text("old-access-secret new-access-secret new-refresh-secret"), "[REDACTED] [REDACTED] [REDACTED]");
     assert.deepEqual(JSON.parse(await readFile(path, "utf8")).items, [{ id: "untouched" }]);
-  } finally { await rm(dir, { recursive: true, force: true }); }
+  } finally { release(); await rm(dir, { recursive: true, force: true }); }
 });
 
 test("login waits for refresh; corrupt storage is never overwritten", async () => {

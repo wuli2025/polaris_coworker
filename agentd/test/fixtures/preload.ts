@@ -11,9 +11,7 @@ faux.setResponses([
     return fauxAssistantMessage(text.includes("tool-result-marker") ? "tool round trip complete" : "tool result missing");
   },
   (_context, options) => new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fauxAssistantMessage("late")), 10000);
     options?.signal?.addEventListener("abort", () => {
-      clearTimeout(timer);
       resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
     }, { once: true });
   }),

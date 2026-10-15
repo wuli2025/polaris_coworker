@@ -459,3 +459,41 @@ Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列�
 - 配置：沿用 `providers[].models[].cost`（input/output/cacheRead/cacheWrite，USD/百万 tokens）；已有 schema 校验。独立 agentd 的 `usageDir` 默认空串禁用写入，宿主默认 `Polaris/data/pi-usage`；切换示例见报告，无新依赖或开关。
 - 迁移：记录仍为 version 1；缺字段保留 `None`，聚合按未知计数并保留已有金额。false 同样增加 `unpricedRequests`；true 即使本次费用为 0 也已标价。不回填旧账本，不改前端协议。
 - 验证：agentd typecheck、6 个用量行为用例、两壳 offline check（0 警告）、Vitest 61 用例通过；全量 agentd 26/28 文件通过，kernel 207 单测通过、6 失败、2 ignored，补跑 8 个集成用例通过；失败名和限制见报告。
+
+## R8：P5c/P5d 审查修复（代码与定向测试落地，全量验证 BLOCKED）
+
+- 前端入口：`ContextFileEditor.vue` → `src/features/runtime/useContextFileEditor.ts` → 原 `contextFiles` 接口；切换项目先确认脏编辑，取消保留原项目、文本及保存目标，确认后读取新项目。无新依赖。
+- 专家入口：`K/chat/backend/pi/experts.rs`；持久配置读取、daemon 实际配置读取、应用与保存均校验 prompt 原始 UTF-8 字节数，再去除尾部空白后比较。超限返回 `ExpertPromptTooLong`，不静默截断正文。
+- 配置：`POLARIS_EXPERT_PROMPT_MAX_BYTES` 默认 `32768`，必须为可表示为 usize 的正整数，否则 `ExpertPromptLimitInvalid`。切换示例：`POLARIS_EXPERT_PROMPT_MAX_BYTES=65536 ./polaris-server`；取消环境变量恢复默认。
+- 迁移：旧 JSON 结构不变；超限旧 prompt 需缩短或显式提高上限；尾部空白差异不再触发重复 apply。费用聚合逻辑不变，只固化同模型同窗口混合请求为 `has_price=false`、仅有价窗口为 true。
+- 恢复入口：`PiBackend::new` 在 shared 模式启动 supervisor，不等待 daemon I/O；`pi/supervisor.rs` → `pi/experts_sync.rs` 在初次及后续健康 ping 后恢复专家配置，apply 后再次 ping 核验。应用期间排队请求，失败后释放请求并保留 daemon 健康状态；后续 ping 自动重试。daemon 退出和空闲回收均重置同步状态。
+- 状态接口：`agent_backend_status` 新增 `expertsSynced: boolean | null`、`expertSyncError: string | null`，对应 `src/types/agentRuntime.ts`；Pi 未同步为 false，确认持久覆盖已恢复或无覆盖为 true，非 Pi 为 null。配置错误与 daemon 的 `healthy` 分开报告；同步失败时显式专家 setter 返回 `ExpertConfigUnsynced`，其他 daemon 请求仍可用。
+- 恢复配置：复用 `agentd.pingIntervalMs`（默认 30000）、既有重启退避及熔断阈值；JSON 正整数校验不变。切换示例及熔断边界见报告。无新依赖，per-account 隔离行为不变。
+- 测试：`tests/frontend/runtimeContextEditor.test.ts`、`K/chat/backend/pi/experts{,_recovery}_tests.rs`、`K/provider/usage_costs.rs`。Vitest 65 通过，vue-tsc 通过；kernel 218 通过（含 13 个专家测试）、6 个端口绑定失败、2 ignored，补跑 8 个集成用例通过。
+- 两壳检查：桌面与带 collab-net 的服务壳均退出 0、0 警告；额外不带 collab-net 的服务壳退出 0，但仍有 4 条范围外 mesh 警告。未修改并行 P6a 文件。
+- 完整改动清单、实际命令、失败名和未运行项见 [R8 第二次执行报告](pi-migration/r8-review-fixes-run2.md)；[第一次报告](pi-migration/r8-review-fixes.md)保留历史。全量测试未满足，最终由 Claude 重跑、Pi 独立审查后决定完成。
+
+## P6a：互联后端（部分实现，BLOCKED）
+
+- 入口：`collab::interconnect` 配置与登录编排；`authority/trust.rs` 指纹信任；`http/{account_routes,mesh_routes}.rs` 下发 relay。
+- 装配：`tunnel/{relay,endpoint}.rs` 与 `gateway/endpoint.rs` 共用 relay；`src/mesh/{login,orchestration}.rs` 注册→清单→relay→连接，Tauri 新增 `account_login_password`。
+- 配置：随包 `interconnect/{defaults,schema}.json`；环境变量 > 用户 JSON > 默认；占位本地模式、完整 SHA-256 多指纹、relay fallback 默认 true。
+- 依赖/迁移：无新依赖/DB 迁移；新 pin 必须匹配预置指纹，已有显式 URL 部署须补指纹；旧响应缺 relay 字段继续兼容。原 TTL/密钥哈希/本机准入保留。
+- 前端：状态新增 `interconnect`、`relayConfig`、`authorityConfigured`、`configurationError`；`mesh_sync` 可重试，relay 待重连时明确 pending。
+- 阻塞：策略 B 尚未启用；账号断言不绑定设备，且全网立即吊销与现有离线会话需要明确协议取舍。高风险清单已列代码，审批/通知/窗口配置与相关测试未实现。
+- 验证：两壳 offline check 零警告；collab 124 项通过（2 项网络测试由既有门控短路）；kernel 216 通过/6 端口绑定失败/2 ignored，另 8 项集成测试通过；vue-tsc 通过。
+- 配置切换、接口、未完成项、实际命令、文件行数与长文件技术债见 [P6a 执行报告](interconnect/p6a-backend.md) 和 [验证清单](interconnect/p6a-validation.md)。
+
+
+## P6a-2：设备绑定、吊销传播与策略 B（执行报告，待复核）
+
+- 入口/依赖：`collab::interconnect::{binding,revocations,sync,risk,gate,notifications}`；HTTP security routes、mesh 控制台与 invoke 装配；复用 SQLite/Ed25519/ureq/tokio，无新依赖。
+- 行为：断言绑定设备代际 ID 与 NodeId；签名清单失效会话；离线沿用缓存；立即读写、通知与高风险批准。取代上节策略 B 阻塞项，旧无绑定断言仍兼容并记日志。
+- 配置/迁移：`security` 默认拉取 30s、新鲜度 600s、窗口 24h、批准超时 300s；增量建表、旧设备回填、旧会话重登录后绑定；保留显式权限与 revoked。
+- 验证/接口/限制：见 [P6a-2 协议及执行报告](interconnect/p6a2-policy-b.md)、[文件与实际验证](interconnect/p6a2-validation.md)；不代表 Claude/Pi 最终验收。
+
+## F1：并行测试时序加固（执行报告，验收 BLOCKED）
+
+- 入口：`agentd/test/{synchronization,helpers}.ts`、`K/chat/backend/pi/test_support.rs`；JSONL 事件、状态谓词、测试时钟与 actor 控制同步；无新依赖或生产行为/数据迁移。
+- 配置：`POLARIS_TEST_WAIT_MS` 默认 30000，整数范围 1000–300000；临时用量/专家设置按测试隔离；示例、逐文件行为与同目录排查见 [F1 报告](pi-migration/f1-timing.md)。
+- 验证：两套全量各连续 15 轮的逐轮结果、环境失败、构建组合和未完成项见 [F1 验证](pi-migration/f1-validation.md)；不将沙箱失败记为通过，由 Claude/Pi 复核。

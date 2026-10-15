@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { setTimeout as delay } from "node:timers/promises";
+import { bounded } from "./synchronization.ts";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { harness, result, until } from "./helpers.ts";
@@ -29,16 +29,13 @@ for (const command of ["abort", "close"]) {
       const blocked = h.request(command, { sessionId: a }).then((response) => { blockingDone = true; return response; });
       const queued = h.request("prompt", { sessionId: a, text: "after cancellation" })
         .then((response) => { queuedDone = true; return response; });
-      const start = performance.now();
-      const fast = await Promise.all([h.request("ping"), h.request("models.list"),
-        h.request("prompt", { sessionId: b, text: "independent" })]);
-      const elapsed = performance.now() - start;
+      const fast = await bounded(Promise.all([h.request("ping"), h.request("models.list"),
+        h.request("prompt", { sessionId: b, text: "independent" })]), "independent commands while A is blocked");
       assert.ok(fast.every((response) => response.ok));
-      assert.ok(elapsed < 100, `independent commands took ${elapsed}ms`);
       assert.equal(blockingDone, false);
       assert.equal(queuedDone, false);
       const shutdown = h.daemon.shutdown().then(() => { shutdownDone = true; });
-      await delay(20);
+      assert.equal((await h.request("ping")).ok, false); // Shutdown has entered its rejecting state.
       assert.equal(shutdownDone, false);
       release();
       assert.ok((await blocked).ok);
@@ -65,7 +62,7 @@ test("session.open resource loading does not block health checks and shutdown wa
     assert.ok((await h.request("ping")).ok);
     let stopped = false;
     const shutdown = h.daemon.shutdown().then(() => { stopped = true; });
-    await delay(20);
+    assert.equal((await h.request("ping")).ok, false); // Shutdown has entered its rejecting state.
     assert.equal(stopped, false);
     release();
     assert.ok((await opening).ok);

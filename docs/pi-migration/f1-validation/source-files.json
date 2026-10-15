@@ -1,0 +1,152 @@
+[
+  {
+    "file": "agentd/test/concurrency.test.ts",
+    "lines": 72,
+    "maxLineCharacters": 123,
+    "sha256": "0d78214b403b8f25a7571e9cd709b7b496d2775cb0643cf72a1e873ebd7a9ed4"
+  },
+  {
+    "file": "agentd/test/credential-lock.test.ts",
+    "lines": 91,
+    "maxLineCharacters": 134,
+    "sha256": "b47ceb9a2893cd2e1d8ea69314347c7526ae8ff01856b99cfbdad4678a3cc4e5"
+  },
+  {
+    "file": "agentd/test/e2e.test.ts",
+    "lines": 92,
+    "maxLineCharacters": 141,
+    "sha256": "0ce2b638f5e101fe16859674a524044f0ca9bff046baad673a759d96acaa555e"
+  },
+  {
+    "file": "agentd/test/fixtures/preload.ts",
+    "lines": 18,
+    "maxLineCharacters": 122,
+    "sha256": "9bbbacd67f1034a5a5d715d0d9ad3f76e171d9d933e73a0e0aaaff025b5a38ae"
+  },
+  {
+    "file": "agentd/test/helpers.ts",
+    "lines": 60,
+    "maxLineCharacters": 142,
+    "sha256": "118f5e5da81079e103b596f2825ff7c9fbdb47fb6fbdc2c39d48b4febcee2fa4"
+  },
+  {
+    "file": "agentd/test/protocol.test.ts",
+    "lines": 63,
+    "maxLineCharacters": 108,
+    "sha256": "3572e045d4f60075bec6fbd1e378731af8a05500cabce3c4c465b6da0c1b180d"
+  },
+  {
+    "file": "agentd/test/provider-credentials.test.ts",
+    "lines": 122,
+    "maxLineCharacters": 149,
+    "sha256": "02323039f68ce6fa84f0745537e8cde9c1512bd72205b262acd0a1d1e36a9052"
+  },
+  {
+    "file": "agentd/test/sandbox-status.test.ts",
+    "lines": 82,
+    "maxLineCharacters": 145,
+    "sha256": "b7625963b6dd4debd0dfaad97ebde96499526a2d87a8c0914166e14a2ae675b7"
+  },
+  {
+    "file": "agentd/test/sdk-contract.test.ts",
+    "lines": 110,
+    "maxLineCharacters": 117,
+    "sha256": "3ca2fcc566c34792fe098200c80fa8164aca5a064731e6669e2ab79f323cd815"
+  },
+  {
+    "file": "agentd/test/sessions.test.ts",
+    "lines": 124,
+    "maxLineCharacters": 139,
+    "sha256": "5910680b717452d04f60808888c3d87dbd7c8b32ebe8c8f9d443cf40f3b1eeb3"
+  },
+  {
+    "file": "agentd/test/timeouts.test.ts",
+    "lines": 66,
+    "maxLineCharacters": 122,
+    "sha256": "ea1585be0c788861ef9d9ffa56050607d10f4e18f37dd52ab296b26d4077f9c7"
+  },
+  {
+    "file": "agentd/test/synchronization.ts",
+    "lines": 42,
+    "maxLineCharacters": 96,
+    "sha256": "732702f16237b02d422fd821638e1812619cc155cbd9ddddd15e670c9d1959e7"
+  },
+  {
+    "file": "agentd/test/synchronization.test.ts",
+    "lines": 29,
+    "maxLineCharacters": 99,
+    "sha256": "7fc53921b90f4bcd0bd844aefce794005e1842f17b91c2d5e217ace2242cb142"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/pi/client.rs",
+    "lines": 108,
+    "maxLineCharacters": 195,
+    "sha256": "a714e17ce5fd61c4efbc7c0f6605546b51114b8e380c39fdf0746f2da44ab800"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs",
+    "lines": 197,
+    "maxLineCharacters": 146,
+    "sha256": "f9deb5c38456a0c355f19220dc4aee3f0ece1502484e20abd9b85138fa227122"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs",
+    "lines": 359,
+    "maxLineCharacters": 188,
+    "sha256": "d25d1b31dbc5d34d540260d6f3b2ae0da2f7d841ecc06ff55ce54901d8bd08e4"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor_tests.rs",
+    "lines": 43,
+    "maxLineCharacters": 117,
+    "sha256": "5ab3e5b249fe33b744d7b1fe9c9d6559163aaff1a533b48cf1ddbfef5ba473d9"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/pi/tests.rs",
+    "lines": 405,
+    "maxLineCharacters": 162,
+    "sha256": "4a5210ba0a969301675a7f363b686a645cfc4764210c18db961e64cad7c7ea53"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/pi/experts_recovery_tests.rs",
+    "lines": 132,
+    "maxLineCharacters": 116,
+    "sha256": "01f2f48e4690f426dd1c6d9fb65b9be66e429d1386c96b8b185e27bd4a694021"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/pi/extension_tests.rs",
+    "lines": 189,
+    "maxLineCharacters": 129,
+    "sha256": "4c21fb9df9ca06477788219b6985e33f7132e0563208dc986df3aca5851393ce"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/pi/wiki_tests.rs",
+    "lines": 50,
+    "maxLineCharacters": 129,
+    "sha256": "6c0869cb811566a2eb09fdded1e9b9cab54e6840cca33c8f0a68db357535fd78"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/pi/test_support.rs",
+    "lines": 49,
+    "maxLineCharacters": 125,
+    "sha256": "345307609a1d3eba78f86212e023adc76fc5e73d073f7244ea6e39df6efd8b39"
+  },
+  {
+    "file": "src-tauri/crates/polaris-kernel/src/chat/backend/stream.rs",
+    "lines": 111,
+    "maxLineCharacters": 124,
+    "sha256": "81379828c31ab500f351ca4a251821358e824361f21304e3d24f4ea17e5c727a"
+  },
+  {
+    "file": "docs/feature-tree.md",
+    "lines": 499,
+    "maxLineCharacters": 369,
+    "sha256": "4c5bb5e96e778d0260a83d4409a10a1d024de7ebdc6e52e4dae3e3ecfadf887f"
+  },
+  {
+    "file": "docs/pi-migration/f1-timing.md",
+    "lines": 107,
+    "maxLineCharacters": 110,
+    "sha256": "50f1544ec49afaa9b5fadf3179e9d09250b8ea57341423514f1335c9462bfdde"
+  }
+]

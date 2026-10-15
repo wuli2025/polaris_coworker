@@ -30,6 +30,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
+mod account_routes;
+mod mesh_routes;
+mod security_routes;
+use security_routes::*;
+#[cfg(test)]
+mod interconnect_tests;
+#[cfg(test)]
+mod security_tests;
+use account_routes::*;
+use mesh_routes::*;
+
 static LEAD_AI_RUNNING: Lazy<parking_lot::Mutex<HashSet<i64>>> =
     Lazy::new(|| parking_lot::Mutex::new(HashSet::new()));
 
@@ -390,134 +401,6 @@ fn not_authority() -> Response {
         Json(json!({"error":"本机不是账号权威(未设 POLARIS_ACCOUNT_AUTHORITY=1)"})),
     )
         .into_response()
-}
-
-/// 账号体系自述(公开):告诉客户端「本机的账号该在哪儿登」。
-/// 三种回答对应三种部署:authority(我就是权威)/ delegated(去这个 URL 登)/ local(老行为,就地登)。
-async fn account_info() -> Response {
-    let out = tokio::task::spawn_blocking(|| -> Result<Value, String> {
-        use crate::collab::authority::{self, Mode};
-        // emailRequired 恒 false:邮箱是**可选**的(绑了才有自助找回)。
-        // emailCapable 告诉前端「这儿发得出验证码吗」—— 发不出就别让人填邮箱空等。
-        Ok(match authority::mode() {
-            Mode::Authority => json!({
-                "mode": "authority",
-                "kid": authority::kid().unwrap_or_default(),
-                "emailRequired": false,
-                "emailCapable": crate::collab::mail::configured(),
-                // 前端据此决定「注册」入口亮不亮:关着还亮就是骗用户填一遍再报 403。
-                "signupOpen": std::env::var("POLARIS_ACCOUNT_OPEN_SIGNUP")
-                    .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false),
-            }),
-            Mode::Delegated(url) => {
-                let pin = authority::pinned();
-                json!({
-                    "mode": "delegated",
-                    "authorityUrl": url,
-                    "trusted": pin.is_some(),
-                    "kid": pin.map(|(_, _, k)| k).unwrap_or_default(),
-                    "emailRequired": false,
-                })
-            }
-            Mode::Local => json!({"mode": "local", "emailRequired": false}),
-        })
-    })
-    .await;
-    unwrap_api(out)
-}
-
-/// 权威公钥(公开):成员主机首次接触时钉住这一串。
-async fn account_pubkey() -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
-    let out = tokio::task::spawn_blocking(|| -> Result<Value, String> {
-        let pk = crate::collab::authority::public_key_b64()?;
-        Ok(json!({"publicKey": pk, "kid": crate::collab::authority::kid_of(&pk), "alg": "ed25519"}))
-    })
-    .await;
-    unwrap_api(out)
-}
-
-/// 全局注册。邮箱**可选**:
-///  · 不填邮箱 → 直接建号(没有自助找回,忘了密码得找管理员重置)。
-///  · 填了邮箱 → 必须同时给出发到该邮箱的验证码,验过才绑 —— 绑一个没验证过的邮箱
-///    等于把「找回密码」的钥匙交给一个不确定属于谁的地址,比不绑还危险。
-///
-/// **默认关闭自助注册**(须显式 `POLARIS_ACCOUNT_OPEN_SIGNUP=1` 才开)。
-/// 原因:账号中心的 `users` 表同时就是这台机器自己的成员表 —— 放开自助注册,
-/// 等于任何人都能拿到本机的 collaborator 会话,而成员能建项目、触发 checks 跑构建脚本,
-/// 本质是主机 RCE。这与 `collab_signup` 默认邀请制是同一条理由,不能因为「它是账号中心」就松口。
-/// 关闭时建号走服务端的 `seed_authority_account` 工具(要能读写权威库,不是远程口子)。
-async fn account_signup(Json(v): Json<Value>) -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
-    if !open_signup() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error":"本账号中心未开放自助注册,请联系管理员开通账号"})),
-        )
-            .into_response();
-    }
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let email = s_of(&v, "email");
-        if !email.trim().is_empty() {
-            if !crate::collab::mail::configured() {
-                return Err("本账号中心没配邮件服务,发不出验证码 —— 请留空邮箱直接注册".into());
-            }
-            crate::collab::mail::verify_code(&email, "signup", &s_of(&v, "code"))?;
-        }
-        let username = s_of(&v, "username");
-        let display = {
-            let d = s_of(&v, "displayName");
-            if d.trim().is_empty() {
-                username.clone()
-            } else {
-                d
-            }
-        };
-        let (u, uid) = crate::collab::auth::create_authority_account(
-            &username,
-            &s_of(&v, "password"),
-            &display,
-            &email,
-        )?;
-        let assertion =
-            crate::collab::authority::sign_assertion(&uid, &u.username, &email, &display)?;
-        Ok(json!({"user": u, "uid": uid, "email": email, "assertion": assertion}))
-    })
-    .await;
-    unwrap_api(out)
-}
-
-/// 全局登录:用户名**或邮箱** + 密码 → 身份断言。权威只回答「你是谁」,
-/// 不回答「你在某台主机上能干什么」—— 那是各主机自己的账。
-async fn account_login(Json(v): Json<Value>) -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let ident = {
-            let u = s_of(&v, "username");
-            if u.trim().is_empty() {
-                s_of(&v, "email")
-            } else {
-                u
-            }
-        };
-        let (u, uid, email) = crate::collab::auth::authority_login(&ident, &s_of(&v, "password"))?;
-        let assertion =
-            crate::collab::authority::sign_assertion(&uid, &u.username, &email, &u.display_name)?;
-        Ok(json!({
-            "user": {"username": u.username, "displayName": u.display_name, "email": email},
-            "uid": uid,
-            "assertion": assertion,
-        }))
-    })
-    .await;
-    unwrap_api(out)
 }
 
 /// 请求来源 IP。没有反代头就返回空串 —— 调用方(频控)对空 key 一律放行,
@@ -1679,56 +1562,6 @@ async fn collab_email_login(Json(v): Json<Value>) -> Response {
         let (u, token) =
             crate::collab::auth::login_with_verified_email(&email, &s_of(&v, "deviceId"))?;
         Ok(json!({"user": u, "token": token}))
-    })
-    .await;
-    unwrap_api(out)
-}
-
-/// 全局验证码登录(账号权威):邮箱 + 验证码 → 身份断言,拿着它能进任意一台成员主机。
-/// 与 `/api/account/login` 的区别只在于「凭什么证明是你」——那个用密码,这个用邮箱验证码。
-///
-/// **首登即注册**:这个邮箱还没有账号时当场建一个(受 `POLARIS_ACCOUNT_OPEN_SIGNUP` 闸控)。
-/// 注册页因此可以整个消失 —— 用户从没填过用户名、没设过密码,只证明了「这个邮箱是我的」。
-/// 建出来的账号密码位是哨兵串,永远不可能凭密码进来。
-async fn account_login_code(Json(v): Json<Value>) -> Response {
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        // 与 send_code 同一口径:成员主机当管子,把验证码原样递给账号中心、把断言原样带回来。
-        // 主机自己不看、不改、不留 —— 它本来就没有能力验这枚码。
-        if !crate::collab::authority::is_authority() {
-            return crate::collab::authority::upstream_forward("/api/account/login_code", &v);
-        }
-        let email = s_of(&v, "email");
-        // 验证码必须**先**过:否则「首登自动建号」就成了任何人往任意邮箱建号的口子。
-        crate::collab::mail::verify_code(&email, "login", &s_of(&v, "code"))?;
-        let (u, uid, email) = match crate::collab::auth::authority_identity_by_email(&email) {
-            Ok(v) => v,
-            Err(e) => {
-                // 只有「没这个账号」才走自动建号;停用、缺 uid 这些要原样报出去,
-                // 否则会绕过管理员的停用决定,凭空再造一个能用的号。
-                if !e.contains("没有绑定任何账号") {
-                    return Err(e);
-                }
-                if !open_signup() {
-                    return Err("本账号中心未开放自助注册,请联系管理员开通账号".into());
-                }
-                match crate::collab::auth::create_account_by_verified_email(&email) {
-                    Ok((u, uid)) => {
-                        let e2 = crate::collab::auth::validate_email(&email)?;
-                        (u, uid, e2)
-                    }
-                    // 并发首登:两台设备同时拿着同一枚码进来,一个建成、一个撞唯一索引。
-                    // 撞了的那个直接读既有账号即可 —— 用户看到的是两台都登进去了。
-                    Err(_) => crate::collab::auth::authority_identity_by_email(&email)?,
-                }
-            }
-        };
-        let assertion =
-            crate::collab::authority::sign_assertion(&uid, &u.username, &email, &u.display_name)?;
-        Ok(json!({
-            "user": {"username": u.username, "displayName": u.display_name, "email": email},
-            "uid": uid,
-            "assertion": assertion,
-        }))
     })
     .await;
     unwrap_api(out)
@@ -4047,135 +3880,6 @@ fn httpdate_from_secs(secs: u64) -> String {
 // 设备清单、换一张 5 分钟身份断言),换不到任何一台设备的访问权。
 
 /// 设备密钥入口闸。密钥无效/被吊销 → 403 并带上原因(客户端据此决定「重新入网」)。
-fn mesh_key_of(headers: &HeaderMap) -> Result<String, Response> {
-    bearer_of(headers).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"缺设备密钥(Bearer mk_…)"})),
-        )
-            .into_response()
-    })
-}
-
-/// 设备入网:拿一张身份断言换一把长期设备密钥。
-///
-/// 断言由本机(权威)自己签的,所以这里用**自己的公钥**验 —— 等于确认「这张断言真是我签的、
-/// 没过期」。客户端的断言来自 `/api/account/login`,即用户刚亲自输过密码。
-async fn mesh_enroll(Json(v): Json<Value>) -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        use crate::collab::authority as A;
-        let claims = A::verify_assertion_with(&s_of(&v, "assertion"), &A::public_key_b64()?)?;
-        let key = crate::collab::mesh::enroll(
-            &claims.uid,
-            &s_of(&v, "nodeId"),
-            &s_of(&v, "name"),
-            &s_of(&v, "os"),
-            &s_of(&v, "ver"),
-        )?;
-        Ok(json!({ "meshKey": key, "uid": claims.uid, "username": claims.username }))
-    })
-    .await;
-    unwrap_api(out)
-}
-
-/// 心跳 + 取同账号设备清单(一次往返办两件事)。
-async fn mesh_announce(headers: HeaderMap, Json(v): Json<Value>) -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
-    let key = match mesh_key_of(&headers) {
-        Ok(k) => k,
-        Err(r) => return r,
-    };
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let (uid, peers) = crate::collab::mesh::announce(
-            &key,
-            &s_of(&v, "name"),
-            &s_of(&v, "os"),
-            &s_of(&v, "ver"),
-        )?;
-        Ok(json!({ "uid": uid, "peers": peers }))
-    })
-    .await;
-    unwrap_api(out)
-}
-
-/// 设备密钥 → 一张新的 5 分钟身份断言。设备拿它去**对端主机**换本机会话。
-///
-/// 这是设备网唯一的「凭据升级」点,也是它必须只能自助的原因:签出来的断言只说
-/// 「我是 uid X」,进不进得去某台机器仍由那台机器自己的成员资格决定。
-async fn mesh_assert(headers: HeaderMap) -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
-    let key = match mesh_key_of(&headers) {
-        Ok(k) => k,
-        Err(r) => return r,
-    };
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let (uid, _) = crate::collab::mesh::resolve_key(&key)?;
-        let (username, email, display) = crate::collab::mesh::account_of(&uid)?;
-        let assertion =
-            crate::collab::authority::sign_assertion(&uid, &username, &email, &display)?;
-        Ok(json!({ "assertion": assertion, "uid": uid, "username": username }))
-    })
-    .await;
-    unwrap_api(out)
-}
-
-/// 设备**台账**:这个账号名下的全部设备(含自己那台、含已移出的)。
-///
-/// 与 announce 回的名册的分工:那个是给后台对账循环用的「我该连谁」,这个是给人看的。
-/// 台账少一台都是缺陷 —— 用户要认出「哪台是我正用的」,也要看见「上周被我踢掉的那台」。
-async fn mesh_devices(headers: HeaderMap) -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
-    let key = match mesh_key_of(&headers) {
-        Ok(k) => k,
-        Err(r) => return r,
-    };
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let (uid, me) = crate::collab::mesh::resolve_key(&key)?;
-        let list: Vec<Value> = crate::collab::mesh::devices(&uid)?
-            .into_iter()
-            .map(|(p, revoked)| {
-                json!({
-                    "nodeId": p.node_id, "name": p.name, "os": p.os, "ver": p.ver,
-                    "lastSeen": p.last_seen, "online": p.online, "firstSeen": p.first_seen,
-                    "revoked": revoked,
-                    // 「这台就是你现在坐着的这台」——台账上要标出来,不然一屋子机器名认不出谁是谁。
-                    "self": p.node_id == me,
-                })
-            })
-            .collect();
-        Ok(json!({ "uid": uid, "nodeId": me, "devices": list }))
-    })
-    .await;
-    unwrap_api(out)
-}
-
-/// 给自己账号名下的设备改个人话名字。改过之后心跳不再用机器名覆盖它。
-async fn mesh_rename(headers: HeaderMap, Json(v): Json<Value>) -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
-    let key = match mesh_key_of(&headers) {
-        Ok(k) => k,
-        Err(r) => return r,
-    };
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let (uid, _) = crate::collab::mesh::resolve_key(&key)?;
-        crate::collab::mesh::rename(&uid, &s_of(&v, "nodeId"), &s_of(&v, "name"))?;
-        Ok(json!({ "ok": true }))
-    })
-    .await;
-    unwrap_api(out)
-}
-
 // ───────────────────────── 设备信任契约 /api/peer/*(每台主机本地)─────────────────────────
 //
 // 与上面 /api/mesh/* 的分工要分清,这是整套设计的关键一刀:
@@ -4285,22 +3989,7 @@ async fn peer_grant_revoke(
 }
 
 /// 把自己账号名下的一台设备移出设备网(丢了电脑的应急操作)。
-async fn mesh_revoke(headers: HeaderMap, Json(v): Json<Value>) -> Response {
-    if !crate::collab::authority::is_authority() {
-        return not_authority();
-    }
-    let key = match mesh_key_of(&headers) {
-        Ok(k) => k,
-        Err(r) => return r,
-    };
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let (uid, _) = crate::collab::mesh::resolve_key(&key)?;
-        crate::collab::mesh::revoke(&uid, &s_of(&v, "nodeId"))?;
-        Ok(json!({ "ok": true }))
-    })
-    .await;
-    unwrap_api(out)
-}
+
 
 // ───────────────────────── 远程文件写入(挂载盘的读写面)─────────────────────────
 //
@@ -4504,6 +4193,8 @@ async fn fs_op_api(
 
 /// 协作路由。`with_ws=true` 时附带 /ws(桌面 hosting 用;server 壳自己有全量 /ws,传 false 防 merge 撞路由)。
 pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
+    #[cfg(not(test))]
+    crate::collab::interconnect::sync::start();
     let mut r = Router::new()
         // 账号/会话/票据/设备(权限判定全走 collab.db 确定性授权表)
         .route("/api/collab/bootstrap", post(collab_bootstrap))
@@ -4528,6 +4219,12 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
         // ── 同账号设备网(权威侧目录:登录即成网,不必再粘连接码)──
         .route("/api/mesh/enroll", post(mesh_enroll))
         .route("/api/mesh/announce", post(mesh_announce))
+        .route("/api/mesh/security/inbox", get(security_inbox))
+        .route("/api/mesh/security/watch", get(security_watch))
+        .route("/api/mesh/security/ack", post(security_ack))
+        .route("/api/mesh/risk/authorize", post(security_authorize))
+        .route("/api/mesh/risk/decide", post(security_decide))
+        .route("/api/mesh/revocations", get(mesh_revocations))
         .route("/api/mesh/assert", post(mesh_assert))
         .route("/api/mesh/revoke", post(mesh_revoke))
         .route("/api/mesh/devices", get(mesh_devices))
@@ -4698,7 +4395,7 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
     if with_ws {
         r = r.route("/ws", get(collab_ws_handler));
     }
-    r.with_state(state)
+    r.layer(axum::middleware::from_fn(risk_middleware)).with_state(state)
 }
 
 #[cfg(test)]

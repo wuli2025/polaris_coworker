@@ -84,10 +84,11 @@ tauri::generate_handler![
             fsshare::fs_share_set,
             fsshare::fs_share_list,
             fsshare::fs_share_save,
-            // 统一账号:邮箱验证码是**唯一**登录方式。send_code 发码,login_code 一步办完
+            // 统一账号:邮箱验证码与密码登录共用可重试的互联编排。
             // (换断言 → 钉账号中心 → 本机准入 → 入网并原子保存身份),此后开机自动互连。
             mesh::account_send_code,
             mesh::account_login_code,
+            mesh::account_login_password,
             // 同账号设备网(登录一次 → 自己的设备自动互连自动挂盘,不再粘连接码)
             mesh::mesh_join,
             mesh::mesh_leave,
@@ -95,6 +96,9 @@ tauri::generate_handler![
             mesh::mesh_device_remove,
             mesh::mesh_sync,
             mesh::mesh_status,
+            mesh::mesh_security_inbox,
+            mesh::mesh_security_ack,
+            mesh::mesh_risk_decide,
             // 设备台账(云端目录 + 本机契约 + 实时链路一次给全)与逐设备的权限档位。
             // 档位落 peer_grants,跨重启有效 —— 「记住权限状态」。
             mesh::mesh_devices,

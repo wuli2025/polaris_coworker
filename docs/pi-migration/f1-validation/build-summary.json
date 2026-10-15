@@ -1,0 +1,52 @@
+[
+  {
+    "name": "kernel-check",
+    "command": [
+      "cargo",
+      "check",
+      "-p",
+      "polaris-kernel",
+      "--offline"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "desktop-check",
+    "command": [
+      "cargo",
+      "check",
+      "-p",
+      "polaris-app",
+      "--offline"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "server-check",
+    "command": [
+      "cargo",
+      "check",
+      "-p",
+      "polaris-cli",
+      "--bin",
+      "polaris-server",
+      "--offline"
+    ],
+    "exit": 0
+  },
+  {
+    "name": "server-collab-check",
+    "command": [
+      "cargo",
+      "check",
+      "-p",
+      "polaris-cli",
+      "--bin",
+      "polaris-server",
+      "--features",
+      "collab-net",
+      "--offline"
+    ],
+    "exit": 0
+  }
+]

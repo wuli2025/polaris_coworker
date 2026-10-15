@@ -1,26 +1,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Sandbox } from "../src/extensions/sandbox.ts";
 import { loadConfig, mergeConfig } from "../src/config/load.ts";
 import { harness, result, until } from "./helpers.ts";
 
 const config = { ...loadConfig().sandbox, probeTimeoutMs: 20, probeCacheMs: 30, timeoutMs: 2000 };
-test("unresponsive backend fails fast, caches failure, and retries after TTL", async () => {
+test("unresponsive backend fails fast, caches failure, and retries after TTL", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
   let calls = 0;
   const sandbox = new Sandbox(true, "/tmp", config, () => { calls++; });
-  const start = performance.now();
-  await assert.rejects(sandbox.request("bash", { command: "pwd" }), /SANDBOX_UNAVAILABLE/);
-  assert.ok(performance.now() - start < 250, "must fail near probe timeout, not 2000ms tool timeout");
+  const failed = assert.rejects(sandbox.request("bash", { command: "pwd" }), /SANDBOX_UNAVAILABLE/);
+  t.mock.timers.tick(config.probeTimeoutMs);
+  await failed; // Only the probe budget has elapsed; the 2000ms tool timeout has not.
   assert.equal(calls, 1);
   await assert.rejects(sandbox.available(), /SANDBOX_UNAVAILABLE/);
   assert.equal(calls, 1);
-  await delay(config.probeCacheMs + 5);
-  await assert.rejects(sandbox.available(), /SANDBOX_UNAVAILABLE/);
+  t.mock.timers.tick(config.probeCacheMs);
+  const retry = assert.rejects(sandbox.available(), /SANDBOX_UNAVAILABLE/);
+  t.mock.timers.tick(config.probeTimeoutMs);
+  await retry;
   assert.equal(calls, 2);
 });
-test("successful probe is shared and cached, config rejects invalid probe limits", async () => {
+test("successful probe is shared and cached, config rejects invalid probe limits", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
   let calls = 0;
   const sandbox = new Sandbox(true, "/tmp", config, (request) => {
     calls++;
@@ -29,7 +32,7 @@ test("successful probe is shared and cached, config rejects invalid probe limits
   await Promise.all([sandbox.available(), sandbox.available()]);
   await sandbox.available();
   assert.equal(calls, 1);
-  await delay(config.probeCacheMs + 5);
+  t.mock.timers.tick(config.probeCacheMs);
   await sandbox.available();
   assert.equal(calls, 2);
   for (const patch of [{ probeTimeoutMs: 0 }, { probeCacheMs: -1 }, { probeTimeoutMs: "5000" }]) {

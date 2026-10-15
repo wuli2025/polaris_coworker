@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, mkdir, writeFile, utimes } from "node:fs/promises";
+import { mkdtemp, readFile, rm, mkdir, writeFile, utimes, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquire, reclaim } from "../src/models/credential-lock.ts";
 import { reclaimable } from "../src/models/lock-owner.ts";
 import { FileCredentials } from "../src/models/file-credentials.ts";
 import { Redactor } from "../src/models/credentials.ts";
+
+import { WAIT_MS } from "./synchronization.ts";
 
 const fixture = new URL("../../src-tauri/crates/polaris-kernel/tests/fixtures/credential-lock-vectors.json", import.meta.url);
 test("Node and Rust share reclamation decisions", async () => {
@@ -25,7 +27,7 @@ async function killed(path: string) {
   try { assert.deepEqual(await once(holder, "message"), ["held", undefined]); }
   finally { const exit = once(holder, "exit"); holder.kill("SIGKILL"); await exit; }
 }
-test("SIGKILL holder is recovered by a different process before wait timeout", { timeout: 10000 }, async () => {
+test("SIGKILL holder is recovered by a different process before wait timeout", { timeout: WAIT_MS * 4 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "r5-kill-"));
   try {
     const path = join(dir, "providers.json");
@@ -37,7 +39,7 @@ test("SIGKILL holder is recovered by a different process before wait timeout", {
     assert.equal(JSON.parse(await readFile(path, "utf8")).credentials.p.key, "recovered");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test("two process reapers have exactly one winner; delayed release cannot delete replacement", { timeout: 10000 }, async () => {
+test("two process reapers have exactly one winner; delayed release cannot delete replacement", { timeout: WAIT_MS * 4 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "r5-reap-"));
   const children: ChildProcess[] = [];
   try {
@@ -49,7 +51,10 @@ test("two process reapers have exactly one winner; delayed release cannot delete
     children.forEach((c) => c.send("go"));
     assert.deepEqual((await Promise.all(results)).map((r) => r[0]).sort(), [false, true]);
     const old = await acquire(`${path}.lock`, { timeoutMs: 1000, pollMs: 1 });
-    await new Promise((r) => setTimeout(r, 10));
+    const token = (await readdir(`${path}.lock`)).find((name) => name.startsWith("owner-"))!;
+    const ownerPath = join(`${path}.lock`, token, "owner.json");
+    const owner = JSON.parse(await readFile(ownerPath, "utf8"));
+    await writeFile(ownerPath, JSON.stringify({ ...owner, acquiredAt: 0 }));
     assert.equal(await reclaim(`${path}.lock`, 1), true);
     const next = await acquire(`${path}.lock`, { timeoutMs: 1000, pollMs: 1 });
     await assert.rejects(old.assertOwned(), /CredentialStoreLeaseExpired/);

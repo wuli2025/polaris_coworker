@@ -511,6 +511,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         conn.execute("UPDATE mesh_nodes SET first_seen=created_at WHERE first_seen=0", [])
             .ok();
     }
+    super::interconnect::devices::migrate(conn)?;
     Ok(())
 }
 

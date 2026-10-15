@@ -1,0 +1,40 @@
+TAP version 13
+# Subtest: JSONL handles partial UTF-8, multiple lines, CRLF and unterminated EOF
+ok 1 - JSONL handles partial UTF-8, multiple lines, CRLF and unterminated EOF
+  ---
+  duration_ms: 1.301387
+  type: 'test'
+  ...
+# Subtest: oversized frames discard through LF, report once and recover
+ok 2 - oversized frames discard through LF, report once and recover
+  ---
+  duration_ms: 13.93693
+  type: 'test'
+  ...
+# Subtest: invalid JSON/UTF-8 are named errors and do not poison following lines
+ok 3 - invalid JSON/UTF-8 are named errors and do not poison following lines
+  ---
+  duration_ms: 0.429765
+  type: 'test'
+  ...
+# Subtest: writer flushes complete lines in order despite backpressure and redacts nested secrets
+ok 4 - writer flushes complete lines in order despite backpressure and redacts nested secrets
+  ---
+  duration_ms: 15.084242
+  type: 'test'
+  ...
+# Subtest: request and response schemas enforce correlation and command fields
+ok 5 - request and response schemas enforce correlation and command fields
+  ---
+  duration_ms: 14.233992
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 72.919104

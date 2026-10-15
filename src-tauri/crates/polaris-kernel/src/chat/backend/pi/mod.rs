@@ -31,9 +31,12 @@ pub struct PiBackend {
 impl PiBackend {
     pub fn new(config: config::Agentd) -> anyhow::Result<Self> {
         config::Config { agent: config::Agent::default(), agentd: config.clone() }.validate()?;
-        Ok(Self { config, client: once_cell::sync::OnceCell::new(),
+        let backend = Self { config, client: once_cell::sync::OnceCell::new(),
             provider_config: Mutex::new(None), expert_lock: Mutex::new(()),
-            preparing: Arc::new(Mutex::new(HashSet::new())), cancelled: Arc::new(Mutex::new(HashSet::new())) })
+            preparing: Arc::new(Mutex::new(HashSet::new())), cancelled: Arc::new(Mutex::new(HashSet::new())) };
+        // Start supervision without waiting for daemon I/O or expert restoration.
+        if backend.config.isolation == "shared" { backend.client()?; }
+        Ok(backend)
     }
     fn client(&self) -> anyhow::Result<Arc<Client>> {
         if self.config.isolation == "per-account" { return Err(BackendError::AccountContextRequired.into()); }
@@ -101,7 +104,6 @@ impl AgentBackend for PiBackend {
                 if self.provider_apply(&id)?["superseded"] != true { break; }
             }
         }
-        self.sync_experts()?;
         let client = self.client()?;
         if client.status.lock().circuit_open { return Err(BackendError::CircuitOpen.into()); }
         let (sender, stream) = stream::Mailbox::channel(self.config.channel_capacity, self.config.max_line_bytes);
@@ -190,3 +192,6 @@ impl AgentBackend for PiBackend {
     fn shutdown(&self) { if let Some(client) = self.client.get() { client.stop(); } }
 }
 impl Drop for PiBackend { fn drop(&mut self) { self.shutdown(); } }
+
+#[cfg(test)]
+mod test_support;

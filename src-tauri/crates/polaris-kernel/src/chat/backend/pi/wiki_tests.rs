@@ -35,7 +35,7 @@ fn wiki_profile_permission_and_sandbox_reach_session_open() -> anyhow::Result<()
     let stream = backend.start_with_tools(input, ToolOptions {
         sandbox: true, tool_profile: Some("wiki-custom".into()), detailed_events: true, ..Default::default()
     })?;
-    loop { if stream.recv_timeout(Duration::from_secs(5))?.kind == "done" { break; } }
+    loop { if stream.recv_timeout(super::test_support::wait_budget())?.kind == "done" { break; } }
     backend.models()?;
     let sent: Vec<Value> = std::fs::read_to_string(&record)?.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
     let open = sent.iter().find(|v| v["method"] == "session.open").ok_or_else(|| anyhow::anyhow!("no session open"))?;

@@ -37,9 +37,9 @@ async fn dispatch_desktop(cmd: &str, a: &Args, _app: AppHandle) -> Result<Value,
         )?),
         // ── 远程盘共享目录(主机侧开放哪些目录给对端访问,逐目录点选放开写) ──
         "fs_share_get" => ok(crate::fsshare::fs_share_get()),
-        "fs_share_set" => ok(crate::fsshare::fs_share_set(vec_str(a, "paths"))?),
+        "fs_share_set" => ok(crate::fsshare::fs_share_set_authorized(vec_str(a, "paths"))?),
         "fs_share_list" => ok(crate::fsshare::fs_share_list()),
-        "fs_share_save" => ok(crate::fsshare::fs_share_save(vec_val(a, "items"))?),
+        "fs_share_save" => ok(crate::fsshare::fs_share_save_authorized(vec_val(a, "items"))?),
         // ── 应用直投:手机要知道主机发布了哪些应用(点开后走 /app/{slug}/) ──
         "app_pub_list" => ok(crate::appproxy::app_pub_list()),
         "app_open" => ok(crate::appproxy::app_open(req_str(a, "slug")?)?),

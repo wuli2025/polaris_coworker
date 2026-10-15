@@ -1,0 +1,200 @@
+
+> @polaris/agentd@0.1.0 test
+> node --import tsx --test "test/**/*.test.ts"
+
+TAP version 13
+# Subtest: test/catalog.test.ts
+ok 1 - test/catalog.test.ts
+  ---
+  duration_ms: 5418.396232
+  type: 'test'
+  ...
+# Subtest: test/concurrency.test.ts
+ok 2 - test/concurrency.test.ts
+  ---
+  duration_ms: 4922.631949
+  type: 'test'
+  ...
+# Subtest: test/config-review.test.ts
+ok 3 - test/config-review.test.ts
+  ---
+  duration_ms: 5204.294276
+  type: 'test'
+  ...
+# Subtest: test/config.test.ts
+ok 4 - test/config.test.ts
+  ---
+  duration_ms: 5796.723841
+  type: 'test'
+  ...
+# Subtest: test/configure-transaction.test.ts
+ok 5 - test/configure-transaction.test.ts
+  ---
+  duration_ms: 6350.101182
+  type: 'test'
+  ...
+# Subtest: test/credential-lock.test.ts
+ok 6 - test/credential-lock.test.ts
+  ---
+  duration_ms: 11445.399221
+  type: 'test'
+  ...
+# Subtest: test/credentials-review.test.ts
+ok 7 - test/credentials-review.test.ts
+  ---
+  duration_ms: 6212.245659
+  type: 'test'
+  ...
+# Subtest: test/e2e.test.ts
+not ok 8 - test/e2e.test.ts
+  ---
+  duration_ms: 9589.986153
+  type: 'test'
+  location: '/home/mi/work/polaris-pi/agentd/test/e2e.test.ts:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+  signal: ~
+  error: 'test failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: test/events.test.ts
+ok 9 - test/events.test.ts
+  ---
+  duration_ms: 4618.925679
+  type: 'test'
+  ...
+# Subtest: test/expert-settings.test.ts
+ok 10 - test/expert-settings.test.ts
+  ---
+  duration_ms: 5198.25328
+  type: 'test'
+  ...
+# Subtest: test/model-errors.test.ts
+ok 11 - test/model-errors.test.ts
+  ---
+  duration_ms: 2145.055264
+  type: 'test'
+  ...
+# Subtest: test/permissions.test.ts
+ok 12 - test/permissions.test.ts
+  ---
+  duration_ms: 6138.075901
+  type: 'test'
+  ...
+# Subtest: test/protocol-extension.test.ts
+ok 13 - test/protocol-extension.test.ts
+  ---
+  duration_ms: 6406.525132
+  type: 'test'
+  ...
+# Subtest: test/protocol.test.ts
+ok 14 - test/protocol.test.ts
+  ---
+  duration_ms: 2097.775218
+  type: 'test'
+  ...
+# Subtest: test/provider-credentials.test.ts
+ok 15 - test/provider-credentials.test.ts
+  ---
+  duration_ms: 5797.369413
+  type: 'test'
+  ...
+# Subtest: test/provider-login.test.ts
+ok 16 - test/provider-login.test.ts
+  ---
+  duration_ms: 5745.2676
+  type: 'test'
+  ...
+# Subtest: test/provider-usage-pricing.test.ts
+ok 17 - test/provider-usage-pricing.test.ts
+  ---
+  duration_ms: 6134.610167
+  type: 'test'
+  ...
+# Subtest: test/provider-usage.test.ts
+ok 18 - test/provider-usage.test.ts
+  ---
+  duration_ms: 5419.357119
+  type: 'test'
+  ...
+# Subtest: test/resources.test.ts
+ok 19 - test/resources.test.ts
+  ---
+  duration_ms: 6194.964158
+  type: 'test'
+  ...
+# Subtest: test/runtime.test.ts
+ok 20 - test/runtime.test.ts
+  ---
+  duration_ms: 4678.751641
+  type: 'test'
+  ...
+# Subtest: test/sandbox-status.test.ts
+ok 21 - test/sandbox-status.test.ts
+  ---
+  duration_ms: 5993.799232
+  type: 'test'
+  ...
+# Subtest: test/sandbox.test.ts
+ok 22 - test/sandbox.test.ts
+  ---
+  duration_ms: 6207.915089
+  type: 'test'
+  ...
+# Subtest: test/sdk-contract.test.ts
+ok 23 - test/sdk-contract.test.ts
+  ---
+  duration_ms: 4937.749316
+  type: 'test'
+  ...
+# Subtest: test/sessions.test.ts
+ok 24 - test/sessions.test.ts
+  ---
+  duration_ms: 5809.031658
+  type: 'test'
+  ...
+# Subtest: test/shell-config.test.ts
+ok 25 - test/shell-config.test.ts
+  ---
+  duration_ms: 5173.505224
+  type: 'test'
+  ...
+# Subtest: test/subagents.test.ts
+ok 26 - test/subagents.test.ts
+  ---
+  duration_ms: 3998.847573
+  type: 'test'
+  ...
+# Subtest: test/synchronization.test.ts
+ok 27 - test/synchronization.test.ts
+  ---
+  duration_ms: 601.798886
+  type: 'test'
+  ...
+# Subtest: test/timeouts.test.ts
+ok 28 - test/timeouts.test.ts
+  ---
+  duration_ms: 3239.29132
+  type: 'test'
+  ...
+# Subtest: test/web.test.ts
+not ok 29 - test/web.test.ts
+  ---
+  duration_ms: 1726.219256
+  type: 'test'
+  location: '/home/mi/work/polaris-pi/agentd/test/web.test.ts:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+  signal: ~
+  error: 'test failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+1..29
+# tests 29
+# suites 0
+# pass 27
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 13644.425694

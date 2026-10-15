@@ -1,0 +1,38 @@
+[
+  {
+    "test": "concurrency",
+    "exit": 0
+  },
+  {
+    "test": "credential-lock",
+    "exit": 0
+  },
+  {
+    "test": "provider-credentials",
+    "exit": 0
+  },
+  {
+    "test": "protocol",
+    "exit": 0
+  },
+  {
+    "test": "sandbox-status",
+    "exit": 0
+  },
+  {
+    "test": "sdk-contract",
+    "exit": 0
+  },
+  {
+    "test": "sessions",
+    "exit": 0
+  },
+  {
+    "test": "synchronization",
+    "exit": 0
+  },
+  {
+    "test": "timeouts",
+    "exit": 0
+  }
+]

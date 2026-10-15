@@ -91,7 +91,7 @@ fn permission_confirmation_round_trip_preserves_call_and_parent() -> anyhow::Res
         let backend = PiBackend::new(super::tests::config())?;
         let stream = backend.start(super::tests::input("approval", "permission"))?;
         let approval = loop {
-            let event = stream.recv_timeout(Duration::from_secs(3))?;
+            let event = stream.recv_timeout(super::test_support::wait_budget())?;
             if event.kind == "permission.request" { break event; }
             anyhow::ensure!(event.kind != "done" && event.kind != "error", "unexpected terminal");
         };
@@ -105,7 +105,7 @@ fn permission_confirmation_round_trip_preserves_call_and_parent() -> anyhow::Res
         let mut text = String::new();
         let mut resolved = false;
         loop {
-            let event = stream.recv_timeout(Duration::from_secs(3))?;
+            let event = stream.recv_timeout(super::test_support::wait_budget())?;
             if event.kind == "permission.resolved" {
                 let body: Value = serde_json::from_str(event.text.as_deref()
                     .ok_or_else(|| anyhow::anyhow!("missing resolution"))?)?;
@@ -133,7 +133,7 @@ fn explicit_tool_options_reach_session_open_without_legacy_context() -> anyhow::
     let stream = backend.start_with_tools(super::tests::input("tools", "normal"), ToolOptions {
         sandbox: true, expert_prompt: Some("expert-section".into()), ..Default::default()
     })?;
-    while stream.recv_timeout(Duration::from_secs(3))?.kind != "done" {}
+    while stream.recv_timeout(super::test_support::wait_budget())?.kind != "done" {}
     let sent: Vec<Value> = std::fs::read_to_string(&record)?.lines()
         .map(serde_json::from_str).collect::<Result<_, _>>()?;
     let open = sent.iter().find(|r| r["method"] == "session.open").ok_or_else(|| anyhow::anyhow!("missing open"))?;
@@ -174,7 +174,7 @@ fn selected_expert_is_loaded_into_this_turn_without_project_writes() -> anyhow::
         let mut input = super::tests::input("selected-expert", "normal");
         input.cwd = project.clone();
         let stream = backend.start_with_tools(input, ToolOptions { sandbox: false, expert_prompt, ..Default::default() })?;
-        while stream.recv_timeout(Duration::from_secs(3))?.kind != "done" {}
+        while stream.recv_timeout(super::test_support::wait_budget())?.kind != "done" {}
         let sent: Vec<Value> = std::fs::read_to_string(&record)?.lines()
             .map(serde_json::from_str).collect::<Result<_, _>>()?;
         let open = sent.iter().find(|r| r["method"] == "session.open")

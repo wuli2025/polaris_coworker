@@ -76,7 +76,7 @@ impl TurnRequest {
             account_id: None, timeout: None, legacy: None }
     }
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendStatus {
     pub backend: String,
@@ -84,6 +84,9 @@ pub struct BackendStatus {
     pub pid: Option<u32>,
     pub restarts: u32,
     pub usage_persist_failures: u64,
+    /// None for backends without daemon expert configuration.
+    pub experts_synced: Option<bool>,
+    pub expert_sync_error: Option<String>,
     pub circuit_open: bool,
     pub healthy: bool,
     pub last_error: Option<String>,
@@ -91,7 +94,8 @@ pub struct BackendStatus {
 impl BackendStatus {
     pub(crate) fn new(name: &str) -> Self {
         Self { backend: name.into(), agentd_version: None, pid: None, restarts: 0,
-            usage_persist_failures: 0, circuit_open: false, healthy: false, last_error: None }
+            usage_persist_failures: 0, experts_synced: (name == "pi").then_some(false),
+            expert_sync_error: None, circuit_open: false, healthy: false, last_error: None }
     }
 }
 pub trait AgentBackend: Send + Sync {

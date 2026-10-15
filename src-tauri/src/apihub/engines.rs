@@ -22,9 +22,9 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
         )?),
         // 远程盘共享目录(主机侧开放哪些目录给对端访问,逐目录点选放开写)
         "fs_share_get" => ok(crate::fsshare::fs_share_get()),
-        "fs_share_set" => ok(crate::fsshare::fs_share_set(vec_str(a, "paths"))?),
+        "fs_share_set" => ok(crate::fsshare::fs_share_set_authorized(vec_str(a, "paths"))?),
         "fs_share_list" => ok(crate::fsshare::fs_share_list()),
-        "fs_share_save" => ok(crate::fsshare::fs_share_save(vec_val(a, "items"))?),
+        "fs_share_save" => ok(crate::fsshare::fs_share_save_authorized(vec_val(a, "items"))?),
         "kb_set_root" => ok(kb::kb_set_root(req_str(a, "newPath")?)?),
         "kb_scan" => ok(kb::kb_scan_sync()?),
         "kb_compile" => ok(wiki::kb_compile(app)?),

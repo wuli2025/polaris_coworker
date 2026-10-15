@@ -15,6 +15,10 @@ pub enum Control {
     TestExit(bool),
     #[cfg(test)]
     TestClose,
+    #[cfg(test)]
+    TestAgeIdle(Reply),
+    #[cfg(test)]
+    TestWaitPings(u32, Reply),
 }
 pub struct Client {
     pub config: Agentd,

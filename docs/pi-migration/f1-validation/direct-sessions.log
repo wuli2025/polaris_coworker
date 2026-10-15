@@ -1,0 +1,48 @@
+TAP version 13
+# Subtest: open → prompt → close → fresh daemon resumes history by id
+ok 1 - open → prompt → close → fresh daemon resumes history by id
+  ---
+  duration_ms: 391.010343
+  type: 'test'
+  ...
+# Subtest: concurrent opens reserve capacity; duplicate/busy/missing sessions have named errors
+ok 2 - concurrent opens reserve capacity; duplicate/busy/missing sessions have named errors
+  ---
+  duration_ms: 108.233091
+  type: 'test'
+  ...
+# Subtest: steer and followUp share bounded queue and are delivered inside one host turn
+ok 3 - steer and followUp share bounded queue and are delivered inside one host turn
+  ---
+  duration_ms: 236.609434
+  type: 'test'
+  ...
+# Subtest: abort and timeout emit exactly one terminal status and allow another prompt
+ok 4 - abort and timeout emit exactly one terminal status and allow another prompt
+  ---
+  duration_ms: 791.759443
+  type: 'test'
+  ...
+(node:141) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: immediate cancellation during prompt preparation cannot start a later model call
+ok 5 - immediate cancellation during prompt preparation cannot start a later model call
+  ---
+  duration_ms: 139.050361
+  type: 'test'
+  ...
+# Subtest: idle sessions are reclaimed but running sessions stay alive until completion
+ok 6 - idle sessions are reclaimed but running sessions stay alive until completion
+  ---
+  duration_ms: 248.909646
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1923.384506

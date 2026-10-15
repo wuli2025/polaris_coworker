@@ -6,10 +6,11 @@ fn drop_replies_to_every_deferred_and_pending_request_immediately() -> anyhow::R
         let now = Instant::now();
         let status = Arc::new(Mutex::new(BackendStatus::new("pi")));
         let mut state = State {
+            experts: Default::default(),
             config: super::super::tests::config(), status: status.clone(),
             active: Arc::new(Mutex::new(HashMap::new())), routes: HashMap::new(),
             pending: HashMap::new(), deferred: Vec::new(), counter: 0, failures: 0,
-            next_start: now, last_ping: now, started: now, last_used: now, stopping: false,
+            next_start: now, last_ping: now, started: now, last_used: now, stopping: false, ping_waiters: Vec::new(),
         };
         let mut receivers = Vec::new();
         // Keep sender clones alive: channel disconnection cannot pass this test.

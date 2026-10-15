@@ -1696,24 +1696,8 @@ pub fn fs_mount_refresh_token(source_id: &str, token: &str) -> bool {
     true
 }
 
-/// 卸载一块远程盘(拆桥 + 删盘符)。幂等。
-#[cfg_attr(feature = "desktop", tauri::command)]
-#[allow(non_snake_case)]
-pub async fn fs_unmount(sourceId: String) -> Result<(), String> {
-    let m = mounts().lock().unwrap().remove(&sourceId);
-    if let Some(m) = m {
-        m.alive.store(false, Ordering::SeqCst);
-        m.shutdown.notify_waiters();
-        let drive = m.drive.lock().unwrap().clone();
-        let sc = m.shortcut.lock().unwrap().clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            unmount_system(&drive);
-            drop_shortcut(&sc); // 断开就把桌面图标收走,不留一个点开报错的死图标
-        })
-        .await;
-    }
-    Ok(())
-}
+mod unmount;
+pub use unmount::*;
 
 /// 全部挂载的现状(前端徽标轮询用)。
 #[cfg_attr(feature = "desktop", tauri::command)]

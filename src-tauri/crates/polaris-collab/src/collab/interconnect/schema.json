@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Polaris interconnect configuration (partial user overrides allowed)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "publicKeyFingerprints": {
+          "type": "array",
+          "default": [],
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          }
+        }
+      }
+    },
+    "relay": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "urls": {
+          "type": "array",
+          "default": [],
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https?://"
+          }
+        },
+        "fallback": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "revocationPollSecs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 30
+        },
+        "revocationMaxAgeSecs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400,
+          "default": 600
+        },
+        "newDeviceWindowHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 720,
+          "default": 24
+        },
+        "approvalTimeoutSecs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 300
+        }
+      }
+    }
+  }
+}

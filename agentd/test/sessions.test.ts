@@ -2,16 +2,13 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { harness, result, until, type Steps } from "./helpers.ts";
 
 const slow: Steps[number] = (_context, options) => new Promise((resolve) => {
-  const timer = setTimeout(() => resolve(fauxAssistantMessage("late")), 2000);
-  options?.signal?.addEventListener("abort", () => {
-    clearTimeout(timer);
-    resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
-  }, { once: true });
+  const abort = () => resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
+  options?.signal?.addEventListener("abort", abort, { once: true });
+  if (options?.signal?.aborted) abort();
 });
 async function open(h: Awaited<ReturnType<typeof harness>>) {
   return result<{ sessionId: string }>(await h.request("session.open", { cwd: h.dir })).sessionId;
@@ -108,16 +105,20 @@ test("immediate cancellation during prompt preparation cannot start a later mode
     assert.deepEqual(h.events.filter((e) => e.event === "turn.completed").map((e) => e.status), ["aborted"]);
   } finally { await h.close(); }
 });
-test("idle sessions are reclaimed but running sessions stay alive until completion", async () => {
+test("idle sessions are reclaimed but running sessions stay alive until completion", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const h = await harness([slow], { idleTimeoutMs: 30 });
   try {
     await open(h);
+    t.mock.timers.tick(30);
     await until(() => h.daemon.sessions.size === 0);
     const id = await open(h);
     await h.request("prompt", { sessionId: id, text: "slow" });
-    await delay(60);
+    await until(() => h.faux.state.callCount === 1);
+    t.mock.timers.tick(60);
     assert.equal(h.daemon.sessions.size, 1);
     await h.request("abort", { sessionId: id });
+    t.mock.timers.tick(30);
     await until(() => h.daemon.sessions.size === 0);
   } finally { await h.close(); }
 });

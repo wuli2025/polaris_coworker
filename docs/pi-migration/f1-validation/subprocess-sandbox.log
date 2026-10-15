@@ -1,0 +1,2 @@
+{"probe":"spawnSync with piped stdio","error":"EPERM","status":0,"stdout":"","stderr":""}
+close 0 null

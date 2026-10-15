@@ -8,6 +8,7 @@ pub mod auth;
 /// 账号权威:云机签发身份断言,成员主机离线验签(「一个账号在哪台机器都能登」的地基)。
 /// 不挂任何 feature —— 桌面/NAS/云机三种形态都要么签要么验,谁都绕不开。
 pub mod authority;
+pub mod interconnect;
 /// 任务级多轮对话(协作者↔负责人↔主 Agent 的微调通道)。
 pub mod chat;
 /// 任务卡检查工作流(CI-lite):worktree 跑开源工具链+密钥扫描+大文件闸。

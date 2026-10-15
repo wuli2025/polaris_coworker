@@ -1,0 +1,16 @@
+{
+  "authority": {
+    "url": null,
+    "publicKeyFingerprints": []
+  },
+  "relay": {
+    "urls": [],
+    "fallback": true
+  },
+  "security": {
+    "revocationPollSecs": 30,
+    "revocationMaxAgeSecs": 600,
+    "newDeviceWindowHours": 24,
+    "approvalTimeoutSecs": 300
+  }
+}

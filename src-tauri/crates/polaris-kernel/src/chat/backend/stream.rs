@@ -73,6 +73,18 @@ impl Mailbox {
             self.ready.wait(&mut s);
         }
     }
+    #[cfg(test)]
+    pub(crate) fn wait_full(&self, timeout: Duration) -> anyhow::Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock();
+        while state.queue.len() < self.capacity {
+            anyhow::ensure!(!state.finished, "stream finished before backpressure");
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            anyhow::ensure!(!remaining.is_zero(), "mailbox did not fill");
+            self.ready.wait_for(&mut state, remaining);
+        }
+        Ok(())
+    }
     pub fn is_finished(&self) -> bool { self.state.lock().finished }
 }
 impl EventStream {

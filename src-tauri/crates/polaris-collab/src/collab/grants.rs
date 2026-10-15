@@ -10,22 +10,11 @@
 //!  · **入方向**:它拿断言来进本机门时,`revoked=1` 直接拒 —— 这是云端目录之外的第二道闸,
 //!    云机被绕过、名册被伪造,本机这一行仍然说了算。
 //!
-//! ## 冷静期(cooldown)
-//!
-//! `SelfOwned` 准入让「同一个账号的设备免邀请码」,代价是:云机若被拿下,伪造一张断言就能
-//! 直接成为你每台机器的 owner。冷静期是这一让步的对冲 —— 一台**从没见过的**新设备首次进来,
-//! 24 小时内一律按只读对待,且这段时间里用户能一键撤销。把「静默拿到全权」压成
-//! 「24 小时内可反悔的只读」。用户在设备台账上点「信任这台设备」即当场清零。
-//!
-//! 注意冷静期只对**账号里已经有别的设备**时生效:第一台设备就是你本人在装机,拦它没有意义,
-//! 只会让「填个邮箱就能用」变成「填完还要等一天」。
+//! 策略 B：同账号新设备立即按契约全权；高风险操作由 interconnect::gate 单独批准。
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use super::db::{self, now, open_db};
-
-/// 新设备冷静期时长(秒)。
-pub const COOLDOWN_SECS: i64 = 24 * 3600;
 
 /// 盘访问档。
 pub const FS_NONE: &str = "none";
@@ -37,57 +26,8 @@ pub const EXEC_NONE: &str = "none";
 pub const EXEC_ASK: &str = "ask";
 pub const EXEC_ALLOW: &str = "allow";
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
-pub struct Grant {
-    pub node_id: String,
-    pub uid: String,
-    pub name: String,
-    pub role: String,
-    /// 库里存的档位(用户批的那个)。实际生效的档见 [`Grant::effective_fs`]。
-    pub fs_access: String,
-    pub exec_access: String,
-    pub auto_mount: bool,
-    pub drive_hint: String,
-    pub cooldown_until: i64,
-    pub granted_at: i64,
-    pub granted_by: String,
-    pub revoked: bool,
-}
-
-impl Grant {
-    /// 冷静期内还在观察的新设备:UI 要显著提示,用户据此决定信任还是撤销。
-    pub fn in_cooldown(&self) -> bool {
-        self.cooldown_until > now()
-    }
-
-    /// **实际**生效的盘访问档。冷静期内一律降到只读 —— 这就是那句「可反悔的只读」
-    /// 落在代码里的样子:库里记着用户批的 rw,但这 24 小时内谁问都只给 ro。
-    pub fn effective_fs(&self) -> &str {
-        if self.revoked {
-            return FS_NONE;
-        }
-        if self.in_cooldown() && self.fs_access == FS_RW {
-            return FS_RO;
-        }
-        &self.fs_access
-    }
-
-    /// 实际生效的执行档。冷静期内不给 allow(降到 ask,由人当场确认)。
-    pub fn effective_exec(&self) -> &str {
-        if self.revoked {
-            return EXEC_NONE;
-        }
-        if self.in_cooldown() && self.exec_access == EXEC_ALLOW {
-            return EXEC_ASK;
-        }
-        &self.exec_access
-    }
-
-    /// 这台设备现在该不该被自动连上并挂盘。
-    pub fn should_mount(&self) -> bool {
-        !self.revoked && self.auto_mount && self.effective_fs() != FS_NONE
-    }
-}
+mod contract;
+pub use contract::Grant;
 
 fn norm_fs(v: &str) -> Result<&'static str, String> {
     match v.trim() {
@@ -162,55 +102,9 @@ pub fn list() -> Result<Vec<Grant>, String> {
 /// 返回 (契约, 是否新建)。已存在就原样返回 —— 用户后来手工调过的档位,不能被一次重连覆盖回默认值,
 /// 那等于「每次重启都把权限重置一遍」,正是这次要修掉的毛病。
 ///
-/// `is_first_device=true`(本机此前一台设备都没批过)时不设冷静期:那就是你本人在装第一台机器,
-/// 拦它只会把「填个邮箱就能用」变成「填完还要等一天」。
-pub fn auto_grant_self(
-    node_id: &str,
-    uid: &str,
-    name: &str,
-    is_first_device: bool,
-) -> Result<(Grant, bool), String> {
-    let node_id = node_id.trim();
-    if node_id.is_empty() {
-        return Err("缺 NodeId".into());
-    }
-    if let Some(g) = get(node_id)? {
-        return Ok((g, false));
-    }
-    let t = now();
-    let cooldown = if is_first_device {
-        0
-    } else {
-        t + COOLDOWN_SECS
-    };
-    let conn = open_db()?;
-    conn.execute(
-        "INSERT INTO peer_grants(node_id,uid,name,role,fs_access,exec_access,auto_mount,\
-         drive_hint,cooldown_until,granted_at,granted_by,revoked) \
-         VALUES(?1,?2,?3,'owner',?4,?5,1,'',?6,?7,'auto:same-account',0)",
-        params![
-            node_id,
-            uid.trim(),
-            name.trim(),
-            FS_RW,
-            EXEC_ALLOW,
-            cooldown,
-            t
-        ],
-    )
-    .map_err(|e| format!("登记设备契约失败: {e}"))?;
-    db::audit(
-        uid,
-        "peer.grant.auto",
-        node_id,
-        if cooldown > 0 {
-            "同账号设备·冷静期中"
-        } else {
-            "同账号设备·首台"
-        },
-    );
-    Ok((get(node_id)?.ok_or("刚写入的契约读不回来")?, true))
-}
+/// `is_first_device` 参数保留调用兼容；策略 B 的所有新设备都立即按全权契约接入。
+mod automatic;
+pub use automatic::auto_grant_self;
 
 /// 用户在设备台账上改档位。只改传进来的字段(None = 不动)。
 #[allow(clippy::too_many_arguments)]
@@ -555,20 +449,17 @@ mod gate_tests {
         assert!(exec_gate("node-never-seen").is_ok());
     }
 
-    /// 同账号设备的冷静期在**入方向**也真的生效了(此前只影响本机挂对端时的 ro/rw)。
+    /// 策略 B 的同账号新设备在入方向立即可读写、可执行。
     #[test]
-    fn same_account_cooldown_now_bites_on_the_way_in() {
+    fn same_account_new_device_can_read_write_and_execute() {
         let _g = tmp("cooldown");
         db::meta_set("host_node_id", "node-me").unwrap();
         auto_grant_self("node-first", "acct_1", "第一台", true).unwrap();
         let (second, _) = auto_grant_self("node-2nd", "acct_1", "新来的", false).unwrap();
-        assert!(second.in_cooldown());
+        assert!(!second.in_cooldown());
         assert!(fs_gate("node-2nd", false).is_ok(), "读照旧");
-        assert!(
-            fs_gate("node-2nd", true).unwrap_err().contains("观察期"),
-            "冷静期内写要被挡"
-        );
-        assert!(exec_gate("node-2nd").unwrap_err().contains("观察期"));
+        assert!(fs_gate("node-2nd", true).is_ok());
+        assert!(exec_gate("node-2nd").is_ok());
         // 第一台没有冷静期,照旧全权。
         assert!(fs_gate("node-first", true).is_ok());
         assert!(exec_gate("node-first").is_ok());
@@ -587,9 +478,9 @@ mod tests {
         g
     }
 
-    /// 第一台设备免冷静期直接全权;第二台起进冷静期,期间**实际**只给只读。
+    /// 策略 B 的第一台和后续设备均立即全权。
     #[test]
-    fn first_device_is_full_second_is_cooled() {
+    fn both_first_and_second_devices_have_full_contract_permissions() {
         let _g = tmp_db("cooldown");
         let (first, fresh) = auto_grant_self("node-a", "acct_1", "我的电脑", true).unwrap();
         assert!(fresh);
@@ -599,11 +490,11 @@ mod tests {
         assert!(first.should_mount());
 
         let (second, _) = auto_grant_self("node-b", "acct_1", "NAS", false).unwrap();
-        assert!(second.in_cooldown(), "第二台起必须进冷静期");
+        assert!(!second.in_cooldown());
         assert_eq!(second.fs_access, FS_RW, "库里记的仍是用户批的档");
-        assert_eq!(second.effective_fs(), FS_RO, "但这 24 小时内实际只给只读");
-        assert_eq!(second.effective_exec(), EXEC_ASK);
-        assert!(second.should_mount(), "只读盘照样该挂上,只是不给写");
+        assert_eq!(second.effective_fs(), FS_RW);
+        assert_eq!(second.effective_exec(), EXEC_ALLOW);
+        assert!(second.should_mount(), "全权设备应自动挂载");
     }
 
     /// 重连不该把用户手工调过的档位冲回默认值 —— 「每次重启权限重置一遍」正是要修的毛病。
@@ -635,7 +526,7 @@ mod tests {
         let _g = tmp_db("trust");
         auto_grant_self("node-a", "acct_1", "第一台", true).unwrap();
         let (g, _) = auto_grant_self("node-b", "acct_1", "新设备", false).unwrap();
-        assert_eq!(g.effective_fs(), FS_RO);
+        assert_eq!(g.effective_fs(), FS_RW);
 
         let g = trust_now("node-b", "wuli").unwrap();
         assert!(!g.in_cooldown());

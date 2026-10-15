@@ -27,6 +27,11 @@ pub fn fs_share_get() -> Vec<String> {
 /// 整体覆盖共享目录清单(全部按只读)。每条须是已存在目录,否则整体拒绝;空清单=停止共享。
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn fs_share_set(paths: Vec<String>) -> Result<Vec<String>, String> {
+    crate::mesh::require_local("change_device_permissions", &json!({"paths":paths}))?;
+    fs_share_set_authorized(paths)
+}
+
+pub(crate) fn fs_share_set_authorized(paths: Vec<String>) -> Result<Vec<String>, String> {
     #[cfg(feature = "collab-host")]
     {
         return crate::collab::fsface::set_shared_roots(&paths);
@@ -57,6 +62,11 @@ pub fn fs_share_list() -> Vec<Value> {
 /// 整体覆盖共享清单(带写位)。缺 `write` 字段一律当只读 —— 默认关是这条线的安全底线。
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn fs_share_save(items: Vec<Value>) -> Result<Vec<Value>, String> {
+    crate::mesh::require_local("change_device_permissions", &json!({"items":items}))?;
+    fs_share_save_authorized(items)
+}
+
+pub(crate) fn fs_share_save_authorized(items: Vec<Value>) -> Result<Vec<Value>, String> {
     #[cfg(feature = "collab-host")]
     {
         let parsed: Vec<crate::collab::fsface::ShareRoot> = items

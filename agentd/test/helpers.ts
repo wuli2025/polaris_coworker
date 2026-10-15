@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { WAIT_MS } from "./synchronization.ts";
+// Keep readiness polling on real time when a test advances the policy clock.
+const pollTimer = globalThis.setTimeout;
 import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { loadConfig, mergeConfig } from "../src/config/load.ts";
@@ -24,7 +26,7 @@ export async function harness(steps: Steps = [], patch: ConfigPatch = {}, factor
   faux.setResponses(steps);
   const model = faux.getModel();
   const config = mergeConfig(loadConfig(), {
-    sessionDir: join(dir, "sessions"), defaultModel: { provider: model.provider, id: model.id },
+    sessionDir: join(dir, "sessions"), usageDir: join(dir, "usage"), defaultModel: { provider: model.provider, id: model.id },
     providers: [providerConfig(model)], tools: [],
     // SDK behavior tests opt into execution; permission tests explicitly choose their mode.
     permissions: { ...loadConfig().permissions, defaultMode: "auto-all" }, ...patch,
@@ -50,9 +52,9 @@ export function result<T>(response: Response): T {
   return response.result as T;
 }
 export async function until(predicate: () => boolean): Promise<void> {
-  const end = Date.now() + 5000;
+  const end = performance.now() + WAIT_MS;
   while (!predicate()) {
-    if (Date.now() > end) throw new Error("Timed out waiting for condition");
-    await delay(5);
+    if (performance.now() > end) throw new Error("Timed out waiting for condition");
+    await new Promise<void>((resolve) => pollTimer(resolve, 5));
   }
 }

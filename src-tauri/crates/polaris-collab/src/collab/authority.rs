@@ -4,11 +4,11 @@
 //! 账号 —— 「一个账号在哪台机器都能登」做不到。本模块把**云机立为账号权威**,其余主机
 //! 退化为「认签名的成员」。
 //!
-//! 三种运行模式(由环境变量决定,默认保持老行为,老部署零影响):
+//! 三种运行模式(环境变量覆盖用户配置与随包默认;占位默认使用本地模式):
 //!  · `POLARIS_ACCOUNT_AUTHORITY=1`      本进程**就是**权威。持签名私钥,`/api/account/*` 对外
 //!                                        发号:注册(强制绑邮箱)、登录、改密,签发身份断言。
 //!  · `POLARIS_ACCOUNT_AUTHORITY_URL=…`  本进程是**成员主机**。不再自己判密码,只认权威签的断言;
-//!                                        权威公钥首次接触即钉死(TOFU),此后**离线也能验**。
+//!                                        首次接触须匹配预置指纹,钉住后**离线也能验**。
 //!  · 都不设                              本地权威(老行为):自己的 users 表说了算。
 //!
 //! 为什么是「签名断言」而不是「每次请求问云端」:成员主机大多在家里/NAS,网络随时会断。
@@ -52,33 +52,8 @@ pub enum Mode {
     Local,
 }
 
-/// 当前模式。两个环境变量都设时以 Authority 优先 —— 权威机不该再去问别人。
-pub fn mode() -> Mode {
-    let is_authority = std::env::var("POLARIS_ACCOUNT_AUTHORITY")
-        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if is_authority {
-        return Mode::Authority;
-    }
-    match std::env::var("POLARIS_ACCOUNT_AUTHORITY_URL") {
-        Ok(u) if !u.trim().is_empty() => {
-            Mode::Delegated(u.trim().trim_end_matches('/').to_string())
-        }
-        _ => Mode::Local,
-    }
-}
-
-pub fn is_authority() -> bool {
-    mode() == Mode::Authority
-}
-
-/// 成员主机模式下的权威地址(其余模式 None)。
-pub fn upstream_url() -> Option<String> {
-    match mode() {
-        Mode::Delegated(u) => Some(u),
-        _ => None,
-    }
-}
+mod trust;
+pub use trust::{mode, is_authority, upstream_url, pinned, ensure_pinned, pin_explicit, repin, verify_assertion};
 
 // ── 签名私钥(仅权威机持有)────────────────────────────────────────────────
 
@@ -143,217 +118,11 @@ pub fn kid() -> Result<String, String> {
 
 // ── 身份断言 ──────────────────────────────────────────────────────────────
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct Claims {
-    /// 签发者标识(权威公钥指纹)。
-    pub iss: String,
-    /// 全局账号 id —— 跨主机认人**只认这个**。
-    pub uid: String,
-    pub username: String,
-    /// 绑定邮箱。权威强制每个账号都有,故这里必非空。
-    pub email: String,
-    #[serde(default)]
-    pub display_name: String,
-    pub iat: i64,
-    pub exp: i64,
-}
-
-/// 签一张身份断言(权威机专用)。格式 `PA1.<b64u(claims)>.<b64u(sig)>`,
-/// 签名覆盖 `PA1.<b64u(claims)>` 的 ASCII 字节(前缀纳入签名,防跨版本重放)。
-pub fn sign_assertion(
-    uid: &str,
-    username: &str,
-    email: &str,
-    display_name: &str,
-) -> Result<String, String> {
-    let sk = signing_key()?;
-    let t = now();
-    let claims = Claims {
-        iss: kid_of(&B64.encode(sk.verifying_key().to_bytes())),
-        uid: uid.into(),
-        username: username.into(),
-        email: email.into(),
-        display_name: display_name.into(),
-        iat: t,
-        exp: t + ASSERTION_TTL,
-    };
-    let payload = serde_json::to_vec(&claims).map_err(|e| format!("断言序列化失败: {e}"))?;
-    let head = format!("PA1.{}", B64.encode(payload));
-    let sig = sk.sign(head.as_bytes());
-    Ok(format!("{head}.{}", B64.encode(sig.to_bytes())))
-}
-
-/// 用给定公钥验一张断言。纯本地运算 —— **不联网**,这正是成员主机断网仍能放人进来的原因。
-pub fn verify_assertion_with(assertion: &str, pub_b64: &str) -> Result<Claims, String> {
-    let mut it = assertion.trim().splitn(3, '.');
-    let (p0, p1, p2) = match (it.next(), it.next(), it.next()) {
-        (Some(a), Some(b), Some(c)) => (a, b, c),
-        _ => return Err("身份断言格式不对".into()),
-    };
-    if p0 != "PA1" {
-        return Err("身份断言版本不认识(须 PA1)".into());
-    }
-    let pk_bytes: [u8; 32] = B64
-        .decode(pub_b64)
-        .map_err(|_| "权威公钥不是 base64".to_string())?
-        .try_into()
-        .map_err(|_| "权威公钥长度不对".to_string())?;
-    let vk = VerifyingKey::from_bytes(&pk_bytes).map_err(|e| format!("权威公钥无效: {e}"))?;
-    let sig_bytes: [u8; 64] = B64
-        .decode(p2)
-        .map_err(|_| "断言签名不是 base64".to_string())?
-        .try_into()
-        .map_err(|_| "断言签名长度不对".to_string())?;
-    let sig = Signature::from_bytes(&sig_bytes);
-    let head = format!("{p0}.{p1}");
-    vk.verify(head.as_bytes(), &sig)
-        .map_err(|_| "身份断言签名验证失败(可能被篡改,或权威换了钥匙)".to_string())?;
-    let claims: Claims = serde_json::from_slice(
-        &B64.decode(p1)
-            .map_err(|_| "断言载荷不是 base64".to_string())?,
-    )
-    .map_err(|e| format!("断言载荷解析失败: {e}"))?;
-    let t = now();
-    if claims.exp + CLOCK_SKEW < t {
-        return Err("身份断言已过期,请重新登录".into());
-    }
-    if claims.iat - CLOCK_SKEW > t {
-        return Err("身份断言的签发时间在未来(检查两端系统时钟)".into());
-    }
-    if claims.uid.trim().is_empty() {
-        return Err("身份断言缺 uid".into());
-    }
-    Ok(claims)
-}
+mod assertions;
+pub use assertions::{Claims, sign_assertion, sign_device_assertion, verify_assertion_with};
+pub(crate) use assertions::{sign_document, verify_document};
 
 // ── 成员主机侧:钉住权威公钥(TOFU)────────────────────────────────────────
-
-/// 已钉住的权威 (url, pub_b64, kid)。没钉过返回 None。
-pub fn pinned() -> Option<(String, String, String)> {
-    let url = db::meta_get("authority_url")?;
-    let pk = db::meta_get("authority_pub")?;
-    if url.is_empty() || pk.is_empty() {
-        return None;
-    }
-    let kid = db::meta_get("authority_kid").unwrap_or_else(|| kid_of(&pk));
-    Some((url, pk, kid))
-}
-
-/// 向权威取公钥。只在需要钉/换钉时调用,登录热路径不走这里。
-fn fetch_public_key(url: &str) -> Result<String, String> {
-    let ep = format!("{}/api/account/pubkey", url.trim_end_matches('/'));
-    let resp = ureq::get(&ep)
-        .timeout(std::time::Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
-        .call()
-        .map_err(|e| format!("连不上账号权威 {url}: {e}"))?;
-    let v: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| format!("账号权威返回的不是 JSON: {e}"))?;
-    let pk = v
-        .get("publicKey")
-        .and_then(|x| x.as_str())
-        .unwrap_or_default()
-        .to_string();
-    if pk.is_empty() {
-        return Err("账号权威没返回公钥 —— 确认该地址开了 POLARIS_ACCOUNT_AUTHORITY=1".into());
-    }
-    Ok(pk)
-}
-
-/// 确保已钉住当前配置的权威公钥,返回 (url, pub_b64)。
-///
-/// 首次接触即钉死(TOFU)。此后**公钥变了一律拒绝**,不静默接受 —— 静默接受等于把
-/// 「中间人换一把自己的钥匙」变成无声事件,那整套验签就白做了。真要换钥匙(权威轮换密钥、
-/// 换了云机)走 `repin`,由 owner 显式确认。
-pub fn ensure_pinned() -> Result<(String, String), String> {
-    let url = upstream_url().ok_or("本机未配置账号权威(POLARIS_ACCOUNT_AUTHORITY_URL)")?;
-    if let Some((pinned_url, pk, _)) = pinned() {
-        if pinned_url == url {
-            return Ok((url, pk));
-        }
-        // 换了权威地址:同样按「显式确认」处理,不静默改钉。
-        return Err(format!(
-            "本机已钉在账号权威「{pinned_url}」,与当前配置「{url}」不一致 —— 请 owner 走「重新信任」确认后再切换"
-        ));
-    }
-    let pk = fetch_public_key(&url)?;
-    let k = kid_of(&pk);
-    db::meta_set("authority_url", &url)?;
-    db::meta_set("authority_pub", &pk)?;
-    db::meta_set("authority_kid", &k)?;
-    db::audit("system", "authority.pin", &url, &k);
-    Ok((url, pk))
-}
-
-/// 用**显式给的地址**钉住权威(不看环境变量)。
-///
-/// 为什么需要它:`ensure_pinned` 的地址来自 `POLARIS_ACCOUNT_AUTHORITY_URL`,而桌面 App 是
-/// 双击启动的 —— 那个环境变量根本不存在。于是桌面主机永远钉不上权威,也就**永远不接受
-/// 身份断言**:同账号的另一台设备连过来会吃一句「本机未配置云端账号中心」。设备网入网时
-/// 用户亲手填了地址、输了密码,正是钉住它的合法时机。
-///
-/// 语义与 `ensure_pinned` 一致的那一半:已经钉过**同一个** URL 就直接复用;钉过**别的**
-/// URL 一律拒绝,不静默改钉 —— 静默换钥匙等于把验签这道防线拆了。真要换走 [`repin`]。
-pub fn pin_explicit(url: &str) -> Result<(String, String), String> {
-    let url = url.trim().trim_end_matches('/').to_string();
-    if url.is_empty() {
-        return Err("账号中心地址不能为空".into());
-    }
-    if let Some((pinned_url, pk, _)) = pinned() {
-        if pinned_url == url {
-            return Ok((url, pk));
-        }
-        return Err(format!(
-            "本机已信任账号中心「{pinned_url}」,与这次要用的「{url}」不一致 —— \
-             要换请走「重新信任」并核对公钥指纹"
-        ));
-    }
-    let pk = fetch_public_key(&url)?;
-    let k = kid_of(&pk);
-    db::meta_set("authority_url", &url)?;
-    db::meta_set("authority_pub", &pk)?;
-    db::meta_set("authority_kid", &k)?;
-    db::audit("system", "authority.pin", &url, &k);
-    Ok((url, pk))
-}
-
-/// owner 显式重钉(换云机/轮换密钥)。要求调用方已核过 kid。
-pub fn repin(expect_kid: Option<&str>) -> Result<(String, String), String> {
-    let url = upstream_url().ok_or("本机未配置账号权威(POLARIS_ACCOUNT_AUTHORITY_URL)")?;
-    let pk = fetch_public_key(&url)?;
-    let k = kid_of(&pk);
-    if let Some(want) = expect_kid {
-        if !want.trim().is_empty() && want.trim() != k {
-            return Err(format!("公钥指纹对不上:权威给的是 {k},你要确认的是 {want}"));
-        }
-    }
-    db::meta_set("authority_url", &url)?;
-    db::meta_set("authority_pub", &pk)?;
-    db::meta_set("authority_kid", &k)?;
-    db::audit("owner", "authority.repin", &url, &k);
-    Ok((url, pk))
-}
-
-/// 验一张断言(成员主机侧:用钉住的公钥)。
-///
-/// 还没钉过就先钉一次(首次接触要连一下权威取公钥)。**只有这一次需要网络** ——
-/// 钥匙钉下之后本机就能独立验签,权威挂了、家里断网了都不影响成员登录。
-pub fn verify_assertion(assertion: &str) -> Result<Claims, String> {
-    let pk = match pinned() {
-        Some((_, pk, _)) => pk,
-        None => match ensure_pinned() {
-            Ok((_, pk)) => pk,
-            Err(e) => {
-                return Err(if upstream_url().is_some() {
-                    format!("本机首次信任云端账号中心需要连一次它:{e}")
-                } else {
-                    "本机未配置云端账号中心(POLARIS_ACCOUNT_AUTHORITY_URL),不接受身份断言".into()
-                })
-            }
-        },
-    };
-    verify_assertion_with(assertion, &pk)
-}
 
 /// 成员主机把一个请求**原样转给**它信任的账号中心,回体也原样带回来。
 ///
@@ -369,7 +138,7 @@ pub fn upstream_forward(path: &str, body: &serde_json::Value) -> Result<serde_js
     // 账号中心是用户登录时由 `pin_explicit` 写进 meta 的。只看环境变量的话,
     // 这条转发在**桌面主机上永远不可用**,而桌面正是手机最常连的那一台。
     let url = match pinned() {
-        Some((u, _, _)) => u,
+        Some((u, _, _)) => pin_explicit(&u)?.0,
         None => ensure_pinned()
             .map_err(|e| {
                 format!(
@@ -413,6 +182,7 @@ pub fn upstream_login(username: &str, password: &str) -> Result<String, String> 
             let v: serde_json::Value = r
                 .into_json()
                 .map_err(|e| format!("账号权威返回的不是 JSON: {e}"))?;
+            super::interconnect::apply_received_relays(&v)?;
             v.get("assertion")
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string())
@@ -456,8 +226,8 @@ pub enum Admission {
     /// 却要自己给自己发一张邀请码。用户看到的就是「怎么还要登第二个账号」。
     ///
     /// 代价与对冲说清楚:云机若被完全拿下,它能签任意断言,于是能直接成为你每台机器的 owner
-    /// (此前还隔着一道邀请码)。对冲在 [`super::grants`] 的冷静期 —— 从没见过的新设备首次
-    /// 进来的 24 小时内一律按只读对待,期间用户可一键撤销。另有 `owner_uid` 只写一次的闸
+    /// (此前还隔着一道邀请码)。策略 B 允许新设备立即全权；高风险操作另走
+    /// interconnect::gate 的设备批准与吊销新鲜度检查。另有 `owner_uid` 只写一次的闸
     /// (见 [`super::db::meta_set_once`]),否则「谁最后登录谁是主人」会把远程夺权做成一条 API。
     SelfOwned,
     /// **本机控制台**:用户就坐在这台机器前,在桌面 App 里亲手填了邮箱和验证码
@@ -763,139 +533,8 @@ fn stamp_owner_uid(role: &str, uid: &str) {
 ///  · 否则 → [`Admission::ExistingOnly`],已是成员才放行,陌生人走 `join_with_ticket`。
 ///  · 设备被本机撤销过(peer_grants.revoked)→ 一律拒,连主人本人的设备也拒 ——
 ///    「丢了电脑」的应急撤销必须比「我是主人」优先,否则捡到电脑的人照样能进。
-pub fn login_with_assertion(assertion: &str, device_id: &str) -> Result<(User, String), String> {
-    login_with_assertion_ex(assertion, device_id, false)
-}
-
-/// **本机控制台**版的同一件事:用户就坐在这台机器前,在桌面 App 里亲手填的邮箱验证码。
-///
-/// 只多一档准入 [`Admission::LocalConsole`](认领已有的那一行 / 认领这台还没主人的机器)。
-/// 调用方只有一个 —— `mesh::account_login_code`(Tauri 命令)。**不要**把它接到任何 HTTP
-/// 路由上:那就等于把「远程夺主」做成一条 API。
-pub fn login_with_assertion_local(
-    assertion: &str,
-    device_id: &str,
-) -> Result<(User, String), String> {
-    login_with_assertion_ex(assertion, device_id, true)
-}
-
-fn login_with_assertion_ex(
-    assertion: &str,
-    device_id: &str,
-    local_console: bool,
-) -> Result<(User, String), String> {
-    let claims = verify_assertion(assertion)?;
-    let dev = device_id.trim();
-    if !dev.is_empty() && super::grants::is_revoked(dev) {
-        db::audit(
-            &claims.username,
-            "auth.login.denied",
-            dev,
-            "设备已被本机撤销",
-        );
-        return Err(
-            "这台设备已被移出本机的信任列表 —— 请在另一台设备的「设备台账」里恢复它".into(),
-        );
-    }
-    let owner = owner_uid();
-    let is_mine = !owner.is_empty() && owner == claims.uid;
-    let admission = if is_mine {
-        Admission::SelfOwned
-    } else if local_console {
-        Admission::LocalConsole
-    } else {
-        Admission::ExistingOnly
-    };
-    let user = upsert_member(&claims, admission)?;
-
-    // 主人身份要**重读**:空库首登时 owner_uid 是 upsert_member 刚刚才落下的,
-    // 上面那个 is_mine 当时还是 false。少了这次重读,第一台设备就不会登记契约,
-    // 于是第二台设备会被 `any_granted()` 误判成「本机的第一台」而跳过冷静期 ——
-    // 那道对冲 SelfOwned 的闸就永远不会生效(探针 email_login_probe 抓到过这个)。
-    let mine_now = {
-        let o = owner_uid();
-        !o.is_empty() && o == claims.uid
-    };
-
-    // 自己名下的设备:首次见面即登记信任契约(带冷静期)。之后的档位调整以用户手动设置为准 ——
-    // auto_grant_self 对已有契约是 no-op,不会把用户调过的档冲回默认值。
-    if mine_now && !dev.is_empty() {
-        let first = !super::grants::any_granted().unwrap_or(false);
-        match super::grants::auto_grant_self(dev, &claims.uid, &user.display_name, first) {
-            Ok((g, true)) if g.in_cooldown() => {
-                db::audit(
-                    &user.username,
-                    "auth.login.newdevice",
-                    dev,
-                    "同账号新设备已接入,冷静期内只读",
-                );
-            }
-            Ok(_) => {}
-            // 登记失败不该把人挡在门外(登录已经成了),但要留痕以便排查。
-            Err(e) => db::audit(&user.username, "peer.grant.fail", dev, &e),
-        }
-    }
-
-    let token = super::auth::issue_session(user.id, dev)?;
-    db::audit(&user.username, "auth.login.federated", dev, &claims.uid);
-    Ok((user, token))
-}
-
-/// 云端账号 + 一次性邀请票据 → 成为本机成员并拿到本机会话。
-///
-/// 票据的原子核销与成员资格的创建**必须**在同一事务里,否则并发两个人拿同一张票据
-/// 都能进来。这里的做法与 identity::redeem_ticket 一致:先 CAS 占用票据(`WHERE
-/// used_at IS NULL`),占不到就是被人抢先了,直接拒。
-pub fn join_with_ticket(
-    assertion: &str,
-    code: &str,
-    device_name: &str,
-    node_id: &str,
-) -> Result<(User, String), String> {
-    let claims = verify_assertion(assertion)?;
-    // 已经是成员(或本机主人自己)就不必再烧票据,直接当登录处理 ——
-    // 重复点「入伙」不该白白作废一张票,主人对自己的机器更不该被要求出示邀请码。
-    let owner = owner_uid();
-    let quick = if !owner.is_empty() && owner == claims.uid {
-        Admission::SelfOwned
-    } else {
-        Admission::ExistingOnly
-    };
-    if let Ok(u) = upsert_member(&claims, quick) {
-        let token = super::auth::issue_session(u.id, node_id)?;
-        return Ok((u, token));
-    }
-    let code = normalize_invite(code);
-    if code.is_empty() {
-        return Err("请填写这台机器的设备码".into());
-    }
-    // **一码**:本机那串常驻设备码在这里也认。
-    //
-    // 在此之前「进这台机器的门」有两串完全不同的码:一次性邀请票据(账号入伙用)和
-    // PLRK1 连接码(设备连接用),它们的区别纯粹是我们自己的内部分工,用户只看到
-    // 「怎么又是另一种码」。现在设备码一串通吃:拿它入伙,拿到的是 **visitor** ——
-    // 与 `/api/collab/connect` 那条路同一个档,能做什么仍由设备契约逐台说了算。
-    let role = if super::identity::check_access_code(&code).unwrap_or(false) {
-        db::audit(&claims.username, "join.devicecode", node_id, "设备码入伙");
-        "visitor".to_string()
-    } else {
-        burn_ticket(&code, &claims.username)?
-    };
-    let user = upsert_member(&claims, Admission::Invited(role.clone()))?;
-    // 设备白名单:入伙即登记本设备(隧道层准入的那一因子)。失败不阻断入伙。
-    let nid = node_id.trim();
-    if !nid.is_empty() {
-        let name = if device_name.trim().is_empty() {
-            "新设备"
-        } else {
-            device_name.trim()
-        };
-        let _ = super::identity::add_device(user.id, name, nid);
-    }
-    let token = super::auth::issue_session(user.id, nid)?;
-    db::audit(&claims.username, "ticket.redeem.federated", &code, &role);
-    Ok((user, token))
-}
+mod sessions;
+pub use sessions::{login_with_assertion, login_with_assertion_local, join_with_ticket};
 
 /// 用户手里那串东西 → 库里的裸码。**邀请码只有一种**,但用户可能粘到四种形态:
 /// 管理面直接给的 8 位裸码、带主机地址的分享码 `PLRS1-…`、互联页设备码
@@ -1045,6 +684,8 @@ mod tests {
             username: "alice".into(),
             email: "a@b.com".into(),
             display_name: "Alice".into(),
+            device_id: None,
+            node_id: None,
             iat: now() - 10_000,
             exp: now() - 9_000,
         };
@@ -1062,6 +703,8 @@ mod tests {
             username: username.into(),
             email: email.into(),
             display_name: username.into(),
+            device_id: None,
+            node_id: None,
             iat: now(),
             exp: now() + 300,
         }
@@ -1123,7 +766,7 @@ mod tests {
         let (u2, token) = login_with_assertion(&fresh_assertion_for(&me), "node-second").unwrap();
         assert_eq!(u2.role, "owner");
         assert!(!token.is_empty());
-        // 且它已被登记进信任契约(冷静期由 grants 管)。
+        // 且它已被登记进信任契约；高风险批准另由 interconnect::gate 管。
         assert!(super::super::grants::get("node-second").unwrap().is_some());
     }
 
@@ -1382,6 +1025,8 @@ mod tests {
             username: "alice".into(),
             email: "a@b.com".into(),
             display_name: "Alice".into(),
+            device_id: None,
+            node_id: None,
             iat: now(),
             exp: now() + 300,
         };
@@ -1481,6 +1126,8 @@ mod tests {
             username: "alice".into(),
             email: "a@b.com".into(),
             display_name: "Alice".into(),
+            device_id: None,
+            node_id: None,
             iat: now(),
             exp: now() + 300,
         };

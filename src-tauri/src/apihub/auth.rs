@@ -28,6 +28,7 @@ pub(crate) fn resolve_app_auth_token(
                 device_id,
             });
         }
+        return None; // Explicit invalid/revoked sessions must never fall back to open owner access.
     }
     // 免口令模式:gate.enabled 由调用方算出,成立的条件是 —— 本壳是 Docker server 壳、
     // 没设 POLARIS_AUTH_TOKEN、也没开 POLARIS_REQUIRE_LOGIN。此时任何能连上的来源

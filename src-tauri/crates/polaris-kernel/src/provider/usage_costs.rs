@@ -67,6 +67,28 @@ pub struct DailyUsage {
 mod tests {
     use super::*;
     #[test]
+    fn model_price_completeness_is_window_local_and_independent_of_request_order() {
+        let usage = Usage { input: 10, output: 2, cache_read: 0, cache_creation: 0 };
+        for flags in [[true, false, true], [false, true, true], [true, true, false]] {
+            let mut mixed_window = TokenBucket::default();
+            for priced in flags {
+                mixed_window.add(&usage, if priced { 1.5 } else { 0.0 }, priced, "pi", "same-model");
+            }
+            assert_eq!(mixed_window.models.len(), 1);
+            let row = &mixed_window.models[0];
+            assert!(!row.has_price);
+            assert_eq!((row.priced_requests, row.unpriced_requests), (2, 1));
+            assert_eq!(row.cost, 3.0);
+            // A narrower query recomputes the same model from only priced requests.
+            let mut priced_window = TokenBucket::default();
+            for _ in 0..2 { priced_window.add(&usage, 1.5, true, "pi", "same-model"); }
+            let row = &priced_window.models[0];
+            assert!(row.has_price);
+            assert_eq!((row.priced_requests, row.unpriced_requests), (2, 0));
+            assert!(!priced_window.has_unknown_costs);
+        }
+    }
+    #[test]
     fn complete_mixed_and_unknown_costs_preserve_priced_subtotal() {
         let usage = Usage { input: 1_000_000, output: 0, cache_read: 0, cache_creation: 0 };
         for flags in [[true, true], [true, false], [false, false]] {

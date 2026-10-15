@@ -1,13 +1,15 @@
 use super::*;
 use super::protocol::{Event, Frame, TurnStatus};
 use std::time::Instant;
+use super::test_support::{wait_budget, wait_status, age_idle, wait_until};
 pub(super) fn config() -> config::Agentd {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut unique = [0_u8; 16];
+    getrandom::getrandom(&mut unique).expect("test directory entropy");
     let mut c = config::Agentd::default();
     c.entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agentd.mjs");
     c.isolation = "shared".into();
-    c.request_timeout_ms = 1500;
-    c.turn_idle_timeout_ms = 3000;
+    c.request_timeout_ms = wait_budget().as_millis() as u64;
+    c.turn_idle_timeout_ms = wait_budget().as_millis() as u64;
     c.abort_timeout_ms = 100;
     c.restart_base_ms = 20;
     c.restart_max_ms = 80;
@@ -16,7 +18,8 @@ pub(super) fn config() -> config::Agentd {
     c.failure_threshold = 3;
     c.max_line_bytes = 4096;
     c.channel_capacity = 2;
-    c.session_map = std::env::temp_dir().join(format!("pi-tests-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    c.session_map = std::env::temp_dir().join(format!("pi-tests-{:032x}", u128::from_le_bytes(unique)));
+    c.expert_settings = c.session_map.join("expert-settings.json");
     c
 }
 pub(super) fn input(req: &str, prompt: &str) -> TurnRequest {
@@ -27,7 +30,7 @@ pub(super) fn input(req: &str, prompt: &str) -> TurnRequest {
 fn collect_events(stream: EventStream) -> Vec<crate::chat::ChatStreamEvent> {
     let mut events = vec![];
     loop {
-        let e = stream.recv_timeout(Duration::from_secs(5)).expect("terminal event deadline");
+        let e = stream.recv_timeout(wait_budget()).expect("terminal event deadline");
         let done = e.kind == "done";
         events.push(e);
         if done { return events; }
@@ -35,11 +38,7 @@ fn collect_events(stream: EventStream) -> Vec<crate::chat::ChatStreamEvent> {
 }
 fn ready(b: &PiBackend) {
     b.models().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !b.status().healthy {
-        assert!(Instant::now() < deadline, "{:?}", b.status());
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_until("backend healthy", || b.status().healthy).unwrap();
 }
 #[test]
 fn protocol_samples_and_source_fingerprint() {
@@ -102,7 +101,7 @@ fn crash_restarts_and_active_turn_finishes() {
     let b = PiBackend::new(config()).unwrap(); ready(&b);
     let events = collect_events(b.start(input("crash", "crash")).unwrap());
     assert_eq!(events[events.len()-2].kind, "error");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + wait_budget();
     while b.status().restarts == 0 || !b.status().healthy {
         assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10));
     }
@@ -113,7 +112,7 @@ fn cancellation_and_abort_timeout_both_finish() {
     for prompt in ["hang", "abort-hang"] {
         let b = PiBackend::new(config()).unwrap(); ready(&b);
         let stream = b.start(input(prompt, prompt)).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + wait_budget();
         while b.client.get().unwrap().active.lock().is_empty() {
             assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(5));
         }
@@ -133,7 +132,7 @@ fn malformed_and_oversized_lines_fail_closed() {
 fn slow_consumer_retains_text_and_terminal() {
     let b = PiBackend::new(config()).unwrap(); ready(&b);
     let stream = b.start(input("slow", "flood")).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    stream.mailbox.wait_full(wait_budget()).unwrap();
     let events = collect_events(stream);
     assert!(!events.iter().any(|e| e.kind == "error"), "{events:?}");
     assert_eq!(events.iter().filter(|e| e.kind == "delta").filter_map(|e| e.text.as_ref()).map(String::len).sum::<usize>(), 128000);
@@ -144,7 +143,7 @@ fn slow_consumer_retains_text_and_terminal() {
 fn repeated_startup_failure_opens_circuit() {
     let mut c = config(); c.args = vec!["--crash-start".into()];
     let b = PiBackend::new(c).unwrap(); let _ = b.models();
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + wait_budget();
     while !b.status().circuit_open { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
     assert!(b.start(input("blocked", "normal")).err().unwrap().to_string().contains("CircuitOpen"));
 }
@@ -160,18 +159,17 @@ fn isolation_never_silently_shares() {
 fn ping_timeout_is_bounded() {
     let mut c = config(); c.args = vec!["--ping-hang".into()]; c.request_timeout_ms = 80;
     let b = PiBackend::new(c).unwrap(); let _ = b.models();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + wait_budget();
     while !b.status().circuit_open { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
 }
 #[test]
 fn idle_reaping_and_reopen_after_config_apply() {
-    let mut c = config(); c.idle_ms = 100;
-    let b = PiBackend::new(c).unwrap(); ready(&b);
+    let b = PiBackend::new(config()).unwrap(); ready(&b);
     assert_eq!(collect(&b, input("session", "normal"), |_,_| {}).unwrap(), "hello world");
     b.apply_config(Some(serde_json::json!({"thinkingLevel":"off"})), None).unwrap();
     assert_eq!(collect(&b, input("session", "normal"), |_,_| {}).unwrap(), "hello world");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while b.status().pid.is_some() { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    age_idle(&b).unwrap();
+    wait_status(&b, |s| s.pid.is_none()).unwrap();
     assert_eq!(collect(&b, input("after-idle", "normal"), |_,_| {}).unwrap(), "hello world");
 }
 #[test]
@@ -205,7 +203,7 @@ fn config_apply_is_not_busy_after_circuit_or_thread_exit() {
         let b = PiBackend::new(c).unwrap(); ready(&b);
         let stream = b.start(input("release", if shutdown { "hang" } else { "crash" })).unwrap();
         if shutdown {
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + wait_budget();
             while b.client.get().unwrap().active.lock().is_empty() {
                 assert!(Instant::now() < deadline);
                 std::thread::sleep(Duration::from_millis(5));
@@ -214,7 +212,7 @@ fn config_apply_is_not_busy_after_circuit_or_thread_exit() {
         }
         let events = collect_events(stream);
         assert_eq!(events.last().unwrap().kind, "done");
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + wait_budget();
         while !b.client.get().unwrap().active.lock().is_empty() {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
@@ -238,7 +236,7 @@ fn stalled_stdin_reports_backpressure_to_caller_and_status() -> anyhow::Result<(
     result:{status:'ok',sessions:0,version:'0.1.0',piVersion:'1.0.4',protocolVersion:6, usagePersistFailures:0}})+'\n');
   process.stdin.pause();
 }); setInterval(() => {}, 1000)"#.into()];
-    c.request_timeout_ms = 300;
+    c.request_timeout_ms = wait_budget().as_millis() as u64;
     c.max_line_bytes = 2_000_000;
     c.failure_threshold = 1;
     let b = PiBackend::new(c)?;
@@ -261,7 +259,7 @@ fn supervisor_exit_clears_orphan_active_entries() {
     client.active.lock().insert("orphan".into(), "session".into());
     assert!(b.apply_config(None, None).is_ok()); // P4 defers running sessions in agentd.
     b.shutdown();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + wait_budget();
     while !client.active.lock().is_empty() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(5));
@@ -277,7 +275,7 @@ fn supervisor_exit_panic_and_channel_close_finish_inflight_turns() -> anyhow::Re
         let b = PiBackend::new(c)?;
         b.models()?;
         let client = b.client()?;
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + wait_budget();
         while !b.status().healthy {
             anyhow::ensure!(Instant::now() < deadline, "supervisor never healthy");
             std::thread::sleep(Duration::from_millis(5));
@@ -290,7 +288,7 @@ fn supervisor_exit_panic_and_channel_close_finish_inflight_turns() -> anyhow::Re
         }
         client.send(control)?;
         for (index, stream) in streams.into_iter().enumerate() {
-            let wait = Duration::from_secs(2);
+            let wait = wait_budget();
             assert_eq!(stream.recv_timeout(wait)?.kind, "meta");
             let error = stream.recv_timeout(wait)?;
             assert_eq!(error.kind, "error");
@@ -355,12 +353,13 @@ fn timed_events(c: config::Agentd, request: TurnRequest) -> anyhow::Result<Vec<c
     let stream = b.start(request)?;
     let mut events = Vec::new();
     loop {
-        let event = stream.recv_timeout(Duration::from_secs(5))?;
+        let event = stream.recv_timeout(wait_budget())?;
         let done = event.kind == "done";
         events.push(event);
         if done { break; }
     }
-    assert!(stream.recv_timeout(Duration::from_millis(50)).is_err(), "duplicate terminal");
+    let closed = stream.recv_timeout(wait_budget()).unwrap_err();
+    assert!(matches!(closed.downcast_ref(), Some(stream::StreamError::Closed)), "{closed}");
     Ok(events)
 }
 #[test]

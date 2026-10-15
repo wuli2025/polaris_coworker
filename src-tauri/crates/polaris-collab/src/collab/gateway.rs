@@ -57,7 +57,7 @@ static REGISTRY: Lazy<RwLock<HashMap<String, HostEntry>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// 网关自己的 iroh Endpoint(单例,连所有主机复用)。
-static ENDPOINT: Lazy<tokio::sync::Mutex<Option<Endpoint>>> =
+static ENDPOINT: Lazy<tokio::sync::Mutex<Option<std::sync::Arc<super::tunnel::relay::ConfiguredEndpoint>>>> =
     Lazy::new(|| tokio::sync::Mutex::new(None));
 
 /// 每主机的活跃连接缓存(健康巡检 / open_bi 复用)。key = host node_id。
@@ -113,29 +113,8 @@ pub fn gateway_node_id() -> Result<String, String> {
 
 // ── Endpoint 惰性初始化 ─────────────────────────────────────────────────────
 
-async fn ensure_endpoint() -> Result<Endpoint, String> {
-    let mut g = ENDPOINT.lock().await;
-    if let Some(ep) = g.as_ref() {
-        return Ok(ep.clone());
-    }
-    let seed = get_or_create_gateway_key()?;
-    let transport = QuicTransportConfig::builder()
-        .keep_alive_interval(KEEP_ALIVE)
-        .max_idle_timeout(Some(
-            IdleTimeout::try_from(IDLE_TIMEOUT).expect("idle timeout 常量合法"),
-        ))
-        .build();
-    let ep = Endpoint::builder(presets::N0)
-        .secret_key(SecretKey::from_bytes(&seed))
-        .transport_config(transport)
-        .alpns(vec![ALPN.to_vec()])
-        .bind()
-        .await
-        .map_err(|e| format!("网关 iroh endpoint 绑定失败: {e}"))?;
-    *g = Some(ep.clone());
-    eprintln!("[gateway] iroh Endpoint 就绪 node_id={}", ep.id());
-    Ok(ep)
-}
+mod endpoint;
+use endpoint::ensure_endpoint;
 
 /// 取一条到指定主机的健康连接:缓存里已死的丢弃重建。
 async fn healthy_conn(host_node_id: &str) -> Result<Connection, String> {

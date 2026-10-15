@@ -23,10 +23,14 @@ use std::time::Duration;
 use base64::Engine;
 use iroh::endpoint::presets;
 use iroh::endpoint::{Connection, IdleTimeout, PathId, QuicTransportConfig, VarInt};
-use iroh::{Endpoint, EndpointId, RelayMode, RelayUrl, SecretKey};
+use iroh::{Endpoint, EndpointId, SecretKey};
+#[cfg(test)]
+use iroh::RelayMode;
 use once_cell::sync::Lazy;
 
 use super::identity;
+pub(crate) mod relay;
+pub use relay::{apply_relay_config, apply_authority_relays, relay_status};
 
 /// 应用层协议标识:主机与成员两端必须一致。
 const ALPN: &[u8] = b"polaris/1";
@@ -107,8 +111,6 @@ fn upstream_addr() -> String {
 
 /// 活跃转发流总数(主机 accept 的 + 成员代理的),仅聚合展示用。
 static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
-/// 自定义 relay URL 列表;空 = 用 iroh 默认(n0 公共 relay)。
-static RELAYS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 // 主机侧
 static HOST_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -167,7 +169,8 @@ static TUNNEL_RT: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
 });
 
 /// 共享客户端 Endpoint(device.key 身份),首个隧道触发构建,之后所有隧道复用。
-static CLIENT_EP: Lazy<tokio::sync::OnceCell<Endpoint>> = Lazy::new(tokio::sync::OnceCell::new);
+static CLIENT_EP: Lazy<tokio::sync::Mutex<std::sync::Weak<relay::ConfiguredEndpoint>>> =
+    Lazy::new(|| tokio::sync::Mutex::new(std::sync::Weak::new()));
 /// 共享 Endpoint 建成后记下 NodeId,status 聚合展示用。
 static DEVICE_NODE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 
@@ -250,123 +253,8 @@ pub fn node_id_of_device_key() -> Result<String, String> {
 
 // ── relay 动态配置 ───────────────────────────────────────────────────────────
 
-/// 接受 `{"relays":[{"url":"https://relay.example.com"}]}` 形式的配置。
-/// 空列表 = 恢复默认(n0 公共 relay)。v1 忽略证书指纹字段(预留)。
-/// 注意:客户端共享 Endpoint 建成后改 relay,要等全部隧道断开重连才生效(Endpoint 级配置)。
-pub fn apply_relay_config(json: &str) -> Result<(), String> {
-    let v: serde_json::Value =
-        serde_json::from_str(json).map_err(|e| format!("relay 配置非法 JSON: {e}"))?;
-    let mut urls = Vec::new();
-    if let Some(arr) = v.get("relays").and_then(|r| r.as_array()) {
-        for item in arr {
-            let u = item
-                .get("url")
-                .and_then(|u| u.as_str())
-                .ok_or("relay 项缺 url 字段")?;
-            // 先验一遍能否解析成 RelayUrl,坏 URL 直接拒收,不留到起隧道时才炸。
-            let _: RelayUrl = u.parse().map_err(|e| format!("relay url 非法 {u}: {e}"))?;
-            urls.push(u.to_string());
-        }
-    }
-    *RELAYS.lock().unwrap() = urls;
-    Ok(())
-}
-
-/// 用种子建 Endpoint:N0 预设(打洞 + n0 DNS 发现 + 默认 relay)+ mDNS 内网发现,
-/// 有自定义 relay 则覆盖 relay_mode。
-async fn build_endpoint(seed: [u8; 32]) -> Result<Endpoint, String> {
-    // 保活 + 判死超时:没有它,NAT/relay 会静默回收空闲连接,直到下次请求才暴露断线。
-    //
-    // 流量窗口:QUIC 的默认值按「100ms RTT × 100Mbps」调,单流 1.25MB、连接级不设上限。
-    // 两头都不合适 ——
-    //  · 单流 1.25MB 在**高延迟长肥管**(比如跨境 200ms)上会把单流封在 6MB/s 左右,
-    //    而这正是「拷一个大文件」的形态;放到 4MB 才够喂满。
-    //  · 连接级不设上限意味着最坏情况是 `并发流数 × 单流窗口`,没有硬约束 —— 对
-    //    1.6G 内存的小云机是个隐患。这里显式钉一个连接级总量(默认 32MB)作为**内存上限**,
-    //    既拿到单流的速度,又不会因为对端猛开流把内存吃穿。
-    // 两个都可用 env 覆盖(单位 KB):内存紧张的 NAS 调小,专线大带宽调大。
-    let stream_rwnd = env_kb("POLARIS_QUIC_STREAM_WINDOW_KB", 4 * 1024).clamp(64 * 1024, 64 << 20);
-    let conn_rwnd = env_kb("POLARIS_QUIC_CONN_WINDOW_KB", 32 * 1024).clamp(stream_rwnd, 512 << 20);
-    let transport = QuicTransportConfig::builder()
-        .keep_alive_interval(KEEP_ALIVE)
-        .max_idle_timeout(Some(
-            IdleTimeout::try_from(IDLE_TIMEOUT).expect("idle timeout 常量合法"),
-        ))
-        .stream_receive_window(VarInt::from_u64(stream_rwnd).expect("窗口值已夹在合法区间"))
-        .receive_window(VarInt::from_u64(conn_rwnd).expect("窗口值已夹在合法区间"))
-        // 发送侧同样放到连接级上限,否则收端给了窗口发端也吐不出来。
-        .send_window(conn_rwnd)
-        .build();
-    let mut builder = Endpoint::builder(presets::N0)
-        .secret_key(SecretKey::from_bytes(&seed))
-        .transport_config(transport)
-        .alpns(vec![ALPN.to_vec()]);
-    // 固定 UDP 端口(`POLARIS_IROH_PORT`)。默认是随机口,这对**跑在容器/NAT 后面的主机**
-    // 是致命的:端口每次重启都变,docker 没法发布、防火墙没法放行 → 外面永远打不进来,
-    // 打洞必失败、只能落中继(实测绕到 n0 德国中继,每跳往返 370ms)。钉死端口后
-    // `-p 41641:41641/udp` + 云防火墙放行这一个口,成员端即可直连。0 = 保持随机。
-    if let Some(p) = env_u16("POLARIS_IROH_PORT") {
-        builder = builder
-            .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, p))
-            .map_err(|e| format!("POLARIS_IROH_PORT={p} 绑定失败: {e}"))?;
-    }
-    // 自建中继也允许 env 配(容器重启即生效),不必每次重启后再 POST 一次
-    // /api/collab/tunnel/relays —— 服务端进程重启后 RELAYS 是空的,靠人工补那一刀
-    // 迟早会漏。env 只在 RELAYS 还没被 API 设过时兜底。
-    if RELAYS.lock().unwrap().is_empty() {
-        if let Ok(s) = std::env::var("POLARIS_RELAYS") {
-            let list: Vec<String> = s
-                .split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty())
-                .collect();
-            if !list.is_empty() {
-                *RELAYS.lock().unwrap() = list;
-            }
-        }
-    }
-    let relays = RELAYS.lock().unwrap().clone();
-    if !relays.is_empty() {
-        let mut urls: Vec<RelayUrl> = Vec::new();
-        for u in &relays {
-            urls.push(u.parse().map_err(|e| format!("relay url 非法 {u}: {e}"))?);
-        }
-        builder = builder.relay_mode(RelayMode::custom(urls));
-    }
-    let ep = builder
-        .bind()
-        .await
-        .map_err(|e| format!("iroh endpoint 绑定失败: {e}"))?;
-    // mDNS 局域网发现(iroh-mdns-address-lookup):纯内网(n0 DNS/relay 全不可达)时,
-    // 同网段设备也能互相发现直连。尽力而为:失败只丢内网发现,不影响正常组网;
-    // POLARIS_MDNS=0 可关(某些企业网禁组播,mDNS 只会白噪音)。
-    let mdns_off = std::env::var("POLARIS_MDNS")
-        .map(|v| v == "0")
-        .unwrap_or(false);
-    if !mdns_off {
-        match iroh_mdns_address_lookup::MdnsAddressLookup::builder().build(ep.id()) {
-            Ok(mdns) => match ep.address_lookup() {
-                Ok(services) => services.add(mdns),
-                Err(e) => eprintln!("[tunnel] mDNS 挂载失败(忽略,仅失去纯内网发现): {e}"),
-            },
-            Err(e) => eprintln!("[tunnel] mDNS 启动失败(忽略,仅失去纯内网发现): {e}"),
-        }
-    }
-    Ok(ep)
-}
-
-/// 共享客户端 Endpoint:首用构建(device.key),失败可重试(OnceCell 不留错值)。
-async fn client_endpoint() -> Result<Endpoint, String> {
-    let ep = CLIENT_EP
-        .get_or_try_init(|| async {
-            let seed = get_or_create_device_key()?;
-            let ep = build_endpoint(seed).await?;
-            *DEVICE_NODE.lock().unwrap() = ep.id().to_string();
-            Ok::<Endpoint, String>(ep)
-        })
-        .await?;
-    Ok(ep.clone())
-}
+mod endpoint;
+use endpoint::{build_endpoint, client_endpoint};
 
 // ── 主机侧 ──────────────────────────────────────────────────────────────────
 
@@ -375,7 +263,7 @@ pub async fn host_listen() -> Result<(), String> {
     HOST_STOPPING.store(false, Ordering::SeqCst);
     *HOST_STATE.lock().unwrap() = "connecting".to_string();
     let seed = identity::get_or_create_host_key()?;
-    let ep = match build_endpoint(seed).await {
+    let ep = match build_endpoint(seed, "host").await {
         Ok(ep) => ep,
         Err(e) => {
             *HOST_ERROR.lock().unwrap() = e.clone();
@@ -720,7 +608,7 @@ async fn run_client(t: Arc<ClientTunnel>) {
     watchdog.abort();
     finish(&t);
     eprintln!("[tunnel] 成员代理已停止 127.0.0.1:{}", t.port);
-    // 注:共享 Endpoint 不关,别的隧道还在用;进程退出统一回收。
+    // The last endpoint owner releases it; the next connection uses current relays.
 }
 
 // ── 状态 / 停止 / 同步包装 ───────────────────────────────────────────────────
@@ -797,7 +685,8 @@ pub fn status() -> serde_json::Value {
         "node_id": if host_running && !host_node.is_empty() { host_node.clone() } else { device_node },
         "connections": CONNECTIONS.load(Ordering::Relaxed),
         "upstream": upstream_addr(),
-        "relays": RELAYS.lock().unwrap().clone(),
+        "relays": relay_status()["urls"],
+        "relayConfig": relay_status(),
         "latency_ms": best_latency,
         "last_error": if !host_err.is_empty() { host_err } else { first_err },
         "host": { "running": host_running, "state": host_state, "node_id": host_node },
@@ -945,17 +834,6 @@ mod tests {
 
         assert!(split_node_and_addrs("abc123@1.2.3.4").is_err()); // 缺端口
         assert!(split_node_and_addrs("abc123@不是地址:41641").is_err());
-    }
-
-    /// relay 配置解析:合法进、坏 URL 拒。
-    #[test]
-    fn relay_config_parse() {
-        apply_relay_config(r#"{"relays":[{"url":"https://relay.example.com"}]}"#)
-            .expect("合法配置");
-        assert_eq!(RELAYS.lock().unwrap().len(), 1);
-        assert!(apply_relay_config(r#"{"relays":[{"url":"::bad::"}]}"#).is_err());
-        apply_relay_config(r#"{"relays":[]}"#).expect("清空恢复默认");
-        assert!(RELAYS.lock().unwrap().is_empty());
     }
 
     /// connect_client 幂等与冲突:坏 NodeId 同步报错;同端口同主机 no-op;

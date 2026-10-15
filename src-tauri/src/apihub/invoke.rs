@@ -101,6 +101,23 @@ async fn invoke(
         )
             .into_response();
     }
+    if ctx.user_id > 0 {
+        let operation = crate::collab::interconnect::risk_inventory::HIGH_RISK_OPERATIONS.iter()
+            .find(|op| op.entry_points.contains(&req.cmd.as_str())).map(|op| op.id);
+        if let Some(operation) = operation {
+            let token = bearer_of(&headers).map_or_else(String::new, |token| token);
+            let payload = json!({"command":req.cmd,"args":req.args});
+            let assertion = headers.get("x-polaris-device-assertion")
+                .and_then(|value| value.to_str().ok()).map(String::from);
+            match tokio::task::spawn_blocking(move || {
+                crate::collab::interconnect::gate::session_proven(&token, operation, &payload, assertion.as_deref())
+            }).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return invoke_err_resp(format!("(403) {error}")),
+                Err(error) => return invoke_err_resp(error.to_string()),
+            }
+        }
+    }
     let cmd = req.cmd;
     let args = req.args;
     let app = state.app();

@@ -7,8 +7,11 @@ use serde_json::{Value, json};
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
 mod tests;
+#[path = "experts_sync.rs"]
+mod experts_sync;
 struct Pending { reply: Option<Reply>, since: Instant, ping: bool }
 struct State {
+    experts: experts_sync::Restore,
     config: Agentd,
     status: Arc<Mutex<BackendStatus>>,
     active: Arc<Mutex<HashMap<String, String>>>,
@@ -22,6 +25,8 @@ struct State {
     started: Instant,
     last_used: Instant,
     stopping: bool,
+    #[cfg(test)]
+    ping_waiters: Vec<(u32, Reply)>,
 }
 impl State {
     fn request(&mut self, process: &Process, command: Command, reply: Option<Reply>) -> anyhow::Result<()> {
@@ -33,12 +38,15 @@ impl State {
         Ok(())
     }
     fn fail(&mut self, error: String) {
+        self.experts = Default::default();
         self.failures = self.failures.saturating_add(1);
         let circuit = error.contains("AgentdProtocolMismatch") || self.failures >= self.config.failure_threshold;
         let error = if circuit { format!("{}: {error}", BackendError::CircuitOpen) } else { error };
         for route in self.routes.values_mut() { route.fail(&error); }
         let mut status = self.status.lock();
         status.healthy = false;
+        status.experts_synced = Some(false);
+        status.expert_sync_error = Some(error.clone());
         status.pid = None;
         status.circuit_open = circuit;
         eprintln!("{}", json!({"component":"agent.backend", "backend":"pi", "phase":"failure", "error":error}));
@@ -62,6 +70,7 @@ impl State {
                 if let Some(pending) = self.pending.remove(&id) {
                     let result = if ok { Ok(result.unwrap_or(Value::Null)) }
                         else { Err(error.map(|e| format!("{}: {}", e.code, e.message)).unwrap_or_else(|| "AgentdResponseError".into())) };
+                    if self.expert_response(&id, &result) { return Ok(()); }
                     if pending.ping {
                         let checked = result.and_then(|v| super::protocol::check_ping(v.clone())
                             .map(|ping| (v, ping)).map_err(|e| e.to_string()));
@@ -71,6 +80,16 @@ impl State {
                                 status.healthy = true;
                                 status.agentd_version = Some(ping.version);
                                 status.usage_persist_failures = ping.usage_persist_failures;
+                                drop(status);
+                                if pending.reply.is_none() {
+                                    self.restore_experts(ping.experts);
+                                    #[cfg(test)]
+                                    self.ping_waiters.retain_mut(|(remaining, reply)| {
+                                        *remaining -= 1;
+                                        if *remaining == 0 { let _ = reply.send(Ok(json!({}))); }
+                                        *remaining != 0
+                                    });
+                                }
                                 if let Some(reply) = pending.reply { let _ = reply.send(Ok(value)); }
                             }
                             Err(error) => {
@@ -94,6 +113,17 @@ impl State {
             Control::Stop => { self.stopping = true; }
             #[cfg(test)]
             Control::TestExit(_) | Control::TestClose => unreachable!("handled by run"),
+            #[cfg(test)]
+            Control::TestAgeIdle(reply) => {
+                // Advance only this actor's idle age, after the test has finished setup.
+                self.last_used = Instant::now() - Duration::from_millis(self.config.idle_ms);
+                let _ = reply.send(Ok(json!({})));
+            }
+            #[cfg(test)]
+            Control::TestWaitPings(count, reply) => {
+                assert!(count > 0);
+                self.ping_waiters.push((count, reply));
+            }
             Control::Fail(req, message) => {
                 for route in self.routes.values_mut().filter(|r| r.req == req) { route.fail(&message); }
             }
@@ -115,7 +145,7 @@ impl State {
             }
             Control::Request(command, reply) => {
                 if let Some(process) = process {
-                    if !self.status.lock().healthy {
+                    if !self.status.lock().healthy || self.experts.busy() {
                         if self.deferred.len() >= self.config.channel_capacity {
                             let _ = reply.send(Err("AgentdHandshakeQueueFull".into()));
                         } else { self.deferred.push((command, reply, Instant::now())); }
@@ -198,6 +228,7 @@ impl Drop for State {
         {
             let mut status = self.status.lock();
             status.healthy = false;
+            status.experts_synced = Some(false);
             status.pid = None;
             if !self.stopping || !self.routes.is_empty() {
                 status.last_error = Some(super::routes::SUPERVISOR_EXITED.into());
@@ -219,8 +250,11 @@ impl Drop for State {
 pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mutex<BackendStatus>>,
     active: Arc<Mutex<HashMap<String, String>>>) {
     let now = Instant::now();
-    let mut s = State { config, status, active, routes: HashMap::new(), pending: HashMap::new(),
-        deferred: Vec::new(), counter: 0, failures: 0, next_start: now, last_ping: now, started: now, last_used: now, stopping: false };
+    let mut s = State { config, status, active, experts: Default::default(), routes: HashMap::new(), pending: HashMap::new(),
+        deferred: Vec::new(), counter: 0, failures: 0, next_start: now, last_ping: now, started: now, last_used: now, stopping: false,
+        #[cfg(test)]
+        ping_waiters: Vec::new(),
+    };
     let mut process: Option<Process> = None;
     let mut ever_started = false;
     let mut idle = false;
@@ -288,7 +322,8 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
             }
         };
         let outcome = outcome.and_then(|()| {
-            if s.status.lock().healthy {
+            if let Some(p) = process.as_ref() { s.send_expert_request(p)?; }
+            if s.status.lock().healthy && !s.experts.busy() {
                 if let Some(p) = process.as_ref() {
                     for (command, reply, _) in std::mem::take(&mut s.deferred) {
                         if let Err(error) = s.request(p, command, Some(reply.clone())) {
@@ -315,6 +350,8 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
             && s.last_used.elapsed().as_millis() >= s.config.idle_ms as u128 {
             if let Some(mut p) = process.take() { p.stop().await; }
             let mut status = s.status.lock(); status.pid = None; status.healthy = false;
+            status.experts_synced = Some(false);
+            s.experts = Default::default();
             idle = true;
         }
     }
