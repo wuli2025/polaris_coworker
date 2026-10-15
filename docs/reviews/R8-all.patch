@@ -1,0 +1,483 @@
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+index f48e2fc..0ab1e36 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs
+@@ -76,7 +76,7 @@ impl TurnRequest {
+             account_id: None, timeout: None, legacy: None }
+     }
+ }
+-#[derive(Debug, Clone, Serialize)]
++#[derive(Debug, Clone, Default, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct BackendStatus {
+     pub backend: String,
+@@ -84,6 +84,9 @@ pub struct BackendStatus {
+     pub pid: Option<u32>,
+     pub restarts: u32,
+     pub usage_persist_failures: u64,
++    /// None for backends without daemon expert configuration.
++    pub experts_synced: Option<bool>,
++    pub expert_sync_error: Option<String>,
+     pub circuit_open: bool,
+     pub healthy: bool,
+     pub last_error: Option<String>,
+@@ -91,7 +94,8 @@ pub struct BackendStatus {
+ impl BackendStatus {
+     pub(crate) fn new(name: &str) -> Self {
+         Self { backend: name.into(), agentd_version: None, pid: None, restarts: 0,
+-            usage_persist_failures: 0, circuit_open: false, healthy: false, last_error: None }
++            usage_persist_failures: 0, experts_synced: (name == "pi").then_some(false),
++            expert_sync_error: None, circuit_open: false, healthy: false, last_error: None }
+     }
+ }
+ pub trait AgentBackend: Send + Sync {
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/experts.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/experts.rs
+index bb45161..ad277ca 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/experts.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/experts.rs
+@@ -7,18 +7,51 @@ use std::{fs, path::Path};
+ #[serde(deny_unknown_fields)]
+ pub struct ExpertConfig { pub enabled: bool, pub prompt: String }
+ 
++const DEFAULT_PROMPT_MAX_BYTES: usize = 32768;
++const PROMPT_LIMIT_ENV: &str = "POLARIS_EXPERT_PROMPT_MAX_BYTES";
++
++fn parse_prompt_limit(value: Option<&str>) -> anyhow::Result<usize> {
++    match value {
++        None => Ok(DEFAULT_PROMPT_MAX_BYTES),
++        Some(value) => value.parse::<usize>().ok().filter(|limit| *limit > 0)
++            .ok_or_else(|| anyhow::anyhow!("ExpertPromptLimitInvalid: {PROMPT_LIMIT_ENV} must be a positive byte count")),
++    }
++}
++
++pub(super) fn prompt_limit() -> anyhow::Result<usize> {
++    match std::env::var(PROMPT_LIMIT_ENV) {
++        Ok(value) => parse_prompt_limit(Some(&value)),
++        Err(std::env::VarError::NotPresent) => parse_prompt_limit(None),
++        Err(_) => anyhow::bail!("ExpertPromptLimitInvalid: {PROMPT_LIMIT_ENV} must be UTF-8"),
++    }
++}
++
++impl ExpertConfig {
++    pub(super) fn normalized(mut self, limit: usize) -> anyhow::Result<Self> {
++        anyhow::ensure!(self.prompt.len() <= limit,
++            "ExpertPromptTooLong: {} bytes exceeds limit {limit}", self.prompt.len());
++        self.prompt.truncate(self.prompt.trim_end().len());
++        Ok(self)
++    }
++}
++
+ pub fn load(path: &Path) -> anyhow::Result<Option<ExpertConfig>> {
++    load_with_limit(path, prompt_limit()?)
++}
++
++fn load_with_limit(path: &Path, limit: usize) -> anyhow::Result<Option<ExpertConfig>> {
+     match fs::read(path) {
+-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)
+-            .map_err(|e| anyhow::anyhow!("ExpertConfigInvalid: {e}"))?)),
++        Ok(bytes) => Ok(Some(serde_json::from_slice::<ExpertConfig>(&bytes)
++            .map_err(|e| anyhow::anyhow!("ExpertConfigInvalid: {e}"))?.normalized(limit)?)),
+         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+         Err(e) => Err(anyhow::anyhow!("ExpertConfigReadFailed: {e}")),
+     }
+ }
+ 
+ fn persist(path: &Path, config: &ExpertConfig) -> anyhow::Result<()> {
++    let config = config.clone().normalized(prompt_limit()?)?;
+     if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+-    crate::provider::atomic_write(path, &serde_json::to_string_pretty(config)?)
++    crate::provider::atomic_write(path, &serde_json::to_string_pretty(&config)?)
+         .map_err(|e| anyhow::anyhow!("ExpertConfigWriteFailed: {e}"))
+ }
+ 
+@@ -26,36 +59,33 @@ impl PiBackend {
+     fn actual_experts(&self) -> anyhow::Result<ExpertConfig> {
+         let ping = self.client()?.call(Command::Ping(Empty {}))?;
+         super::protocol::check_ping(ping)?.experts
+-            .ok_or_else(|| anyhow::anyhow!("ExpertConfigReadUnsupported"))
++            .ok_or_else(|| anyhow::anyhow!("ExpertConfigReadUnsupported"))?
++            .normalized(prompt_limit()?)
+     }
+ 
+     fn apply_experts(&self, config: &ExpertConfig) -> anyhow::Result<()> {
++        let config = config.clone().normalized(prompt_limit()?)?;
+         self.apply_config(Some(serde_json::json!({ "experts": config })), None)?;
+-        anyhow::ensure!(self.actual_experts()? == *config, "ExpertConfigApplyMismatch");
++        anyhow::ensure!(self.actual_experts()? == config, "ExpertConfigApplyMismatch");
+         Ok(())
+     }
+ 
+-    fn restore_experts(&self) -> anyhow::Result<()> {
+-        if let Some(saved) = load(&self.config.expert_settings)? {
+-            if self.actual_experts()? != saved { self.apply_experts(&saved)?; }
+-        }
+-        Ok(())
+-    }
+-
+-    pub(super) fn sync_experts(&self) -> anyhow::Result<()> {
+-        let _guard = self.expert_lock.lock();
+-        self.restore_experts()
+-    }
+-
+     pub(super) fn expert_state(&self, enabled: Option<bool>) -> anyhow::Result<bool> {
+         let _guard = self.expert_lock.lock();
+-        self.restore_experts()?;
++        // Supervisor queues this ping behind any in-flight restore transaction.
+         let before = self.actual_experts()?;
++        let status = self.client()?.status.lock().clone();
++        anyhow::ensure!(status.experts_synced == Some(true), "ExpertConfigUnsynced: {}",
++            status.expert_sync_error.as_deref().map_or("awaiting daemon ping", |error| error));
+         let Some(enabled) = enabled else { return Ok(before.enabled); };
+         let config = ExpertConfig { enabled, prompt: before.prompt.clone() };
+         self.apply_experts(&config)?;
+         if let Err(error) = persist(&self.config.expert_settings, &config) {
+             if let Err(rollback) = self.apply_experts(&before) {
++                let client = self.client()?;
++                let mut status = client.status.lock();
++                status.experts_synced = Some(false);
++                status.expert_sync_error = Some(format!("ExpertConfigRollbackFailed: {rollback}"));
+                 anyhow::bail!("{error}; ExpertConfigRollbackFailed: {rollback}");
+             }
+             return Err(error);
+@@ -65,62 +95,8 @@ impl PiBackend {
+ }
+ 
+ #[cfg(test)]
+-mod tests {
+-    use super::*;
+-    use crate::chat::backend::AgentBackend;
+-
+-    #[test]
+-    fn setter_delivers_persists_and_restores_after_host_restart() -> anyhow::Result<()> {
+-        let mut config = super::super::tests::config();
+-        let root = config.session_map.with_extension("experts-test");
+-        fs::create_dir_all(&root)?;
+-        config.expert_settings = root.join("settings.json");
+-        let backend = PiBackend::new(config.clone())?;
+-        assert!(!backend.experts_enabled(None)?);
+-        assert!(backend.experts_enabled(Some(true))?);
+-        let saved = load(&config.expert_settings)?.ok_or_else(|| anyhow::anyhow!("missing settings"))?;
+-        assert!(saved.enabled);
+-        assert_eq!(saved.prompt, "deployment-prompt");
+-        backend.shutdown();
+-        let restarted = PiBackend::new(config)?;
+-        assert!(restarted.experts_enabled(None)?);
+-        assert!(!restarted.experts_enabled(Some(false))?);
+-        assert!(!restarted.experts_enabled(None)?);
+-        restarted.shutdown();
+-        fs::remove_dir_all(root)?;
+-        Ok(())
+-    }
+-
+-    #[cfg(unix)]
+-    #[test]
+-    fn failed_persistence_rolls_runtime_back() -> anyhow::Result<()> {
+-        use std::os::unix::fs::PermissionsExt;
+-        let mut config = super::super::tests::config();
+-        let root = config.session_map.with_extension("experts-rollback");
+-        fs::create_dir_all(&root)?;
+-        config.expert_settings = root.join("settings.json");
+-        let backend = PiBackend::new(config)?;
+-        assert!(!backend.experts_enabled(None)?);
+-        fs::set_permissions(&root, fs::Permissions::from_mode(0o500))?;
+-        let result = backend.experts_enabled(Some(true));
+-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+-        assert!(result.is_err_and(|e| e.to_string().contains("ExpertConfigWriteFailed")));
+-        assert!(!backend.actual_experts()?.enabled);
+-        backend.shutdown();
+-        fs::remove_dir(root)?;
+-        Ok(())
+-    }
+-    #[test]
+-    fn persisted_settings_validate_and_survive_reload() -> anyhow::Result<()> {
+-        let path = std::env::temp_dir().join(format!("p5d-experts-{}.json", std::process::id()));
+-        let _ = fs::remove_file(&path);
+-        assert!(load(&path)?.is_none());
+-        let config = ExpertConfig { enabled: true, prompt: "configured expert".into() };
+-        persist(&path, &config)?;
+-        assert_eq!(load(&path)?, Some(config));
+-        fs::write(&path, r#"{"enabled":"true","prompt":""}"#)?;
+-        assert!(load(&path).is_err());
+-        fs::remove_file(path)?;
+-        Ok(())
+-    }
+-}
++#[path = "experts_tests.rs"]
++mod tests;
++#[cfg(test)]
++#[path = "experts_recovery_tests.rs"]
++mod recovery_tests;
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+index f953d90..50c2fcb 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs
+@@ -31,9 +31,12 @@ pub struct PiBackend {
+ impl PiBackend {
+     pub fn new(config: config::Agentd) -> anyhow::Result<Self> {
+         config::Config { agent: config::Agent::default(), agentd: config.clone() }.validate()?;
+-        Ok(Self { config, client: once_cell::sync::OnceCell::new(),
++        let backend = Self { config, client: once_cell::sync::OnceCell::new(),
+             provider_config: Mutex::new(None), expert_lock: Mutex::new(()),
+-            preparing: Arc::new(Mutex::new(HashSet::new())), cancelled: Arc::new(Mutex::new(HashSet::new())) })
++            preparing: Arc::new(Mutex::new(HashSet::new())), cancelled: Arc::new(Mutex::new(HashSet::new())) };
++        // Start supervision without waiting for daemon I/O or expert restoration.
++        if backend.config.isolation == "shared" { backend.client()?; }
++        Ok(backend)
+     }
+     fn client(&self) -> anyhow::Result<Arc<Client>> {
+         if self.config.isolation == "per-account" { return Err(BackendError::AccountContextRequired.into()); }
+@@ -101,7 +104,6 @@ impl AgentBackend for PiBackend {
+                 if self.provider_apply(&id)?["superseded"] != true { break; }
+             }
+         }
+-        self.sync_experts()?;
+         let client = self.client()?;
+         if client.status.lock().circuit_open { return Err(BackendError::CircuitOpen.into()); }
+         let (sender, stream) = stream::Mailbox::channel(self.config.channel_capacity, self.config.max_line_bytes);
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+index 068dc78..c25610c 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor.rs
+@@ -7,8 +7,11 @@ use serde_json::{Value, json};
+ #[cfg(test)]
+ #[path = "supervisor_tests.rs"]
+ mod tests;
++#[path = "experts_sync.rs"]
++mod experts_sync;
+ struct Pending { reply: Option<Reply>, since: Instant, ping: bool }
+ struct State {
++    experts: experts_sync::Restore,
+     config: Agentd,
+     status: Arc<Mutex<BackendStatus>>,
+     active: Arc<Mutex<HashMap<String, String>>>,
+@@ -33,12 +36,15 @@ impl State {
+         Ok(())
+     }
+     fn fail(&mut self, error: String) {
++        self.experts = Default::default();
+         self.failures = self.failures.saturating_add(1);
+         let circuit = error.contains("AgentdProtocolMismatch") || self.failures >= self.config.failure_threshold;
+         let error = if circuit { format!("{}: {error}", BackendError::CircuitOpen) } else { error };
+         for route in self.routes.values_mut() { route.fail(&error); }
+         let mut status = self.status.lock();
+         status.healthy = false;
++        status.experts_synced = Some(false);
++        status.expert_sync_error = Some(error.clone());
+         status.pid = None;
+         status.circuit_open = circuit;
+         eprintln!("{}", json!({"component":"agent.backend", "backend":"pi", "phase":"failure", "error":error}));
+@@ -62,6 +68,7 @@ impl State {
+                 if let Some(pending) = self.pending.remove(&id) {
+                     let result = if ok { Ok(result.unwrap_or(Value::Null)) }
+                         else { Err(error.map(|e| format!("{}: {}", e.code, e.message)).unwrap_or_else(|| "AgentdResponseError".into())) };
++                    if self.expert_response(&id, &result) { return Ok(()); }
+                     if pending.ping {
+                         let checked = result.and_then(|v| super::protocol::check_ping(v.clone())
+                             .map(|ping| (v, ping)).map_err(|e| e.to_string()));
+@@ -71,6 +78,8 @@ impl State {
+                                 status.healthy = true;
+                                 status.agentd_version = Some(ping.version);
+                                 status.usage_persist_failures = ping.usage_persist_failures;
++                                drop(status);
++                                if pending.reply.is_none() { self.restore_experts(ping.experts); }
+                                 if let Some(reply) = pending.reply { let _ = reply.send(Ok(value)); }
+                             }
+                             Err(error) => {
+@@ -115,7 +124,7 @@ impl State {
+             }
+             Control::Request(command, reply) => {
+                 if let Some(process) = process {
+-                    if !self.status.lock().healthy {
++                    if !self.status.lock().healthy || self.experts.busy() {
+                         if self.deferred.len() >= self.config.channel_capacity {
+                             let _ = reply.send(Err("AgentdHandshakeQueueFull".into()));
+                         } else { self.deferred.push((command, reply, Instant::now())); }
+@@ -198,6 +207,7 @@ impl Drop for State {
+         {
+             let mut status = self.status.lock();
+             status.healthy = false;
++            status.experts_synced = Some(false);
+             status.pid = None;
+             if !self.stopping || !self.routes.is_empty() {
+                 status.last_error = Some(super::routes::SUPERVISOR_EXITED.into());
+@@ -219,7 +229,7 @@ impl Drop for State {
+ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mutex<BackendStatus>>,
+     active: Arc<Mutex<HashMap<String, String>>>) {
+     let now = Instant::now();
+-    let mut s = State { config, status, active, routes: HashMap::new(), pending: HashMap::new(),
++    let mut s = State { config, status, active, experts: Default::default(), routes: HashMap::new(), pending: HashMap::new(),
+         deferred: Vec::new(), counter: 0, failures: 0, next_start: now, last_ping: now, started: now, last_used: now, stopping: false };
+     let mut process: Option<Process> = None;
+     let mut ever_started = false;
+@@ -288,7 +298,8 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
+             }
+         };
+         let outcome = outcome.and_then(|()| {
+-            if s.status.lock().healthy {
++            if let Some(p) = process.as_ref() { s.send_expert_request(p)?; }
++            if s.status.lock().healthy && !s.experts.busy() {
+                 if let Some(p) = process.as_ref() {
+                     for (command, reply, _) in std::mem::take(&mut s.deferred) {
+                         if let Err(error) = s.request(p, command, Some(reply.clone())) {
+@@ -315,6 +326,8 @@ pub async fn run(config: Agentd, mut rx: mpsc::Receiver<Control>, status: Arc<Mu
+             && s.last_used.elapsed().as_millis() >= s.config.idle_ms as u128 {
+             if let Some(mut p) = process.take() { p.stop().await; }
+             let mut status = s.status.lock(); status.pid = None; status.healthy = false;
++            status.experts_synced = Some(false);
++            s.experts = Default::default();
+             idle = true;
+         }
+     }
+diff --git a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor_tests.rs b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor_tests.rs
+index 6da95c0..d52c3fe 100644
+--- a/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor_tests.rs
++++ b/src-tauri/crates/polaris-kernel/src/chat/backend/pi/supervisor_tests.rs
+@@ -6,6 +6,7 @@ fn drop_replies_to_every_deferred_and_pending_request_immediately() -> anyhow::R
+         let now = Instant::now();
+         let status = Arc::new(Mutex::new(BackendStatus::new("pi")));
+         let mut state = State {
++            experts: Default::default(),
+             config: super::super::tests::config(), status: status.clone(),
+             active: Arc::new(Mutex::new(HashMap::new())), routes: HashMap::new(),
+             pending: HashMap::new(), deferred: Vec::new(), counter: 0, failures: 0,
+diff --git a/src-tauri/crates/polaris-kernel/src/provider/usage_costs.rs b/src-tauri/crates/polaris-kernel/src/provider/usage_costs.rs
+index 407038c..5710ce9 100644
+--- a/src-tauri/crates/polaris-kernel/src/provider/usage_costs.rs
++++ b/src-tauri/crates/polaris-kernel/src/provider/usage_costs.rs
+@@ -67,6 +67,28 @@ pub struct DailyUsage {
+ mod tests {
+     use super::*;
+     #[test]
++    fn model_price_completeness_is_window_local_and_independent_of_request_order() {
++        let usage = Usage { input: 10, output: 2, cache_read: 0, cache_creation: 0 };
++        for flags in [[true, false, true], [false, true, true], [true, true, false]] {
++            let mut mixed_window = TokenBucket::default();
++            for priced in flags {
++                mixed_window.add(&usage, if priced { 1.5 } else { 0.0 }, priced, "pi", "same-model");
++            }
++            assert_eq!(mixed_window.models.len(), 1);
++            let row = &mixed_window.models[0];
++            assert!(!row.has_price);
++            assert_eq!((row.priced_requests, row.unpriced_requests), (2, 1));
++            assert_eq!(row.cost, 3.0);
++            // A narrower query recomputes the same model from only priced requests.
++            let mut priced_window = TokenBucket::default();
++            for _ in 0..2 { priced_window.add(&usage, 1.5, true, "pi", "same-model"); }
++            let row = &priced_window.models[0];
++            assert!(row.has_price);
++            assert_eq!((row.priced_requests, row.unpriced_requests), (2, 0));
++            assert!(!priced_window.has_unknown_costs);
++        }
++    }
++    #[test]
+     fn complete_mixed_and_unknown_costs_preserve_priced_subtotal() {
+         let usage = Usage { input: 1_000_000, output: 0, cache_read: 0, cache_creation: 0 };
+         for flags in [[true, true], [true, false], [false, false]] {
+diff --git a/src-tauri/crates/polaris-wiki/src/wiki/compile/tests.rs b/src-tauri/crates/polaris-wiki/src/wiki/compile/tests.rs
+index c4551eb..e53b456 100644
+--- a/src-tauri/crates/polaris-wiki/src/wiki/compile/tests.rs
++++ b/src-tauri/crates/polaris-wiki/src/wiki/compile/tests.rs
+@@ -79,8 +79,7 @@ impl AgentBackend for Fake {
+     fn close(&self, _: &str) -> anyhow::Result<()> { self.closes.fetch_add(1, Ordering::SeqCst); Ok(()) }
+     fn models(&self) -> anyhow::Result<serde_json::Value> { Ok(json!([])) }
+     fn status(&self) -> BackendStatus {
+-        BackendStatus { backend: self.kind.clone(), agentd_version: None, pid: None, restarts: 0,
+-            usage_persist_failures: 0, circuit_open: false, healthy: true, last_error: None }
++        BackendStatus { backend: self.kind.clone(), healthy: true, ..BackendStatus::default() }
+     }
+     fn is_running(&self, _: &str) -> bool { false }
+     fn shutdown(&self) {}
+diff --git a/src/features/runtime/components/ContextFileEditor.vue b/src/features/runtime/components/ContextFileEditor.vue
+index 34eaf84..744c228 100644
+--- a/src/features/runtime/components/ContextFileEditor.vue
++++ b/src/features/runtime/components/ContextFileEditor.vue
+@@ -1,53 +1,15 @@
+ <script setup lang="ts">
+ import { onMounted, ref } from 'vue';
+ import { convApi } from '../../../tauri';
+-import { contextFiles, type ContextSelection } from '../contracts';
++import { useContextFileEditor } from '../useContextFileEditor';
+ 
+ const projects = ref<{ id: string; name: string }[]>([]);
+-const projectId = ref('');
+-const createFile = ref<ContextSelection['fileName']>('AGENTS.md');
+-const selection = ref<ContextSelection | null>(null);
+-const content = ref('');
+-const original = ref('');
+-const busy = ref(false);
+-const error = ref('');
+-const saved = ref(false);
+-
+-async function load() {
+-  if (busy.value) return;
+-  if (content.value !== original.value && !confirm('重新读取会丢失未保存修改，继续？')) return;
+-  busy.value = true;
+-  error.value = '';
+-  saved.value = false;
+-  selection.value = null;
+-  content.value = original.value = '';
+-  try {
+-    const selected = await contextFiles.metadata(projectId.value, createFile.value);
+-    const text = selected.exists ? await contextFiles.read(projectId.value, selected) : '';
+-    loadedProject.value = projectId.value;
+-    selection.value = selected;
+-    content.value = original.value = text;
+-  } catch (e) { error.value = String(e); }
+-  finally { busy.value = false; }
+-}
+-// Bind edits to the loaded project, so changing the dropdown cannot redirect a save.
+-const loadedProject = ref('');
+-async function open() { await load(); }
+-async function save() {
+-  const selected = selection.value;
+-  if (!selected || busy.value) return;
+-  busy.value = true;
+-  error.value = '';
+-  saved.value = false;
+-  try {
+-    await contextFiles.write(loadedProject.value, selected, content.value);
+-    original.value = content.value;
+-    selection.value = { ...selected, exists: true,
+-      agentsExists: selected.agentsExists || selected.fileName === 'AGENTS.md',
+-      claudeExists: selected.claudeExists || selected.fileName === 'CLAUDE.md' };
+-    saved.value = true;
+-  } catch (e) { error.value = String(e); }
+-  finally { busy.value = false; }
++const { projectId, createFile, selection, content, busy, error, saved, open, save, switchProject } = useContextFileEditor();
++async function changeProject(event: Event) {
++  const select = event.target as HTMLSelectElement;
++  const next = select.value;
++  select.value = projectId.value;
++  await switchProject(next);
+ }
+ onMounted(async () => {
+   try {
+@@ -60,7 +22,7 @@ onMounted(async () => {
+ <template>
+   <section class="context-editor">
+     <p>Pi 按项目实际工作目录优先读取 AGENTS.md，否则读取 CLAUDE.md；保存始终写回本次选中的文件。</p>
+-    <label>项目 <select v-model="projectId" :disabled="busy">
++    <label>项目 <select :value="projectId" :disabled="busy" @change="changeProject">
+       <option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option>
+     </select></label>
+     <label>两者都不存在时创建 <select v-model="createFile" :disabled="busy">
+diff --git a/src/types/agentRuntime.ts b/src/types/agentRuntime.ts
+index f36f174..33b66ba 100644
+--- a/src/types/agentRuntime.ts
++++ b/src/types/agentRuntime.ts
+@@ -5,6 +5,8 @@ export interface AgentBackendStatus {
+   pid: number | null;
+   restarts: number;
+   usagePersistFailures: number;
++  expertsSynced: boolean | null;
++  expertSyncError: string | null;
+   circuitOpen: boolean;
+   healthy: boolean;
+   lastError: string | null;
+@@ -13,5 +15,6 @@ export interface AgentBackendStatus {
+ export const previewBackendStatus: AgentBackendStatus = {
+   backend: 'pi', agentdVersion: null, pid: null, restarts: 0,
+   usagePersistFailures: 0, circuitOpen: false, healthy: false,
++  expertsSynced: false, expertSyncError: null,
+   lastError: 'BrowserPreview',
+ };

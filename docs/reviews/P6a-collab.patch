@@ -1,0 +1,1558 @@
+diff --git a/src-tauri/crates/polaris-collab/src/collab/auth.rs b/src-tauri/crates/polaris-collab/src/collab/auth.rs
+index f9793a2..3ffa8c7 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/auth.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/auth.rs
+@@ -876,106 +876,8 @@ pub fn peer_guest_user() -> Result<User, String> {
+     Ok(user)
+ }
+ 
+-/// 校验会话 token → 返回用户（check_auth 的核心）。过期或吊销即失败。
+-/// 短缓存命中(TTL 内且吊销版本未变)直接返回,免开库;未命中走每线程复用连接查库。
+-pub fn check_session(token: &str) -> Result<User, String> {
+-    check_session_with_device(token).map(|(u, _)| u)
+-}
+-
+-/// 同 [`check_session`],但把会话上记的**设备标识**一并带出来。
+-///
+-/// 入方向的按设备闸(`grants::fs_gate` / `grants::exec_gate`)靠它认出「这条请求
+-/// 是哪台设备发来的」—— 没有它,台账上那两排权限档对连进来的人就是摆设。
+-pub fn check_session_with_device(token: &str) -> Result<(User, String), String> {
+-    let t = now();
+-    // 版本号必须在查缓存/查库**之前**读:若查询期间发生吊销,写入缓存的条目带旧版本号,
+-    // 下次请求即判陈旧 —— 堵住「查到旧数据 + 吊销后才写缓存」的竞态窗口。
+-    let gen = SESSION_REVOKE_GEN.load(Ordering::SeqCst);
+-    // 当前库路径:缓存按库隔离(切库不串库)。取不到路径就用固定串,行为退化为不按库隔离但不 panic。
+-    let cur_db = db::db_path()
+-        .map(|p| p.to_string_lossy().into_owned())
+-        .unwrap_or_default();
+-    {
+-        let mut cache = SESSION_CACHE.lock();
+-        if let Some(e) = cache.get(token) {
+-            // 命中四道闸:版本未变 + 同库 + TTL 内 + 会话自身未到期(缺一即落库重查)。
+-            if e.gen == gen
+-                && e.db_path == cur_db
+-                && t - e.cached_at < SESSION_CACHE_TTL_SECS
+-                && t < e.expires_at
+-            {
+-                return Ok((e.user.clone(), e.device_id.clone()));
+-            }
+-            cache.remove(token); // 陈旧 → 惰性剔除,落库重查
+-        }
+-    }
+-    let (user, device_id, expires_at) = check_session_db(token, t)?;
+-    let mut cache = SESSION_CACHE.lock();
+-    // 硬上限防 token 洪泛撑爆内存:先剔陈旧;仍超限就整体清空(纯性能缓存,清空只是回落到查库)。
+-    if cache.len() >= SESSION_CACHE_CAP {
+-        cache.retain(|_, e| {
+-            e.gen == gen && t - e.cached_at < SESSION_CACHE_TTL_SECS && t < e.expires_at
+-        });
+-        if cache.len() >= SESSION_CACHE_CAP {
+-            cache.clear();
+-        }
+-    }
+-    cache.insert(
+-        token.to_string(),
+-        CachedSession {
+-            user: user.clone(),
+-            device_id: device_id.clone(),
+-            expires_at,
+-            cached_at: t,
+-            gen,
+-            db_path: cur_db,
+-        },
+-    );
+-    Ok((user, device_id))
+-}
+-
+-/// check_session 的落库部分(原逻辑不变,连接改走每线程复用的 with_conn)。
+-/// 返回 (用户, 设备标识, 会话到期时刻)。
+-fn check_session_db(token: &str, t: i64) -> Result<(User, String, i64), String> {
+-    db::with_conn(|conn| {
+-        let row = conn.query_row(
+-            "SELECT u.id,u.username,u.role,u.display_name,u.disabled,s.expires_at,s.device_id \
+-             FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?1",
+-            params![token],
+-            |r| {
+-                Ok((
+-                    r.get::<_, i64>(0)?,
+-                    r.get::<_, String>(1)?,
+-                    r.get::<_, String>(2)?,
+-                    r.get::<_, String>(3)?,
+-                    r.get::<_, i64>(4)?,
+-                    r.get::<_, i64>(5)?,
+-                    r.get::<_, String>(6)?,
+-                ))
+-            },
+-        );
+-        let (id, username, role, display_name, disabled, expires_at, device_id) =
+-            row.map_err(|_| "会话无效，请重新登录".to_string())?;
+-        if disabled != 0 {
+-            return Err("账号已停用".into());
+-        }
+-        if expires_at < t {
+-            let _ = conn.execute("DELETE FROM sessions WHERE token=?1", params![token]);
+-            return Err("会话已过期，请重新登录".into());
+-        }
+-        Ok((
+-            User {
+-                id,
+-                username,
+-                role,
+-                display_name,
+-                disabled: false,
+-            },
+-            device_id,
+-            expires_at,
+-        ))
+-    })
+-}
++mod sessions;
++pub use sessions::{check_session, check_session_with_device};
+ 
+ /// 登出：删会话。吊销版本 +1,短缓存里的该会话即刻失效(不等 TTL)。
+ pub fn logout(token: &str) -> Result<(), String> {
+diff --git a/src-tauri/crates/polaris-collab/src/collab/authority.rs b/src-tauri/crates/polaris-collab/src/collab/authority.rs
+index 43cc463..c06981b 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/authority.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/authority.rs
+@@ -4,11 +4,11 @@
+ //! 账号 —— 「一个账号在哪台机器都能登」做不到。本模块把**云机立为账号权威**,其余主机
+ //! 退化为「认签名的成员」。
+ //!
+-//! 三种运行模式(由环境变量决定,默认保持老行为,老部署零影响):
++//! 三种运行模式(环境变量覆盖用户配置与随包默认;占位默认使用本地模式):
+ //!  · `POLARIS_ACCOUNT_AUTHORITY=1`      本进程**就是**权威。持签名私钥,`/api/account/*` 对外
+ //!                                        发号:注册(强制绑邮箱)、登录、改密,签发身份断言。
+ //!  · `POLARIS_ACCOUNT_AUTHORITY_URL=…`  本进程是**成员主机**。不再自己判密码,只认权威签的断言;
+-//!                                        权威公钥首次接触即钉死(TOFU),此后**离线也能验**。
++//!                                        首次接触须匹配预置指纹,钉住后**离线也能验**。
+ //!  · 都不设                              本地权威(老行为):自己的 users 表说了算。
+ //!
+ //! 为什么是「签名断言」而不是「每次请求问云端」:成员主机大多在家里/NAS,网络随时会断。
+@@ -52,33 +52,8 @@ pub enum Mode {
+     Local,
+ }
+ 
+-/// 当前模式。两个环境变量都设时以 Authority 优先 —— 权威机不该再去问别人。
+-pub fn mode() -> Mode {
+-    let is_authority = std::env::var("POLARIS_ACCOUNT_AUTHORITY")
+-        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+-        .unwrap_or(false);
+-    if is_authority {
+-        return Mode::Authority;
+-    }
+-    match std::env::var("POLARIS_ACCOUNT_AUTHORITY_URL") {
+-        Ok(u) if !u.trim().is_empty() => {
+-            Mode::Delegated(u.trim().trim_end_matches('/').to_string())
+-        }
+-        _ => Mode::Local,
+-    }
+-}
+-
+-pub fn is_authority() -> bool {
+-    mode() == Mode::Authority
+-}
+-
+-/// 成员主机模式下的权威地址(其余模式 None)。
+-pub fn upstream_url() -> Option<String> {
+-    match mode() {
+-        Mode::Delegated(u) => Some(u),
+-        _ => None,
+-    }
+-}
++mod trust;
++pub use trust::{mode, is_authority, upstream_url, pinned, ensure_pinned, pin_explicit, repin, verify_assertion};
+ 
+ // ── 签名私钥(仅权威机持有)────────────────────────────────────────────────
+ 
+@@ -143,218 +118,12 @@ pub fn kid() -> Result<String, String> {
+ 
+ // ── 身份断言 ──────────────────────────────────────────────────────────────
+ 
+-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+-pub struct Claims {
+-    /// 签发者标识(权威公钥指纹)。
+-    pub iss: String,
+-    /// 全局账号 id —— 跨主机认人**只认这个**。
+-    pub uid: String,
+-    pub username: String,
+-    /// 绑定邮箱。权威强制每个账号都有,故这里必非空。
+-    pub email: String,
+-    #[serde(default)]
+-    pub display_name: String,
+-    pub iat: i64,
+-    pub exp: i64,
+-}
+-
+-/// 签一张身份断言(权威机专用)。格式 `PA1.<b64u(claims)>.<b64u(sig)>`,
+-/// 签名覆盖 `PA1.<b64u(claims)>` 的 ASCII 字节(前缀纳入签名,防跨版本重放)。
+-pub fn sign_assertion(
+-    uid: &str,
+-    username: &str,
+-    email: &str,
+-    display_name: &str,
+-) -> Result<String, String> {
+-    let sk = signing_key()?;
+-    let t = now();
+-    let claims = Claims {
+-        iss: kid_of(&B64.encode(sk.verifying_key().to_bytes())),
+-        uid: uid.into(),
+-        username: username.into(),
+-        email: email.into(),
+-        display_name: display_name.into(),
+-        iat: t,
+-        exp: t + ASSERTION_TTL,
+-    };
+-    let payload = serde_json::to_vec(&claims).map_err(|e| format!("断言序列化失败: {e}"))?;
+-    let head = format!("PA1.{}", B64.encode(payload));
+-    let sig = sk.sign(head.as_bytes());
+-    Ok(format!("{head}.{}", B64.encode(sig.to_bytes())))
+-}
+-
+-/// 用给定公钥验一张断言。纯本地运算 —— **不联网**,这正是成员主机断网仍能放人进来的原因。
+-pub fn verify_assertion_with(assertion: &str, pub_b64: &str) -> Result<Claims, String> {
+-    let mut it = assertion.trim().splitn(3, '.');
+-    let (p0, p1, p2) = match (it.next(), it.next(), it.next()) {
+-        (Some(a), Some(b), Some(c)) => (a, b, c),
+-        _ => return Err("身份断言格式不对".into()),
+-    };
+-    if p0 != "PA1" {
+-        return Err("身份断言版本不认识(须 PA1)".into());
+-    }
+-    let pk_bytes: [u8; 32] = B64
+-        .decode(pub_b64)
+-        .map_err(|_| "权威公钥不是 base64".to_string())?
+-        .try_into()
+-        .map_err(|_| "权威公钥长度不对".to_string())?;
+-    let vk = VerifyingKey::from_bytes(&pk_bytes).map_err(|e| format!("权威公钥无效: {e}"))?;
+-    let sig_bytes: [u8; 64] = B64
+-        .decode(p2)
+-        .map_err(|_| "断言签名不是 base64".to_string())?
+-        .try_into()
+-        .map_err(|_| "断言签名长度不对".to_string())?;
+-    let sig = Signature::from_bytes(&sig_bytes);
+-    let head = format!("{p0}.{p1}");
+-    vk.verify(head.as_bytes(), &sig)
+-        .map_err(|_| "身份断言签名验证失败(可能被篡改,或权威换了钥匙)".to_string())?;
+-    let claims: Claims = serde_json::from_slice(
+-        &B64.decode(p1)
+-            .map_err(|_| "断言载荷不是 base64".to_string())?,
+-    )
+-    .map_err(|e| format!("断言载荷解析失败: {e}"))?;
+-    let t = now();
+-    if claims.exp + CLOCK_SKEW < t {
+-        return Err("身份断言已过期,请重新登录".into());
+-    }
+-    if claims.iat - CLOCK_SKEW > t {
+-        return Err("身份断言的签发时间在未来(检查两端系统时钟)".into());
+-    }
+-    if claims.uid.trim().is_empty() {
+-        return Err("身份断言缺 uid".into());
+-    }
+-    Ok(claims)
+-}
++mod assertions;
++pub use assertions::{Claims, sign_assertion, sign_device_assertion, verify_assertion_with};
++pub(crate) use assertions::{sign_document, verify_document};
+ 
+ // ── 成员主机侧:钉住权威公钥(TOFU)────────────────────────────────────────
+ 
+-/// 已钉住的权威 (url, pub_b64, kid)。没钉过返回 None。
+-pub fn pinned() -> Option<(String, String, String)> {
+-    let url = db::meta_get("authority_url")?;
+-    let pk = db::meta_get("authority_pub")?;
+-    if url.is_empty() || pk.is_empty() {
+-        return None;
+-    }
+-    let kid = db::meta_get("authority_kid").unwrap_or_else(|| kid_of(&pk));
+-    Some((url, pk, kid))
+-}
+-
+-/// 向权威取公钥。只在需要钉/换钉时调用,登录热路径不走这里。
+-fn fetch_public_key(url: &str) -> Result<String, String> {
+-    let ep = format!("{}/api/account/pubkey", url.trim_end_matches('/'));
+-    let resp = ureq::get(&ep)
+-        .timeout(std::time::Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
+-        .call()
+-        .map_err(|e| format!("连不上账号权威 {url}: {e}"))?;
+-    let v: serde_json::Value = resp
+-        .into_json()
+-        .map_err(|e| format!("账号权威返回的不是 JSON: {e}"))?;
+-    let pk = v
+-        .get("publicKey")
+-        .and_then(|x| x.as_str())
+-        .unwrap_or_default()
+-        .to_string();
+-    if pk.is_empty() {
+-        return Err("账号权威没返回公钥 —— 确认该地址开了 POLARIS_ACCOUNT_AUTHORITY=1".into());
+-    }
+-    Ok(pk)
+-}
+-
+-/// 确保已钉住当前配置的权威公钥,返回 (url, pub_b64)。
+-///
+-/// 首次接触即钉死(TOFU)。此后**公钥变了一律拒绝**,不静默接受 —— 静默接受等于把
+-/// 「中间人换一把自己的钥匙」变成无声事件,那整套验签就白做了。真要换钥匙(权威轮换密钥、
+-/// 换了云机)走 `repin`,由 owner 显式确认。
+-pub fn ensure_pinned() -> Result<(String, String), String> {
+-    let url = upstream_url().ok_or("本机未配置账号权威(POLARIS_ACCOUNT_AUTHORITY_URL)")?;
+-    if let Some((pinned_url, pk, _)) = pinned() {
+-        if pinned_url == url {
+-            return Ok((url, pk));
+-        }
+-        // 换了权威地址:同样按「显式确认」处理,不静默改钉。
+-        return Err(format!(
+-            "本机已钉在账号权威「{pinned_url}」,与当前配置「{url}」不一致 —— 请 owner 走「重新信任」确认后再切换"
+-        ));
+-    }
+-    let pk = fetch_public_key(&url)?;
+-    let k = kid_of(&pk);
+-    db::meta_set("authority_url", &url)?;
+-    db::meta_set("authority_pub", &pk)?;
+-    db::meta_set("authority_kid", &k)?;
+-    db::audit("system", "authority.pin", &url, &k);
+-    Ok((url, pk))
+-}
+-
+-/// 用**显式给的地址**钉住权威(不看环境变量)。
+-///
+-/// 为什么需要它:`ensure_pinned` 的地址来自 `POLARIS_ACCOUNT_AUTHORITY_URL`,而桌面 App 是
+-/// 双击启动的 —— 那个环境变量根本不存在。于是桌面主机永远钉不上权威,也就**永远不接受
+-/// 身份断言**:同账号的另一台设备连过来会吃一句「本机未配置云端账号中心」。设备网入网时
+-/// 用户亲手填了地址、输了密码,正是钉住它的合法时机。
+-///
+-/// 语义与 `ensure_pinned` 一致的那一半:已经钉过**同一个** URL 就直接复用;钉过**别的**
+-/// URL 一律拒绝,不静默改钉 —— 静默换钥匙等于把验签这道防线拆了。真要换走 [`repin`]。
+-pub fn pin_explicit(url: &str) -> Result<(String, String), String> {
+-    let url = url.trim().trim_end_matches('/').to_string();
+-    if url.is_empty() {
+-        return Err("账号中心地址不能为空".into());
+-    }
+-    if let Some((pinned_url, pk, _)) = pinned() {
+-        if pinned_url == url {
+-            return Ok((url, pk));
+-        }
+-        return Err(format!(
+-            "本机已信任账号中心「{pinned_url}」,与这次要用的「{url}」不一致 —— \
+-             要换请走「重新信任」并核对公钥指纹"
+-        ));
+-    }
+-    let pk = fetch_public_key(&url)?;
+-    let k = kid_of(&pk);
+-    db::meta_set("authority_url", &url)?;
+-    db::meta_set("authority_pub", &pk)?;
+-    db::meta_set("authority_kid", &k)?;
+-    db::audit("system", "authority.pin", &url, &k);
+-    Ok((url, pk))
+-}
+-
+-/// owner 显式重钉(换云机/轮换密钥)。要求调用方已核过 kid。
+-pub fn repin(expect_kid: Option<&str>) -> Result<(String, String), String> {
+-    let url = upstream_url().ok_or("本机未配置账号权威(POLARIS_ACCOUNT_AUTHORITY_URL)")?;
+-    let pk = fetch_public_key(&url)?;
+-    let k = kid_of(&pk);
+-    if let Some(want) = expect_kid {
+-        if !want.trim().is_empty() && want.trim() != k {
+-            return Err(format!("公钥指纹对不上:权威给的是 {k},你要确认的是 {want}"));
+-        }
+-    }
+-    db::meta_set("authority_url", &url)?;
+-    db::meta_set("authority_pub", &pk)?;
+-    db::meta_set("authority_kid", &k)?;
+-    db::audit("owner", "authority.repin", &url, &k);
+-    Ok((url, pk))
+-}
+-
+-/// 验一张断言(成员主机侧:用钉住的公钥)。
+-///
+-/// 还没钉过就先钉一次(首次接触要连一下权威取公钥)。**只有这一次需要网络** ——
+-/// 钥匙钉下之后本机就能独立验签,权威挂了、家里断网了都不影响成员登录。
+-pub fn verify_assertion(assertion: &str) -> Result<Claims, String> {
+-    let pk = match pinned() {
+-        Some((_, pk, _)) => pk,
+-        None => match ensure_pinned() {
+-            Ok((_, pk)) => pk,
+-            Err(e) => {
+-                return Err(if upstream_url().is_some() {
+-                    format!("本机首次信任云端账号中心需要连一次它:{e}")
+-                } else {
+-                    "本机未配置云端账号中心(POLARIS_ACCOUNT_AUTHORITY_URL),不接受身份断言".into()
+-                })
+-            }
+-        },
+-    };
+-    verify_assertion_with(assertion, &pk)
+-}
+-
+ /// 成员主机把一个请求**原样转给**它信任的账号中心,回体也原样带回来。
+ ///
+ /// 为什么需要它:手机常常只连得上家里那台桌面/NAS(同一 WiFi、没走公网),连不上云机。
+@@ -369,7 +138,7 @@ pub fn upstream_forward(path: &str, body: &serde_json::Value) -> Result<serde_js
+     // 账号中心是用户登录时由 `pin_explicit` 写进 meta 的。只看环境变量的话,
+     // 这条转发在**桌面主机上永远不可用**,而桌面正是手机最常连的那一台。
+     let url = match pinned() {
+-        Some((u, _, _)) => u,
++        Some((u, _, _)) => pin_explicit(&u)?.0,
+         None => ensure_pinned()
+             .map_err(|e| {
+                 format!(
+@@ -413,6 +182,7 @@ pub fn upstream_login(username: &str, password: &str) -> Result<String, String>
+             let v: serde_json::Value = r
+                 .into_json()
+                 .map_err(|e| format!("账号权威返回的不是 JSON: {e}"))?;
++            super::interconnect::apply_received_relays(&v)?;
+             v.get("assertion")
+                 .and_then(|x| x.as_str())
+                 .map(|s| s.to_string())
+@@ -456,8 +226,8 @@ pub enum Admission {
+     /// 却要自己给自己发一张邀请码。用户看到的就是「怎么还要登第二个账号」。
+     ///
+     /// 代价与对冲说清楚:云机若被完全拿下,它能签任意断言,于是能直接成为你每台机器的 owner
+-    /// (此前还隔着一道邀请码)。对冲在 [`super::grants`] 的冷静期 —— 从没见过的新设备首次
+-    /// 进来的 24 小时内一律按只读对待,期间用户可一键撤销。另有 `owner_uid` 只写一次的闸
++    /// (此前还隔着一道邀请码)。策略 B 允许新设备立即全权；高风险操作另走
++    /// interconnect::gate 的设备批准与吊销新鲜度检查。另有 `owner_uid` 只写一次的闸
+     /// (见 [`super::db::meta_set_once`]),否则「谁最后登录谁是主人」会把远程夺权做成一条 API。
+     SelfOwned,
+     /// **本机控制台**:用户就坐在这台机器前,在桌面 App 里亲手填了邮箱和验证码
+@@ -763,139 +533,8 @@ fn stamp_owner_uid(role: &str, uid: &str) {
+ ///  · 否则 → [`Admission::ExistingOnly`],已是成员才放行,陌生人走 `join_with_ticket`。
+ ///  · 设备被本机撤销过(peer_grants.revoked)→ 一律拒,连主人本人的设备也拒 ——
+ ///    「丢了电脑」的应急撤销必须比「我是主人」优先,否则捡到电脑的人照样能进。
+-pub fn login_with_assertion(assertion: &str, device_id: &str) -> Result<(User, String), String> {
+-    login_with_assertion_ex(assertion, device_id, false)
+-}
+-
+-/// **本机控制台**版的同一件事:用户就坐在这台机器前,在桌面 App 里亲手填的邮箱验证码。
+-///
+-/// 只多一档准入 [`Admission::LocalConsole`](认领已有的那一行 / 认领这台还没主人的机器)。
+-/// 调用方只有一个 —— `mesh::account_login_code`(Tauri 命令)。**不要**把它接到任何 HTTP
+-/// 路由上:那就等于把「远程夺主」做成一条 API。
+-pub fn login_with_assertion_local(
+-    assertion: &str,
+-    device_id: &str,
+-) -> Result<(User, String), String> {
+-    login_with_assertion_ex(assertion, device_id, true)
+-}
+-
+-fn login_with_assertion_ex(
+-    assertion: &str,
+-    device_id: &str,
+-    local_console: bool,
+-) -> Result<(User, String), String> {
+-    let claims = verify_assertion(assertion)?;
+-    let dev = device_id.trim();
+-    if !dev.is_empty() && super::grants::is_revoked(dev) {
+-        db::audit(
+-            &claims.username,
+-            "auth.login.denied",
+-            dev,
+-            "设备已被本机撤销",
+-        );
+-        return Err(
+-            "这台设备已被移出本机的信任列表 —— 请在另一台设备的「设备台账」里恢复它".into(),
+-        );
+-    }
+-    let owner = owner_uid();
+-    let is_mine = !owner.is_empty() && owner == claims.uid;
+-    let admission = if is_mine {
+-        Admission::SelfOwned
+-    } else if local_console {
+-        Admission::LocalConsole
+-    } else {
+-        Admission::ExistingOnly
+-    };
+-    let user = upsert_member(&claims, admission)?;
+-
+-    // 主人身份要**重读**:空库首登时 owner_uid 是 upsert_member 刚刚才落下的,
+-    // 上面那个 is_mine 当时还是 false。少了这次重读,第一台设备就不会登记契约,
+-    // 于是第二台设备会被 `any_granted()` 误判成「本机的第一台」而跳过冷静期 ——
+-    // 那道对冲 SelfOwned 的闸就永远不会生效(探针 email_login_probe 抓到过这个)。
+-    let mine_now = {
+-        let o = owner_uid();
+-        !o.is_empty() && o == claims.uid
+-    };
+-
+-    // 自己名下的设备:首次见面即登记信任契约(带冷静期)。之后的档位调整以用户手动设置为准 ——
+-    // auto_grant_self 对已有契约是 no-op,不会把用户调过的档冲回默认值。
+-    if mine_now && !dev.is_empty() {
+-        let first = !super::grants::any_granted().unwrap_or(false);
+-        match super::grants::auto_grant_self(dev, &claims.uid, &user.display_name, first) {
+-            Ok((g, true)) if g.in_cooldown() => {
+-                db::audit(
+-                    &user.username,
+-                    "auth.login.newdevice",
+-                    dev,
+-                    "同账号新设备已接入,冷静期内只读",
+-                );
+-            }
+-            Ok(_) => {}
+-            // 登记失败不该把人挡在门外(登录已经成了),但要留痕以便排查。
+-            Err(e) => db::audit(&user.username, "peer.grant.fail", dev, &e),
+-        }
+-    }
+-
+-    let token = super::auth::issue_session(user.id, dev)?;
+-    db::audit(&user.username, "auth.login.federated", dev, &claims.uid);
+-    Ok((user, token))
+-}
+-
+-/// 云端账号 + 一次性邀请票据 → 成为本机成员并拿到本机会话。
+-///
+-/// 票据的原子核销与成员资格的创建**必须**在同一事务里,否则并发两个人拿同一张票据
+-/// 都能进来。这里的做法与 identity::redeem_ticket 一致:先 CAS 占用票据(`WHERE
+-/// used_at IS NULL`),占不到就是被人抢先了,直接拒。
+-pub fn join_with_ticket(
+-    assertion: &str,
+-    code: &str,
+-    device_name: &str,
+-    node_id: &str,
+-) -> Result<(User, String), String> {
+-    let claims = verify_assertion(assertion)?;
+-    // 已经是成员(或本机主人自己)就不必再烧票据,直接当登录处理 ——
+-    // 重复点「入伙」不该白白作废一张票,主人对自己的机器更不该被要求出示邀请码。
+-    let owner = owner_uid();
+-    let quick = if !owner.is_empty() && owner == claims.uid {
+-        Admission::SelfOwned
+-    } else {
+-        Admission::ExistingOnly
+-    };
+-    if let Ok(u) = upsert_member(&claims, quick) {
+-        let token = super::auth::issue_session(u.id, node_id)?;
+-        return Ok((u, token));
+-    }
+-    let code = normalize_invite(code);
+-    if code.is_empty() {
+-        return Err("请填写这台机器的设备码".into());
+-    }
+-    // **一码**:本机那串常驻设备码在这里也认。
+-    //
+-    // 在此之前「进这台机器的门」有两串完全不同的码:一次性邀请票据(账号入伙用)和
+-    // PLRK1 连接码(设备连接用),它们的区别纯粹是我们自己的内部分工,用户只看到
+-    // 「怎么又是另一种码」。现在设备码一串通吃:拿它入伙,拿到的是 **visitor** ——
+-    // 与 `/api/collab/connect` 那条路同一个档,能做什么仍由设备契约逐台说了算。
+-    let role = if super::identity::check_access_code(&code).unwrap_or(false) {
+-        db::audit(&claims.username, "join.devicecode", node_id, "设备码入伙");
+-        "visitor".to_string()
+-    } else {
+-        burn_ticket(&code, &claims.username)?
+-    };
+-    let user = upsert_member(&claims, Admission::Invited(role.clone()))?;
+-    // 设备白名单:入伙即登记本设备(隧道层准入的那一因子)。失败不阻断入伙。
+-    let nid = node_id.trim();
+-    if !nid.is_empty() {
+-        let name = if device_name.trim().is_empty() {
+-            "新设备"
+-        } else {
+-            device_name.trim()
+-        };
+-        let _ = super::identity::add_device(user.id, name, nid);
+-    }
+-    let token = super::auth::issue_session(user.id, nid)?;
+-    db::audit(&claims.username, "ticket.redeem.federated", &code, &role);
+-    Ok((user, token))
+-}
++mod sessions;
++pub use sessions::{login_with_assertion, login_with_assertion_local, join_with_ticket};
+ 
+ /// 用户手里那串东西 → 库里的裸码。**邀请码只有一种**,但用户可能粘到四种形态:
+ /// 管理面直接给的 8 位裸码、带主机地址的分享码 `PLRS1-…`、互联页设备码
+@@ -1045,6 +684,8 @@ mod tests {
+             username: "alice".into(),
+             email: "a@b.com".into(),
+             display_name: "Alice".into(),
++            device_id: None,
++            node_id: None,
+             iat: now() - 10_000,
+             exp: now() - 9_000,
+         };
+@@ -1062,6 +703,8 @@ mod tests {
+             username: username.into(),
+             email: email.into(),
+             display_name: username.into(),
++            device_id: None,
++            node_id: None,
+             iat: now(),
+             exp: now() + 300,
+         }
+@@ -1123,7 +766,7 @@ mod tests {
+         let (u2, token) = login_with_assertion(&fresh_assertion_for(&me), "node-second").unwrap();
+         assert_eq!(u2.role, "owner");
+         assert!(!token.is_empty());
+-        // 且它已被登记进信任契约(冷静期由 grants 管)。
++        // 且它已被登记进信任契约；高风险批准另由 interconnect::gate 管。
+         assert!(super::super::grants::get("node-second").unwrap().is_some());
+     }
+ 
+@@ -1382,6 +1025,8 @@ mod tests {
+             username: "alice".into(),
+             email: "a@b.com".into(),
+             display_name: "Alice".into(),
++            device_id: None,
++            node_id: None,
+             iat: now(),
+             exp: now() + 300,
+         };
+@@ -1481,6 +1126,8 @@ mod tests {
+             username: "alice".into(),
+             email: "a@b.com".into(),
+             display_name: "Alice".into(),
++            device_id: None,
++            node_id: None,
+             iat: now(),
+             exp: now() + 300,
+         };
+diff --git a/src-tauri/crates/polaris-collab/src/collab/db.rs b/src-tauri/crates/polaris-collab/src/collab/db.rs
+index a64ac9d..0631362 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/db.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/db.rs
+@@ -511,6 +511,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
+         conn.execute("UPDATE mesh_nodes SET first_seen=created_at WHERE first_seen=0", [])
+             .ok();
+     }
++    super::interconnect::devices::migrate(conn)?;
+     Ok(())
+ }
+ 
+diff --git a/src-tauri/crates/polaris-collab/src/collab/gateway.rs b/src-tauri/crates/polaris-collab/src/collab/gateway.rs
+index f501143..c267d90 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/gateway.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/gateway.rs
+@@ -57,7 +57,7 @@ static REGISTRY: Lazy<RwLock<HashMap<String, HostEntry>>> =
+     Lazy::new(|| RwLock::new(HashMap::new()));
+ 
+ /// 网关自己的 iroh Endpoint(单例,连所有主机复用)。
+-static ENDPOINT: Lazy<tokio::sync::Mutex<Option<Endpoint>>> =
++static ENDPOINT: Lazy<tokio::sync::Mutex<Option<std::sync::Arc<super::tunnel::relay::ConfiguredEndpoint>>>> =
+     Lazy::new(|| tokio::sync::Mutex::new(None));
+ 
+ /// 每主机的活跃连接缓存(健康巡检 / open_bi 复用)。key = host node_id。
+@@ -113,29 +113,8 @@ pub fn gateway_node_id() -> Result<String, String> {
+ 
+ // ── Endpoint 惰性初始化 ─────────────────────────────────────────────────────
+ 
+-async fn ensure_endpoint() -> Result<Endpoint, String> {
+-    let mut g = ENDPOINT.lock().await;
+-    if let Some(ep) = g.as_ref() {
+-        return Ok(ep.clone());
+-    }
+-    let seed = get_or_create_gateway_key()?;
+-    let transport = QuicTransportConfig::builder()
+-        .keep_alive_interval(KEEP_ALIVE)
+-        .max_idle_timeout(Some(
+-            IdleTimeout::try_from(IDLE_TIMEOUT).expect("idle timeout 常量合法"),
+-        ))
+-        .build();
+-    let ep = Endpoint::builder(presets::N0)
+-        .secret_key(SecretKey::from_bytes(&seed))
+-        .transport_config(transport)
+-        .alpns(vec![ALPN.to_vec()])
+-        .bind()
+-        .await
+-        .map_err(|e| format!("网关 iroh endpoint 绑定失败: {e}"))?;
+-    *g = Some(ep.clone());
+-    eprintln!("[gateway] iroh Endpoint 就绪 node_id={}", ep.id());
+-    Ok(ep)
+-}
++mod endpoint;
++use endpoint::ensure_endpoint;
+ 
+ /// 取一条到指定主机的健康连接:缓存里已死的丢弃重建。
+ async fn healthy_conn(host_node_id: &str) -> Result<Connection, String> {
+diff --git a/src-tauri/crates/polaris-collab/src/collab/grants.rs b/src-tauri/crates/polaris-collab/src/collab/grants.rs
+index c86cf4f..5260ffa 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/grants.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/grants.rs
+@@ -10,23 +10,12 @@
+ //!  · **入方向**:它拿断言来进本机门时,`revoked=1` 直接拒 —— 这是云端目录之外的第二道闸,
+ //!    云机被绕过、名册被伪造,本机这一行仍然说了算。
+ //!
+-//! ## 冷静期(cooldown)
+-//!
+-//! `SelfOwned` 准入让「同一个账号的设备免邀请码」,代价是:云机若被拿下,伪造一张断言就能
+-//! 直接成为你每台机器的 owner。冷静期是这一让步的对冲 —— 一台**从没见过的**新设备首次进来,
+-//! 24 小时内一律按只读对待,且这段时间里用户能一键撤销。把「静默拿到全权」压成
+-//! 「24 小时内可反悔的只读」。用户在设备台账上点「信任这台设备」即当场清零。
+-//!
+-//! 注意冷静期只对**账号里已经有别的设备**时生效:第一台设备就是你本人在装机,拦它没有意义,
+-//! 只会让「填个邮箱就能用」变成「填完还要等一天」。
++//! 策略 B：同账号新设备立即按契约全权；高风险操作由 interconnect::gate 单独批准。
+ use rusqlite::{params, OptionalExtension};
+ use serde::Serialize;
+ 
+ use super::db::{self, now, open_db};
+ 
+-/// 新设备冷静期时长(秒)。
+-pub const COOLDOWN_SECS: i64 = 24 * 3600;
+-
+ /// 盘访问档。
+ pub const FS_NONE: &str = "none";
+ pub const FS_RO: &str = "ro";
+@@ -37,57 +26,8 @@ pub const EXEC_NONE: &str = "none";
+ pub const EXEC_ASK: &str = "ask";
+ pub const EXEC_ALLOW: &str = "allow";
+ 
+-#[derive(Serialize, Clone, Debug, PartialEq)]
+-pub struct Grant {
+-    pub node_id: String,
+-    pub uid: String,
+-    pub name: String,
+-    pub role: String,
+-    /// 库里存的档位(用户批的那个)。实际生效的档见 [`Grant::effective_fs`]。
+-    pub fs_access: String,
+-    pub exec_access: String,
+-    pub auto_mount: bool,
+-    pub drive_hint: String,
+-    pub cooldown_until: i64,
+-    pub granted_at: i64,
+-    pub granted_by: String,
+-    pub revoked: bool,
+-}
+-
+-impl Grant {
+-    /// 冷静期内还在观察的新设备:UI 要显著提示,用户据此决定信任还是撤销。
+-    pub fn in_cooldown(&self) -> bool {
+-        self.cooldown_until > now()
+-    }
+-
+-    /// **实际**生效的盘访问档。冷静期内一律降到只读 —— 这就是那句「可反悔的只读」
+-    /// 落在代码里的样子:库里记着用户批的 rw,但这 24 小时内谁问都只给 ro。
+-    pub fn effective_fs(&self) -> &str {
+-        if self.revoked {
+-            return FS_NONE;
+-        }
+-        if self.in_cooldown() && self.fs_access == FS_RW {
+-            return FS_RO;
+-        }
+-        &self.fs_access
+-    }
+-
+-    /// 实际生效的执行档。冷静期内不给 allow(降到 ask,由人当场确认)。
+-    pub fn effective_exec(&self) -> &str {
+-        if self.revoked {
+-            return EXEC_NONE;
+-        }
+-        if self.in_cooldown() && self.exec_access == EXEC_ALLOW {
+-            return EXEC_ASK;
+-        }
+-        &self.exec_access
+-    }
+-
+-    /// 这台设备现在该不该被自动连上并挂盘。
+-    pub fn should_mount(&self) -> bool {
+-        !self.revoked && self.auto_mount && self.effective_fs() != FS_NONE
+-    }
+-}
++mod contract;
++pub use contract::Grant;
+ 
+ fn norm_fs(v: &str) -> Result<&'static str, String> {
+     match v.trim() {
+@@ -162,55 +102,9 @@ pub fn list() -> Result<Vec<Grant>, String> {
+ /// 返回 (契约, 是否新建)。已存在就原样返回 —— 用户后来手工调过的档位,不能被一次重连覆盖回默认值,
+ /// 那等于「每次重启都把权限重置一遍」,正是这次要修掉的毛病。
+ ///
+-/// `is_first_device=true`(本机此前一台设备都没批过)时不设冷静期:那就是你本人在装第一台机器,
+-/// 拦它只会把「填个邮箱就能用」变成「填完还要等一天」。
+-pub fn auto_grant_self(
+-    node_id: &str,
+-    uid: &str,
+-    name: &str,
+-    is_first_device: bool,
+-) -> Result<(Grant, bool), String> {
+-    let node_id = node_id.trim();
+-    if node_id.is_empty() {
+-        return Err("缺 NodeId".into());
+-    }
+-    if let Some(g) = get(node_id)? {
+-        return Ok((g, false));
+-    }
+-    let t = now();
+-    let cooldown = if is_first_device {
+-        0
+-    } else {
+-        t + COOLDOWN_SECS
+-    };
+-    let conn = open_db()?;
+-    conn.execute(
+-        "INSERT INTO peer_grants(node_id,uid,name,role,fs_access,exec_access,auto_mount,\
+-         drive_hint,cooldown_until,granted_at,granted_by,revoked) \
+-         VALUES(?1,?2,?3,'owner',?4,?5,1,'',?6,?7,'auto:same-account',0)",
+-        params![
+-            node_id,
+-            uid.trim(),
+-            name.trim(),
+-            FS_RW,
+-            EXEC_ALLOW,
+-            cooldown,
+-            t
+-        ],
+-    )
+-    .map_err(|e| format!("登记设备契约失败: {e}"))?;
+-    db::audit(
+-        uid,
+-        "peer.grant.auto",
+-        node_id,
+-        if cooldown > 0 {
+-            "同账号设备·冷静期中"
+-        } else {
+-            "同账号设备·首台"
+-        },
+-    );
+-    Ok((get(node_id)?.ok_or("刚写入的契约读不回来")?, true))
+-}
++/// `is_first_device` 参数保留调用兼容；策略 B 的所有新设备都立即按全权契约接入。
++mod automatic;
++pub use automatic::auto_grant_self;
+ 
+ /// 用户在设备台账上改档位。只改传进来的字段(None = 不动)。
+ #[allow(clippy::too_many_arguments)]
+@@ -555,20 +449,17 @@ mod gate_tests {
+         assert!(exec_gate("node-never-seen").is_ok());
+     }
+ 
+-    /// 同账号设备的冷静期在**入方向**也真的生效了(此前只影响本机挂对端时的 ro/rw)。
++    /// 策略 B 的同账号新设备在入方向立即可读写、可执行。
+     #[test]
+-    fn same_account_cooldown_now_bites_on_the_way_in() {
++    fn same_account_new_device_can_read_write_and_execute() {
+         let _g = tmp("cooldown");
+         db::meta_set("host_node_id", "node-me").unwrap();
+         auto_grant_self("node-first", "acct_1", "第一台", true).unwrap();
+         let (second, _) = auto_grant_self("node-2nd", "acct_1", "新来的", false).unwrap();
+-        assert!(second.in_cooldown());
++        assert!(!second.in_cooldown());
+         assert!(fs_gate("node-2nd", false).is_ok(), "读照旧");
+-        assert!(
+-            fs_gate("node-2nd", true).unwrap_err().contains("观察期"),
+-            "冷静期内写要被挡"
+-        );
+-        assert!(exec_gate("node-2nd").unwrap_err().contains("观察期"));
++        assert!(fs_gate("node-2nd", true).is_ok());
++        assert!(exec_gate("node-2nd").is_ok());
+         // 第一台没有冷静期,照旧全权。
+         assert!(fs_gate("node-first", true).is_ok());
+         assert!(exec_gate("node-first").is_ok());
+@@ -587,9 +478,9 @@ mod tests {
+         g
+     }
+ 
+-    /// 第一台设备免冷静期直接全权;第二台起进冷静期,期间**实际**只给只读。
++    /// 策略 B 的第一台和后续设备均立即全权。
+     #[test]
+-    fn first_device_is_full_second_is_cooled() {
++    fn both_first_and_second_devices_have_full_contract_permissions() {
+         let _g = tmp_db("cooldown");
+         let (first, fresh) = auto_grant_self("node-a", "acct_1", "我的电脑", true).unwrap();
+         assert!(fresh);
+@@ -599,11 +490,11 @@ mod tests {
+         assert!(first.should_mount());
+ 
+         let (second, _) = auto_grant_self("node-b", "acct_1", "NAS", false).unwrap();
+-        assert!(second.in_cooldown(), "第二台起必须进冷静期");
++        assert!(!second.in_cooldown());
+         assert_eq!(second.fs_access, FS_RW, "库里记的仍是用户批的档");
+-        assert_eq!(second.effective_fs(), FS_RO, "但这 24 小时内实际只给只读");
+-        assert_eq!(second.effective_exec(), EXEC_ASK);
+-        assert!(second.should_mount(), "只读盘照样该挂上,只是不给写");
++        assert_eq!(second.effective_fs(), FS_RW);
++        assert_eq!(second.effective_exec(), EXEC_ALLOW);
++        assert!(second.should_mount(), "全权设备应自动挂载");
+     }
+ 
+     /// 重连不该把用户手工调过的档位冲回默认值 —— 「每次重启权限重置一遍」正是要修的毛病。
+@@ -635,7 +526,7 @@ mod tests {
+         let _g = tmp_db("trust");
+         auto_grant_self("node-a", "acct_1", "第一台", true).unwrap();
+         let (g, _) = auto_grant_self("node-b", "acct_1", "新设备", false).unwrap();
+-        assert_eq!(g.effective_fs(), FS_RO);
++        assert_eq!(g.effective_fs(), FS_RW);
+ 
+         let g = trust_now("node-b", "wuli").unwrap();
+         assert!(!g.in_cooldown());
+diff --git a/src-tauri/crates/polaris-collab/src/collab/http.rs b/src-tauri/crates/polaris-collab/src/collab/http.rs
+index e31e59d..8599edf 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/http.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/http.rs
+@@ -30,6 +30,17 @@ use std::sync::Arc;
+ use std::time::{Duration, Instant};
+ use tokio::sync::broadcast;
+ 
++mod account_routes;
++mod mesh_routes;
++mod security_routes;
++use security_routes::*;
++#[cfg(test)]
++mod interconnect_tests;
++#[cfg(test)]
++mod security_tests;
++use account_routes::*;
++use mesh_routes::*;
++
+ static LEAD_AI_RUNNING: Lazy<parking_lot::Mutex<HashSet<i64>>> =
+     Lazy::new(|| parking_lot::Mutex::new(HashSet::new()));
+ 
+@@ -392,134 +403,6 @@ fn not_authority() -> Response {
+         .into_response()
+ }
+ 
+-/// 账号体系自述(公开):告诉客户端「本机的账号该在哪儿登」。
+-/// 三种回答对应三种部署:authority(我就是权威)/ delegated(去这个 URL 登)/ local(老行为,就地登)。
+-async fn account_info() -> Response {
+-    let out = tokio::task::spawn_blocking(|| -> Result<Value, String> {
+-        use crate::collab::authority::{self, Mode};
+-        // emailRequired 恒 false:邮箱是**可选**的(绑了才有自助找回)。
+-        // emailCapable 告诉前端「这儿发得出验证码吗」—— 发不出就别让人填邮箱空等。
+-        Ok(match authority::mode() {
+-            Mode::Authority => json!({
+-                "mode": "authority",
+-                "kid": authority::kid().unwrap_or_default(),
+-                "emailRequired": false,
+-                "emailCapable": crate::collab::mail::configured(),
+-                // 前端据此决定「注册」入口亮不亮:关着还亮就是骗用户填一遍再报 403。
+-                "signupOpen": std::env::var("POLARIS_ACCOUNT_OPEN_SIGNUP")
+-                    .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+-                    .unwrap_or(false),
+-            }),
+-            Mode::Delegated(url) => {
+-                let pin = authority::pinned();
+-                json!({
+-                    "mode": "delegated",
+-                    "authorityUrl": url,
+-                    "trusted": pin.is_some(),
+-                    "kid": pin.map(|(_, _, k)| k).unwrap_or_default(),
+-                    "emailRequired": false,
+-                })
+-            }
+-            Mode::Local => json!({"mode": "local", "emailRequired": false}),
+-        })
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+-/// 权威公钥(公开):成员主机首次接触时钉住这一串。
+-async fn account_pubkey() -> Response {
+-    if !crate::collab::authority::is_authority() {
+-        return not_authority();
+-    }
+-    let out = tokio::task::spawn_blocking(|| -> Result<Value, String> {
+-        let pk = crate::collab::authority::public_key_b64()?;
+-        Ok(json!({"publicKey": pk, "kid": crate::collab::authority::kid_of(&pk), "alg": "ed25519"}))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+-/// 全局注册。邮箱**可选**:
+-///  · 不填邮箱 → 直接建号(没有自助找回,忘了密码得找管理员重置)。
+-///  · 填了邮箱 → 必须同时给出发到该邮箱的验证码,验过才绑 —— 绑一个没验证过的邮箱
+-///    等于把「找回密码」的钥匙交给一个不确定属于谁的地址,比不绑还危险。
+-///
+-/// **默认关闭自助注册**(须显式 `POLARIS_ACCOUNT_OPEN_SIGNUP=1` 才开)。
+-/// 原因:账号中心的 `users` 表同时就是这台机器自己的成员表 —— 放开自助注册,
+-/// 等于任何人都能拿到本机的 collaborator 会话,而成员能建项目、触发 checks 跑构建脚本,
+-/// 本质是主机 RCE。这与 `collab_signup` 默认邀请制是同一条理由,不能因为「它是账号中心」就松口。
+-/// 关闭时建号走服务端的 `seed_authority_account` 工具(要能读写权威库,不是远程口子)。
+-async fn account_signup(Json(v): Json<Value>) -> Response {
+-    if !crate::collab::authority::is_authority() {
+-        return not_authority();
+-    }
+-    if !open_signup() {
+-        return (
+-            StatusCode::FORBIDDEN,
+-            Json(json!({"error":"本账号中心未开放自助注册,请联系管理员开通账号"})),
+-        )
+-            .into_response();
+-    }
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        let email = s_of(&v, "email");
+-        if !email.trim().is_empty() {
+-            if !crate::collab::mail::configured() {
+-                return Err("本账号中心没配邮件服务,发不出验证码 —— 请留空邮箱直接注册".into());
+-            }
+-            crate::collab::mail::verify_code(&email, "signup", &s_of(&v, "code"))?;
+-        }
+-        let username = s_of(&v, "username");
+-        let display = {
+-            let d = s_of(&v, "displayName");
+-            if d.trim().is_empty() {
+-                username.clone()
+-            } else {
+-                d
+-            }
+-        };
+-        let (u, uid) = crate::collab::auth::create_authority_account(
+-            &username,
+-            &s_of(&v, "password"),
+-            &display,
+-            &email,
+-        )?;
+-        let assertion =
+-            crate::collab::authority::sign_assertion(&uid, &u.username, &email, &display)?;
+-        Ok(json!({"user": u, "uid": uid, "email": email, "assertion": assertion}))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+-/// 全局登录:用户名**或邮箱** + 密码 → 身份断言。权威只回答「你是谁」,
+-/// 不回答「你在某台主机上能干什么」—— 那是各主机自己的账。
+-async fn account_login(Json(v): Json<Value>) -> Response {
+-    if !crate::collab::authority::is_authority() {
+-        return not_authority();
+-    }
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        let ident = {
+-            let u = s_of(&v, "username");
+-            if u.trim().is_empty() {
+-                s_of(&v, "email")
+-            } else {
+-                u
+-            }
+-        };
+-        let (u, uid, email) = crate::collab::auth::authority_login(&ident, &s_of(&v, "password"))?;
+-        let assertion =
+-            crate::collab::authority::sign_assertion(&uid, &u.username, &email, &u.display_name)?;
+-        Ok(json!({
+-            "user": {"username": u.username, "displayName": u.display_name, "email": email},
+-            "uid": uid,
+-            "assertion": assertion,
+-        }))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+ /// 请求来源 IP。没有反代头就返回空串 —— 调用方(频控)对空 key 一律放行,
+ /// 不误伤直连场景;那时按邮箱的那道闸还在。
+ ///
+@@ -1684,56 +1567,6 @@ async fn collab_email_login(Json(v): Json<Value>) -> Response {
+     unwrap_api(out)
+ }
+ 
+-/// 全局验证码登录(账号权威):邮箱 + 验证码 → 身份断言,拿着它能进任意一台成员主机。
+-/// 与 `/api/account/login` 的区别只在于「凭什么证明是你」——那个用密码,这个用邮箱验证码。
+-///
+-/// **首登即注册**:这个邮箱还没有账号时当场建一个(受 `POLARIS_ACCOUNT_OPEN_SIGNUP` 闸控)。
+-/// 注册页因此可以整个消失 —— 用户从没填过用户名、没设过密码,只证明了「这个邮箱是我的」。
+-/// 建出来的账号密码位是哨兵串,永远不可能凭密码进来。
+-async fn account_login_code(Json(v): Json<Value>) -> Response {
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        // 与 send_code 同一口径:成员主机当管子,把验证码原样递给账号中心、把断言原样带回来。
+-        // 主机自己不看、不改、不留 —— 它本来就没有能力验这枚码。
+-        if !crate::collab::authority::is_authority() {
+-            return crate::collab::authority::upstream_forward("/api/account/login_code", &v);
+-        }
+-        let email = s_of(&v, "email");
+-        // 验证码必须**先**过:否则「首登自动建号」就成了任何人往任意邮箱建号的口子。
+-        crate::collab::mail::verify_code(&email, "login", &s_of(&v, "code"))?;
+-        let (u, uid, email) = match crate::collab::auth::authority_identity_by_email(&email) {
+-            Ok(v) => v,
+-            Err(e) => {
+-                // 只有「没这个账号」才走自动建号;停用、缺 uid 这些要原样报出去,
+-                // 否则会绕过管理员的停用决定,凭空再造一个能用的号。
+-                if !e.contains("没有绑定任何账号") {
+-                    return Err(e);
+-                }
+-                if !open_signup() {
+-                    return Err("本账号中心未开放自助注册,请联系管理员开通账号".into());
+-                }
+-                match crate::collab::auth::create_account_by_verified_email(&email) {
+-                    Ok((u, uid)) => {
+-                        let e2 = crate::collab::auth::validate_email(&email)?;
+-                        (u, uid, e2)
+-                    }
+-                    // 并发首登:两台设备同时拿着同一枚码进来,一个建成、一个撞唯一索引。
+-                    // 撞了的那个直接读既有账号即可 —— 用户看到的是两台都登进去了。
+-                    Err(_) => crate::collab::auth::authority_identity_by_email(&email)?,
+-                }
+-            }
+-        };
+-        let assertion =
+-            crate::collab::authority::sign_assertion(&uid, &u.username, &email, &u.display_name)?;
+-        Ok(json!({
+-            "user": {"username": u.username, "displayName": u.display_name, "email": email},
+-            "uid": uid,
+-            "assertion": assertion,
+-        }))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+ /// 自助注册是否开放。默认**关**:账号中心的 users 表同时是这台机器自己的成员表,
+ /// 放开等于把本机的 collaborator 会话发给任何人(成员能触发构建脚本 = 主机 RCE)。
+ /// 官方云机要开它,须同时开 `POLARIS_AUTHORITY_ONLY=1` 把「能跑东西」的那一面关掉。
+@@ -4047,135 +3880,6 @@ fn httpdate_from_secs(secs: u64) -> String {
+ // 设备清单、换一张 5 分钟身份断言),换不到任何一台设备的访问权。
+ 
+ /// 设备密钥入口闸。密钥无效/被吊销 → 403 并带上原因(客户端据此决定「重新入网」)。
+-fn mesh_key_of(headers: &HeaderMap) -> Result<String, Response> {
+-    bearer_of(headers).ok_or_else(|| {
+-        (
+-            StatusCode::UNAUTHORIZED,
+-            Json(json!({"error":"缺设备密钥(Bearer mk_…)"})),
+-        )
+-            .into_response()
+-    })
+-}
+-
+-/// 设备入网:拿一张身份断言换一把长期设备密钥。
+-///
+-/// 断言由本机(权威)自己签的,所以这里用**自己的公钥**验 —— 等于确认「这张断言真是我签的、
+-/// 没过期」。客户端的断言来自 `/api/account/login`,即用户刚亲自输过密码。
+-async fn mesh_enroll(Json(v): Json<Value>) -> Response {
+-    if !crate::collab::authority::is_authority() {
+-        return not_authority();
+-    }
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        use crate::collab::authority as A;
+-        let claims = A::verify_assertion_with(&s_of(&v, "assertion"), &A::public_key_b64()?)?;
+-        let key = crate::collab::mesh::enroll(
+-            &claims.uid,
+-            &s_of(&v, "nodeId"),
+-            &s_of(&v, "name"),
+-            &s_of(&v, "os"),
+-            &s_of(&v, "ver"),
+-        )?;
+-        Ok(json!({ "meshKey": key, "uid": claims.uid, "username": claims.username }))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+-/// 心跳 + 取同账号设备清单(一次往返办两件事)。
+-async fn mesh_announce(headers: HeaderMap, Json(v): Json<Value>) -> Response {
+-    if !crate::collab::authority::is_authority() {
+-        return not_authority();
+-    }
+-    let key = match mesh_key_of(&headers) {
+-        Ok(k) => k,
+-        Err(r) => return r,
+-    };
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        let (uid, peers) = crate::collab::mesh::announce(
+-            &key,
+-            &s_of(&v, "name"),
+-            &s_of(&v, "os"),
+-            &s_of(&v, "ver"),
+-        )?;
+-        Ok(json!({ "uid": uid, "peers": peers }))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+-/// 设备密钥 → 一张新的 5 分钟身份断言。设备拿它去**对端主机**换本机会话。
+-///
+-/// 这是设备网唯一的「凭据升级」点,也是它必须只能自助的原因:签出来的断言只说
+-/// 「我是 uid X」,进不进得去某台机器仍由那台机器自己的成员资格决定。
+-async fn mesh_assert(headers: HeaderMap) -> Response {
+-    if !crate::collab::authority::is_authority() {
+-        return not_authority();
+-    }
+-    let key = match mesh_key_of(&headers) {
+-        Ok(k) => k,
+-        Err(r) => return r,
+-    };
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        let (uid, _) = crate::collab::mesh::resolve_key(&key)?;
+-        let (username, email, display) = crate::collab::mesh::account_of(&uid)?;
+-        let assertion =
+-            crate::collab::authority::sign_assertion(&uid, &username, &email, &display)?;
+-        Ok(json!({ "assertion": assertion, "uid": uid, "username": username }))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+-/// 设备**台账**:这个账号名下的全部设备(含自己那台、含已移出的)。
+-///
+-/// 与 announce 回的名册的分工:那个是给后台对账循环用的「我该连谁」,这个是给人看的。
+-/// 台账少一台都是缺陷 —— 用户要认出「哪台是我正用的」,也要看见「上周被我踢掉的那台」。
+-async fn mesh_devices(headers: HeaderMap) -> Response {
+-    if !crate::collab::authority::is_authority() {
+-        return not_authority();
+-    }
+-    let key = match mesh_key_of(&headers) {
+-        Ok(k) => k,
+-        Err(r) => return r,
+-    };
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        let (uid, me) = crate::collab::mesh::resolve_key(&key)?;
+-        let list: Vec<Value> = crate::collab::mesh::devices(&uid)?
+-            .into_iter()
+-            .map(|(p, revoked)| {
+-                json!({
+-                    "nodeId": p.node_id, "name": p.name, "os": p.os, "ver": p.ver,
+-                    "lastSeen": p.last_seen, "online": p.online, "firstSeen": p.first_seen,
+-                    "revoked": revoked,
+-                    // 「这台就是你现在坐着的这台」——台账上要标出来,不然一屋子机器名认不出谁是谁。
+-                    "self": p.node_id == me,
+-                })
+-            })
+-            .collect();
+-        Ok(json!({ "uid": uid, "nodeId": me, "devices": list }))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+-/// 给自己账号名下的设备改个人话名字。改过之后心跳不再用机器名覆盖它。
+-async fn mesh_rename(headers: HeaderMap, Json(v): Json<Value>) -> Response {
+-    if !crate::collab::authority::is_authority() {
+-        return not_authority();
+-    }
+-    let key = match mesh_key_of(&headers) {
+-        Ok(k) => k,
+-        Err(r) => return r,
+-    };
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        let (uid, _) = crate::collab::mesh::resolve_key(&key)?;
+-        crate::collab::mesh::rename(&uid, &s_of(&v, "nodeId"), &s_of(&v, "name"))?;
+-        Ok(json!({ "ok": true }))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
+-
+ // ───────────────────────── 设备信任契约 /api/peer/*(每台主机本地)─────────────────────────
+ //
+ // 与上面 /api/mesh/* 的分工要分清,这是整套设计的关键一刀:
+@@ -4285,22 +3989,7 @@ async fn peer_grant_revoke(
+ }
+ 
+ /// 把自己账号名下的一台设备移出设备网(丢了电脑的应急操作)。
+-async fn mesh_revoke(headers: HeaderMap, Json(v): Json<Value>) -> Response {
+-    if !crate::collab::authority::is_authority() {
+-        return not_authority();
+-    }
+-    let key = match mesh_key_of(&headers) {
+-        Ok(k) => k,
+-        Err(r) => return r,
+-    };
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        let (uid, _) = crate::collab::mesh::resolve_key(&key)?;
+-        crate::collab::mesh::revoke(&uid, &s_of(&v, "nodeId"))?;
+-        Ok(json!({ "ok": true }))
+-    })
+-    .await;
+-    unwrap_api(out)
+-}
++
+ 
+ // ───────────────────────── 远程文件写入(挂载盘的读写面)─────────────────────────
+ //
+@@ -4504,6 +4193,8 @@ async fn fs_op_api(
+ 
+ /// 协作路由。`with_ws=true` 时附带 /ws(桌面 hosting 用;server 壳自己有全量 /ws,传 false 防 merge 撞路由)。
+ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
++    #[cfg(not(test))]
++    crate::collab::interconnect::sync::start();
+     let mut r = Router::new()
+         // 账号/会话/票据/设备(权限判定全走 collab.db 确定性授权表)
+         .route("/api/collab/bootstrap", post(collab_bootstrap))
+@@ -4528,6 +4219,12 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
+         // ── 同账号设备网(权威侧目录:登录即成网,不必再粘连接码)──
+         .route("/api/mesh/enroll", post(mesh_enroll))
+         .route("/api/mesh/announce", post(mesh_announce))
++        .route("/api/mesh/security/inbox", get(security_inbox))
++        .route("/api/mesh/security/watch", get(security_watch))
++        .route("/api/mesh/security/ack", post(security_ack))
++        .route("/api/mesh/risk/authorize", post(security_authorize))
++        .route("/api/mesh/risk/decide", post(security_decide))
++        .route("/api/mesh/revocations", get(mesh_revocations))
+         .route("/api/mesh/assert", post(mesh_assert))
+         .route("/api/mesh/revoke", post(mesh_revoke))
+         .route("/api/mesh/devices", get(mesh_devices))
+@@ -4698,7 +4395,7 @@ pub fn collab_router(state: CollabState, with_ws: bool) -> Router {
+     if with_ws {
+         r = r.route("/ws", get(collab_ws_handler));
+     }
+-    r.with_state(state)
++    r.layer(axum::middleware::from_fn(risk_middleware)).with_state(state)
+ }
+ 
+ #[cfg(test)]
+diff --git a/src-tauri/crates/polaris-collab/src/collab/mesh.rs b/src-tauri/crates/polaris-collab/src/collab/mesh.rs
+index 6a80713..7d5998b 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/mesh.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/mesh.rs
+@@ -85,7 +85,15 @@ pub fn enroll(uid: &str, node_id: &str, name: &str, os: &str, ver: &str) -> Resu
+         return Err("缺账号 uid".into());
+     }
+     let key = new_key()?;
+-    let conn = open_db()?;
++    let mut connection = open_db()?;
++    let conn = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
++        .map_err(|e| e.to_string())?;
++    let existing_uid: Option<String> = conn.query_row(
++        "SELECT uid FROM mesh_nodes WHERE node_id=?1", params![node_id], |r| r.get(0),
++    ).optional().map_err(|e| e.to_string())?;
++    if existing_uid.is_some_and(|existing| existing != uid.trim()) {
++        return Err("该 NodeId 已登记到其他账号".into());
++    }
+     // first_seen 用 excluded 会被重登覆盖 —— 这里刻意保留旧值(COALESCE 兜住老行的 0),
+     // 因为台账要回答的是「这台机器什么时候第一次出现在我账号里」,不是「上次重登是几点」。
+     conn.execute(
+@@ -93,11 +101,14 @@ pub fn enroll(uid: &str, node_id: &str, name: &str, os: &str, ver: &str) -> Resu
+          VALUES(?1,?2,?3,?4,?5,?6,?7,?7,0,?7) \
+          ON CONFLICT(node_id) DO UPDATE SET \
+            uid=excluded.uid, name=excluded.name, os=excluded.os, ver=excluded.ver, \
+-           key_hash=excluded.key_hash, last_seen=excluded.last_seen, revoked=0, \
++           key_hash=excluded.key_hash, created_at=excluded.created_at, last_seen=excluded.last_seen, revoked=0, \
+            first_seen=CASE WHEN mesh_nodes.first_seen>0 THEN mesh_nodes.first_seen ELSE excluded.first_seen END",
+         params![node_id, uid.trim(), name.trim(), os.trim(), ver.trim(), hash_key(&key), now()],
+     )
+     .map_err(|e| format!("设备入网失败: {e}"))?;
++    super::interconnect::devices::enrolled(&conn, uid, node_id)?;
++    conn.commit().map_err(|e| e.to_string())?;
++    super::interconnect::notifications::wake();
+     db::audit(uid, "mesh.enroll", node_id, name);
+     Ok(key)
+ }
+@@ -219,7 +230,9 @@ pub fn announce(key: &str, name: &str, os: &str, ver: &str) -> Result<(String, V
+ /// 把自己账号名下的一台设备移出设备网(丢了电脑的应急操作)。
+ /// 只能踢**同 uid** 的设备 —— 拿着自己的密钥踢不掉别人账号的机器。
+ pub fn revoke(uid: &str, node_id: &str) -> Result<(), String> {
+-    let conn = open_db()?;
++    let mut connection = open_db()?;
++    let conn = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
++        .map_err(|e| e.to_string())?;
+     let n = conn
+         .execute(
+             "UPDATE mesh_nodes SET revoked=1 WHERE node_id=?1 AND uid=?2",
+@@ -229,6 +242,9 @@ pub fn revoke(uid: &str, node_id: &str) -> Result<(), String> {
+     if n == 0 {
+         return Err("这台设备不在你账号的设备网里".into());
+     }
++    super::interconnect::devices::revoked(&conn, uid, node_id)?;
++    conn.commit().map_err(|e| e.to_string())?;
++    super::interconnect::notifications::wake();
+     db::audit(uid, "mesh.revoke", node_id, "");
+     Ok(())
+ }
+diff --git a/src-tauri/crates/polaris-collab/src/collab/mod.rs b/src-tauri/crates/polaris-collab/src/collab/mod.rs
+index 8e3bf60..f75dda4 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/mod.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/mod.rs
+@@ -8,6 +8,7 @@ pub mod auth;
+ /// 账号权威:云机签发身份断言,成员主机离线验签(「一个账号在哪台机器都能登」的地基)。
+ /// 不挂任何 feature —— 桌面/NAS/云机三种形态都要么签要么验,谁都绕不开。
+ pub mod authority;
++pub mod interconnect;
+ /// 任务级多轮对话(协作者↔负责人↔主 Agent 的微调通道)。
+ pub mod chat;
+ /// 任务卡检查工作流(CI-lite):worktree 跑开源工具链+密钥扫描+大文件闸。
+diff --git a/src-tauri/crates/polaris-collab/src/collab/tunnel.rs b/src-tauri/crates/polaris-collab/src/collab/tunnel.rs
+index c638e07..7eeb306 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/tunnel.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/tunnel.rs
+@@ -23,10 +23,14 @@ use std::time::Duration;
+ use base64::Engine;
+ use iroh::endpoint::presets;
+ use iroh::endpoint::{Connection, IdleTimeout, PathId, QuicTransportConfig, VarInt};
+-use iroh::{Endpoint, EndpointId, RelayMode, RelayUrl, SecretKey};
++use iroh::{Endpoint, EndpointId, SecretKey};
++#[cfg(test)]
++use iroh::RelayMode;
+ use once_cell::sync::Lazy;
+ 
+ use super::identity;
++pub(crate) mod relay;
++pub use relay::{apply_relay_config, apply_authority_relays, relay_status};
+ 
+ /// 应用层协议标识:主机与成员两端必须一致。
+ const ALPN: &[u8] = b"polaris/1";
+@@ -107,8 +111,6 @@ fn upstream_addr() -> String {
+ 
+ /// 活跃转发流总数(主机 accept 的 + 成员代理的),仅聚合展示用。
+ static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+-/// 自定义 relay URL 列表;空 = 用 iroh 默认(n0 公共 relay)。
+-static RELAYS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+ 
+ // 主机侧
+ static HOST_RUNNING: AtomicBool = AtomicBool::new(false);
+@@ -167,7 +169,8 @@ static TUNNEL_RT: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+ });
+ 
+ /// 共享客户端 Endpoint(device.key 身份),首个隧道触发构建,之后所有隧道复用。
+-static CLIENT_EP: Lazy<tokio::sync::OnceCell<Endpoint>> = Lazy::new(tokio::sync::OnceCell::new);
++static CLIENT_EP: Lazy<tokio::sync::Mutex<std::sync::Weak<relay::ConfiguredEndpoint>>> =
++    Lazy::new(|| tokio::sync::Mutex::new(std::sync::Weak::new()));
+ /// 共享 Endpoint 建成后记下 NodeId,status 聚合展示用。
+ static DEVICE_NODE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+ 
+@@ -250,123 +253,8 @@ pub fn node_id_of_device_key() -> Result<String, String> {
+ 
+ // ── relay 动态配置 ───────────────────────────────────────────────────────────
+ 
+-/// 接受 `{"relays":[{"url":"https://relay.example.com"}]}` 形式的配置。
+-/// 空列表 = 恢复默认(n0 公共 relay)。v1 忽略证书指纹字段(预留)。
+-/// 注意:客户端共享 Endpoint 建成后改 relay,要等全部隧道断开重连才生效(Endpoint 级配置)。
+-pub fn apply_relay_config(json: &str) -> Result<(), String> {
+-    let v: serde_json::Value =
+-        serde_json::from_str(json).map_err(|e| format!("relay 配置非法 JSON: {e}"))?;
+-    let mut urls = Vec::new();
+-    if let Some(arr) = v.get("relays").and_then(|r| r.as_array()) {
+-        for item in arr {
+-            let u = item
+-                .get("url")
+-                .and_then(|u| u.as_str())
+-                .ok_or("relay 项缺 url 字段")?;
+-            // 先验一遍能否解析成 RelayUrl,坏 URL 直接拒收,不留到起隧道时才炸。
+-            let _: RelayUrl = u.parse().map_err(|e| format!("relay url 非法 {u}: {e}"))?;
+-            urls.push(u.to_string());
+-        }
+-    }
+-    *RELAYS.lock().unwrap() = urls;
+-    Ok(())
+-}
+-
+-/// 用种子建 Endpoint:N0 预设(打洞 + n0 DNS 发现 + 默认 relay)+ mDNS 内网发现,
+-/// 有自定义 relay 则覆盖 relay_mode。
+-async fn build_endpoint(seed: [u8; 32]) -> Result<Endpoint, String> {
+-    // 保活 + 判死超时:没有它,NAT/relay 会静默回收空闲连接,直到下次请求才暴露断线。
+-    //
+-    // 流量窗口:QUIC 的默认值按「100ms RTT × 100Mbps」调,单流 1.25MB、连接级不设上限。
+-    // 两头都不合适 ——
+-    //  · 单流 1.25MB 在**高延迟长肥管**(比如跨境 200ms)上会把单流封在 6MB/s 左右,
+-    //    而这正是「拷一个大文件」的形态;放到 4MB 才够喂满。
+-    //  · 连接级不设上限意味着最坏情况是 `并发流数 × 单流窗口`,没有硬约束 —— 对
+-    //    1.6G 内存的小云机是个隐患。这里显式钉一个连接级总量(默认 32MB)作为**内存上限**,
+-    //    既拿到单流的速度,又不会因为对端猛开流把内存吃穿。
+-    // 两个都可用 env 覆盖(单位 KB):内存紧张的 NAS 调小,专线大带宽调大。
+-    let stream_rwnd = env_kb("POLARIS_QUIC_STREAM_WINDOW_KB", 4 * 1024).clamp(64 * 1024, 64 << 20);
+-    let conn_rwnd = env_kb("POLARIS_QUIC_CONN_WINDOW_KB", 32 * 1024).clamp(stream_rwnd, 512 << 20);
+-    let transport = QuicTransportConfig::builder()
+-        .keep_alive_interval(KEEP_ALIVE)
+-        .max_idle_timeout(Some(
+-            IdleTimeout::try_from(IDLE_TIMEOUT).expect("idle timeout 常量合法"),
+-        ))
+-        .stream_receive_window(VarInt::from_u64(stream_rwnd).expect("窗口值已夹在合法区间"))
+-        .receive_window(VarInt::from_u64(conn_rwnd).expect("窗口值已夹在合法区间"))
+-        // 发送侧同样放到连接级上限,否则收端给了窗口发端也吐不出来。
+-        .send_window(conn_rwnd)
+-        .build();
+-    let mut builder = Endpoint::builder(presets::N0)
+-        .secret_key(SecretKey::from_bytes(&seed))
+-        .transport_config(transport)
+-        .alpns(vec![ALPN.to_vec()]);
+-    // 固定 UDP 端口(`POLARIS_IROH_PORT`)。默认是随机口,这对**跑在容器/NAT 后面的主机**
+-    // 是致命的:端口每次重启都变,docker 没法发布、防火墙没法放行 → 外面永远打不进来,
+-    // 打洞必失败、只能落中继(实测绕到 n0 德国中继,每跳往返 370ms)。钉死端口后
+-    // `-p 41641:41641/udp` + 云防火墙放行这一个口,成员端即可直连。0 = 保持随机。
+-    if let Some(p) = env_u16("POLARIS_IROH_PORT") {
+-        builder = builder
+-            .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, p))
+-            .map_err(|e| format!("POLARIS_IROH_PORT={p} 绑定失败: {e}"))?;
+-    }
+-    // 自建中继也允许 env 配(容器重启即生效),不必每次重启后再 POST 一次
+-    // /api/collab/tunnel/relays —— 服务端进程重启后 RELAYS 是空的,靠人工补那一刀
+-    // 迟早会漏。env 只在 RELAYS 还没被 API 设过时兜底。
+-    if RELAYS.lock().unwrap().is_empty() {
+-        if let Ok(s) = std::env::var("POLARIS_RELAYS") {
+-            let list: Vec<String> = s
+-                .split(',')
+-                .map(|x| x.trim().to_string())
+-                .filter(|x| !x.is_empty())
+-                .collect();
+-            if !list.is_empty() {
+-                *RELAYS.lock().unwrap() = list;
+-            }
+-        }
+-    }
+-    let relays = RELAYS.lock().unwrap().clone();
+-    if !relays.is_empty() {
+-        let mut urls: Vec<RelayUrl> = Vec::new();
+-        for u in &relays {
+-            urls.push(u.parse().map_err(|e| format!("relay url 非法 {u}: {e}"))?);
+-        }
+-        builder = builder.relay_mode(RelayMode::custom(urls));
+-    }
+-    let ep = builder
+-        .bind()
+-        .await
+-        .map_err(|e| format!("iroh endpoint 绑定失败: {e}"))?;
+-    // mDNS 局域网发现(iroh-mdns-address-lookup):纯内网(n0 DNS/relay 全不可达)时,
+-    // 同网段设备也能互相发现直连。尽力而为:失败只丢内网发现,不影响正常组网;
+-    // POLARIS_MDNS=0 可关(某些企业网禁组播,mDNS 只会白噪音)。
+-    let mdns_off = std::env::var("POLARIS_MDNS")
+-        .map(|v| v == "0")
+-        .unwrap_or(false);
+-    if !mdns_off {
+-        match iroh_mdns_address_lookup::MdnsAddressLookup::builder().build(ep.id()) {
+-            Ok(mdns) => match ep.address_lookup() {
+-                Ok(services) => services.add(mdns),
+-                Err(e) => eprintln!("[tunnel] mDNS 挂载失败(忽略,仅失去纯内网发现): {e}"),
+-            },
+-            Err(e) => eprintln!("[tunnel] mDNS 启动失败(忽略,仅失去纯内网发现): {e}"),
+-        }
+-    }
+-    Ok(ep)
+-}
+-
+-/// 共享客户端 Endpoint:首用构建(device.key),失败可重试(OnceCell 不留错值)。
+-async fn client_endpoint() -> Result<Endpoint, String> {
+-    let ep = CLIENT_EP
+-        .get_or_try_init(|| async {
+-            let seed = get_or_create_device_key()?;
+-            let ep = build_endpoint(seed).await?;
+-            *DEVICE_NODE.lock().unwrap() = ep.id().to_string();
+-            Ok::<Endpoint, String>(ep)
+-        })
+-        .await?;
+-    Ok(ep.clone())
+-}
++mod endpoint;
++use endpoint::{build_endpoint, client_endpoint};
+ 
+ // ── 主机侧 ──────────────────────────────────────────────────────────────────
+ 
+@@ -375,7 +263,7 @@ pub async fn host_listen() -> Result<(), String> {
+     HOST_STOPPING.store(false, Ordering::SeqCst);
+     *HOST_STATE.lock().unwrap() = "connecting".to_string();
+     let seed = identity::get_or_create_host_key()?;
+-    let ep = match build_endpoint(seed).await {
++    let ep = match build_endpoint(seed, "host").await {
+         Ok(ep) => ep,
+         Err(e) => {
+             *HOST_ERROR.lock().unwrap() = e.clone();
+@@ -720,7 +608,7 @@ async fn run_client(t: Arc<ClientTunnel>) {
+     watchdog.abort();
+     finish(&t);
+     eprintln!("[tunnel] 成员代理已停止 127.0.0.1:{}", t.port);
+-    // 注:共享 Endpoint 不关,别的隧道还在用;进程退出统一回收。
++    // The last endpoint owner releases it; the next connection uses current relays.
+ }
+ 
+ // ── 状态 / 停止 / 同步包装 ───────────────────────────────────────────────────
+@@ -797,7 +685,8 @@ pub fn status() -> serde_json::Value {
+         "node_id": if host_running && !host_node.is_empty() { host_node.clone() } else { device_node },
+         "connections": CONNECTIONS.load(Ordering::Relaxed),
+         "upstream": upstream_addr(),
+-        "relays": RELAYS.lock().unwrap().clone(),
++        "relays": relay_status()["urls"],
++        "relayConfig": relay_status(),
+         "latency_ms": best_latency,
+         "last_error": if !host_err.is_empty() { host_err } else { first_err },
+         "host": { "running": host_running, "state": host_state, "node_id": host_node },
+@@ -947,17 +836,6 @@ mod tests {
+         assert!(split_node_and_addrs("abc123@不是地址:41641").is_err());
+     }
+ 
+-    /// relay 配置解析:合法进、坏 URL 拒。
+-    #[test]
+-    fn relay_config_parse() {
+-        apply_relay_config(r#"{"relays":[{"url":"https://relay.example.com"}]}"#)
+-            .expect("合法配置");
+-        assert_eq!(RELAYS.lock().unwrap().len(), 1);
+-        assert!(apply_relay_config(r#"{"relays":[{"url":"::bad::"}]}"#).is_err());
+-        apply_relay_config(r#"{"relays":[]}"#).expect("清空恢复默认");
+-        assert!(RELAYS.lock().unwrap().is_empty());
+-    }
+-
+     /// connect_client 幂等与冲突:坏 NodeId 同步报错;同端口同主机 no-op;
+     /// 同端口不同主机报「被占用」。NodeId 用固定种子构造(不碰 env/文件,
+     /// 免与 device_key_idempotent 抢 POLARIS_DEVICE_KEY);连接在后台重试,不阻塞断言。

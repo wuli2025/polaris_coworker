@@ -1,0 +1,52 @@
+{
+  "started_at": "2026-10-15T03:10:35.806584+00:00",
+  "status": "REVIEW_RECEIVED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P6a-brief.md",
+        "bytes": 2609,
+        "lines": 14,
+        "sha256": "5a1664a0f2f9bbba78c6f1f3d74ecea3275aeb6fa5193200e4114fc52bd776fb"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P6a-collab.patch",
+        "bytes": 72919,
+        "lines": 1558,
+        "sha256": "c38078a2e481ea809fef5caa2cc06baf53324be10035f7bad521bbf4da8b6b55"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P6a-host.patch",
+        "bytes": 48838,
+        "lines": 1120,
+        "sha256": "6a5484618e05bb1274facbe0476a9db298bb2fffe623628863bbd6f46532f722"
+      }
+    ],
+    "prompt_sha256": "d10e05161ad0ad5c8308d24c58e538221478f4657174c4c07b5f24c70b224cf7",
+    "prompt_bytes": 140447
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "provider": "minimax",
+  "model": "MiniMax-M2.7",
+  "usage": {
+    "input": 0,
+    "output": 2668,
+    "cacheRead": 0,
+    "cacheWrite": 40770,
+    "totalTokens": 43438,
+    "cost": {
+      "input": 0,
+      "output": 0.0032015999999999998,
+      "cacheRead": 0,
+      "cacheWrite": 0.01528875,
+      "total": 0.01849035
+    }
+  },
+  "session_id": "01a13d8a-a190-7a62-bedc-a0bdfbfde486",
+  "finished_at": "2026-10-15T03:12:06.820922+00:00"
+}
