@@ -436,3 +436,17 @@ Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列�
 验证与完整文件行数见 [P5c 执行报告](pi-migration/p5c-frontend.md)。
 新增 Vitest 覆盖诊断映射/SSR、成本缺价、协议与模型校验、旧动作守卫、预览不假报成功及上下文阻塞策略。
 仅作执行报告；上下文自动选择与专家开关仍受后端契约阻塞，由 Claude 重跑、Pi 独立审查后决定验收。
+## P5d：上下文、价格完整性与专家开关
+
+- 状态：**BLOCKED（部分实现）**；[执行报告、改动清单与验证](pi-migration/p5d-contracts.md)。仅执行报告，由 Claude 复核、Pi 独立审查。
+- 上下文入口：`claude_md::context::{context_file_metadata,context_file_read,context_file_write}`；两壳注册，Pi 的 `ClaudeMdPanel` 接入独立 `ContextFileEditor`。
+- 依赖：复用 chat 的 `effective_cwd`、conv 项目目录和 runtime `path_contains`。AGENTS.md 优先，否则 CLAUDE.md；返回选中文件、两者存在性及相对路径。
+- 上下文配置：metadata 的 `createFile` 默认 AGENTS.md，仅接受 AGENTS.md/CLAUDE.md；write 回传原 selection，cwd 变化报 stale，拒绝父路径及符号链接。
+- 迁移：旧 `claude_md_*` 和旧后端路径行为不变；不重命名文件，Pi 面板解除临时禁用。缺文件、权限不足和其它 I/O 错误分别命名。
+- 用量入口：`provider::usage_summary`；桶增加 `models`、`unpricedRequests`、`hasUnknownCosts`，每日趋势同步完整性；UsageBoard/ProviderDock 保留金额并单列未知请求。
+- 用量配置：默认估价表 `provider/usage_prices.json`；`POLARIS_USAGE_PRICES=/absolute/prices.json` 切换，校验匹配规则和四项非负有限价格，未匹配模型不再套 Sonnet 价。
+- 用量迁移缺口：Pi 老账本无 `priceAvailable` 时保留金额并标未知；当前 agentd 生产写入链路仍无此字段。修改该链路超出 TASK DATA 限定范围，扩展授权未收到，不能宣称 Pi 价格完整性闭环。
+- 专家入口：`expert_enabled_get/set` → `AgentBackend::experts_enabled` → Pi `config.apply`；`ExpertRuntimeNotice` 为 ExpertCenter/ExpertTeam 共用实际状态开关。
+- 专家配置：agentd 默认关闭；宿主 `agentd.expertSettings` 默认 `~/Polaris/data/expert-settings.json`，必须绝对文件路径。开关严格布尔，保存现有 prompt；落盘失败回滚 daemon。
+- 专家迁移：宿主启动后首次读取/发轮次会恢复持久配置；新会话生效，空闲会话依原 reopen 机制重开，忙会话延迟。未配置持久文件时读取 daemon 部署实际状态。
+- 验证：两壳实际入口 offline check 均 0 警告；前端 typecheck、61 用例、build 通过。内核 206 单测 + 8 集成用例通过（排除 6 个具名 TCP 沙箱项，另 2 ignored）。agentd typecheck 通过，27 测试文件中 25 通过、2 个既有环境失败，详见报告。

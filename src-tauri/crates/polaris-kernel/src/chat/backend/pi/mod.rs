@@ -1,6 +1,7 @@
 //! Shared daemon adapter. Per-account fails closed until the shell can supply
 //! authenticated OS isolation; different working directories are not a sandbox.
 mod client;
+mod experts;
 mod process;
 pub mod protocol;
 mod routes;
@@ -24,13 +25,14 @@ pub struct PiBackend {
     client: once_cell::sync::OnceCell<Arc<Client>>,
     preparing: Arc<Mutex<HashSet<String>>>,
     cancelled: Arc<Mutex<HashSet<String>>>,
+    expert_lock: Mutex<()>,
     provider_config: Mutex<Option<(Option<u32>, Value)>>,
 }
 impl PiBackend {
     pub fn new(config: config::Agentd) -> anyhow::Result<Self> {
         config::Config { agent: config::Agent::default(), agentd: config.clone() }.validate()?;
         Ok(Self { config, client: once_cell::sync::OnceCell::new(),
-            provider_config: Mutex::new(None),
+            provider_config: Mutex::new(None), expert_lock: Mutex::new(()),
             preparing: Arc::new(Mutex::new(HashSet::new())), cancelled: Arc::new(Mutex::new(HashSet::new())) })
     }
     fn client(&self) -> anyhow::Result<Arc<Client>> {
@@ -51,6 +53,7 @@ impl PiBackend {
     }
 }
 impl AgentBackend for PiBackend {
+    fn experts_enabled(&self, enabled: Option<bool>) -> anyhow::Result<bool> { self.expert_state(enabled) }
     fn auth(&self, operation: &str, provider: &str, input: Option<String>) -> anyhow::Result<Value> {
         self.client()?.call(Command::Auth(protocol::Auth { operation: operation.into(), provider: provider.into(), input }))
     }
@@ -98,6 +101,7 @@ impl AgentBackend for PiBackend {
                 if self.provider_apply(&id)?["superseded"] != true { break; }
             }
         }
+        self.sync_experts()?;
         let client = self.client()?;
         if client.status.lock().circuit_open { return Err(BackendError::CircuitOpen.into()); }
         let (sender, stream) = stream::Mailbox::channel(self.config.channel_capacity, self.config.max_line_bytes);

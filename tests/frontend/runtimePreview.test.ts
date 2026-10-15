@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentRuntime, envDoctor, provider } from '../../src/tauri';
+import { contextFiles, expertSettings } from '../../src/features/runtime/contracts';
 
 afterEach(() => vi.unstubAllGlobals());
 describe('browser runtime preview', () => {
@@ -17,5 +18,8 @@ describe('browser runtime preview', () => {
     expect(await provider.codexPollLogin('preview', 'preview')).toMatchObject({ status: 'pending' });
     await expect(provider.setLinkMode(true)).rejects.toThrow('Unsupported');
     await expect(provider.setRouteMode(true)).rejects.toThrow('Unsupported');
+    await expect(expertSettings.get()).rejects.toThrow('浏览器预览');
+    await expect(expertSettings.set(true)).rejects.toThrow('浏览器预览');
+    await expect(contextFiles.metadata('project')).rejects.toThrow('浏览器预览');
   });
 });

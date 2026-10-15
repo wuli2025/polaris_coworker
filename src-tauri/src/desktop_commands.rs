@@ -132,6 +132,8 @@ tauri::generate_handler![
             persona::persona_list,
             persona::persona_apply,
             // 百人专家团
+            expert::settings::expert_enabled_get,
+            expert::settings::expert_enabled_set,
             expert::expert_list,
             expert::expert_list_by_group,
             expert::expert_groups,
@@ -196,6 +198,9 @@ tauri::generate_handler![
             project::project_run,
             project::project_stop,
             // CLAUDE.md
+            claude_md::context::context_file_metadata,
+            claude_md::context::context_file_read,
+            claude_md::context::context_file_write,
             claude_md::claude_md_list_projects,
             claude_md::claude_md_kb_info,
             claude_md::claude_md_read,

@@ -1,0 +1,11 @@
+[
+  {"contains": ["opus"], "rates": [15, 75, 18.75, 1.5]},
+  {"contains": ["haiku"], "rates": [0.8, 4, 1, 0.08]},
+  {"contains": ["sonnet"], "rates": [3, 15, 3.75, 0.3]},
+  {"contains": ["gpt", "codex"], "prefixes": ["o1", "o3"], "rates": [1.25, 10, 1.5625, 0.125]},
+  {"contains": ["gemini"], "rates": [1.25, 10, 1.625, 0.31]},
+  {"contains": ["deepseek"], "rates": [0.27, 1.1, 0.027, 0.027]},
+  {"contains": ["glm"], "rates": [0.6, 2.2, 0.11, 0.11]},
+  {"contains": ["kimi", "moonshot"], "rates": [0.6, 2.5, 0.15, 0.15]},
+  {"contains": ["qwen", "minimax"], "rates": [0.4, 1.2, 0.08, 0.08]}
+]

@@ -1,3 +1,4 @@
+import type { BucketCosts, PriceCompleteness } from "./types/usageCosts";
 import { runtimeCopy } from "./features/runtime/copy";
 import type { AgentBackendStatus } from "./types/agentRuntime";
 export type { AgentBackendStatus } from "./types/agentRuntime";
@@ -1861,7 +1862,7 @@ export interface ProviderSaveInput {
   /** 完整 settings_config（env 含 base_url + token + 开关） */
   settingsConfig: any;
 }
-export interface TokenBucket {
+export interface TokenBucket extends BucketCosts {
   input: number;
   output: number;
   cacheRead: number;
@@ -1870,7 +1871,7 @@ export interface TokenBucket {
   requests: number;
   cost: number;
 }
-export interface DailyUsage {
+export interface DailyUsage extends PriceCompleteness {
   date: string;
   label: string;
   total: number;
@@ -2588,14 +2589,14 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       const daily = Array.from({ length: 14 }, (_, i) => {
         const d = new Date(Date.now() - (13 - i) * 86400000);
         const label = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-        return { date: label, label, total: Math.round(300000 + Math.random() * 1600000), cost: +(Math.random() * 6).toFixed(4) };
+        return { date: label, label, total: Math.round(300000 + Math.random() * 1600000), cost: +(Math.random() * 6).toFixed(4), unpricedRequests: 1, hasUnknownCosts: true };
       });
       return {
         available: true,
-        today: { input: 75600, output: 644800, cacheRead: 45506800, cacheCreation: 1637200, total: 720483 + 47144001, requests: 411, cost: 49.107 },
-        week: { input: 280000, output: 64000, cacheRead: 6100000, cacheCreation: 410000, total: 6854000, requests: 248, cost: 112.4 },
-        month: { input: 980000, output: 240000, cacheRead: 22000000, cacheCreation: 1400000, total: 24620000, requests: 940, cost: 421.8 },
-        year: { input: 1900000, output: 520000, cacheRead: 44000000, cacheCreation: 2800000, total: 49220000, requests: 1894, cost: 980.5 },
+        today: { input: 75600, output: 644800, cacheRead: 45506800, cacheCreation: 1637200, total: 720483 + 47144001, requests: 411, cost: 49.107, unpricedRequests: 411, hasUnknownCosts: true, models: [] },
+        week: { input: 280000, output: 64000, cacheRead: 6100000, cacheCreation: 410000, total: 6854000, requests: 248, cost: 112.4, unpricedRequests: 248, hasUnknownCosts: true, models: [] },
+        month: { input: 980000, output: 240000, cacheRead: 22000000, cacheCreation: 1400000, total: 24620000, requests: 940, cost: 421.8, unpricedRequests: 940, hasUnknownCosts: true, models: [] },
+        year: { input: 1900000, output: 520000, cacheRead: 44000000, cacheCreation: 2800000, total: 49220000, requests: 1894, cost: 980.5, unpricedRequests: 1894, hasUnknownCosts: true, models: [] },
         daily,
       };
     }
@@ -2626,6 +2627,12 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return "";
     case "expert_recommend_from_kb":
       return { team: null, reason: "(browser stub)", topExperts: [], matchedTopics: [], corpusSize: 0 };
+    case "context_file_metadata":
+    case "context_file_read":
+    case "context_file_write":
+    case "expert_enabled_get":
+    case "expert_enabled_set":
+      throw new Error("浏览器预览未连接宿主，无法读写实际配置");
     default:
       return null;
   }

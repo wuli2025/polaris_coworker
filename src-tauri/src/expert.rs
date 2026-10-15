@@ -13,6 +13,8 @@ mod teams;
 
 pub use teams::ExpertTeam;
 
+pub mod settings;
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

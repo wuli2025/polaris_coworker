@@ -7,6 +7,7 @@ const record = recordIndex < 0 ? undefined : process.argv[recordIndex + 1];
 if (process.argv.includes('--crash-start')) process.exit(7);
 const sessions = new Map();
 let applied;
+let experts = { enabled: false, prompt: "deployment-prompt" };
 async function gate(option) {
   const index = process.argv.indexOf(option);
   if (index < 0) return;
@@ -66,7 +67,7 @@ async function dispatch({ id, method, params: p }) {
     case 'ping':
       if (process.argv.includes('--ping-hang')) return;
       return response(id, { status: 'ok', sessions: sessions.size, version: '0.1.0', piVersion: '1.0.4',
-        usagePersistFailures: 7, protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 6 });
+        usagePersistFailures: 7, experts, protocolVersion: process.argv.includes('--protocol-mismatch') ? 1 : 6 });
     case 'models.catalog':
       await gate('--gate-catalog');
       return response(id, { models: [] });
@@ -104,6 +105,7 @@ async function dispatch({ id, method, params: p }) {
     case 'config.apply':
       await gate('--gate-apply');
       applied = p.config;
+      if (p.config?.experts) experts = p.config.experts;
       return response(id, { applied: true, reopenRequired: [...sessions.keys()] });
     case 'steer': case 'followUp': return response(id, { turnId: sessions.get(p.sessionId)?.turn, disposition: 'queued' });
     default: return error(id, 'INVALID_REQUEST');

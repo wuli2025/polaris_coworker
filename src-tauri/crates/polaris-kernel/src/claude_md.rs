@@ -9,6 +9,7 @@
 //! placeholder marker: 顶部含 `polaris:placeholder` 行表示「未填写」, 不注入
 
 use crate::conv;
+pub mod context;
 #[cfg(not(feature = "desktop"))]
 use crate::host::AppHandle;
 use anyhow::Result;

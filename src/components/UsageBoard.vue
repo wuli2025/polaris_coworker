@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { runtimeCopy as copy } from "../features/runtime/copy";
-import { usageCost, recordedCost } from "../features/runtime/presentation";
+import { pricedCost, unknownCosts } from "../features/runtime/usageCosts";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   X,
@@ -79,7 +79,7 @@ function fmtK(n: number): string {
   return String(n);
 }
 function fmtCost(n: number): string {
-  return usageCost(n);
+  return pricedCost(n);
 }
 function cacheTotal(b: TokenBucket): number {
   return b.cacheRead + b.cacheCreation;
@@ -186,11 +186,11 @@ function cacheTotal(b: TokenBucket): number {
 
               <div class="card">
                 <div class="c-head">
-                  <span class="c-lab">总成本<span class="c-est">估算</span></span>
+                  <span class="c-lab">已标价 / 已记录成本<span class="c-est">估算</span></span>
                   <span class="c-ic green"><DollarSign :size="15" :stroke-width="2" /></span>
                 </div>
                 <div class="c-num">{{ fmtCost(bucket.cost) }}</div>
-                <div class="c-sub">已记录金额：{{ recordedCost(bucket.cost) }}</div>
+                <div class="c-sub">{{ unknownCosts(bucket) }}</div>
               </div>
 
               <div class="card">
@@ -229,7 +229,7 @@ function cacheTotal(b: TokenBucket): number {
                   v-for="(d, i) in daily"
                   :key="d.date + i"
                   class="bar-col"
-                  :title="`${d.label}: ${fmtInt(d.total)} tokens · ${fmtCost(d.cost)}`"
+                  :title="`${d.label}: ${fmtInt(d.total)} tokens · ${fmtCost(d.cost)} · ${unknownCosts(d)}`"
                 >
                   <div class="bar-wrap">
                     <div

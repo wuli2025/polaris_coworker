@@ -40,6 +40,7 @@ export type SessionOptions = Static<typeof SessionOptionsSchema>;
 export type ImageAttachment = Static<typeof ImageSchema>;
 export const PingSchema = Type.Object({ status: Type.Literal("ok"), sessions: Type.Integer({ minimum: 0 }),
   usagePersistFailures: Type.Integer({ minimum: 0 }),
+  experts: Type.Optional(Type.Object({ enabled: Type.Boolean(), prompt: Type.String() }, { additionalProperties: false })),
   version: text, piVersion: text, protocolVersion: Type.Literal(PROTOCOL_VERSION) });
 // Keep every command explicit so unknown fields/methods cannot reach SDK APIs.
 export const SandboxResultSchema = Type.Object({

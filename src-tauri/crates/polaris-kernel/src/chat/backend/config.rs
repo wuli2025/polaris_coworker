@@ -63,6 +63,7 @@ pub struct Agentd {
     pub control_poll_ms: u64,
     pub session_map: PathBuf,
     pub attachments: super::images::ImageLimits,
+    pub expert_settings: PathBuf,
 }
 impl Default for Agentd {
     fn default() -> Self {
@@ -82,6 +83,7 @@ impl Default for Agentd {
             supervisor_tick_ms: 10, shutdown_timeout_ms: 1000, control_poll_ms: 1,
             session_map: crate::runtime::paths::data_dir().join("agent-session-map"),
             attachments: super::images::ImageLimits::default(),
+            expert_settings: crate::runtime::paths::data_file("expert-settings.json"),
         }
     }
 }
@@ -126,6 +128,8 @@ impl Config {
         BackendKind::parse(&self.agent.backend)?;
         let c = &self.agentd;
         c.attachments.validate()?;
+        anyhow::ensure!(c.expert_settings.is_absolute() && c.expert_settings.file_name().is_some(),
+            "InvalidAgentConfig: expertSettings must be an absolute file path");
         anyhow::ensure!(!c.sandbox_container.is_empty() && !c.sandbox_container.starts_with('-')
             && c.sandbox_container.chars().all(|ch| ch.is_ascii_alphanumeric() || "_.-".contains(ch)),
             "InvalidAgentConfig: sandboxContainer must be a Docker container name");

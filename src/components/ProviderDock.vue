@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { usageCost } from "../features/runtime/presentation";
+import { pricedCost, unknownCosts } from "../features/runtime/usageCosts";
 import { runtimeCopy as copy } from "../features/runtime/copy";
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
 // 懒加载:绘图供应商面板只在 Dock 展开到对应页时才渲染,静态 import 会把它
@@ -137,7 +137,7 @@ function fmt(n: number): string {
   return String(n);
 }
 function fmtCost(n: number): string {
-  return usageCost(n);
+  return pricedCost(n);
 }
 function hostOf(url: string): string {
   if (!url) return "本地 / 订阅";
@@ -1098,7 +1098,7 @@ function subtitleOf(p: ProviderView): string {
                     </button>
                   </div>
                   <div v-if="activeBucket" class="mini-foot">
-                    <span>总成本 <b>{{ fmtCost(activeBucket.cost) }}</b></span>
+                    <span>已标价 / 已记录成本 <b>{{ fmtCost(activeBucket.cost) }}</b> · {{ unknownCosts(activeBucket) }}</span>
                     <span>输入 {{ fmt(activeBucket.input) }} · 输出 {{ fmt(activeBucket.output) }}</span>
                     <span>{{ activeBucket.requests }} 次</span>
                   </div>

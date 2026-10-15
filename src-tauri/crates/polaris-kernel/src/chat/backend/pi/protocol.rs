@@ -89,6 +89,7 @@ pub struct Prompt {
 pub struct Ping {
     pub status: String, pub sessions: u64, pub version: String,
     pub pi_version: String, pub protocol_version: u64, pub usage_persist_failures: u64,
+    pub experts: Option<super::experts::ExpertConfig>,
 }
 pub fn check_ping(value: Value) -> anyhow::Result<Ping> {
     anyhow::ensure!(value.get("protocolVersion").and_then(Value::as_u64) == Some(PROTOCOL_VERSION),

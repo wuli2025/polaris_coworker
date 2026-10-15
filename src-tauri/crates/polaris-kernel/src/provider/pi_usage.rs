@@ -4,6 +4,9 @@ use super::*;
 pub struct Row {
     pub date: String,
     pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    pub price_available: Option<bool>,
     pub request_id: String,
     pub legacy_message_id: Option<String>,
     pub usage: crate::chat::backend::pi::protocol::Usage,

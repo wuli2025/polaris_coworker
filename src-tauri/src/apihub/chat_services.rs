@@ -40,6 +40,15 @@ fn dispatch_chat_and_services(cmd: &str, a: &Args, app: AppHandle) -> Result<Val
         "project_run" => ok(project::project_run(app, req_str(a, "root")?)?),
         "project_stop" => ok(project::project_stop(app, req_str(a, "root")?)?),
 
+        "context_file_metadata" => ok(claude_md::context::context_file_metadata(
+            req_str(a, "projectId")?, opt_str(a, "createFile"))?),
+        "context_file_read" => ok(claude_md::context::context_file_read(
+            req_str(a, "projectId")?, serde_json::from_value(a.get("selection").cloned()
+                .ok_or("Missing selection")?).map_err(|e| format!("ContextSelectionInvalid: {e}"))?)?),
+        "context_file_write" => ok(claude_md::context::context_file_write(
+            req_str(a, "projectId")?, serde_json::from_value(a.get("selection").cloned()
+                .ok_or("Missing selection")?).map_err(|e| format!("ContextSelectionInvalid: {e}"))?,
+            req_str(a, "content")?)?),
         // ── CLAUDE.md ──
         "claude_md_list_projects" => ok(claude_md::claude_md_list_projects()),
         "claude_md_kb_info" => ok(claude_md::claude_md_kb_info()),

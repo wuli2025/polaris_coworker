@@ -301,6 +301,9 @@ fn dispatch_sync(cmd: &str, a: &Args, app: AppHandle) -> Result<Value, String> {
         )?),
 
         // ── Expert / 专家团（Docker/web 版同样要能用专家市场、向导推荐、一键入驻）──
+        "expert_enabled_get" => ok(expert::settings::expert_enabled_get()?),
+        "expert_enabled_set" => ok(expert::settings::expert_enabled_set(
+            a.get("enabled").and_then(Value::as_bool).ok_or("ExpertEnabledInvalid: expected boolean")?)?),
         "expert_list" => ok(expert::expert_list()),
         "expert_list_by_group" => ok(expert::expert_list_by_group(req_str(a, "group")?)),
         "expert_groups" => ok(expert::expert_groups()),

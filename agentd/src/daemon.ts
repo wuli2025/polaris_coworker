@@ -98,7 +98,7 @@ export class Daemon {
       case "provider.auth": return this.logins.handle(request.params.provider, request.params.operation, request.params.input);
       case "permission.respond": return this.sessions.respondPermission(request.params.sessionId, request.params.callId, request.params.decision);
       case "sandbox.respond": return this.sessions.respondSandbox(request.params.sessionId, request.params.callId, request.params);
-      case "ping": return { status: "ok", sessions: this.sessions.size, usagePersistFailures: this.usagePersistFailures, ...versions };
+      case "ping": return { experts: { ...this.config.experts }, status: "ok", sessions: this.sessions.size, usagePersistFailures: this.usagePersistFailures, ...versions };
       case "models.list": return { models: this.models.list() };
       case "models.catalog": return { models: this.models.builtinCatalog } satisfies Catalog;
       case "session.open": return this.sessions.open(request.params.sessionId, request.params.cwd, request.params);

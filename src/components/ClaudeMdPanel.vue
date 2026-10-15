@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import ContextRuntimeNotice from "../features/runtime/components/ContextRuntimeNotice.vue";
+import ContextFileEditor from "../features/runtime/components/ContextFileEditor.vue";
 import { runtimeCopy as copy } from "../features/runtime/copy";
 import { useBackendStatus } from "../features/runtime/useBackendStatus";
 import { contextEditingAvailable } from "../features/runtime/contextPolicy";
@@ -244,7 +245,8 @@ onMounted(refresh);
       </button>
     </div>
 
-    <ContextRuntimeNotice v-if="!editable" />
+    <ContextFileEditor v-if="status?.backend === 'pi'" />
+    <ContextRuntimeNotice v-else-if="!editable" />
     <div v-else class="cmd-body">
       <!-- Left: list -->
       <aside class="list">

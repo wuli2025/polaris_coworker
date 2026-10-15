@@ -2,38 +2,12 @@ use super::*;
 
 // ───────────────────────── Commands: 用量看板 ─────────────────────────
 
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TokenBucket {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_creation: u64,
-    pub total: u64,
-    pub requests: u64,
-    pub cost: f64,
-}
-
-impl TokenBucket {
-    fn add(&mut self, u: &Usage, cost: f64) {
-        self.input += u.input;
-        self.output += u.output;
-        self.cache_read += u.cache_read;
-        self.cache_creation += u.cache_creation;
-        self.total += u.input + u.output + u.cache_read + u.cache_creation;
-        self.requests += 1;
-        self.cost += cost;
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DailyUsage {
-    pub date: String,
-    pub label: String,
-    pub total: u64,
-    pub cost: f64,
-}
+#[path = "usage_costs.rs"]
+mod costs;
+#[path = "usage_prices.rs"]
+mod prices;
+pub use costs::{TokenBucket, DailyUsage};
+use prices::line_cost;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,42 +27,6 @@ struct Usage {
     cache_creation: u64,
 }
 
-/// 模型 → (input, output, cache_write, cache_read) USD / 1M tokens。估算用。
-fn model_price(model: &str) -> (f64, f64, f64, f64) {
-    let m = model.to_ascii_lowercase();
-    if m.contains("opus") {
-        (15.0, 75.0, 18.75, 1.5)
-    } else if m.contains("haiku") {
-        (0.8, 4.0, 1.0, 0.08)
-    } else if m.contains("sonnet") {
-        (3.0, 15.0, 3.75, 0.3)
-    } else if m.contains("gpt") || m.contains("codex") || m.starts_with("o1") || m.starts_with("o3")
-    {
-        (1.25, 10.0, 1.5625, 0.125)
-    } else if m.contains("gemini") {
-        (1.25, 10.0, 1.625, 0.31)
-    } else if m.contains("deepseek") {
-        (0.27, 1.1, 0.027, 0.027)
-    } else if m.contains("glm") {
-        (0.6, 2.2, 0.11, 0.11)
-    } else if m.contains("kimi") || m.contains("moonshot") {
-        (0.6, 2.5, 0.15, 0.15)
-    } else if m.contains("qwen") || m.contains("minimax") {
-        (0.4, 1.2, 0.08, 0.08)
-    } else {
-        (3.0, 15.0, 3.75, 0.3) // 未知 → Sonnet 档
-    }
-}
-
-fn line_cost(u: &Usage, model: &str) -> f64 {
-    let (pin, pout, pcw, pcr) = model_price(model);
-    (u.input as f64 * pin
-        + u.output as f64 * pout
-        + u.cache_creation as f64 * pcw
-        + u.cache_read as f64 * pcr)
-        / 1_000_000.0
-}
-
 // command(async): WalkDir 全量遍历 ~/.claude/projects 并逐行解析 jsonl(一年后可达
 // 数百 MB), 同步命令会钉住 UI 主线程(v1.5.2 同族问题)。属性形式挪到工作线程,
 // fn 保持同步签名(server dispatch 直调不受影响)。
@@ -103,8 +41,13 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
     if let Some(d) = private_claude_home().map(|d| d.join("projects")) {
         dirs.push(d);
     }
-    dirs.retain(|d| d.exists());
     let pi_dir = credential_file::provider_store_path().and_then(|p| p.parent().map(|p| p.join("pi-usage")));
+    summarize(dirs, pi_dir)
+}
+
+fn summarize(mut dirs: Vec<PathBuf>, pi_dir: Option<PathBuf>) -> Result<UsageSummary, String> {
+    let price_rules = std::sync::Arc::new(prices::load()?);
+    dirs.retain(|d| d.exists());
     if dirs.is_empty() && !pi_dir.as_ref().is_some_and(|p| p.exists()) {
         return Ok(empty_summary());
     }
@@ -124,7 +67,7 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
         trend_window.push((s, label));
     }
     let trend_set: HashSet<String> = trend_window.iter().map(|(s, _)| s.clone()).collect();
-    let mut by_day: HashMap<String, (u64, f64)> = HashMap::new();
+    let mut by_day: HashMap<String, TokenBucket> = HashMap::new();
 
     let mut today = TokenBucket::default();
     let mut week = TokenBucket::default();
@@ -158,7 +101,9 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
         date: String,
         usage: Usage,
         cost: f64,
-        line_tokens: u64,
+        has_price: bool,
+        source: String,
+        model: String,
     }
 
     // 并发宽度:默认按核数取(2~8)。`POLARIS_USAGE_SCAN_PAR=1` 可退回单线程 ——
@@ -179,6 +124,7 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
     let year_cut_shared = std::sync::Arc::new(year_cut.clone());
     let mut handles = Vec::with_capacity(workers);
     for _ in 0..workers {
+        let price_rules = std::sync::Arc::clone(&price_rules);
         let files = std::sync::Arc::clone(&files);
         let cursor = std::sync::Arc::clone(&cursor);
         let year_cut = std::sync::Arc::clone(&year_cut_shared);
@@ -191,7 +137,7 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
                     continue;
                 };
                 let reader = BufReader::new(file);
-                parse_lines(reader, &year_cut, &mut out);
+                parse_lines(reader, &year_cut, &price_rules, &mut out);
             }
             out
         }));
@@ -203,7 +149,8 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
             let u = Usage { input: row.usage.input as u64, output: row.usage.output as u64,
                 cache_read: row.usage.cache_read as u64, cache_creation: row.usage.cache_write as u64 };
             records.push(Rec { msg_id: Some(row.dedup_key()), date: row.date,
-                line_tokens: u.input + u.output + u.cache_read + u.cache_creation,
+                has_price: row.price_available == Some(true),
+                source: format!("pi:{}", row.provider), model: row.model,
                 cost: row.usage.cost.total, usage: u });
         }
     }
@@ -219,30 +166,28 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
                 continue;
             }
         }
-        let (u, cost, date, line_tokens) = (r.usage, r.cost, r.date, r.line_tokens);
+        let (u, cost, date) = (r.usage, r.cost, r.date);
         if date.as_str() >= year_cut.as_str() {
-            year.add(&u, cost);
+            year.add(&u, cost, r.has_price, &r.source, &r.model);
             if date.as_str() >= month_cut.as_str() {
-                month.add(&u, cost);
+                month.add(&u, cost, r.has_price, &r.source, &r.model);
                 if date.as_str() >= week_cut.as_str() {
-                    week.add(&u, cost);
+                    week.add(&u, cost, r.has_price, &r.source, &r.model);
                     if date == today_str {
-                        today.add(&u, cost);
+                        today.add(&u, cost, r.has_price, &r.source, &r.model);
                     }
                 }
             }
         }
         if trend_set.contains(&date) {
-            let e = by_day.entry(date).or_insert((0, 0.0));
-            e.0 += line_tokens;
-            e.1 += cost;
+            by_day.entry(date).or_default().add(&u, cost, r.has_price, &r.source, &r.model);
         }
     }
 
     // 逐行解析(从原地内联的循环原样搬出,判定顺序与取值一字未改)。
     // `year_cut`:一年窗口之外的行对四个桶和 14 天趋势都无贡献,直接在解析阶段丢掉,
     // 省下把它们搬进汇总阶段的内存与去重成本(旧实现是一路带到最后才被条件过滤掉)。
-    fn parse_lines<R: BufRead>(reader: R, year_cut: &str, out: &mut Vec<Rec>) {
+    fn parse_lines<R: BufRead>(reader: R, year_cut: &str, prices: &[prices::PriceRule], out: &mut Vec<Rec>) {
         for line in reader.lines() {
             let Ok(line) = line else { continue };
             if line.trim().is_empty() || !line.contains("\"usage\"") {
@@ -286,7 +231,7 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
                 continue;
             }
             let model = msg.get("model").and_then(|x| x.as_str()).unwrap_or("");
-            let cost = line_cost(&u, model);
+            let cost = line_cost(&u, model, prices);
 
             let date = v
                 .get("timestamp")
@@ -308,8 +253,10 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
                     .map(|s| format!("request:{date}:{s}")),
                 date,
                 usage: u,
-                cost,
-                line_tokens,
+                cost: cost.unwrap_or(0.0),
+                has_price: cost.is_some(),
+                source: "claude-history".into(),
+                model: model.into(),
             });
         }
     }
@@ -317,12 +264,14 @@ pub fn usage_summary() -> Result<UsageSummary, String> {
     let daily: Vec<DailyUsage> = trend_window
         .into_iter()
         .map(|(date, label)| {
-            let (total, cost) = by_day.get(&date).copied().unwrap_or((0, 0.0));
+            let bucket = by_day.remove(&date).unwrap_or_default();
             DailyUsage {
                 date,
                 label,
-                total,
-                cost,
+                total: bucket.total,
+                cost: bucket.cost,
+                unpriced_requests: bucket.unpriced_requests,
+                has_unknown_costs: bucket.has_unknown_costs,
             }
         })
         .collect();
@@ -347,3 +296,7 @@ fn empty_summary() -> UsageSummary {
         daily: Vec::new(),
     }
 }
+
+#[cfg(test)]
+#[path = "usage_tests.rs"]
+mod tests;
