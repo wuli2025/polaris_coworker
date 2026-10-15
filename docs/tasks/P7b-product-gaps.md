@@ -2,6 +2,12 @@
 
 来源：`docs/drills/P7a-blockers.md`"确认的产品接口限制"。
 
+## 0. 回归：agentd 生产打包失败（阻塞演练，最先修）
+- 现象：`node scripts/pack-agentd.mjs <out>` 在最后的契约自检步骤失败。根因：F1 让 `agentd/test/sdk-contract.test.ts` 引入了 `./synchronization.ts`，但 `scripts/pack-agentd.mjs:20` 只复制 `test/sdk-contract.test.ts`、`:46` 只复制编译后的 `sdk-contract.test.js`，辅助文件缺失导致导入失败。
+- 要求：打包时一并带上契约测试依赖的辅助模块（按导入关系收集，不要写死文件名列表），或让契约自检脚本自包含；自检通过后仍删除测试目录、不把测试文件留在产物里。
+- 加回归保护：`scripts/` 下增加针对打包脚本的测试（或把一次最小打包纳入 agentd 测试），确保以后测试辅助文件变化不会悄悄打坏打包。
+- 允许修改：`scripts/pack-agentd.mjs`、`scripts/runtime/`、`agentd/test/`。
+
 ## 1. 运行中对话的插话（steer）与追加（followUp）入口
 - 现状：agentd 协议与内核 Pi 后端都支持 steer/followUp，但服务端分发（`src-tauri/src/apihub/`、Tauri 命令）没有入口，前端无法在 AI 回答过程中插话或排队追加。
 - 要求：新增 `chat_steer(reqId|conversationId, text)` 与 `chat_follow_up(...)`（Tauri 与服务端 HTTP 两条路径），定义"会话/请求 → agentd session"绑定；运行中才接受，空闲时返回具名错误（或按 followUp 语义转为新一轮，二选一并写明）；与 busy/done 的竞态有明确行为；遵守现有权限（只能操作自己的会话）。
@@ -14,6 +20,6 @@
 - 测试：用测试 CA 签发的本地 HTTPS 服务，配置 CA 后可连、未配置时拒绝；不出现任何"跳过校验"路径。演练脚本 D4 改用该配置走真实 TLS。
 
 ## 规则
-- 允许修改：`src-tauri/src/apihub/`、`src-tauri/src/` 中命令注册、`src-tauri/crates/polaris-kernel/src/chat/`、`src-tauri/crates/polaris-collab/`、`src/components/chat/`（按上述净增限制）与新文件、`src/stores/chat.ts`（既有超长，净增 ≤10 行）、`drills/`、测试、`docs/`。
+- 允许修改：`scripts/pack-agentd.mjs`、`scripts/runtime/`、`agentd/test/`、`src-tauri/src/apihub/`、`src-tauri/src/` 中命令注册、`src-tauri/crates/polaris-kernel/src/chat/`、`src-tauri/crates/polaris-collab/`、`src/components/chat/`（按上述净增限制）与新文件、`src/stores/chat.ts`（既有超长，净增 ≤10 行）、`drills/`、测试、`docs/`。
 - 不新增依赖（若 ureq 现有特性无法注入 CA，先在结果中说明并给出不新增依赖的方案或理由）；≤500 行/≤500 字符；新 Rust 代码无 unwrap/expect；三种构建 0 警告。
 - 必须通过：三种 `cargo check --offline`；`cargo test -p polaris-kernel -p polaris-collab --features polaris-collab/collab-host,polaris-collab/collab-net --lib --tests --offline`；`npx vue-tsc --noEmit`；`npx vitest run`。不 commit。
