@@ -1,0 +1,84 @@
+## 审查结果
+
+**审查模式**：packet（无工具），仅依据内联且编号的显式材料。
+
+---
+
+### 结论：**PASS**
+
+所审范围内未发现阻塞问题。已逐项核实 brief 关注点及缺陷类型，无工具无法推断测试通过情况（未运行测试）。
+
+---
+
+### 范围与缺失材料
+
+| 项目 | 状态 |
+|---|---|
+| Brief | ✅ 内联（第 1–10 行） |
+| 源码 diff | ✅ 内联（第 1–1562 行） |
+| 路由/模块索引 | ✅ 覆盖（gateway、http、browser_routes、interconnect/browser、frontend） |
+| 测试 | ✅ 内联（`browser_tests.rs`、`connections/tests.rs`、`browserTransport.test.ts`） |
+| 配置 schema/defaults | ✅ 内联（schema.json、defaults.json、security.sql） |
+| `auth::random_token()` 实现 | ❌ 未提供，仅见调用处 |
+| `binding::issue()` 实现 | ❌ 未提供，仅见调用处 |
+| `interconnectBackendAvailable` 前端实现 | ❌ 未提供，仅见调用处 |
+
+---
+
+### 问题
+
+**无阻塞问题。** 以下均为推断风险，无工具验证。
+
+#### 1. `actorName` 无显式转义层，但 Vue 模板插值自动转义（推断风险）
+
+- **证据**：`risk.rs` 第 1090 行返回 `"actorName":r.get::<_,Option<String>>(7)?`，无 HTML 实体编码。
+- **测试**：`browserTransport.test.ts` 第 1285–1289 行验证 `<My laptop>` 渲染为 `&lt;My laptop&gt;`，依赖 Vue `{{ }}` 自动转义。
+- **可复现影响**：若 Vue 插值失效或改用 `v-html`，可导致 XSS。
+- **最小修复建议**：在 `risk.rs` 中入库前转义，或在 `ApprovalPanel.vue` 中对 `item.actor`（稳定 ID）改用 `v-text` 显式绑定。
+
+#### 2. 设备名称允许 `<>` 等特殊字符（推断风险）
+
+- **证据**：`browser/mod.rs` 第 818 行 `validate_label` 仅过滤控制字符，未禁止 `<>`、`"`、`'`。
+- **测试**：`browser_tests.rs` 第 357 行仅测 `My browser`，未覆盖特殊字符。
+- **可复现影响**：设备名称含 `>` 时前端显示为 `&gt;`（Vue 转义），但若后续改用属性绑定可能绕过。
+- **最小修复建议**：将 `validate_label` 改为白名单（仅允许字母/数字/汉字/常见符号），与前端渲染上下文隔离。
+
+#### 3. `auth::random_token()` 熵源未验证（推断风险）
+
+- **证据**：多处调用（`browser/mod.rs` 第 937 行生成 node ID、第 1001 行生成 nonce），但函数实现未提供。
+- **可复现影响**：若熵源可预测，攻击者可枚举会话设备、刷新"新设备"窗口。
+- **最小修复建议**：在 patch 范围内确认 `auth::random_token()` 使用 `rand::rngs::OsRng` 或等价加密随机源。
+
+#### 4. 无独立 CORS 配置（推断风险）
+
+- **证据**：`browser_routes.rs` 无 CORS 层；`browserTransport.ts` 第 1342 行 `credentials: 'omit'`；SSR 模式下同源请求无影响。
+- **可复现影响**：若未来允许独立前端域名接入，`/api/interconnect/*` 会缺 CORS 头。
+- **最小修复建议**：如属设计内（同源 SSR），可忽略；否则在 `router.rs` 中添加轴辐式 CORS。
+
+---
+
+### 建议验证步骤（推断风险 vs. 已有证据）
+
+| 风险 | 类别 | 验证建议 |
+|---|---|---|
+| `actorName` XSS | **已有证据**（依赖 Vue 自动转义） | 运行 `browserTransport.test.ts` 确认 Vue 版本未禁用自动转义；grep `v-html` 确认无绕过 |
+| `actor`（设备 ID）显示 | **已有证据**（Vue 插值） | 同上 |
+| 特殊字符设备名 | 推断风险 | 构造 `{ "deviceName": "<img src=x onerror=alert(1)>" }` 调用 `/api/interconnect/login`，检查 DB 存储值及前端渲染 |
+| `random_token` 熵源 | 推断风险 | 审查 `auth.rs` 中 `random_token` 实现；单元测试验证连续生成 1000 次无碰撞 |
+| CSRF | 推断风险 | 确认浏览器非同源场景（如独立域名部署）的 cookie 策略 |
+| 批量生成会话 | 推断风险 | 连续调用 `/api/interconnect/login` 超过速率限制后，验证新会话 `node_id` 前缀仍为 `web_`，未混入 `iroh` 节点 |
+| 重试幂等性 | **已有证据**（`failed_connect_retry_preserves_device_key_and_registration_time` 测试） | 确认测试覆盖 Connect 阶段失败后重试，而非仅覆盖 Discover 阶段 |
+| 状态查询隔离 | **已有证据**（第 288–293 行测试） | 无 token 返回 403；用 A 的 token 查 B 的状态未提供测试 |
+| 准入不泄露 LocalConsole | **已有证据**（第 440–444 行测试拒绝 `console:true`） | 确认 `mobile/` 代码无新增旁路（brief 承诺"未改 mobile/"） |
+
+---
+
+### 总结
+
+所审 patch 结构清晰，分层合理：
+- 会话设备前缀 `web_*` 与 iroh 节点隔离（`mesh.rs` 第 1166 行 `GLOB` 过滤）
+- 速率限制覆盖全部新路由（`rate_limits.rs` 第 464–475 行）
+- 准入约束通过 `Admission::ExistingOnly` 防止浏览器会话成为 LocalConsole（`browser/mod.rs` 第 934–935 行）
+- 错误信息统一为 `interconnect_login_failed`，不区分账号是否存在（`browser_tests.rs` 第 333–347 行）
+
+未运行测试，测试通过声明不被本次审查采信。
