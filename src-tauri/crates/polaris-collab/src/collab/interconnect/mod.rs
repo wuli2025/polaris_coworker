@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 pub mod hardening;
+pub mod http_client;
 pub mod gate;
 pub mod notifications;
 pub mod risk;
@@ -35,6 +36,8 @@ pub struct Config {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Authority {
     pub url: Option<String>,
+    #[serde(default)]
+    pub extra_ca_pem: Option<String>,
     pub public_key_fingerprints: Vec<String>,
 }
 
@@ -140,6 +143,9 @@ pub fn resolve(
         ("globalMultiplier", config.rate_limit.global_multiplier, 10000),
     ] {
         if value == 0 || value > max { return Err(format!("rateLimit.{name} 须为 1..={max} 的整数")); }
+    }
+    if config.authority.extra_ca_pem.as_ref().is_some_and(|v| v.trim().is_empty()) {
+        return Err("InterconnectCaInvalid: authority.extraCaPem must be a PEM certificate or file path".into());
     }
     config.browser.validate()?;
     config.ingress.validate()?;

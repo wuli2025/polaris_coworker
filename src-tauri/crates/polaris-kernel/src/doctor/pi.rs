@@ -68,6 +68,7 @@ pub fn ping(config: &Agentd) -> Result<Ping, String> {
         let mut cmd = tokio::process::Command::new(&config.node);
         cmd.args(&config.node_args).arg(&config.entry).args(&config.args)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        config.network.configure(cmd.as_std_mut()).map_err(|_| "AgentNetworkConfigInvalid")?;
         #[cfg(windows)]
         super::pi_shell::configure(cmd.as_std_mut(), config)?;
         crate::runtime::procs::no_window(cmd.as_std_mut());
@@ -157,7 +158,11 @@ fn finish_report(node: ToolStatus, mut runtime: AgentRuntimeReport, shell: Optio
 }
 pub fn verify() -> VerifyReport {
     let (report, shell) = report_with_shell();
-    verify_report(report, shell.as_ref())
+    let mut verified = verify_report(report, shell.as_ref());
+    let step = network::check();
+    if step.status != "ok" { verified.ok = false; }
+    verified.steps.push(step);
+    verified
 }
 fn verify_report(report: EnvReport, shell: Option<&ResolvedShell>) -> VerifyReport {
     let r = &report.agent_runtime;
@@ -180,3 +185,6 @@ fn shell_detail(shell: Option<&ResolvedShell>) -> String {
 #[cfg(test)]
 #[path = "pi_tests.rs"]
 mod tests;
+
+#[path = "pi_network.rs"]
+mod network;

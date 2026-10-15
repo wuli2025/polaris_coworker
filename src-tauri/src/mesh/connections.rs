@@ -3,7 +3,7 @@ use super::*;
 
 #[cfg(feature = "collab-net")]
 fn login_peer(port: u16, assertion: &str) -> Result<String, String> {
-    let resp = agent()
+    let resp = agent()?
         .post(&format!(
             "http://127.0.0.1:{port}/api/collab/login_assertion"
         ))
@@ -22,7 +22,7 @@ fn login_peer(port: u16, assertion: &str) -> Result<String, String> {
 /// 不能证明 tunnel 仍 connected、session 没被撤销；用轻量 `/api/collab/me` 才是事实。
 #[cfg(feature = "collab-net")]
 fn probe_peer_session(port: u16, token: &str) -> Result<(), String> {
-    agent()
+    agent()?
         .get(&format!("http://127.0.0.1:{port}/api/collab/me"))
         .set("Authorization", &format!("Bearer {token}"))
         .call()
@@ -311,7 +311,7 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
     let me = my_node_id();
     let my_name_s = my_name();
     let got = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let challenge_resp = agent()
+        let challenge_resp = agent()?
             .post(&format!(
                 "http://127.0.0.1:{port}/api/collab/connect/challenge"
             ))
@@ -326,7 +326,7 @@ pub async fn connect_by_code(code: String) -> Result<Value, String> {
             .ok_or("对方没返回连接挑战 —— 请先升级对方的 Polaris")?;
         let signature = crate::collab::identity::sign_connect_proof(&me, &access, challenge)?;
 
-        let resp = agent()
+        let resp = agent()?
             .post(&format!("http://127.0.0.1:{port}/api/collab/connect"))
             .send_json(json!({
                 "code": access,

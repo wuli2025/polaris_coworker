@@ -14,7 +14,7 @@ pub async fn account_send_code(
     let url = validate_authority_url(&authority_of(url)?, allowInsecureHttp.unwrap_or(false))?;
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         crate::collab::authority::pin_explicit(&url)?;
-        agent()
+        agent()?
             .post(&format!("{url}/api/account/send_code"))
             .send_json(json!({ "email": email.trim() }))
             .map_err(cloud_err)?;
@@ -63,7 +63,7 @@ pub async fn account_login_code(
         move || -> Result<Value, String> {
             crate::collab::authority::pin_explicit(&url)?;
             // ① 验证码 → 身份断言(账号不存在则当场建号,由账号中心决定)。
-            let resp = agent()
+            let resp = agent()?
                 .post(&format!("{url}/api/account/login_code"))
                 .send_json(json!({ "email": email.trim(), "code": code.trim() }))
                 .map_err(cloud_err)?;
@@ -132,7 +132,7 @@ pub(super) fn enroll_with_assertion(
     };
 
     // ④ 本地两道前置闸均通过后，才去云端换长期设备密钥。
-    let resp = agent()
+    let resp = agent()?
         .post(&format!("{url}/api/mesh/enroll"))
         .send_json(json!({
             "assertion": assertion,
@@ -245,7 +245,7 @@ pub async fn account_login_password(
     let endpoint = url.clone();
     let assertion = tokio::task::spawn_blocking(move || -> Result<String, String> {
         crate::collab::authority::pin_explicit(&endpoint)?;
-        let response: Value = agent().post(&format!("{endpoint}/api/account/login"))
+        let response: Value = agent()?.post(&format!("{endpoint}/api/account/login"))
             .send_json(json!({"username": username, "password": password}))
             .map_err(cloud_err)?.into_json().map_err(|e| format!("账号中心 JSON 无效: {e}"))?;
         crate::collab::interconnect::apply_received_relays(&response)?;

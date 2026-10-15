@@ -62,6 +62,7 @@ export const RequestSchema = Type.Union([
   request("steer", { sessionId: text, text }),
   request("followUp", { sessionId: text, text }),
   request("abort", { sessionId: text }), request("close", { sessionId: text }),
+  request("config.validate", { config: ConfigPatchSchema }),
   Type.Object({ id, method: Type.Literal("config.apply"), params: Type.Object({
     config: Type.Optional(ConfigPatchSchema), credentials: Type.Optional(CredentialsSchema),
   }, { additionalProperties: false }) }, { additionalProperties: false }),

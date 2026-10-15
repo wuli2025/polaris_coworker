@@ -61,6 +61,19 @@ impl AgentBackend for PiBackend {
     fn auth(&self, operation: &str, provider: &str, input: Option<String>) -> anyhow::Result<Value> {
         self.client()?.call(Command::Auth(protocol::Auth { operation: operation.into(), provider: provider.into(), input }))
     }
+    fn provider_validate(&self, view: &crate::provider::ProviderView) -> anyhow::Result<()> {
+        let client = self.client()?;
+        let catalog = protocol::Catalog::parse(client.call(Command::Catalog(Empty {}))?)?;
+        let defaults = crate::provider::pi_config::load().map_err(anyhow::Error::msg)?;
+        let catalog = serde_json::to_value(catalog)?;
+        crate::provider::pi_translate::cache_catalog(&catalog);
+        let models = catalog["models"].as_array().ok_or_else(|| anyhow::anyhow!("AgentdInvalidModels"))?;
+        let provider = crate::provider::pi_translate::translate(view, models, &defaults).map_err(anyhow::Error::msg)?;
+        let config = serde_json::json!({"defaultModel":{"provider":provider["id"],"id":provider["models"][0]["id"]},
+            "providers":[provider]});
+        client.call(Command::Validate(protocol::Apply { config: Some(config), credentials: None }))?;
+        Ok(())
+    }
     fn provider_apply(&self, id: &str) -> anyhow::Result<Value> {
         let (generation, selected) = crate::provider::selection::snapshot();
         if selected != id { return Ok(serde_json::json!({"applied":false,"superseded":true})); }
@@ -74,10 +87,15 @@ impl AgentBackend for PiBackend {
         let catalog = client.call(Command::Catalog(Empty {}));
         if !current() { return Ok(superseded()); }
         let catalog = protocol::Catalog::parse(catalog?)?;
-        let config = crate::provider::pi_translate::config(id, &serde_json::to_value(catalog)?).map_err(anyhow::Error::msg)?;
+        let catalog = serde_json::to_value(catalog)?;
+        crate::provider::pi_translate::cache_catalog(&catalog);
+        let config = crate::provider::pi_translate::config(id, &catalog).map_err(anyhow::Error::msg)?;
         let pid = client.status.lock().pid;
         if !current() { return Ok(superseded()); }
         if last.as_ref() == Some(&(pid, config.clone())) { return Ok(serde_json::json!({"applied":true})); }
+        let validation = client.call(Command::Validate(protocol::Apply { config: Some(config.clone()), credentials: None }));
+        if !current() { return Ok(superseded()); }
+        validation?;
         let result = self.apply_config(Some(config.clone()), None);
         if !current() { *last = None; return Ok(superseded()); }
         let result = result?;

@@ -26,6 +26,7 @@ pub enum Command {
     #[serde(rename = "abort")] Abort(Session),
     #[serde(rename = "close")] Close(Session),
     #[serde(rename = "config.apply")] Apply(Apply),
+    #[serde(rename = "config.validate")] Validate(Apply),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -112,6 +113,15 @@ pub struct Apply {
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct WireError { pub code: String, pub message: String, pub paths: Option<Vec<String>> }
+impl std::fmt::Display for WireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)?;
+        if let Some(paths) = &self.paths {
+            if !paths.is_empty() { write!(f, " [paths: {}]", paths.join(", "))?; }
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum Frame {

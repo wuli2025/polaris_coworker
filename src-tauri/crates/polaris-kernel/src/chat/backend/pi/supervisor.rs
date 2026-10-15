@@ -69,7 +69,7 @@ impl State {
                 let id = id.ok_or_else(|| anyhow::anyhow!("AgentdProtocolError: uncorrelated response"))?;
                 if let Some(pending) = self.pending.remove(&id) {
                     let result = if ok { Ok(result.unwrap_or(Value::Null)) }
-                        else { Err(error.map(|e| format!("{}: {}", e.code, e.message)).unwrap_or_else(|| "AgentdResponseError".into())) };
+                        else { Err(error.map(|e| e.to_string()).unwrap_or_else(|| "AgentdResponseError".into())) };
                     if self.expert_response(&id, &result) { return Ok(()); }
                     if pending.ping {
                         let checked = result.and_then(|v| super::protocol::check_ping(v.clone())

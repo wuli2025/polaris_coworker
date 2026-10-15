@@ -69,7 +69,7 @@ pub async fn mesh_rename(nodeId: String, name: String) -> Result<Value, String> 
         return Err("本机还没登录".into());
     };
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        agent()
+        agent()?
             .post(&format!("{}/api/mesh/rename", c.url))
             .set("Authorization", &format!("Bearer {}", c.key))
             .send_json(json!({ "nodeId": nodeId, "name": name }))
@@ -107,7 +107,7 @@ pub async fn mesh_kick(nodeId: String) -> Result<Value, String> {
     };
     let nid = nodeId.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        agent()
+        agent()?
             .post(&format!("{}/api/mesh/revoke", c.url))
             .set("Authorization", &format!("Bearer {}", c.key))
             .send_json(json!({ "nodeId": nid }))

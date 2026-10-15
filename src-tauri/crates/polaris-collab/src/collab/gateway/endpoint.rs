@@ -19,12 +19,15 @@ pub(super) async fn ensure_endpoint() -> Result<std::sync::Arc<crate::collab::tu
             IdleTimeout::try_from(IDLE_TIMEOUT).map_err(|e| format!("网关 idle timeout 无效: {e}"))?,
         ))
         .build();
-    let ep = Endpoint::builder(presets::N0)
+    let mut builder = Endpoint::builder(presets::N0)
         .relay_mode(crate::collab::tunnel::relay::mode(&relay_config)?)
         .secret_key(SecretKey::from_bytes(&seed))
         .transport_config(transport)
-        .alpns(vec![ALPN.to_vec()])
-        .bind()
+        .alpns(vec![ALPN.to_vec()]);
+    if let Some(tls) = crate::collab::interconnect::http_client::relay_tls_config()? {
+        builder = builder.ca_tls_config(tls);
+    }
+    let ep = builder.bind()
         .await
         .map_err(|e| format!("网关 iroh endpoint 绑定失败: {e}"))?;
     let ep = crate::collab::tunnel::relay::track(ep, relay_config, "gateway");

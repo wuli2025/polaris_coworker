@@ -83,7 +83,7 @@ export async function topology(h) {
     }, { timeoutMs: h.timeout, label: 'authority public key' });
     h.fingerprint = createHash('sha256').update(Buffer.from(publicKey.publicKey, 'base64url')).digest('hex');
     check(publicKey.fingerprint === h.fingerprint, 'Authority fingerprint does not match its public key');
-    await save(join(h.root, 'member.json'), { ...baseConfig, authority: { url: 'https://authority.drill', publicKeyFingerprints: [h.fingerprint] } });
+    await save(join(h.root, 'member.json'), { ...baseConfig, authority: { url: 'https://authority.drill', publicKeyFingerprints: [h.fingerprint], extraCaPem: '/tmp/drill-ca.crt' } });
     await compose(h, 'members-start', ['up', '-d', 'member-a', 'member-b', 'new-device']);
     for (const name of Object.keys(h.data)) await waitFor(async () => {
       try { return (await request(`http://127.0.0.1:${h.ports[name]}`, '/api/ready')).status === 200; } catch { return false; }
@@ -106,5 +106,5 @@ export async function login(h, name = 'Old device', service = 'authority') {
   return r.value;
 }
 export function delegatedBlocked() {
-  throw new Blocked('Delegated self-CA chain blocked: ureq default TLS has no test CA injection in authority/trust.rs or interconnect/browser/authority.rs. Also requires explicit member admission and real host enrollment, not web_ session identities. See docs/drills/P7a-blockers.md');
+  throw new Blocked('This step still requires explicit member admission and real host enrollment, not web_ session identities. CA trust is exercised separately by the tls step. See docs/drills/P7a-blockers.md');
 }

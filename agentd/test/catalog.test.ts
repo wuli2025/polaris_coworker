@@ -5,7 +5,7 @@ import { Value } from "typebox/value";
 import { CatalogSchema } from "../src/protocol/schema.ts";
 import { harness, result } from "./helpers.ts";
 
-test("apply rebuilds builtin catalog with updated native provider configuration", async () => {
+test("apply updates the runtime but keeps the SDK catalog independent of overrides", async () => {
   const h = await harness();
   try {
     const builtin = h.daemon.models.builtinCatalog.find((m) => m.provider === "anthropic");
@@ -15,8 +15,10 @@ test("apply rebuilds builtin catalog with updated native provider configuration"
     result(await h.request("config.apply", { config: { providers: [{ id: provider, api, baseUrl, models: [configModel] }] } }));
     const catalog = result<{ models: typeof model[] }>(await h.request("models.catalog"));
     assert.ok(Value.Check(CatalogSchema, catalog));
-    assert.equal(catalog.models.find((m) => m.provider === provider)?.name, "Updated built-in");
-    assert.equal(catalog.models.find((m) => m.provider === provider)?.contextWindow, 64000);
+    assert.deepEqual(catalog.models.find((m) => m.provider === provider && m.id === model.id), builtin);
+    const active = result<{ models: typeof model[] }>(await h.request("models.list"));
+    assert.equal(active.models.find((m) => m.provider === provider && m.id === model.id)?.name, "Updated built-in");
+    assert.equal(active.models.find((m) => m.provider === provider && m.id === model.id)?.contextWindow, 64000);
   } finally { await h.close(); }
 });
 test("shared catalog sample validates and incomplete/invalid metadata is rejected", async () => {

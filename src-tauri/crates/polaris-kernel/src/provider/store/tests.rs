@@ -1,4 +1,9 @@
 use super::*;
+// These tests cover the retained Claude CLI store/routing contract. Pi save
+// validation is exercised through public commands in tests/native_provider.rs.
+fn legacy_save(input: ProviderInput) -> Result<String, String> {
+    super::commands::save(input, false)
+}
 #[cfg(test)]
 mod volc_ark_tests {
     use super::*;
@@ -64,7 +69,7 @@ mod key_mask_tests {
     use super::*;
 
     fn save(id: &str, token_field: Option<&str>, cfg: Value) {
-        provider_save(ProviderInput {
+        legacy_save(ProviderInput {
             id: Some(id.to_string()),
             name: format!("掩码测试 {id}"),
             note: String::new(),
@@ -229,7 +234,7 @@ mod local_route_tests {
     use super::*;
 
     fn save_openai(id: &str, cfg: Value) {
-        provider_save(ProviderInput {
+        legacy_save(ProviderInput {
             id: Some(id.to_string()),
             name: format!("测试 {id}"),
             note: String::new(),
@@ -303,7 +308,7 @@ mod local_route_tests {
         assert!(route_target("t-openai-nokey").is_err());
 
         // Anthropic 兼容供应商 → 透传目标(路由总开关下会被指到 /p/{id}, 目标始终可解析)
-        provider_save(ProviderInput {
+        legacy_save(ProviderInput {
             id: Some("t-anthropic-direct".into()),
             name: "直连".into(),
             note: String::new(),
@@ -329,7 +334,7 @@ mod local_route_tests {
     /// ②开关开 → cfg 改指 /p/{id}、真 key 摘出换占位、模型钉选保留; ③开关关 → 原配置直连。
     #[test]
     fn route_all_switch_reroutes_anthropic_provider() {
-        provider_save(ProviderInput {
+        legacy_save(ProviderInput {
             id: Some("t-anthropic-routed".into()),
             name: "透传测试".into(),
             note: String::new(),

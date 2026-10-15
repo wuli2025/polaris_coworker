@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Value } from "typebox/value";
 import { ConfigSchema, ConfigPatchSchema, type Config } from "./schema.ts";
 import { validateConfig } from "./validate.ts";
+import { validateNetwork } from "../network.ts";
 import { DaemonError } from "../protocol/errors.ts";
 
 export function mergeConfig(base: Config, patch: unknown): Config {
@@ -20,6 +21,7 @@ export function mergeConfig(base: Config, patch: unknown): Config {
   if (new Set(result.providers.map((p) => p.id)).size !== result.providers.length) {
     throw new DaemonError("INVALID_CONFIG", "提供商标识重复。", ["/providers"]);
   }
+  validateNetwork(result.network);
   const dir = result.sessionDir;
   result.sessionDir = resolve(dir.startsWith("~/") ? resolve(homedir(), dir.slice(2)) : dir);
   return result;
@@ -34,7 +36,12 @@ export function loadConfig(path?: string, env: NodeJS.ProcessEnv = process.env):
     const base: unknown = JSON.parse(readFileSync(defaults, "utf8"));
     validateConfig(ConfigSchema, base);
     if (!Value.Check(ConfigSchema, base)) throw new Error("Unreachable invalid defaults");
-    const config = mergeConfig(base, path ? JSON.parse(readFileSync(path, "utf8")) : {});
+    let config = mergeConfig(base, path ? JSON.parse(readFileSync(path, "utf8")) : {});
+    // Host configuration is delivered before SDK initialization (including doctor).
+    if (env.POLARIS_AGENTD_NETWORK) {
+      const host = mergeConfig(config, { network: JSON.parse(env.POLARIS_AGENTD_NETWORK) });
+      config = mergeConfig(config, { network: { ...config.network, ...host.network } });
+    }
     // The host supplies the bundled shell as a default; explicit JSON wins.
     return mergeConfig(config, { shellPath: config.shellPath || env.POLARIS_AGENTD_SHELL_PATH || null });
   } catch (error) {

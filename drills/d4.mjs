@@ -9,6 +9,14 @@ async function pair(h) {
 }
 const steps = {
   topology,
+  async tls(h) {
+    // The member must fetch/pin the authority key and forward over verified TLS.
+    // Unlike curl probes, this executes the production ureq construction.
+    const response = await accountCall(h, '/api/collab/email/send_code',
+      { email: 'tls-probe@example.invalid', purpose: 'login' }, undefined, 'member-a');
+    check(response.status === 200, `Delegated TLS forwarding failed: ${JSON.stringify(response.value)}`);
+    return { trust: 'authority.extraCaPem', transport: 'production ureq over private-CA HTTPS', forwarded: true };
+  },
   async login() { delegatedBlocked(); },
   async relay() { delegatedBlocked(); },
   async access() { delegatedBlocked(); },

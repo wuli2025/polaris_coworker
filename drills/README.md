@@ -103,11 +103,12 @@ auto-current 的越界写语义是“要求批准”，不是无条件硬拒；�
 | step | 预期结果与限制 |
 | --- | --- |
 | `topology` | 5 个目标角色和 TLS 入口启动，HTTP ready，显式 CA 的 curl 访问 authority 和 relay；从公钥重算 SHA-256 指纹 |
-| `login` / `relay` / `access` | blocked：成员 ureq 自签 CA 信任入口尚未找到；脚本未实现成员本机准入/真实主机入网和跨主机数据面 |
+| `tls` | 成员配置 `authority.extraCaPem=/tmp/drill-ca.crt`，经生产 ureq 获取权威公钥并转发请求；必须收到 HTTP 200，不能用 curl 替代 |
+| `login` / `relay` / `access` | blocked：脚本未实现成员本机准入/真实主机入网和跨主机数据面；TLS 单独由 `tls` 验证 |
 | `notifications` | **权威本机 HTTP 会话设备**：旧会话收到新设备通知 |
 | `approvals` | 同上：新会话高风险操作返回 approval_pending，自批失败，旧会话批准后操作成功 |
 | `revoke` | 同上：一键吊销，新会话在配置拉取周期预算内被拒；不是远端传播证明 |
-| `offline` / `revocations` | blocked：委托 TLS 链未建立，未实现离线保持会话及清单篡改/回滚投递演练 |
+| `offline` / `revocations` | blocked：未实现离线保持会话及清单篡改/回滚投递演练 |
 | `r11` | 真实 HTTP 对注册/未注册邮箱比较状态与 JSON；collab signup/reset/login 及 account send_code；两边同时错误不能算 pass |
 | `rate` | 真正重复匿名登录请求，必须获得 429，预算来自 runtime.json |
 | `backup` | 停本次 authority，复用部署 snapshot.py，用真实 age 加密/解密；校验 tar/SQLite/key 后覆盖恢复，重启校验完整指纹和原账号登录 |

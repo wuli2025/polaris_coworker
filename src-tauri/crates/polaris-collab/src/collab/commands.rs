@@ -180,11 +180,12 @@ pub fn collab_gateway_attach(
         let name = hostName
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "桌面主机".into());
-        let resp = ureq::post(&format!("{base}/api/gw/register"))
+        let resp = super::interconnect::http_client::agent(ureq::AgentBuilder::new())?
+            .post(&format!("{base}/api/gw/register"))
             .set("Authorization", &format!("Bearer {}", token.trim()))
             .timeout(std::time::Duration::from_secs(30))
             .send_json(serde_json::json!({"hostNodeId": host_nid, "hostName": name}))
-            .map_err(|e| format!("注册到云机失败: {e}"))?;
+            .map_err(|e| format!("注册到云机失败: {}", super::interconnect::http_client::diagnostic(&e)))?;
         let v: serde_json::Value = resp
             .into_json()
             .map_err(|e| format!("解析注册响应失败: {e}"))?;

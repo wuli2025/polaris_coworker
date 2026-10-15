@@ -63,10 +63,10 @@ fn fetch_public_key(url: &str) -> Result<String, String> {
     }
     super::super::interconnect::validate_url(url)?;
     let ep = format!("{}/api/account/pubkey", url.trim_end_matches('/'));
-    let resp = ureq::get(&ep)
+    let resp = super::super::interconnect::http_client::agent(ureq::AgentBuilder::new())?.get(&ep)
         .timeout(std::time::Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
         .call()
-        .map_err(|e| format!("连不上账号权威 {url}: {e}"))?;
+        .map_err(|e| format!("连不上账号权威 {url}: {}", super::super::interconnect::http_client::diagnostic(&e)))?;
     let v: serde_json::Value = resp
         .into_json()
         .map_err(|e| format!("账号权威返回的不是 JSON: {e}"))?;

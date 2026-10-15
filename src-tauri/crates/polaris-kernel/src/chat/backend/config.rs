@@ -2,6 +2,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use super::BackendError;
+#[path = "config_network.rs"]
+mod network;
+pub use network::Network;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind { Pi, ClaudeCli }
@@ -30,6 +33,7 @@ impl Default for Agent { fn default() -> Self { Self { backend: "pi".into() } } 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Agentd {
+    pub network: Network,
     pub node: PathBuf,
     pub entry: PathBuf,
     pub node_args: Vec<String>,
@@ -68,6 +72,7 @@ pub struct Agentd {
 impl Default for Agentd {
     fn default() -> Self {
         Self {
+            network: Network::default(),
             node: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).0,
             entry: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).1, node_args: vec![], args: vec![],
             isolation: if cfg!(feature = "desktop") { "shared" } else { "per-account" }.into(),
@@ -128,6 +133,7 @@ impl Config {
         BackendKind::parse(&self.agent.backend)?;
         let c = &self.agentd;
         c.attachments.validate()?;
+        c.network.validate()?;
         anyhow::ensure!(c.expert_settings.is_absolute() && c.expert_settings.file_name().is_some(),
             "InvalidAgentConfig: expertSettings must be an absolute file path");
         anyhow::ensure!(!c.sandbox_container.is_empty() && !c.sandbox_container.starts_with('-')

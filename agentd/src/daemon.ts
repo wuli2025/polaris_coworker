@@ -14,6 +14,7 @@ import { versions } from "./protocol/version.ts";
 import { validateAttachments } from "./sessions/attachments.ts";
 import { SessionRegistry } from "./sessions/registry.ts";
 
+import { configureNetwork } from "./network.ts";
 import { Logins } from "./models/logins.ts";
 
 export class Daemon {
@@ -45,6 +46,7 @@ export class Daemon {
       credentials?: CredentialStore; redactor?: Redactor; factories?: ExtensionFactory[];
     } = {}): Promise<Daemon> {
     const redactor = options.redactor ?? new Redactor();
+    configureNetwork(config.network, redactor);
     const models = await Models.create(config, options.credentials ?? memoryCredentials(), redactor);
     let daemon: Daemon;
     const logger = new Logger(() => daemon?.config.logLevel ?? config.logLevel, redactor, log);
@@ -57,7 +59,7 @@ export class Daemon {
       ? raw.id as string | number : null;
     let sessionId: string | undefined;
     try {
-      if (raw.method === "config.apply" && raw.params && typeof raw.params === "object" && "config" in raw.params) {
+      if (["config.apply", "config.validate"].includes(String(raw.method)) && raw.params && typeof raw.params === "object" && "config" in raw.params) {
         validateConfig(ConfigPatchSchema, raw.params.config);
       }
       if (raw.method === "prompt" && raw.params && typeof raw.params === "object" && "attachments" in raw.params) {
@@ -110,9 +112,14 @@ export class Daemon {
       case "close":
         await this.sessions.close(request.params.sessionId);
         return { closed: true };
+      case "config.validate": {
+        await this.models.validate(mergeConfig(this.config, request.params.config));
+        return { valid: true };
+      }
       case "config.apply": {
         const config = mergeConfig(this.config, request.params.config ?? {});
         await this.models.apply(config, request.params.credentials);
+        configureNetwork(config.network, this.models.redactor);
         const defaultChanged = JSON.stringify(this.config.defaultModel) !== JSON.stringify(config.defaultModel);
         this.config = config;
         await this.sessions.refreshConfig(defaultChanged);

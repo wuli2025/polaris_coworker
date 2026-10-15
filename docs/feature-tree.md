@@ -482,3 +482,18 @@ Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列�
 - 迁移：运行期 owner/reqId/conversationId → agentd session 绑定，不改数据库；空闲拒绝，不自动新建轮次。前端既有长文件净增分别 4/1 行。
 - 验证：最小生产打包及新回归通过；三构建、Rust/前端实跑与失败项见 [P7b 验证](pi-migration/p7b-validation.md)，真实 D1 未跑。
 - 未完成：私有 CA 追加需要访问 ureq 私有默认根或新增直接依赖；本次未新增依赖/替换默认根/禁用校验，D4 TLS 仍 BLOCKED。由 Claude/Pi 决定验收。
+
+## P7b-2 订阅提供商与私有 CA（执行状态见报告）
+
+| 入口 / 依赖 | 行为、配置与验证 |
+| --- | --- |
+| `K/provider/store/commands.rs` → `K/chat/backend/pi/mod.rs` → agentd `config.validate` | P7b-3 起保存仅复用本地翻译和已缓存目录，完整 SDK 校验在切换时执行；`WireError.paths` 保留到 HTTP/Tauri 字符串错误。原生提供商省略端点/API，继承 SDK OAuth；模型默认参数仍由 `pi-default.json` / `POLARIS_PROVIDER_CONFIG` 控制。 |
+| `agentd/src/models/runtime.ts`、`config/schema.ts` | 原生目录与运行时覆盖分离；价格 tiers/未知价格兼容 SDK；目录外模型默认值不代表已验证的上游能力，P5d `priceAvailable=false` 保留。 |
+| `C/collab/interconnect/http_client.rs` → ureq/rustls、iroh | `authority.extraCaPem` 默认 null，接受 PEM 内容或路径；追加默认根，保留证书和主机名验证。新增直接依赖仅锁定已有 `webpki-roots=0.26.11`。 |
+| `C/collab/authority/`、`interconnect/`、`tunnel/endpoint.rs`、`gateway/endpoint.rs` | 权威 HTTP 与 relay TLS 复用 CA 输入；原超长 authority 文件按成员规则与测试拆分。旧配置无需迁移；CA 改动后的已存活 iroh endpoint 需重建/重启。 |
+| 验证 / 未完成 | 真实 Rust→agentd 保存切换、HTTP 错误透传、内存 TLS 握手测试；D4 新增 `tls`。mesh 客户端缺口由 P7b-3 接续修复；HTTPS 验证仍受沙箱限制；完整命令与真实结果见 [P7b-2 执行报告](tasks/P7b2-execution-report.md)。 |
+
+## P7b-3 代理、离线保存与 mesh CA（BLOCKED：真实网络测试受限）
+- 入口：agentd `network.ts` 在 SDK 初始化前安装 undici 8.10.2 分发器；宿主 `chat/backend/config_network.rs` 下发设置；doctor `pi_network.rs` 增加模型网络 HEAD 探测。保存使用 `pi_translate::validate_local`，切换执行 `config.validate`；mesh `transport.rs` / `security.rs` 复用统一 CA。
+- 配置：宿主 `agentd.network.proxy` → agentd `network.proxy`，显式值优先于 HTTP_PROXY/HTTPS_PROXY，NO_PROXY 仍生效；默认代理为空、idleTimeoutMs=300000、probeTimeoutMs=5000。Windows 系统代理/PAC 不会自动读取，需填写代理软件的 HTTP 监听地址或启动前设置环境变量。
+- 迁移与验证：无数据迁移，宿主配置修改后重启；锁文件无新增包。配置/切换示例、文件清单、实际命令、失败与未运行项见 [P7b-3 执行报告](tasks/P7b3-execution-report.md)，由 Claude 重跑验收。

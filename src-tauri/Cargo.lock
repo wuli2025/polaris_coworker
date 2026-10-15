@@ -5913,6 +5913,7 @@ dependencies = [
  "tower-http",
  "ureq 2.12.1",
  "walkdir",
+ "webpki-roots 0.26.11",
  "zstd",
 ]
 

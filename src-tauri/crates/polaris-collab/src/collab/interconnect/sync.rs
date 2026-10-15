@@ -7,9 +7,9 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub fn poll_account(url: &str, uid: &str, timeout: Duration) -> Result<(), String> {
     poll_account_with(uid, || {
-        ureq::AgentBuilder::new().timeout(timeout).build()
+        super::http_client::agent(ureq::AgentBuilder::new().timeout(timeout))?
             .get(&format!("{url}/api/mesh/revocations")).query("uid", uid)
-            .call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())
+            .call().map_err(|e| super::http_client::diagnostic(&e))?.into_json().map_err(|e| e.to_string())
     })
 }
 

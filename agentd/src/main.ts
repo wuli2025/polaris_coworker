@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 import { format } from "node:util";
 import { loadConfig } from "./config/load.ts";
-import { Daemon } from "./daemon.ts";
+import { configureNetwork, probeNetwork } from "./network.ts";
 import { Logger } from "./log.ts";
-import { FileCredentials } from "./models/file-credentials.ts";
-import { Redactor } from "./models/credentials.ts";
+import { Redactor } from "./models/redactor.ts";
 import { publicError } from "./protocol/errors.ts";
 import { JsonlReader, JsonlWriter } from "./protocol/jsonl.ts";
 
@@ -24,10 +23,27 @@ for (const method of ["log", "info", "warn", "error", "debug"] as const) {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (args[0] === "--probe-network" && (!args[1] || args[1].startsWith("--"))) throw new Error("Expected probe target");
+  const probe = args[0] === "--probe-network" ? args.splice(0, 2)[1] : undefined;
   if (args.length && (args.length !== 2 || args[0] !== "--config")) {
     throw new Error("Expected --config <path>");
   }
   const config = loadConfig(args[1] ?? process.env.POLARIS_AGENTD_CONFIG);
+  configureNetwork(config.network, redactor);
+  if (probe !== undefined) {
+    let target = probe;
+    if (!/^https?:/.test(target)) {
+      const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+      const { memoryCredentials } = await import("./models/credentials.ts");
+      const runtime = await ModelRuntime.create({ credentials: memoryCredentials(), modelsPath: null, allowModelNetwork: false });
+      target = runtime.getModels().find((model) => model.provider === target)?.baseUrl ?? "";
+    }
+    output.send(await probeNetwork(target, config.network));
+    await output.flush();
+    return;
+  }
+  const { Daemon } = await import("./daemon.ts");
+  const { FileCredentials } = await import("./models/file-credentials.ts");
   if (process.env.POLARIS_USAGE_DIR) config.usageDir = process.env.POLARIS_USAGE_DIR;
   const path = process.env.POLARIS_PROVIDER_STORE;
   const credentials = path ? new FileCredentials(path, redactor, {

@@ -27,7 +27,7 @@ pub fn require_proven(
     { return Ok(()); }
     let (url, key, _) = authority::pinned().ok_or("需要联网确认：尚未信任权威")?;
     let mesh_key = db::meta_get("mesh_key").ok_or("需要联网确认：本机尚未入网")?;
-    let response = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build()
+    let response = super::http_client::agent(ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)))?
         .post(&format!("{url}/api/mesh/risk/authorize"))
         .set("Authorization", &format!("Bearer {mesh_key}"))
         .send_json(json!({"actorNodeId":actor_node, "operation":operation, "digest":digest, "nonce":nonce, "actorAssertion":assertion}));
@@ -37,7 +37,7 @@ pub fn require_proven(
             let value: Value = response.into_json().map_err(|e| e.to_string())?;
             return Err(value["error"].as_str().map_or_else(|| "需要联网确认".into(), String::from));
         }
-        Err(error) => return Err(format!("需要联网确认：{error}")),
+        Err(error) => return Err(format!("需要联网确认：{}", super::http_client::diagnostic(&error))),
     };
     let document = response["permit"].as_str().ok_or("需要联网确认：权威未返回签名批准")?;
     let config = super::load()?;

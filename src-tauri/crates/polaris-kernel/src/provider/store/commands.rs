@@ -96,12 +96,20 @@ pub fn provider_set_route_mode(route: bool) -> Result<bool, String> {
 
 #[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn provider_save(input: ProviderInput) -> Result<String, String> {
+    save(input, pi_translate::is_pi())
+}
+
+// The legacy adapter preserves its historical endpoint-only save contract.
+pub(super) fn save(input: ProviderInput, pi: bool) -> Result<String, String> {
     let token_field = input
         .token_field
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_TOKEN_FIELD.to_string());
 
+    if pi && !input.settings_config.is_object() {
+        return Err("ProviderConfigInvalid [paths: /settingsConfig]".into());
+    }
     // settings_config 兜底为 {env:{}}
     let cfg = if input.settings_config.is_object() {
         input.settings_config.clone()
@@ -134,7 +142,7 @@ pub fn provider_save(input: ProviderInput) -> Result<String, String> {
     let protocol = match input.protocol.as_deref().map(str::trim) {
         None | Some("") => String::new(),
         Some(p) if pi_translate::PROTOCOL_APIS.iter().any(|(name, _)| *name == p) => p.into(),
-        _ => return Err("ProviderProtocolUnsupported".into()),
+        _ => return Err("ProviderProtocolUnsupported [paths: /protocol]".into()),
     };
 
     let clear_key = !preserve_key && cfg_env_str(&cfg, &token_field).is_empty()
@@ -150,6 +158,14 @@ pub fn provider_save(input: ProviderInput) -> Result<String, String> {
         settings_config: cfg,
     };
 
+    if pi {
+        let mut candidate = STORE.read().clone();
+        candidate.items.retain(|i| i.id != id);
+        candidate.items.push(item.clone());
+        let view = build_views(&candidate).into_iter().find(|v| v.id == id)
+            .ok_or("ProviderNotFound")?;
+        pi_translate::validate_local(&view)?;
+    }
     let mutation = PROVIDER_MUTATION.lock();
     let mut store = STORE.write();
     if let Some(existing) = store.items.iter_mut().find(|i| i.id == id) {

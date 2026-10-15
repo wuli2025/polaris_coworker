@@ -121,6 +121,9 @@ pub trait AgentBackend: Send + Sync {
     fn experts_enabled(&self, _enabled: Option<bool>) -> anyhow::Result<bool> {
         anyhow::bail!("ExpertConfigUnsupported")
     }
+    fn provider_validate(&self, _view: &crate::provider::ProviderView) -> anyhow::Result<()> {
+        anyhow::bail!("ProviderValidationUnsupported")
+    }
     fn provider_apply(&self, _id: &str) -> anyhow::Result<serde_json::Value> {
         anyhow::bail!("ProviderApplyUnsupported")
     }

@@ -3,12 +3,14 @@ import { Type, type Static } from "typebox";
 const text = Type.String({ minLength: 1 });
 const positive = Type.Integer({ minimum: 1, maximum: 2147483647 });
 const toggle = Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false });
+const rates = { input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(), cacheWrite: Type.Number() };
 const cost = Type.Object({
-  input: Type.Number({ minimum: 0 }), output: Type.Number({ minimum: 0 }),
-  cacheRead: Type.Number({ minimum: 0 }), cacheWrite: Type.Number({ minimum: 0 }),
+  ...rates, tiers: Type.Optional(Type.Array(Type.Object({
+    ...rates, inputTokensAbove: Type.Number({ minimum: 0 }),
+  }, { additionalProperties: false }))),
 }, { additionalProperties: false });
 export const ProviderSchema = Type.Object({
-  id: text, baseUrl: text, api: text, authHeader: Type.Optional(Type.Boolean()),
+  id: text, baseUrl: Type.Optional(text), api: Type.Optional(text), authHeader: Type.Optional(Type.Boolean()),
   models: Type.Array(Type.Object({
     id: text, name: text, reasoning: Type.Boolean(),
     input: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")])),
@@ -16,6 +18,11 @@ export const ProviderSchema = Type.Object({
   }, { additionalProperties: false }), { minItems: 1 }),
 }, { additionalProperties: false });
 export const ConfigSchema = Type.Object({
+  network: Type.Optional(Type.Object({
+    proxy: Type.Optional(Type.Union([text, Type.Null()])),
+    idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647 })),
+    probeTimeoutMs: Type.Optional(positive),
+  }, { additionalProperties: false })),
   shellPath: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   oauthTimeoutMs: positive,
   usageDir: Type.String(),

@@ -102,6 +102,12 @@ async function dispatch({ id, method, params: p }) {
       return response(id, { aborted: true });
     }
     case 'close': sessions.delete(p.sessionId); return response(id, { closed: true });
+    case 'config.validate':
+      if (p.config?.providers?.[0]?.models?.[0]?.id === 'invalid-wire-config') {
+        return send({type:'response', id, ok:false, error:{code:'INVALID_CONFIG', message:'配置字段校验失败。',
+          paths:['/providers/0/models/0/name']}});
+      }
+      return response(id, { valid: true });
     case 'config.apply':
       await gate('--gate-apply');
       applied = p.config;

@@ -3,8 +3,8 @@ use super::*;
 use crate::collab::{authority as a, auth, mesh};
 
 pub fn request(method: &str, url: &str, key: Option<&str>, body: &Value) -> Result<Value, String> {
-    let agent = ureq::AgentBuilder::new().redirects(0)
-        .timeout(std::time::Duration::from_secs(super::super::load()?.browser.request_timeout_secs)).build();
+    let agent = super::super::http_client::agent(ureq::AgentBuilder::new().redirects(0)
+        .timeout(std::time::Duration::from_secs(super::super::load()?.browser.request_timeout_secs)))?;
     let mut request = agent.request(method, url);
     if let Some(key) = key { request = request.set("Authorization", &format!("Bearer {key}")); }
     let response = if method == "GET" { request.call() } else { request.send_json(body.clone()) };
@@ -22,7 +22,7 @@ pub fn request(method: &str, url: &str, key: Option<&str>, body: &Value) -> Resu
             }
             Err("interconnect_upstream_failed".into())
         }
-        Err(_) => Err("interconnect_upstream_unavailable".into()),
+        Err(error) => Err(super::super::http_client::diagnostic(&error)),
     }
 }
 

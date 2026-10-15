@@ -1,6 +1,11 @@
 //! Local console policy B adapters and frontend notification endpoints.
 use super::*;
 
+pub(super) fn watch_agent(interval: u64) -> Result<ureq::Agent, String> {
+    crate::collab::interconnect::http_client::agent(
+        ureq::AgentBuilder::new().timeout(Duration::from_secs(interval + 5)))
+}
+
 static WATCHING: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn start_watch() {
@@ -16,7 +21,7 @@ pub(super) fn start_watch() {
                 .map_or(30, |config| config.security.revocation_poll_secs);
             let previous = cursor.clone();
             let response = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-                ureq::AgentBuilder::new().timeout(Duration::from_secs(interval + 5)).build()
+                watch_agent(interval)?
                     .get(&format!("{}/api/mesh/security/watch", config.url))
                     .query("cursor", &previous)
                     .set("Authorization", &format!("Bearer {}", config.key)).call()
@@ -65,7 +70,7 @@ async fn call(path: &'static str, payload: Option<Value>) -> Result<Value, Strin
     let config = cfg().ok_or("本机尚未入网")?;
     tokio::task::spawn_blocking(move || {
         let url = format!("{}{path}", config.url);
-        let request = if payload.is_some() { agent().post(&url) } else { agent().get(&url) }
+        let request = if payload.is_some() { agent()?.post(&url) } else { agent()?.get(&url) }
             .set("Authorization", &format!("Bearer {}", config.key));
         let response = match payload {
             Some(payload) => request.send_json(payload),

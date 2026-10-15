@@ -39,6 +39,9 @@ pub(super) async fn build_endpoint(seed: [u8; 32], role: &'static str) -> Result
             .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, p))
             .map_err(|e| format!("POLARIS_IROH_PORT={p} 绑定失败: {e}"))?;
     }
+    if let Some(tls) = crate::collab::interconnect::http_client::relay_tls_config()? {
+        builder = builder.ca_tls_config(tls);
+    }
     let relay_config = relay::desired()?;
     builder = builder.relay_mode(relay::mode(&relay_config)?);
     let ep = builder

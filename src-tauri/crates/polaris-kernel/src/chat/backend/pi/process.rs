@@ -25,6 +25,7 @@ impl Process {
         let mut command = Command::new(&config.node);
         command.args(&config.node_args).arg(&config.entry).args(&config.args)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        config.network.configure(command.as_std_mut())?;
         #[cfg(windows)]
         crate::doctor::pi_shell::configure(command.as_std_mut(), config).map_err(anyhow::Error::msg)?;
         if let Some(path) = crate::provider::credential_file::provider_store_path() {
