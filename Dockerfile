@@ -129,7 +129,8 @@ RUN set -eu; \
 
 # 非 root 运行；数据根 = $HOME/Polaris（server 用 ~/Polaris 当工作目录，
 # collab.db 落 ~/Polaris/data/；claude 凭证落 ~/.claude）
-RUN useradd -m -u 1000 -s /bin/bash polaris \
+# The node base image already owns UID 1000 ("node"); keep UID 1000 for existing data volumes.
+RUN userdel -r node 2>/dev/null; useradd -m -u 1000 -s /bin/bash polaris \
     && mkdir -p /home/polaris/Polaris /home/polaris/.claude /home/polaris/.polaris/agentd /srv/web /app/resources \
     && printf '%s\n' "$POLARIS_BUILD_REVISION" > /app/polaris-build-revision \
     && printf '%s\n' "$POLARIS_BUILD_VERSION" > /app/polaris-build-version \
