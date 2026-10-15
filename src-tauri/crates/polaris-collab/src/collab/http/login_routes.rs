@@ -182,7 +182,7 @@ pub(super) async fn account_reset(Json(v): Json<Value>) -> Response {
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let email = s_of(&v, "email");
         crate::collab::mail::verify_code(&email, "reset", &s_of(&v, "code"))?;
-        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or("该邮箱没有绑定任何账号")?;
+        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or(crate::collab::mail::INVALID_CODE)?;
         crate::collab::auth::set_password(u.id, &s_of(&v, "newPassword"))?;
         Ok(json!({"ok": true, "username": u.username}))
     })

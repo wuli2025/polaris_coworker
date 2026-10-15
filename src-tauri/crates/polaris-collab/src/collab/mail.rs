@@ -7,7 +7,7 @@
 //!
 //! 安全口径:
 //! - 明文验证码只进邮件,库里存 argon2id 哈希;10 分钟过期,5 次错误即作废。
-//! - 同邮箱同用途 60s 内不重发,每小时最多 5 封(内存态,重启清零)。
+//! - 同邮箱 60s 内不重发,每小时最多 5 次请求(落库,包括提醒及不发信请求)。
 //! - SMTP 密码读取后不回显(admin 面板只给「已配置」掩码)。
 #![cfg(feature = "collab-host")]
 
@@ -16,12 +16,17 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use rusqlite::params;
 
+mod requests;
+pub use requests::CodeRequest;
+
+pub const INVALID_CODE: &str = "验证码无效或已过期";
+
 use super::auth;
 use super::db::{self, now, open_db};
 
 /// 验证码有效期(秒)。
 const CODE_TTL: i64 = 10 * 60;
-/// 同邮箱同用途重发间隔(秒)。
+/// 同邮箱重发间隔(秒)。
 const RESEND_GAP: i64 = 60;
 /// 每邮箱每小时发信上限。
 const HOURLY_CAP: usize = 5;
@@ -174,6 +179,14 @@ const IP_HOURLY_CAP: i64 = 20;
 pub fn issue_code_from(email: &str, purpose: &str, ip: &str) -> Result<(), String> {
     let email = auth::validate_email(email)?;
     rate_check(&email, ip)?;
+    deliver_code(&email, purpose, send_mail)
+}
+
+fn deliver_code(
+    email: &str,
+    purpose: &str,
+    sender: impl FnOnce(&str, &str, &str) -> Result<(), String>,
+) -> Result<(), String> {
     let code = gen_code()?;
     let phc = auth::hash_password(&code)?;
     // 文案要如实说明这封信是干什么用的 —— 收信人据此判断「这是不是我本人在操作」,
@@ -186,8 +199,8 @@ pub fn issue_code_from(email: &str, purpose: &str, ip: &str) -> Result<(), Strin
     let body = format!(
         "你正在 Polaris 设备联盟{action},验证码:\n\n    {code}\n\n10 分钟内有效。如果这不是你本人的操作,请忽略这封邮件。"
     );
-    // 先发信后落库:发失败不占用「最新一枚」位置,用户可立即重试。
-    send_mail(&email, &format!("【Polaris】{action}验证码 {code}"), &body)?;
+    // 先发信后落库:失败不替换旧码;频控已计入请求,重试仍须等重发间隔。
+    sender(email, &format!("【Polaris】{action}验证码 {code}"), &body)?;
     let t = now();
     let conn = open_db()?;
     conn.execute(
@@ -201,8 +214,7 @@ pub fn issue_code_from(email: &str, purpose: &str, ip: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// 老签名(无来源 IP)。内部调用与既有路由沿用它;新的公开发码口一律走
-/// [`issue_code_from`] 并把来源 IP 带上,否则 IP 那道闸形同虚设。
+/// 兼容无来源 IP 的内部调用;匿名 HTTP 使用 CodeRequest 分离请求与后台投递。
 pub fn issue_code(email: &str, purpose: &str) -> Result<(), String> {
     issue_code_from(email, purpose, "")
 }
@@ -212,8 +224,13 @@ pub fn verify_code(email: &str, purpose: &str, code: &str) -> Result<(), String>
     let email = auth::validate_email(email)?;
     let code = code.trim();
     if code.is_empty() {
-        return Err("请填写邮箱验证码".into());
+        return Err(INVALID_CODE.into());
     }
+    // 无记录/过期/耗尽也做一次同参数 Argon2,避免用错误码请求的耗时探测账号。
+    let invalid = || -> Result<(), String> {
+        auth::hash_password(code)?;
+        Err(INVALID_CODE.into())
+    };
     let conn = open_db()?;
     let row = conn.query_row(
         "SELECT code_hash,attempts,expires_at FROM email_codes WHERE email=?1 AND purpose=?2",
@@ -228,7 +245,7 @@ pub fn verify_code(email: &str, purpose: &str, code: &str) -> Result<(), String>
     );
     let (phc, attempts, expires_at) = match row {
         Ok(v) => v,
-        Err(_) => return Err("请先获取邮箱验证码".into()),
+        Err(_) => return invalid(),
     };
     let gone = |conn: &rusqlite::Connection| {
         let _ = conn.execute(
@@ -238,20 +255,23 @@ pub fn verify_code(email: &str, purpose: &str, code: &str) -> Result<(), String>
     };
     if now() > expires_at {
         gone(&conn);
-        return Err("验证码已过期,请重新获取".into());
+        return invalid();
     }
     if attempts >= MAX_ATTEMPTS {
         gone(&conn);
-        return Err("错误次数过多,验证码已作废,请重新获取".into());
+        return invalid();
     }
     if !auth::verify_password(code, &phc) {
         let _ = conn.execute(
             "UPDATE email_codes SET attempts=attempts+1 WHERE email=?1 AND purpose=?2",
             params![email, purpose],
         );
-        return Err("验证码不对".into());
+        return Err(INVALID_CODE.into());
     }
     gone(&conn);
+    if purpose == "signup" && auth::find_user_by_email(&email)?.is_some() {
+        return Err(INVALID_CODE.into());
+    }
     Ok(())
 }
 
@@ -304,7 +324,7 @@ mod tests {
             assert!(verify_code("b@qq.com", "reset", "999999").is_err());
         }
         let e = verify_code("b@qq.com", "reset", "654321").unwrap_err();
-        assert!(e.contains("作废"), "超试错应作废: {e}");
+        assert_eq!(e, INVALID_CODE);
     }
 
     #[test]

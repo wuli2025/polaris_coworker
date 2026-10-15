@@ -128,7 +128,8 @@ describe('policy B', () => {
   it('decides by request ID and keeps errors visible', async () => {
     const command = vi.fn().mockResolvedValue({});
     const state = useSecurity(command as Command);
-    state.receive({ id: 'r', operation: 'delete_account', actor: 'old', host: 'h', expiresAt: 500, state: 'pending' });
+    state.receive({ id: 'r', operation: 'delete_account', actor: 'old', host: 'h', expiresAt: Date.now() / 1000 + 60, state: 'pending' });
+    expect(state.approvals.value).toHaveLength(1);
     await state.decide('r', false);
     expect(command).toHaveBeenCalledWith('mesh_risk_decide', { requestId: 'r', approve: false });
     expect(state.approvals.value).toEqual([]);

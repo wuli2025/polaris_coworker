@@ -67,54 +67,37 @@ pub(super) async fn collab_email_status() -> Response {
     unwrap_api(out)
 }
 
-/// 发验证码。purpose=signup:邮箱须未被绑定;purpose=reset:邮箱须已绑定账号。
-/// 频控在 mail::issue_code(60s 重发间隔 + 每小时 5 封)。
-pub(super) async fn collab_email_send_code(Json(v): Json<Value>) -> Response {
-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let email = s_of(&v, "email");
-        let purpose = s_of(&v, "purpose");
-        match purpose.as_str() {
-            "signup" => {
-                // 权威机就是注册入口:只要邮件服务配齐就放行,不再受 email_signup 开关约束
-                // (那个开关的语义是「本主机要不要收陌生人」,对权威机没有意义)。
-                let ok = if crate::collab::authority::is_authority() {
-                    crate::collab::mail::configured()
-                } else {
-                    crate::collab::mail::signup_open()
-                };
-                if !ok {
-                    return Err("本主机未开放邮箱注册,请联系管理员或用邀请票据入伙".into());
-                }
-                if crate::collab::auth::find_user_by_email(&email)?.is_some() {
-                    return Err("该邮箱已注册过账号,请直接登录或走「忘记密码」".into());
-                }
-            }
-            "reset" => {
-                if !crate::collab::mail::configured() {
-                    return Err("邮箱服务未配置,无法自助找回,请联系管理员重置密码".into());
-                }
-                if crate::collab::auth::find_user_by_email(&email)?.is_none() {
-                    return Err("该邮箱没有绑定任何账号".into());
-                }
-            }
-            // 验证码登录:不需要密码,能收到这封信就证明是本人。邮箱须已绑定账号 ——
-            // 与 reset 同一口径(都会告知「该邮箱没绑账号」,不额外多泄漏什么)。
-            "login" => {
-                if !crate::collab::mail::configured() {
-                    return Err("邮箱服务未配置,无法用验证码登录,请用密码登录".into());
-                }
-                if crate::collab::auth::find_user_by_email(&email)?.is_none() {
-                    return Err("该邮箱没有绑定任何账号".into());
-                }
-            }
-            _ => return Err("purpose 须为 signup / reset / login".into()),
-        }
-        crate::collab::mail::issue_code(&email, &purpose)?;
-        Ok(json!({"ok": true}))
-    })
-    .await;
-    unwrap_api(out)
+/// 匿名发码:仅配置、格式和频控错误同步返回;账号查询、哈希与 SMTP 均在后台。
+pub(super) async fn collab_email_send_code(headers: HeaderMap, Json(v): Json<Value>) -> Response {
+    send_code_with(headers, v, crate::collab::mail::send_mail).await.0
 }
+
+async fn send_code_with(
+    headers: HeaderMap,
+    v: Value,
+    sender: impl FnOnce(&str, &str, &str) -> Result<(), String> + Send + 'static,
+) -> (Response, Option<tokio::task::JoinHandle<()>>) {
+    let ip = client_ip(&headers);
+    let prepared = tokio::task::spawn_blocking(move || {
+        crate::collab::mail::CodeRequest::prepare(&s_of(&v, "email"), &s_of(&v, "purpose"), &ip)
+    }).await;
+    match prepared {
+        Ok(Ok(request)) => {
+            let task = tokio::task::spawn_blocking(move || {
+                if request.deliver(sender).is_err() {
+                    // 不记录邮箱、验证码或 SMTP 原始错误;失败不改变匿名响应。
+                    eprintln!("[collab-mail] background delivery failed");
+                }
+            });
+            (Json(json!({"ok": true})).into_response(), Some(task))
+        }
+        other => (unwrap_api(other.map(|result| result.map(|_| json!({"ok": true})))), None),
+    }
+}
+
+#[cfg(test)]
+#[path = "email_tests.rs"]
+mod tests;
 
 /// 邮箱验证码注册:验证通过即建号(collaborator)+ 绑邮箱 + 签会话,一步登录。
 pub(super) async fn collab_email_signup(Json(v): Json<Value>) -> Response {
@@ -156,7 +139,7 @@ pub(super) async fn collab_email_reset(Json(v): Json<Value>) -> Response {
     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let email = s_of(&v, "email");
         crate::collab::mail::verify_code(&email, "reset", &s_of(&v, "code"))?;
-        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or("该邮箱没有绑定任何账号")?;
+        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or(crate::collab::mail::INVALID_CODE)?;
         // 联邦账号的密码只有权威说了算:在成员主机上给它写一个本地密码,等于绕开权威
         // 开了一条本机后门(云端停用了这个人,他仍能凭这个本地密码在断网回落时进来)。
         // 按**账号**判,故同机的本地应急账号照旧能自助找回。
@@ -180,7 +163,10 @@ pub(super) async fn collab_email_login(Json(v): Json<Value>) -> Response {
         let email = s_of(&v, "email");
         crate::collab::mail::verify_code(&email, "login", &s_of(&v, "code"))?;
         let (u, token) =
-            crate::collab::auth::login_with_verified_email(&email, &s_of(&v, "deviceId"))?;
+            crate::collab::auth::login_with_verified_email(&email, &s_of(&v, "deviceId"))
+                .map_err(|error| if error == "该邮箱没有绑定任何账号" {
+                    crate::collab::mail::INVALID_CODE.to_string()
+                } else { error })?;
         Ok(json!({"user": u, "token": token}))
     })
     .await;

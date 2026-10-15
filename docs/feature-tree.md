@@ -129,7 +129,7 @@ Pi `useSandbox` 在 P3 路由 bash/write/edit 到宿主容器桥；不可用或�
 | tunnel → `C/collab/tunnel.rs:204,256,374,539,575,743` | 主机监听、共享出站 Endpoint、TCP↔iroh 双向流、connect/disconnect/status、relay 配置 | →identity/iroh；collab-net；POLARIS_DEVICE_KEY、POLARIS_RELAYS、POLARIS_TUNNEL_UPSTREAM、POLARIS_TUNNEL_STRICT（`:192,317,92,421`） |
 | relay 配置 → `C/collab/tunnel.rs:256,317,334,343` | apply_relay_config、自定义 relay 列表、mDNS | 默认 n0 relay（`:12`）；HTTP 配置入口 `C/collab/http.rs:3460,4667`；运行中的 Endpoint 不会就地重建（tunnel `:255`），不是已部署自有 relay 的证据 |
 | gateway → `C/collab/gateway.rs:15,109,167,284,368` | 网关注册主机、单 Endpoint 连多个主机、HTTP/WS `/h/:id` 反代 | →tunnel 协议/CollabState；collab-host+collab-net；POLARIS_GATEWAY_KEY（`:69`），独立 gateway.key；不是 iroh-relay 服务 |
-| http → `C/collab/http.rs:146,176,4506` | resolve_auth、auth_ctx、collab_router；协作/账号/设备/网关路由，双壳共用 | →上述 domain；不包含所有业务 invoke 分发，后者在 `H/apihub.rs:2218` |
+| http → `C/collab/http.rs`、`http/email_routes.rs`、`mail/requests.rs` | collab_router；双壳共用路由；R11 匿名发码后台投递、统一验码错误 | →auth/db/mail；CodeRequest/verify_code；沿用 SMTP/注册开关，无迁移/新依赖；[R11 配置与验证](execution/R11/report.md)；业务 invoke 在 `H/apihub.rs:2218` |
 
 ## 互联客户端与协作业务分支
 
@@ -141,7 +141,7 @@ Pi `useSandbox` 在 P3 路由 bash/write/edit 到宿主容器桥；不可用或�
 | 设备操作 → `H/mesh.rs:1136,1166,1180,1295,1347` | peer_grant_set、peer_trust/revoke、device_code、connect_by_code | →grants/identity；P6 改默认信任体验，保留显式收紧能力；H |
 | 桌面 hosting → `H/hosting.rs:111,338,441,470,492,558` | 内嵌主机 start/status/stop、自启动、LAN 开关，桥接事件 | →collab router+apihub；collab_host.json、POLARIS_HOST_ALLOW_LAN、POLARIS_AUTH_TOKEN（`:58,102,128`）；H |
 | 账号前端 → `src/features/auth/AccountCenterModal.vue:1`、`src/features/auth/authorityTransport.test.ts:1` | 账号中心、权威传输选择 | →壳 mesh/认证 API；UI，有已有传输策略单测 |
-| 互联前端/HTTP → `src/features/interconnect/InterconnectView.vue`、`polaris-collab/src/collab/http/browser_routes.rs` | P6d：密码登录四阶段、会话设备/策略 B、HTTP 网关文件访问、审批名称；P6b 默认界面保留 | 依赖公共 login/auth/mesh/risk/gateway，无新依赖；`browser` 默认/校验/切换、会话表迁移见 [P6d 接口报告](interconnect/p6d-http.md)，[真实验证/文件清单](interconnect/p6d-validation.md)；[P6b](interconnect/p6b-frontend.md) |
+| 互联前端/HTTP → `src/features/interconnect/InterconnectView.vue`、`polaris-collab/src/collab/http/browser_routes.rs` | P6d：密码登录四阶段、会话设备/策略 B、HTTP 网关文件访问、审批名称；P6b 默认界面保留 | 依赖公共 login/auth/mesh/risk/gateway，无新依赖；`browser` 默认/校验/切换、会话表迁移见 [P6d 接口报告](interconnect/p6d-http.md)，[真实验证/文件清单](interconnect/p6d-validation.md)；[P6b](interconnect/p6b-frontend.md)；[R11 到期过滤](execution/R11/report.md) |
 | 协作项目/团队/任务 → `C/collab/mod.rs:39,40,41` | projects/teams/tasks；账号权限和任务状态 | →db/auth；`src/features/collab/api.ts:1`、stores/collab.ts `:1` 为 UI API 与状态入口；C/UI |
 | 协作对话/负责人 → `C/collab/mod.rs:12,36,37` | chat、lead、lead_ai 负责协作者/负责人沟通和任务编排 | 与 kernel/chat 的模型会话不等同；权限由确定性授权表决定（mod `:3`）；C |
 | 独立负责人模型 → `C/collab/lead_ai.rs:41,49,149,193,237,276` | load/save_cfg、ai_decompose/review/task_reply/fuse | OpenAI 兼容 HTTP，配置 `lead_model.json` / POLARIS_LEAD_MODEL_CFG（`:5,28`）；不是 headless/Claude CLI；C |

@@ -15,6 +15,9 @@ export function useSecurity(command: Command) {
   let generation = 0;
   let polling = false;
 
+  function pruneApprovals() {
+    approvals.value = approvals.value.filter(a => a.expiresAt * 1000 > Date.now());
+  }
   function receive(event: Notice | Approval) {
     if ('deviceId' in event && event.kind === 'device_enrolled') {
       if (!acknowledged.has(event.deviceId)) {
@@ -22,9 +25,11 @@ export function useSecurity(command: Command) {
       }
     } else if ('id' in event) {
       approvals.value = [...approvals.value.filter(a => a.id !== event.id), event];
+      pruneApprovals();
     }
   }
   async function refresh() {
+    pruneApprovals();
     if (polling) return;
     polling = true;
     const epoch = generation;
@@ -33,6 +38,7 @@ export function useSecurity(command: Command) {
       if (epoch !== generation) return;
       inbox.notifications.forEach(receive);
       approvals.value = inbox.approvals;
+      pruneApprovals();
     } catch (e) { if (epoch === generation) error.value = errMsg(e); }
     finally { polling = false; }
   }
@@ -82,7 +88,7 @@ export function useSecurity(command: Command) {
     error.value = '';
     await attempt();
   }
-  async function tick() { if (pending.value) await attempt(); }
+  async function tick() { pruneApprovals(); if (pending.value) await attempt(); }
   function cancel() { generation++; operation = undefined; pending.value = ''; error.value = ''; }
   function reset() { cancel(); notices.value = []; approvals.value = []; acknowledged.clear(); }
   return { notices, approvals, pending, error, busy, receive, refresh, ack, decide, run, tick, retry: attempt, cancel, reset };
