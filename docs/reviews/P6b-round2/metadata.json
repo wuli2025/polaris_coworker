@@ -1,0 +1,36 @@
+{
+  "started_at": "2026-10-15T11:48:57.001358+00:00",
+  "status": "BLOCKED",
+  "exit_code": 0,
+  "mode": "packet",
+  "requested_provider": "minimax",
+  "requested_model": "MiniMax-M2.7",
+  "input_manifest": {
+    "files": [
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/R11-rereview-brief.md",
+        "bytes": 1096,
+        "lines": 8,
+        "sha256": "eddbe0d13f0a07bd6829b63dc5264d1983d7448e65f689c16da286ae10fb80d8"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/P6b-round1-triage.md",
+        "bytes": 1908,
+        "lines": 12,
+        "sha256": "d21736330258b07d1a4098f33ca7a6611784e7915819db0b3844ec8b8ab3d858"
+      },
+      {
+        "path": "/home/mi/work/polaris-pi/docs/reviews/R11-diff.patch",
+        "bytes": 35686,
+        "lines": 725,
+        "sha256": "0c35579c0f628aedf30ccd7bb2a52575d1b92314a96227474f94d313070cb5a3"
+      }
+    ],
+    "prompt_sha256": "c0fcca9dde8d7fcdaca33863702470c9bf5ee6529dd325e13d892b609ebf2dab",
+    "prompt_bytes": 44496
+  },
+  "cli": "/mnt/d/Users/mi/npm/pi",
+  "version": "0.78.0",
+  "reason": "Empty or incomplete Pi review: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)\"},\"request_id\":\"071ff1688820db81a15ead0cc24de311\"}",
+  "finished_at": "2026-10-15T11:52:09.084670+00:00"
+}

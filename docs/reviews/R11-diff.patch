@@ -1,0 +1,725 @@
+diff --git a/src-tauri/crates/polaris-collab/src/collab/http/email_routes.rs b/src-tauri/crates/polaris-collab/src/collab/http/email_routes.rs
+index 4938cbe..38736da 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/http/email_routes.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/http/email_routes.rs
+@@ -67,55 +67,38 @@ pub(super) async fn collab_email_status() -> Response {
+     unwrap_api(out)
+ }
+ 
+-/// 发验证码。purpose=signup:邮箱须未被绑定;purpose=reset:邮箱须已绑定账号。
+-/// 频控在 mail::issue_code(60s 重发间隔 + 每小时 5 封)。
+-pub(super) async fn collab_email_send_code(Json(v): Json<Value>) -> Response {
+-    let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+-        let email = s_of(&v, "email");
+-        let purpose = s_of(&v, "purpose");
+-        match purpose.as_str() {
+-            "signup" => {
+-                // 权威机就是注册入口:只要邮件服务配齐就放行,不再受 email_signup 开关约束
+-                // (那个开关的语义是「本主机要不要收陌生人」,对权威机没有意义)。
+-                let ok = if crate::collab::authority::is_authority() {
+-                    crate::collab::mail::configured()
+-                } else {
+-                    crate::collab::mail::signup_open()
+-                };
+-                if !ok {
+-                    return Err("本主机未开放邮箱注册,请联系管理员或用邀请票据入伙".into());
+-                }
+-                if crate::collab::auth::find_user_by_email(&email)?.is_some() {
+-                    return Err("该邮箱已注册过账号,请直接登录或走「忘记密码」".into());
+-                }
+-            }
+-            "reset" => {
+-                if !crate::collab::mail::configured() {
+-                    return Err("邮箱服务未配置,无法自助找回,请联系管理员重置密码".into());
+-                }
+-                if crate::collab::auth::find_user_by_email(&email)?.is_none() {
+-                    return Err("该邮箱没有绑定任何账号".into());
+-                }
+-            }
+-            // 验证码登录:不需要密码,能收到这封信就证明是本人。邮箱须已绑定账号 ——
+-            // 与 reset 同一口径(都会告知「该邮箱没绑账号」,不额外多泄漏什么)。
+-            "login" => {
+-                if !crate::collab::mail::configured() {
+-                    return Err("邮箱服务未配置,无法用验证码登录,请用密码登录".into());
+-                }
+-                if crate::collab::auth::find_user_by_email(&email)?.is_none() {
+-                    return Err("该邮箱没有绑定任何账号".into());
++/// 匿名发码:仅配置、格式和频控错误同步返回;账号查询、哈希与 SMTP 均在后台。
++pub(super) async fn collab_email_send_code(headers: HeaderMap, Json(v): Json<Value>) -> Response {
++    send_code_with(headers, v, crate::collab::mail::send_mail).await.0
++}
++
++async fn send_code_with(
++    headers: HeaderMap,
++    v: Value,
++    sender: impl FnOnce(&str, &str, &str) -> Result<(), String> + Send + 'static,
++) -> (Response, Option<tokio::task::JoinHandle<()>>) {
++    let ip = client_ip(&headers);
++    let prepared = tokio::task::spawn_blocking(move || {
++        crate::collab::mail::CodeRequest::prepare(&s_of(&v, "email"), &s_of(&v, "purpose"), &ip)
++    }).await;
++    match prepared {
++        Ok(Ok(request)) => {
++            let task = tokio::task::spawn_blocking(move || {
++                if request.deliver(sender).is_err() {
++                    // 不记录邮箱、验证码或 SMTP 原始错误;失败不改变匿名响应。
++                    eprintln!("[collab-mail] background delivery failed");
+                 }
+-            }
+-            _ => return Err("purpose 须为 signup / reset / login".into()),
++            });
++            (Json(json!({"ok": true})).into_response(), Some(task))
+         }
+-        crate::collab::mail::issue_code(&email, &purpose)?;
+-        Ok(json!({"ok": true}))
+-    })
+-    .await;
+-    unwrap_api(out)
++        other => (unwrap_api(other.map(|result| result.map(|_| json!({"ok": true})))), None),
++    }
+ }
+ 
++#[cfg(test)]
++#[path = "email_tests.rs"]
++mod tests;
++
+ /// 邮箱验证码注册:验证通过即建号(collaborator)+ 绑邮箱 + 签会话,一步登录。
+ pub(super) async fn collab_email_signup(Json(v): Json<Value>) -> Response {
+     if let Some(r) = refuse_local_account_creation() {
+@@ -156,7 +139,7 @@ pub(super) async fn collab_email_reset(Json(v): Json<Value>) -> Response {
+     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+         let email = s_of(&v, "email");
+         crate::collab::mail::verify_code(&email, "reset", &s_of(&v, "code"))?;
+-        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or("该邮箱没有绑定任何账号")?;
++        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or(crate::collab::mail::INVALID_CODE)?;
+         // 联邦账号的密码只有权威说了算:在成员主机上给它写一个本地密码,等于绕开权威
+         // 开了一条本机后门(云端停用了这个人,他仍能凭这个本地密码在断网回落时进来)。
+         // 按**账号**判,故同机的本地应急账号照旧能自助找回。
+@@ -180,7 +163,10 @@ pub(super) async fn collab_email_login(Json(v): Json<Value>) -> Response {
+         let email = s_of(&v, "email");
+         crate::collab::mail::verify_code(&email, "login", &s_of(&v, "code"))?;
+         let (u, token) =
+-            crate::collab::auth::login_with_verified_email(&email, &s_of(&v, "deviceId"))?;
++            crate::collab::auth::login_with_verified_email(&email, &s_of(&v, "deviceId"))
++                .map_err(|error| if error == "该邮箱没有绑定任何账号" {
++                    crate::collab::mail::INVALID_CODE.to_string()
++                } else { error })?;
+         Ok(json!({"user": u, "token": token}))
+     })
+     .await;
+diff --git a/src-tauri/crates/polaris-collab/src/collab/http/email_tests.rs b/src-tauri/crates/polaris-collab/src/collab/http/email_tests.rs
+new file mode 100644
+index 0000000..d2f093a
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/http/email_tests.rs
+@@ -0,0 +1,246 @@
++use super::*;
++use crate::collab::{auth, db, interconnect::test_env::TestEnv, mail};
++use parking_lot::Mutex;
++
++type Letters = Arc<Mutex<Vec<(String, String, String)>>>;
++
++struct Fixture {
++    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
++    _env: TestEnv,
++}
++
++impl Fixture {
++    fn new() -> Result<Self, String> {
++        let env = TestEnv::new("email-privacy")?;
++        let mut fixture = Self { previous: vec![], _env: env };
++        for key in ["POLARIS_SMTP_USER", "POLARIS_SMTP_PASS", "POLARIS_EMAIL_SIGNUP",
++            "POLARIS_ACCOUNT_OPEN_SIGNUP"] {
++            fixture.previous.push((key, std::env::var_os(key)));
++            std::env::remove_var(key);
++        }
++        mail::save_config("smtp.example.com", 465, "sender@example.com", "fake", "sender@example.com", true)?;
++        db::open_db()?.execute(
++            "INSERT INTO users(username,pass_hash,role,display_name,created_at,email)
++             VALUES('alice','!test','collaborator','Alice',1,'known@example.com')", [],
++        ).map_err(|e| e.to_string())?;
++        Ok(fixture)
++    }
++}
++
++impl Drop for Fixture {
++    fn drop(&mut self) {
++        for (key, value) in &self.previous {
++            match value {
++                Some(value) => std::env::set_var(key, value),
++                None => std::env::remove_var(key),
++            }
++        }
++    }
++}
++
++async fn wire(response: Response) -> Result<(StatusCode, Vec<u8>), String> {
++    let status = response.status();
++    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await
++        .map_err(|e| e.to_string())?;
++    Ok((status, bytes.to_vec()))
++}
++
++async fn send(email: &str, purpose: &str, letters: Letters) -> Result<(StatusCode, Vec<u8>), String> {
++    let (response, task) = send_code_with(HeaderMap::new(), json!({"email":email,"purpose":purpose}),
++        move |to, subject, body| {
++            letters.lock().push((to.into(), subject.into(), body.into()));
++            Ok(())
++        }).await;
++    let response = wire(response).await?;
++    if let Some(task) = task { task.await.map_err(|e| e.to_string())?; }
++    Ok(response)
++}
++
++fn clear_rates() -> Result<(), String> {
++    db::open_db()?.execute("DELETE FROM login_attempts", []).map_err(|e| e.to_string())?;
++    Ok(())
++}
++
++fn plant(email: &str, purpose: &str, phc: &str, ttl: i64, attempts: i64) -> Result<(), String> {
++    db::open_db()?.execute(
++        "INSERT OR REPLACE INTO email_codes(email,purpose,code_hash,attempts,created_at,expires_at)
++         VALUES(?1,?2,?3,?4,?5,?6)",
++        rusqlite::params![email, purpose, phc, attempts, db::now(), db::now() + ttl],
++    ).map_err(|e| e.to_string())?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn all_purposes_hide_account_state_and_deliver_only_the_expected_mail() -> Result<(), String> {
++    let _fixture = Fixture::new()?;
++    for purpose in ["signup", "reset", "login"] {
++        clear_rates()?;
++        if purpose == "signup" {
++            plant("known@example.com", purpose, &auth::hash_password("123456")?, 600, 0)?;
++        }
++        let letters = Letters::default();
++        let known = send(" KNOWN@Example.com ", purpose, letters.clone()).await?;
++        let unknown = send("new@example.com", purpose, letters.clone()).await?;
++        assert_eq!(known, unknown, "{purpose}: status and bytes must match");
++        assert_eq!(known, (StatusCode::OK, br#"{"ok":true}"#.to_vec()));
++        let delivered = letters.lock().clone();
++        assert_eq!(delivered.len(), if purpose == "signup" { 2 } else { 1 });
++        for (email, subject, body) in delivered {
++            if purpose == "signup" && email == "known@example.com" {
++                assert!(body.contains("你已有账号，请直接登录或找回密码"));
++                assert!(!body.contains("验证码"));
++                assert!(!subject.contains("验证码"));
++            } else {
++                assert!(body.contains(match purpose { "signup" => "注册账号", "login" => "登录", _ => "找回密码" }));
++                let code = subject.split_whitespace().last().ok_or("no code")?;
++                assert_eq!(code.len(), 6);
++                mail::verify_code(&email, purpose, code)?;
++                assert_eq!(mail::verify_code(&email, purpose, code), Err(mail::INVALID_CODE.into()));
++            }
++        }
++        for email in ["known@example.com", "new@example.com"] {
++            let count: i64 = db::open_db()?.query_row(
++                "SELECT count(*) FROM email_codes WHERE email=?1 AND purpose=?2",
++                [email, purpose], |r| r.get(0),
++            ).map_err(|e| e.to_string())?;
++            assert_eq!(count, 0);
++        }
++        let before = letters.lock().len();
++        let known_retry = send("known@example.com", purpose, letters.clone()).await?;
++        let new_retry = send("new@example.com", purpose, letters.clone()).await?;
++        assert_eq!(known_retry, new_retry);
++        assert!(!known_retry.0.is_success());
++        assert_eq!(letters.lock().len(), before, "rate limit includes reminders and no-mail requests");
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn authority_signup_and_reset_also_hide_code_and_account_state() -> Result<(), String> {
++    let _fixture = Fixture::new()?;
++    std::env::set_var("POLARIS_ACCOUNT_AUTHORITY", "1");
++    std::env::set_var("POLARIS_ACCOUNT_OPEN_SIGNUP", "1");
++    let phc = auth::hash_password("123456")?;
++    for purpose in ["signup", "reset"] {
++        plant("known@example.com", purpose, &phc, 600, 0)?;
++        let mut responses = vec![];
++        for email in ["known@example.com", "new@example.com"] {
++            let request = Json(json!({"email":email,"code":"000000"}));
++            let response = if purpose == "signup" {
++                account_signup(request).await
++            } else {
++                account_reset(request).await
++            };
++            responses.push(wire(response).await?);
++        }
++        assert_eq!(responses[0], responses[1]);
++        assert_eq!(serde_json::from_slice::<Value>(&responses[0].1).map_err(|e| e.to_string())?,
++            json!({"error":mail::INVALID_CODE}));
++    }
++    plant("new@example.com", "reset", &phc, 600, 0)?;
++    let response = wire(account_reset(Json(json!({"email":"new@example.com","code":"123456"}))).await).await?;
++    assert_eq!(serde_json::from_slice::<Value>(&response.1).map_err(|e| e.to_string())?,
++        json!({"error":mail::INVALID_CODE}));
++    Ok(())
++}
++
++#[tokio::test]
++async fn response_does_not_wait_for_smtp_or_expose_delivery_failure() -> Result<(), String> {
++    let _fixture = Fixture::new()?;
++    for (email, purpose) in [("known@example.com", "signup"), ("new@example.com", "signup"),
++        ("known@example.com", "reset"), ("known@example.com", "login")] {
++        clear_rates()?;
++        let (release, wait) = std::sync::mpsc::channel();
++        let (response, task) = tokio::time::timeout(Duration::from_secs(2), send_code_with(
++            HeaderMap::new(), json!({"email":email,"purpose":purpose}), move |_, _, _| {
++                wait.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?;
++                Err("fake SMTP failure".into())
++            },
++        )).await.map_err(|e| e.to_string())?;
++        let result = wire(response).await?;
++        release.send(()).map_err(|e| e.to_string())?;
++        task.ok_or("no background task")?.await.map_err(|e| e.to_string())?;
++        assert_eq!(result, (StatusCode::OK, br#"{"ok":true}"#.to_vec()));
++        assert_eq!(mail::verify_code(email, purpose, "123456"), Err(mail::INVALID_CODE.into()));
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn submitting_codes_has_one_error_for_missing_wrong_expired_and_exhausted_codes() -> Result<(), String> {
++    let _fixture = Fixture::new()?;
++    let phc = auth::hash_password("123456")?;
++    let mut expected = None;
++    for purpose in ["signup", "reset", "login"] {
++        for (ttl, attempts, code) in [(600, 0, "000000"), (-1, 0, "123456"),
++            (600, 5, "123456"), (600, 0, "")] {
++            plant("known@example.com", purpose, &phc, ttl, attempts)?;
++            for email in ["known@example.com", "new@example.com"] {
++                let request = Json(json!({"email":email,"code":code,"username":"newuser",
++                    "password":"test-password-123","newPassword":"test-password-123"}));
++                let response = match purpose {
++                    "signup" => collab_email_signup(request).await,
++                    "reset" => collab_email_reset(request).await,
++                    _ => collab_email_login(request).await,
++                };
++                let actual = wire(response).await?;
++                assert!(!actual.0.is_success());
++                assert_eq!(serde_json::from_slice::<Value>(&actual.1).map_err(|e| e.to_string())?,
++                    json!({"error":mail::INVALID_CODE}));
++                if let Some(expected) = &expected { assert_eq!(&actual, expected); }
++                else { expected = Some(actual); }
++            }
++        }
++    }
++    // Stale valid codes cannot disclose later account binding/deletion either.
++    plant("known@example.com", "signup", &phc, 600, 0)?;
++    assert_eq!(mail::verify_code("known@example.com", "signup", "123456"), Err(mail::INVALID_CODE.into()));
++    for purpose in ["reset", "login"] {
++        plant("new@example.com", purpose, &phc, 600, 0)?;
++        let request = Json(json!({"email":"new@example.com","code":"123456","newPassword":"test-password-123"}));
++        let response = if purpose == "reset" { collab_email_reset(request).await } else { collab_email_login(request).await };
++        assert_eq!(Some(wire(response).await?), expected);
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn reminder_and_no_mail_requests_keep_hourly_and_ip_limits() -> Result<(), String> {
++    let _fixture = Fixture::new()?;
++    for (email, purpose) in [("known@example.com", "signup"), ("new@example.com", "reset")] {
++        for _ in 0..5 {
++            mail::CodeRequest::prepare(email, purpose, "")?.deliver(|_, _, _| Ok(()))?;
++            db::open_db()?.execute("UPDATE login_attempts SET last_at=?1 WHERE scope='email' AND key=?2",
++                rusqlite::params![db::now() - 61, email]).map_err(|e| e.to_string())?;
++        }
++        assert!(matches!(mail::CodeRequest::prepare(email, purpose, ""), Err(e) if e.contains("一小时")));
++    }
++    clear_rates()?;
++    for i in 0..20 {
++        mail::CodeRequest::prepare(&format!("absent{i}@example.com"), "login", "192.0.2.1")?
++            .deliver(|_, _, _| Err("must not send".into()))?;
++    }
++    assert!(matches!(mail::CodeRequest::prepare("last@example.com", "login", "192.0.2.1"),
++        Err(e) if e.contains("网络")));
++    Ok(())
++}
++
++#[tokio::test]
++async fn public_handler_keeps_configuration_and_input_errors() -> Result<(), String> {
++    let _fixture = Fixture::new()?;
++    for request in [json!({"email":"known@example.com","purpose":"invalid"}),
++        json!({"email":"bad","purpose":"signup"})] {
++        assert!(!collab_email_send_code(HeaderMap::new(), Json(request)).await.status().is_success());
++    }
++    db::meta_set("email_signup", "0")?;
++    let closed = collab_email_send_code(HeaderMap::new(), Json(json!({"email":"new@example.com","purpose":"signup"}))).await;
++    assert!(!closed.status().is_success());
++    db::meta_set("smtp_pass", "")?;
++    for purpose in ["signup", "reset", "login"] {
++        let known = wire(collab_email_send_code(HeaderMap::new(), Json(json!({"email":"known@example.com","purpose":purpose}))).await).await?;
++        let unknown = wire(collab_email_send_code(HeaderMap::new(), Json(json!({"email":"new@example.com","purpose":purpose}))).await).await?;
++        assert_eq!(known, unknown);
++        assert!(!known.0.is_success());
++    }
++    Ok(())
++}
+diff --git a/src-tauri/crates/polaris-collab/src/collab/http/login_routes.rs b/src-tauri/crates/polaris-collab/src/collab/http/login_routes.rs
+index efa4197..f0295d7 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/http/login_routes.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/http/login_routes.rs
+@@ -182,7 +182,7 @@ pub(super) async fn account_reset(Json(v): Json<Value>) -> Response {
+     let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+         let email = s_of(&v, "email");
+         crate::collab::mail::verify_code(&email, "reset", &s_of(&v, "code"))?;
+-        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or("该邮箱没有绑定任何账号")?;
++        let u = crate::collab::auth::find_user_by_email(&email)?.ok_or(crate::collab::mail::INVALID_CODE)?;
+         crate::collab::auth::set_password(u.id, &s_of(&v, "newPassword"))?;
+         Ok(json!({"ok": true, "username": u.username}))
+     })
+diff --git a/src-tauri/crates/polaris-collab/src/collab/mail.rs b/src-tauri/crates/polaris-collab/src/collab/mail.rs
+index 098510e..7ec55e7 100644
+--- a/src-tauri/crates/polaris-collab/src/collab/mail.rs
++++ b/src-tauri/crates/polaris-collab/src/collab/mail.rs
+@@ -7,7 +7,7 @@
+ //!
+ //! 安全口径:
+ //! - 明文验证码只进邮件,库里存 argon2id 哈希;10 分钟过期,5 次错误即作废。
+-//! - 同邮箱同用途 60s 内不重发,每小时最多 5 封(内存态,重启清零)。
++//! - 同邮箱 60s 内不重发,每小时最多 5 次请求(落库,包括提醒及不发信请求)。
+ //! - SMTP 密码读取后不回显(admin 面板只给「已配置」掩码)。
+ #![cfg(feature = "collab-host")]
+ 
+@@ -16,12 +16,17 @@ use lettre::transport::smtp::authentication::Credentials;
+ use lettre::{Message, SmtpTransport, Transport};
+ use rusqlite::params;
+ 
++mod requests;
++pub use requests::CodeRequest;
++
++pub const INVALID_CODE: &str = "验证码无效或已过期";
++
+ use super::auth;
+ use super::db::{self, now, open_db};
+ 
+ /// 验证码有效期(秒)。
+ const CODE_TTL: i64 = 10 * 60;
+-/// 同邮箱同用途重发间隔(秒)。
++/// 同邮箱重发间隔(秒)。
+ const RESEND_GAP: i64 = 60;
+ /// 每邮箱每小时发信上限。
+ const HOURLY_CAP: usize = 5;
+@@ -174,6 +179,14 @@ const IP_HOURLY_CAP: i64 = 20;
+ pub fn issue_code_from(email: &str, purpose: &str, ip: &str) -> Result<(), String> {
+     let email = auth::validate_email(email)?;
+     rate_check(&email, ip)?;
++    deliver_code(&email, purpose, send_mail)
++}
++
++fn deliver_code(
++    email: &str,
++    purpose: &str,
++    sender: impl FnOnce(&str, &str, &str) -> Result<(), String>,
++) -> Result<(), String> {
+     let code = gen_code()?;
+     let phc = auth::hash_password(&code)?;
+     // 文案要如实说明这封信是干什么用的 —— 收信人据此判断「这是不是我本人在操作」,
+@@ -186,8 +199,8 @@ pub fn issue_code_from(email: &str, purpose: &str, ip: &str) -> Result<(), Strin
+     let body = format!(
+         "你正在 Polaris 设备联盟{action},验证码:\n\n    {code}\n\n10 分钟内有效。如果这不是你本人的操作,请忽略这封邮件。"
+     );
+-    // 先发信后落库:发失败不占用「最新一枚」位置,用户可立即重试。
+-    send_mail(&email, &format!("【Polaris】{action}验证码 {code}"), &body)?;
++    // 先发信后落库:失败不替换旧码;频控已计入请求,重试仍须等重发间隔。
++    sender(email, &format!("【Polaris】{action}验证码 {code}"), &body)?;
+     let t = now();
+     let conn = open_db()?;
+     conn.execute(
+@@ -201,8 +214,7 @@ pub fn issue_code_from(email: &str, purpose: &str, ip: &str) -> Result<(), Strin
+     Ok(())
+ }
+ 
+-/// 老签名(无来源 IP)。内部调用与既有路由沿用它;新的公开发码口一律走
+-/// [`issue_code_from`] 并把来源 IP 带上,否则 IP 那道闸形同虚设。
++/// 兼容无来源 IP 的内部调用;匿名 HTTP 使用 CodeRequest 分离请求与后台投递。
+ pub fn issue_code(email: &str, purpose: &str) -> Result<(), String> {
+     issue_code_from(email, purpose, "")
+ }
+@@ -212,8 +224,13 @@ pub fn verify_code(email: &str, purpose: &str, code: &str) -> Result<(), String>
+     let email = auth::validate_email(email)?;
+     let code = code.trim();
+     if code.is_empty() {
+-        return Err("请填写邮箱验证码".into());
++        return Err(INVALID_CODE.into());
+     }
++    // 无记录/过期/耗尽也做一次同参数 Argon2,避免用错误码请求的耗时探测账号。
++    let invalid = || -> Result<(), String> {
++        auth::hash_password(code)?;
++        Err(INVALID_CODE.into())
++    };
+     let conn = open_db()?;
+     let row = conn.query_row(
+         "SELECT code_hash,attempts,expires_at FROM email_codes WHERE email=?1 AND purpose=?2",
+@@ -228,7 +245,7 @@ pub fn verify_code(email: &str, purpose: &str, code: &str) -> Result<(), String>
+     );
+     let (phc, attempts, expires_at) = match row {
+         Ok(v) => v,
+-        Err(_) => return Err("请先获取邮箱验证码".into()),
++        Err(_) => return invalid(),
+     };
+     let gone = |conn: &rusqlite::Connection| {
+         let _ = conn.execute(
+@@ -238,20 +255,23 @@ pub fn verify_code(email: &str, purpose: &str, code: &str) -> Result<(), String>
+     };
+     if now() > expires_at {
+         gone(&conn);
+-        return Err("验证码已过期,请重新获取".into());
++        return invalid();
+     }
+     if attempts >= MAX_ATTEMPTS {
+         gone(&conn);
+-        return Err("错误次数过多,验证码已作废,请重新获取".into());
++        return invalid();
+     }
+     if !auth::verify_password(code, &phc) {
+         let _ = conn.execute(
+             "UPDATE email_codes SET attempts=attempts+1 WHERE email=?1 AND purpose=?2",
+             params![email, purpose],
+         );
+-        return Err("验证码不对".into());
++        return Err(INVALID_CODE.into());
+     }
+     gone(&conn);
++    if purpose == "signup" && auth::find_user_by_email(&email)?.is_some() {
++        return Err(INVALID_CODE.into());
++    }
+     Ok(())
+ }
+ 
+@@ -304,7 +324,7 @@ mod tests {
+             assert!(verify_code("b@qq.com", "reset", "999999").is_err());
+         }
+         let e = verify_code("b@qq.com", "reset", "654321").unwrap_err();
+-        assert!(e.contains("作废"), "超试错应作废: {e}");
++        assert_eq!(e, INVALID_CODE);
+     }
+ 
+     #[test]
+diff --git a/src-tauri/crates/polaris-collab/src/collab/mail/existing_account.txt b/src-tauri/crates/polaris-collab/src/collab/mail/existing_account.txt
+new file mode 100644
+index 0000000..ffe9cee
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/mail/existing_account.txt
+@@ -0,0 +1,3 @@
++你已有账号，请直接登录或找回密码。
++
++有人使用这个邮箱申请注册 Polaris 设备联盟账号。如果这不是你本人的操作，请忽略这封邮件。
+diff --git a/src-tauri/crates/polaris-collab/src/collab/mail/requests.rs b/src-tauri/crates/polaris-collab/src/collab/mail/requests.rs
+new file mode 100644
+index 0000000..52ab089
+--- /dev/null
++++ b/src-tauri/crates/polaris-collab/src/collab/mail/requests.rs
+@@ -0,0 +1,61 @@
++//! Anonymous email requests: account-independent admission, private background delivery.
++use super::{auth, configured, db, deliver_code, rate_check, signup_open};
++
++enum Purpose {
++    Signup,
++    Reset,
++    Login,
++}
++
++/// Prepared requests have already consumed the same quota regardless of account state.
++pub struct CodeRequest {
++    email: String,
++    purpose: Purpose,
++}
++
++impl CodeRequest {
++    pub fn prepare(email: &str, purpose: &str, ip: &str) -> Result<Self, String> {
++        let purpose = match purpose {
++            "signup" => {
++                let open = if crate::collab::authority::is_authority() {
++                    configured()
++                } else {
++                    signup_open()
++                };
++                if !open {
++                    return Err("本主机未开放邮箱注册,请联系管理员或用邀请票据入伙".into());
++                }
++                Purpose::Signup
++            }
++            "reset" | "login" => {
++                if !configured() {
++                    return Err("邮箱服务未配置,请联系管理员".into());
++                }
++                if purpose == "reset" { Purpose::Reset } else { Purpose::Login }
++            }
++            _ => return Err("purpose 须为 signup / reset / login".into()),
++        };
++        let email = auth::validate_email(email)?;
++        rate_check(&email, ip)?;
++        Ok(Self { email, purpose })
++    }
++
++    /// Must run off the HTTP response path; sender is explicit for offline behavior tests.
++    pub fn deliver(self, sender: impl FnOnce(&str, &str, &str) -> Result<(), String>) -> Result<(), String> {
++        let exists = auth::find_user_by_email(&self.email)?.is_some();
++        match (self.purpose, exists) {
++            (Purpose::Signup, true) => {
++                // A previously issued signup code must not survive a later account binding.
++                db::open_db()?.execute(
++                    "DELETE FROM email_codes WHERE email=?1 AND purpose='signup'",
++                    [&self.email],
++                ).map_err(|e| e.to_string())?;
++                sender(&self.email, "【Polaris】账号提醒", include_str!("existing_account.txt"))
++            }
++            (Purpose::Signup, false) => deliver_code(&self.email, "signup", sender),
++            (Purpose::Reset, true) => deliver_code(&self.email, "reset", sender),
++            (Purpose::Login, true) => deliver_code(&self.email, "login", sender),
++            (Purpose::Reset | Purpose::Login, false) => Ok(()),
++        }
++    }
++}
+diff --git a/src/features/interconnect/ApprovalPanel.vue b/src/features/interconnect/ApprovalPanel.vue
+index a118ef8..6271ed3 100644
+--- a/src/features/interconnect/ApprovalPanel.vue
++++ b/src/features/interconnect/ApprovalPanel.vue
+@@ -1,10 +1,12 @@
+ <script setup lang="ts">
+-import { ref, onMounted, onUnmounted } from 'vue';
++import { computed, ref, onMounted, onUnmounted } from 'vue';
+ import type { Approval } from './contracts';
+ import { interconnectCopy as c } from './copy';
+-defineProps<{ approvals: Approval[]; pending: string; error: string; busy: boolean }>();
++const props = defineProps<{ approvals: Approval[]; pending: string; error: string; busy: boolean }>();
+ defineEmits<{ decide: [id: string, approve: boolean]; retry: []; cancel: [] }>();
+ const now = ref(Date.now());
++const visible = computed(() => props.approvals.filter(a =>
++  a.id !== props.pending && a.state === 'pending' && a.expiresAt * 1000 > now.value));
+ let timer: ReturnType<typeof setInterval>;
+ onMounted(() => { timer = setInterval(() => { now.value = Date.now(); }, 1000); });
+ onUnmounted(() => clearInterval(timer));
+@@ -13,8 +15,8 @@ onUnmounted(() => clearInterval(timer));
+   <section aria-live="polite">
+     <p v-if="pending">{{ c.waiting }} <button :disabled="busy" @click="$emit('cancel')">{{ c.cancel }}</button></p>
+     <p v-if="error" role="alert">{{ error }} <button :disabled="busy" @click="$emit('retry')">{{ c.retry }}</button></p>
+-    <h2 v-if="approvals.length">{{ c.approvals }}</h2>
+-    <article v-for="item in approvals.filter(a => a.id !== pending && a.state === 'pending')" :key="item.id">
++    <h2 v-if="visible.length">{{ c.approvals }}</h2>
++    <article v-for="item in visible" :key="item.id">
+       <p>{{ c.operations[item.operation] || item.operation }} · {{ c.device }}：{{ item.actorName || c.unknownDevice }} · {{ item.actorPlatform || c.unknownPlatform }} ({{ item.actor }})</p>
+       <p>{{ c.remaining }} {{ Math.max(0, Math.ceil(item.expiresAt - now / 1000)) }} {{ c.seconds }}</p>
+       <button :disabled="busy || item.expiresAt * 1000 <= now" @click="$emit('decide', item.id, true)">{{ c.approve }}</button>
+diff --git a/src/features/interconnect/approvalExpiry.test.ts b/src/features/interconnect/approvalExpiry.test.ts
+new file mode 100644
+index 0000000..e8cbe88
+--- /dev/null
++++ b/src/features/interconnect/approvalExpiry.test.ts
+@@ -0,0 +1,54 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { createSSRApp, h } from 'vue';
++import { renderToString } from 'vue/server-renderer';
++import ApprovalPanel from './ApprovalPanel.vue';
++import { useSecurity } from './useSecurity';
++import type { Approval, Command } from './contracts';
++import { interconnectCopy as c } from './copy';
++
++const approval = (id: string, expiresAt: number): Approval =>
++  ({ id, expiresAt, operation: 'delete_account', actor: id, host: 'host', state: 'pending' });
++afterEach(() => vi.useRealTimers());
++
++describe('approval expiry', () => {
++  it('drops expired events and stale inbox entries, retaining future requests', async () => {
++    vi.useFakeTimers();
++    vi.setSystemTime(100000);
++    const command = vi.fn().mockResolvedValue({ notifications: [], approvals:
++      [approval('past', 99), approval('boundary', 100), approval('future', 101)] });
++    const state = useSecurity(command as Command);
++    state.receive(approval('expired-event', 100));
++    expect(state.approvals.value).toEqual([]);
++    await state.refresh();
++    expect(state.approvals.value.map(a => a.id)).toEqual(['future']);
++  });
++
++  it('cleans up locally during offline polling and while a risky action is busy', async () => {
++    vi.useFakeTimers();
++    vi.setSystemTime(100000);
++    const command = vi.fn().mockRejectedValue('offline');
++    const state = useSecurity(command as Command);
++    state.receive(approval('expires', 101));
++    state.receive(approval('later', 110));
++    state.busy.value = true;
++    vi.setSystemTime(101000);
++    await state.tick();
++    expect(state.approvals.value.map(a => a.id)).toEqual(['later']);
++    expect(command).not.toHaveBeenCalled();
++    vi.setSystemTime(110000);
++    await state.refresh();
++    expect(state.approvals.value).toEqual([]);
++    expect(state.error.value).toBe('offline');
++  });
++
++  it('does not render expired approval rows or an empty heading', async () => {
++    vi.useFakeTimers();
++    vi.setSystemTime(100000);
++    const render = (approvals: Approval[]) => renderToString(createSSRApp({ render: () =>
++      h(ApprovalPanel, { approvals, pending: '', error: '', busy: false }) }));
++    const html = await render([approval('expired-actor', 100), approval('future-actor', 101)]);
++    expect(html).not.toContain('expired-actor');
++    expect(html).toContain('future-actor');
++    expect(await render([approval('expired-actor', 99)])).not.toContain(c.approvals);
++  });
++});
+diff --git a/src/features/interconnect/interconnect.test.ts b/src/features/interconnect/interconnect.test.ts
+index 3284c82..d4ef2b2 100644
+--- a/src/features/interconnect/interconnect.test.ts
++++ b/src/features/interconnect/interconnect.test.ts
+@@ -128,7 +128,8 @@ describe('policy B', () => {
+   it('decides by request ID and keeps errors visible', async () => {
+     const command = vi.fn().mockResolvedValue({});
+     const state = useSecurity(command as Command);
+-    state.receive({ id: 'r', operation: 'delete_account', actor: 'old', host: 'h', expiresAt: 500, state: 'pending' });
++    state.receive({ id: 'r', operation: 'delete_account', actor: 'old', host: 'h', expiresAt: Date.now() / 1000 + 60, state: 'pending' });
++    expect(state.approvals.value).toHaveLength(1);
+     await state.decide('r', false);
+     expect(command).toHaveBeenCalledWith('mesh_risk_decide', { requestId: 'r', approve: false });
+     expect(state.approvals.value).toEqual([]);
+diff --git a/src/features/interconnect/useSecurity.ts b/src/features/interconnect/useSecurity.ts
+index a24fc7f..e4fd3e0 100644
+--- a/src/features/interconnect/useSecurity.ts
++++ b/src/features/interconnect/useSecurity.ts
+@@ -15,6 +15,9 @@ export function useSecurity(command: Command) {
+   let generation = 0;
+   let polling = false;
+ 
++  function pruneApprovals() {
++    approvals.value = approvals.value.filter(a => a.expiresAt * 1000 > Date.now());
++  }
+   function receive(event: Notice | Approval) {
+     if ('deviceId' in event && event.kind === 'device_enrolled') {
+       if (!acknowledged.has(event.deviceId)) {
+@@ -22,9 +25,11 @@ export function useSecurity(command: Command) {
+       }
+     } else if ('id' in event) {
+       approvals.value = [...approvals.value.filter(a => a.id !== event.id), event];
++      pruneApprovals();
+     }
+   }
+   async function refresh() {
++    pruneApprovals();
+     if (polling) return;
+     polling = true;
+     const epoch = generation;
+@@ -33,6 +38,7 @@ export function useSecurity(command: Command) {
+       if (epoch !== generation) return;
+       inbox.notifications.forEach(receive);
+       approvals.value = inbox.approvals;
++      pruneApprovals();
+     } catch (e) { if (epoch === generation) error.value = errMsg(e); }
+     finally { polling = false; }
+   }
+@@ -82,7 +88,7 @@ export function useSecurity(command: Command) {
+     error.value = '';
+     await attempt();
+   }
+-  async function tick() { if (pending.value) await attempt(); }
++  async function tick() { pruneApprovals(); if (pending.value) await attempt(); }
+   function cancel() { generation++; operation = undefined; pending.value = ''; error.value = ''; }
+   function reset() { cancel(); notices.value = []; approvals.value = []; acknowledged.clear(); }
+   return { notices, approvals, pending, error, busy, receive, refresh, ack, decide, run, tick, retry: attempt, cancel, reset };
