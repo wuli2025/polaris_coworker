@@ -8,3 +8,6 @@
 允许修改：`src-tauri/crates/polaris-collab/src/collab/`、`src-tauri/crates/polaris-kernel/src/chat/backend/mod.rs` 及受影响的构造处、测试、`docs/`。
 无新依赖；≤500 行/≤500 字符；新 Rust 代码无 unwrap/expect；三种构建组合 0 警告。
 必须通过：三种 `cargo check --offline`（0 警告）；`cargo test -p polaris-collab --features polaris-collab/collab-host,polaris-collab/collab-net --lib --tests --offline`；`cargo test -p polaris-kernel -p polaris-wiki --lib --tests --offline`。不 commit。
+
+## 范围例外批复（第 2 次运行，Claude）
+P6a #7 允许修改 `src-tauri/src/mesh.rs` 中引用冷静期的调用点（仅删除/改写冷静期相关逻辑，`mesh.rs` 为既有超长文件，本次只减不增）。其余已完成部分保留。注意 P6c 正在并行写 `deploy/`，不要触碰该目录。
