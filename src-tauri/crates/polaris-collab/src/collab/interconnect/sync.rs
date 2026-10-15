@@ -6,9 +6,17 @@ use std::time::Duration;
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub fn poll_account(url: &str, uid: &str, timeout: Duration) -> Result<(), String> {
-    let value: serde_json::Value = ureq::AgentBuilder::new().timeout(timeout).build()
-        .get(&format!("{url}/api/mesh/revocations")).query("uid", uid)
-        .call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())?;
+    poll_account_with(uid, || {
+        ureq::AgentBuilder::new().timeout(timeout).build()
+            .get(&format!("{url}/api/mesh/revocations")).query("uid", uid)
+            .call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())
+    })
+}
+
+pub(super) fn poll_account_with(
+    uid: &str, fetch: impl FnOnce() -> Result<serde_json::Value, String>,
+) -> Result<(), String> {
+    let value = fetch()?;
     let document = value["document"].as_str().ok_or("权威未提供签名吊销清单")?;
     super::revocations::accept(uid, document)
 }

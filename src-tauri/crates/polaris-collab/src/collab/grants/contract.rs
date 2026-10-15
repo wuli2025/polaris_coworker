@@ -12,6 +12,7 @@ pub struct Grant {
     pub exec_access: String,
     pub auto_mount: bool,
     pub drive_hint: String,
+    /// Legacy storage/serialization only; policy B ignores this timestamp.
     pub cooldown_until: i64,
     pub granted_at: i64,
     pub granted_by: String,
@@ -19,11 +20,6 @@ pub struct Grant {
 }
 
 impl Grant {
-    /// Compatibility field: policy B no longer restricts ordinary access by cooldown.
-    pub fn in_cooldown(&self) -> bool {
-        false
-    }
-
     /// Effective disk permission respects explicit restrictions and revocation.
     pub fn effective_fs(&self) -> &str {
         if self.revoked {

@@ -76,7 +76,8 @@ impl TurnRequest {
             account_id: None, timeout: None, legacy: None }
     }
 }
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct BackendStatus {
     pub backend: String,
@@ -96,6 +97,24 @@ impl BackendStatus {
         Self { backend: name.into(), agentd_version: None, pid: None, restarts: 0,
             usage_persist_failures: 0, experts_synced: (name == "pi").then_some(false),
             expert_sync_error: None, circuit_open: false, healthy: false, last_error: None }
+    }
+}
+#[cfg(test)]
+mod status_tests {
+    use super::BackendStatus;
+
+    #[test]
+    fn explicit_backend_status_reports_expert_support_before_sync() -> serde_json::Result<()> {
+        for (backend, synced) in [("pi", Some(false)), ("claude-cli", None)] {
+            let status = BackendStatus::new(backend);
+            assert_eq!(status.backend, backend);
+            assert_eq!(status.experts_synced, synced);
+            assert!(!status.healthy);
+            assert!(status.expert_sync_error.is_none());
+            let value = serde_json::to_value(status)?;
+            assert_eq!(value["expertsSynced"], serde_json::to_value(synced)?);
+        }
+        Ok(())
     }
 }
 pub trait AgentBackend: Send + Sync {

@@ -1,0 +1,69 @@
+[
+  {
+    "name": "desktop",
+    "command": "cargo check -p polaris-app --offline",
+    "exit_code": 0,
+    "warnings": 0,
+    "log": "/tmp/r9-2-desktop.log",
+    "test_results": []
+  },
+  {
+    "name": "server",
+    "command": "cargo check -p polaris-cli --bin polaris-server --offline",
+    "exit_code": 0,
+    "warnings": 0,
+    "log": "/tmp/r9-2-server.log",
+    "test_results": []
+  },
+  {
+    "name": "server-net",
+    "command": "cargo check -p polaris-cli --bin polaris-server --features collab-net --offline",
+    "exit_code": 0,
+    "warnings": 0,
+    "log": "/tmp/r9-2-server-net.log",
+    "test_results": []
+  },
+  {
+    "name": "collab-tests",
+    "command": "cargo test -p polaris-collab --features polaris-collab/collab-host,polaris-collab/collab-net --lib --tests --offline",
+    "exit_code": 0,
+    "warnings": 0,
+    "log": "/tmp/r9-2-collab-tests.log",
+    "test_results": [
+      "test result: ok. 138 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.16s"
+    ]
+  },
+  {
+    "name": "kernel-wiki-tests",
+    "command": "cargo test -p polaris-kernel -p polaris-wiki --lib --tests --offline",
+    "exit_code": 101,
+    "warnings": 0,
+    "log": "/tmp/r9-2-kernel-wiki-tests.log",
+    "test_results": [
+      "test result: FAILED. 219 passed; 6 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.26s"
+    ]
+  },
+  {
+    "name": "wiki-tests",
+    "command": "cargo test -p polaris-wiki --lib --tests --offline",
+    "exit_code": 0,
+    "warnings": 0,
+    "log": "/tmp/r9-2-wiki-tests.log",
+    "test_results": [
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s"
+    ]
+  },
+  {
+    "name": "kernel-integration",
+    "command": "cargo test -p polaris-kernel --test backend_config --test catalog_protocol --test credential_lock_interop --test provider_switch --offline",
+    "exit_code": 0,
+    "warnings": 0,
+    "log": "/tmp/r9-2-kernel-integration.log",
+    "test_results": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s"
+    ]
+  }
+]

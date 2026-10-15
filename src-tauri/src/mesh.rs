@@ -14,7 +14,7 @@
 //!
 //! 三条设计上的要紧事:
 //!  · **云端不持有远程盘会话或设备私钥。** 它只签身份断言；对端还要经过自己的成员资格、
-//!    设备 proof、grant/冷静期与撤销闸。账号中心签名权一旦失陷仍是严重事件（可伪造身份），
+//!    设备 proof、grant 与撤销闸。账号中心签名权一旦失陷仍是严重事件（可伪造身份），
 //!    因而公网传输必须 HTTPS、authority 必须 pin，不能把“云端不存盘 token”夸成绝对安全。
 //!  · **设备密钥落本机、可按设备吊销。** 丢一台电脑不必改密码,在别的设备上把它踢出设备网即可。
 //!  · **对端离线不拆盘。** 只要它还在设备网名册上,盘符就留着,由 fsmount 看门狗等它回来 ——
@@ -620,8 +620,8 @@ pub async fn mesh_devices() -> Result<Value, String> {
             d["effectiveFs"] = json!(g.map(|x| x.effective_fs().to_string()).unwrap_or_default());
             d["execAccess"] = json!(g.map(|x| x.exec_access.clone()).unwrap_or_default());
             d["autoMount"] = json!(g.map(|x| x.auto_mount).unwrap_or(false));
-            d["inCooldown"] = json!(g.map(|x| x.in_cooldown()).unwrap_or(false));
-            d["cooldownUntil"] = json!(g.map(|x| x.cooldown_until).unwrap_or(0));
+            d["inCooldown"] = json!(false);
+            d["cooldownUntil"] = json!(0);
             d["granted"] = json!(g.is_some());
             d["localRevoked"] = json!(g.map(|x| x.revoked).unwrap_or(false));
             d

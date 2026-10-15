@@ -105,7 +105,8 @@ pub fn is_revoked(uid: &str, device: &str) -> Result<bool, String> {
 pub fn require_fresh(uid: &str) -> Result<(), String> {
     let limit = super::load()?.security.revocation_max_age_secs as i64;
     let issued: Option<i64> = db::with_conn(|conn| conn.query_row(
-        "SELECT issued_at FROM cached_revocation_lists WHERE uid=?1", params![uid], |r| r.get(0),
+        "SELECT issued_at FROM cached_revocation_lists WHERE uid=?1 AND document<>''",
+        params![uid], |r| r.get(0),
     ).optional().map_err(|e| e.to_string()))?;
     if !issued.is_some_and(|t| db::now() - t <= limit) {
         return Err("需要联网确认：吊销清单已过期或尚未同步".into());
@@ -133,7 +134,18 @@ pub fn cached(uid: &str) -> Result<Snapshot, String> {
     let document: String = db::with_conn(|conn| conn.query_row(
         "SELECT document FROM cached_revocation_lists WHERE uid=?1", params![uid], |r| r.get(0),
     ).map_err(|e| e.to_string()))?;
-    let snapshot: Snapshot = authority::verify_document("PR1", &document, &key)?;
-    if snapshot.uid != uid { return Err("吊销清单账号不匹配".into()); }
-    Ok(snapshot)
+    let verified = authority::verify_document::<Snapshot>("PR1", &document, &key)
+        .and_then(|snapshot| {
+            if snapshot.uid != uid { return Err("吊销清单账号不匹配".into()); }
+            Ok(snapshot)
+        });
+    if verified.is_err() {
+        // Clear only the damaged payload, retaining the rollback floor and known revocations.
+        // Compare the payload so a concurrent successful heartbeat is not discarded.
+        db::with_conn(|conn| conn.execute(
+            "UPDATE cached_revocation_lists SET document='' WHERE uid=?1 AND document=?2",
+            params![uid, document],
+        ).map(|_| ()).map_err(|e| e.to_string()))?;
+    }
+    verified
 }

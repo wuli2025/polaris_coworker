@@ -79,7 +79,11 @@ impl AgentBackend for Fake {
     fn close(&self, _: &str) -> anyhow::Result<()> { self.closes.fetch_add(1, Ordering::SeqCst); Ok(()) }
     fn models(&self) -> anyhow::Result<serde_json::Value> { Ok(json!([])) }
     fn status(&self) -> BackendStatus {
-        BackendStatus { backend: self.kind.clone(), healthy: true, ..BackendStatus::default() }
+        BackendStatus {
+            backend: self.kind.clone(), agentd_version: None, pid: None, restarts: 0,
+            usage_persist_failures: 0, experts_synced: (self.kind == "pi").then_some(false),
+            expert_sync_error: None, circuit_open: false, healthy: true, last_error: None,
+        }
     }
     fn is_running(&self, _: &str) -> bool { false }
     fn shutdown(&self) {}

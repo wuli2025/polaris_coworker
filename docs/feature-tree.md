@@ -26,6 +26,7 @@
 | --- | --- | --- |
 | 桌面壳 → `H/main.rs:1`、`H/lib.rs`、`H/desktop_commands.rs` | Tauri 初始化、命令注册、托盘、退出回收 | app→各业务 crate；`src-tauri/Cargo.toml:161` desktop 特性，`src-tauri/tauri.conf.json:1`；H/UI |
 | 服务壳 → `H/server.rs:1,53,84` | HTTP/WS、初始化引擎、运行健康信息 | app→apihub/collab/各引擎；server 特性与 `.env.server.example:1`；H |
+| P6c 新加坡部署 → `deploy/singapore/docker-compose.yml`、`scripts/` | 账号权威、iroh-relay 1.0.1、TLS 与备份恢复；只产出不部署 | 复用 polaris-server/collab-net；配置 `.env.example`，客户端指纹模板、迁移顺序、依赖和验证见 [部署说明](../deploy/singapore/README.md) / [执行记录](../deploy/singapore/VALIDATION.md)；镜像 digest 与上线验证 BLOCKED |
 | 服务可执行入口 → `src-tauri/crates/polaris-cli/Cargo.toml:23` | 真正的 `polaris-server` bin 在 CLI crate | cli→app（无默认特性、server）；不能按主 Cargo.toml 注释中的 bin 当现存配置（`src-tauri/Cargo.toml:221`）；`cargo check -p polaris-cli`，CI `:85` |
 | Vue 桌面/Web → `src/App.vue:1`、`src/tauri.ts:445,1130` | 页壳、invoke/listen 适配、状态与组件 | Vue→桥→Tauri 或 HTTP；`package.json:7` dev，`:8` build；UI |
 | 移动端 → `mobile/src/lib/net.ts:315,345`、`mobile/src/lib/chat.ts:208` | HTTP/WS 远程对话、主机/项目切换；不是本地 Agent runtime | mobile→主机 api；`mobile/package.json:6`；移动 |
@@ -123,7 +124,7 @@ Pi `useSandbox` 在 P3 路由 bash/write/edit 到宿主容器桥；不可用或�
 | authority → `C/collab/authority.rs:56,163,187,268,341` | Local / Authority / Delegated 三模式；Ed25519 断言签验、公钥 pin、转发登录 | →auth/db/HTTP；POLARIS_ACCOUNT_AUTHORITY、POLARIS_ACCOUNT_AUTHORITY_URL、POLARIS_ACCOUNT_KEY（`:57,63,86`）；断言 TTL=300s（`:31`），不是长期 session |
 | authority 准入 → `C/collab/authority.rs:557,766,775,849` | upsert_member、login_with_assertion、local 登录、邀请票据加入 | →本机成员资格/grants；权威 uid 与本机 users.id 不等同（`:18`）；P6 保留跨账号邀请权限边界 |
 | identity → `C/collab/identity.rs:32,123,180,256,565,645` | 自动生成 host.key、连接证明、访问码/邀请、设备注册吊销、节点放行 | →db/密钥；POLARIS_HOST_KEY（`:19`）；密钥已自动生成，不能写成必须手工创建 |
-| grants → `C/collab/grants.rs:131,167,217,256,274,356,383` | peer_grants 持久信任、权限级别、文件/执行门禁 | →db/本机设备身份；同账号设备已有自动登记，除首台外有 24h 冷静期，实际文件只读、执行 ask（`:28,65,76,181`） |
+| grants → `C/collab/grants.rs`、`grants/{automatic,contract}.rs` | peer_grants 持久信任、权限级别、文件/执行门禁 | →db/本机设备身份；策略 B 同账号设备立即全权，显式权限/撤销仍有效；R9 删除旧冷静期分支，旧字段仅作存储兼容 |
 | mesh（权威目录）→ `C/collab/mesh.rs:79,106,126,198,221` | enroll、resolve_key、peers、announce、revoke；同 uid 设备目录 | →db/sha256；meshKey 为长期随机凭据，库只存 hash（`:12,87`）；不是 device.key，也不是设备证书 |
 | tunnel → `C/collab/tunnel.rs:204,256,374,539,575,743` | 主机监听、共享出站 Endpoint、TCP↔iroh 双向流、connect/disconnect/status、relay 配置 | →identity/iroh；collab-net；POLARIS_DEVICE_KEY、POLARIS_RELAYS、POLARIS_TUNNEL_UPSTREAM、POLARIS_TUNNEL_STRICT（`:192,317,92,421`） |
 | relay 配置 → `C/collab/tunnel.rs:256,317,334,343` | apply_relay_config、自定义 relay 列表、mDNS | 默认 n0 relay（`:12`）；HTTP 配置入口 `C/collab/http.rs:3460,4667`；运行中的 Endpoint 不会就地重建（tunnel `:255`），不是已部署自有 relay 的证据 |
@@ -132,7 +133,7 @@ Pi `useSandbox` 在 P3 路由 bash/write/edit 到宿主容器桥；不可用或�
 
 ## 互联客户端与协作业务分支
 
-同账号准入已会调用 auto_grant_self，已有契约不被重连覆盖（`C/collab/authority.rs:820,824`；`C/collab/grants.rs:177`）。P6 应调整登录入口与默认信任/冷静期策略，不能按“现有系统完全没有自动信任”重做。
+同账号准入调用 auto_grant_self，已有契约不被重连覆盖（`C/collab/authority.rs`、`C/collab/grants/automatic.rs`）。策略 B 已替代旧冷静期；R9 清理失效代码，登录失败节流保持原行为。
 
 | 模块 → 入口 | 职责 / 公开接口 | 配置 / 依赖 / 测试 |
 | --- | --- | --- |
@@ -464,10 +465,10 @@ Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列�
 
 - 前端入口：`ContextFileEditor.vue` → `src/features/runtime/useContextFileEditor.ts` → 原 `contextFiles` 接口；切换项目先确认脏编辑，取消保留原项目、文本及保存目标，确认后读取新项目。无新依赖。
 - 专家入口：`K/chat/backend/pi/experts.rs`；持久配置读取、daemon 实际配置读取、应用与保存均校验 prompt 原始 UTF-8 字节数，再去除尾部空白后比较。超限返回 `ExpertPromptTooLong`，不静默截断正文。
-- 配置：`POLARIS_EXPERT_PROMPT_MAX_BYTES` 默认 `32768`，必须为可表示为 usize 的正整数，否则 `ExpertPromptLimitInvalid`。切换示例：`POLARIS_EXPERT_PROMPT_MAX_BYTES=65536 ./polaris-server`；取消环境变量恢复默认。
+- 配置：`POLARIS_EXPERT_PROMPT_MAX_BYTES` 默认 `32768` UTF-8 字节（不是字符数，含尾部空白），必须为可表示为 usize 的正整数，否则 `ExpertPromptLimitInvalid`。切换示例：`POLARIS_EXPERT_PROMPT_MAX_BYTES=65536 ./polaris-server`；取消环境变量恢复默认；[带注释配置](execution/R9/expert-prompt.env.example)。
 - 迁移：旧 JSON 结构不变；超限旧 prompt 需缩短或显式提高上限；尾部空白差异不再触发重复 apply。费用聚合逻辑不变，只固化同模型同窗口混合请求为 `has_price=false`、仅有价窗口为 true。
 - 恢复入口：`PiBackend::new` 在 shared 模式启动 supervisor，不等待 daemon I/O；`pi/supervisor.rs` → `pi/experts_sync.rs` 在初次及后续健康 ping 后恢复专家配置，apply 后再次 ping 核验。应用期间排队请求，失败后释放请求并保留 daemon 健康状态；后续 ping 自动重试。daemon 退出和空闲回收均重置同步状态。
-- 状态接口：`agent_backend_status` 新增 `expertsSynced: boolean | null`、`expertSyncError: string | null`，对应 `src/types/agentRuntime.ts`；Pi 未同步为 false，确认持久覆盖已恢复或无覆盖为 true，非 Pi 为 null。配置错误与 daemon 的 `healthy` 分开报告；同步失败时显式专家 setter 返回 `ExpertConfigUnsynced`，其他 daemon 请求仍可用。
+- 状态接口：`agent_backend_status` 新增 `expertsSynced: boolean | null`、`expertSyncError: string | null`，对应 `src/types/agentRuntime.ts`；Pi 未同步为 false，确认持久覆盖已恢复或无覆盖为 true，非 Pi 为 null。配置错误与 daemon 的 `healthy` 分开报告；同步失败时显式专家 setter 返回 `ExpertConfigUnsynced`，其他 daemon 请求仍可用。R9 将 `BackendStatus::Default` 限定为单元测试可用，生产统一显式构造；wiki 跨 crate 测试替身显式填充字段，序列化行为不变。
 - 恢复配置：复用 `agentd.pingIntervalMs`（默认 30000）、既有重启退避及熔断阈值；JSON 正整数校验不变。切换示例及熔断边界见报告。无新依赖，per-account 隔离行为不变。
 - 测试：`tests/frontend/runtimeContextEditor.test.ts`、`K/chat/backend/pi/experts{,_recovery}_tests.rs`、`K/provider/usage_costs.rs`。Vitest 65 通过，vue-tsc 通过；kernel 218 通过（含 13 个专家测试）、6 个端口绑定失败、2 ignored，补跑 8 个集成用例通过。
 - 两壳检查：桌面与带 collab-net 的服务壳均退出 0、0 警告；额外不带 collab-net 的服务壳退出 0，但仍有 4 条范围外 mesh 警告。未修改并行 P6a 文件。
@@ -479,18 +480,18 @@ Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列�
 - 装配：`tunnel/{relay,endpoint}.rs` 与 `gateway/endpoint.rs` 共用 relay；`src/mesh/{login,orchestration}.rs` 注册→清单→relay→连接，Tauri 新增 `account_login_password`。
 - 配置：随包 `interconnect/{defaults,schema}.json`；环境变量 > 用户 JSON > 默认；占位本地模式、完整 SHA-256 多指纹、relay fallback 默认 true。
 - 依赖/迁移：无新依赖/DB 迁移；新 pin 必须匹配预置指纹，已有显式 URL 部署须补指纹；旧响应缺 relay 字段继续兼容。原 TTL/密钥哈希/本机准入保留。
+- relay 信任边界：列表未单独签名，通过权威 HTTPS 获取（环回开发地址除外）；iroh QUIC 流量端到端加密。仅篡改 relay 列表无法读取或伪造传输内容，最坏造成拒绝服务；这不涵盖权威签名密钥失陷。
 - 前端：状态新增 `interconnect`、`relayConfig`、`authorityConfigured`、`configurationError`；`mesh_sync` 可重试，relay 待重连时明确 pending。
 - 阻塞：策略 B 尚未启用；账号断言不绑定设备，且全网立即吊销与现有离线会话需要明确协议取舍。高风险清单已列代码，审批/通知/窗口配置与相关测试未实现。
 - 验证：两壳 offline check 零警告；collab 124 项通过（2 项网络测试由既有门控短路）；kernel 216 通过/6 端口绑定失败/2 ignored，另 8 项集成测试通过；vue-tsc 通过。
 - 配置切换、接口、未完成项、实际命令、文件行数与长文件技术债见 [P6a 执行报告](interconnect/p6a-backend.md) 和 [验证清单](interconnect/p6a-validation.md)。
 
-
 ## P6a-2：设备绑定、吊销传播与策略 B（执行报告，待复核）
 
 - 入口/依赖：`collab::interconnect::{binding,revocations,sync,risk,gate,notifications}`；HTTP security routes、mesh 控制台与 invoke 装配；复用 SQLite/Ed25519/ureq/tokio，无新依赖。
-- 行为：断言绑定设备代际 ID 与 NodeId；签名清单失效会话；离线沿用缓存；立即读写、通知与高风险批准。取代上节策略 B 阻塞项，旧无绑定断言仍兼容并记日志。
+- 行为：断言绑定设备代际 ID 与 NodeId；签名清单失效会话；离线沿用缓存；立即读写、通知与高风险批准。取代上节策略 B 阻塞项，旧无绑定断言仍兼容并记日志。R9：缓存验签失败清除正文并拒绝高风险操作，保留版本/签发时间下限及已知吊销；下一安全心跳重拉，无 DB 迁移；行为测试及实际验证见 [R9 执行报告](execution/R9/report.md)。
 - 配置/迁移：`security` 默认拉取 30s、新鲜度 600s、窗口 24h、批准超时 300s；增量建表、旧设备回填、旧会话重登录后绑定；保留显式权限与 revoked。
-- 验证/接口/限制：见 [P6a-2 协议及执行报告](interconnect/p6a2-policy-b.md)、[文件与实际验证](interconnect/p6a2-validation.md)；不代表 Claude/Pi 最终验收。
+- 验证/接口/限制：见 [P6a-2 协议及执行报告](interconnect/p6a2-policy-b.md)、[文件与实际验证](interconnect/p6a2-validation.md)；R9 的 #7 已清理，HTTP 入口由 `http.rs` 转发至 `http/router.rs` 和各职责模块；`grants/{gate_tests,tests}.rs`、`http/peer_routes.rs` 验证权限与旧字段兼容。无需新配置/迁移；必测结果和环境阻塞见 [R9 报告](execution/R9/report.md)，不代表 Claude/Pi 最终验收。
 
 ## F1：并行测试时序加固（执行报告，验收 BLOCKED）
 

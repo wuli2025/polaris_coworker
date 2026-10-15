@@ -72,6 +72,50 @@ fn tampered_wrong_account_and_unsigned_lists_do_not_replace_cache() -> Result<()
 }
 
 #[test]
+fn corrupt_cache_denies_high_risk_until_next_security_heartbeat() -> Result<(), String> {
+    let env = test_env::TestEnv::new("cache-recovery")?;
+    account()?;
+    mesh::enroll("acct_test", "node-a", "Laptop", "linux", "1")?;
+    mesh::enroll("acct_test", "node-b", "Old device", "linux", "1")?;
+    let key = authority::public_key_b64()?;
+    let older = revocations::signed("acct_test")?;
+    let revoked_device = devices::active("acct_test", "node-b")?.device_id;
+    mesh::revoke("acct_test", "node-b")?;
+    let valid = revocations::signed("acct_test")?;
+    std::env::set_var("POLARIS_COLLAB_DB", env.directory.join("member.db"));
+    account()?;
+    pin(&key)?;
+    revocations::accept("acct_test", &valid)?;
+    let payload = json!({"id": 1});
+    gate::require("acct_test", "node-a", "delete_account", &payload)?;
+
+    let mut parts: Vec<String> = valid.split('.').map(String::from).collect();
+    parts[1].push('A');
+    db::open_db()?.execute(
+        "UPDATE cached_revocation_lists SET document=?1 WHERE uid='acct_test'",
+        params![parts.join(".")],
+    ).map_err(|e| e.to_string())?;
+    assert!(gate::require("acct_test", "node-a", "delete_account", &payload).is_err());
+    let stored: String = db::open_db()?.query_row(
+        "SELECT document FROM cached_revocation_lists WHERE uid='acct_test'", [], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    assert!(stored.is_empty(), "damaged signed payload must be cleared");
+    assert!(revocations::require_fresh("acct_test").is_err());
+    assert!(revocations::is_revoked("acct_test", &revoked_device)?);
+    assert!(sync::poll_account_with("acct_test", || Ok(json!({"document": older}))).is_err());
+    assert!(sync::poll_account_with("acct_test", || Err("offline".into())).is_err());
+    assert!(gate::require("acct_test", "node-a", "delete_account", &payload).is_err());
+
+    // Run the next heartbeat's account-refresh path with an injected authority response.
+    assert!(revocations::accounts()?.iter().any(|uid| uid == "acct_test"));
+    sync::poll_account_with("acct_test", || Ok(json!({"document": valid})))?;
+    revocations::require_fresh("acct_test")?;
+    gate::require("acct_test", "node-a", "delete_account", &payload)?;
+    assert!(revocations::is_revoked("acct_test", &revoked_device)?);
+    Ok(())
+}
+
+#[test]
 fn offline_session_works_but_stale_high_risk_requires_online_confirmation() -> Result<(), String> {
     let _env = test_env::TestEnv::new("offline")?;
     account()?;
