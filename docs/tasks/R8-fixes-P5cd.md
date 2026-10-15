@@ -7,3 +7,6 @@
 允许修改：`src/features/runtime/`、`tests/frontend/`、`src-tauri/crates/polaris-kernel/src/chat/backend/pi/experts*.rs`、`src-tauri/crates/polaris-kernel/src/chat/backend/` 中状态类型、`src-tauri/crates/polaris-kernel/src/provider/usage_costs*.rs`、对应前端类型、测试、`docs/`。
 无新依赖；≤500 行/≤500 字符；新 Rust 代码无 unwrap/expect；编译警告 0。
 必须通过：两壳 `cargo check --offline`；`cargo test -p polaris-kernel --lib --tests --offline`；`npx vue-tsc --noEmit`；`npx vitest run`。不 commit。
+
+## 范围例外批复（第 2 次运行，Claude）
+后端 #4 允许修改 `src-tauri/crates/polaris-kernel/src/chat/backend/pi/mod.rs`、`pi/supervisor.rs`（仅专家同步的启动/恢复接线与状态字段）。注意：P6a 正在并行修改 `polaris-collab` 与 `src-tauri/src` 中的互联代码，服务端壳 `collab-net` 组合的编译错误来自 P6a 进行中的改动，本任务不要触碰 collab 与互联文件；验证时桌面壳与内核测试为准，服务端壳结果单独说明。其余已完成部分保留。
