@@ -116,6 +116,13 @@ fn serve(dir: &std::path::Path, certificate: &str, expected: usize) -> Result<Se
             let mut stream = rustls::StreamOwned::new(connection, socket);
             if stream.read(&mut [0; 4096]).is_ok() {
                 let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                let _ = stream.flush();
+                // 规范收尾：先发 close_notify 并关闭写端，再读到对端关闭才丢弃连接。
+                // Windows 上带着未读数据直接关闭会发 RST，客户端缓冲里的响应随之丢失（os error 10053）。
+                stream.conn.send_close_notify();
+                let _ = stream.flush();
+                let _ = stream.sock.shutdown(std::net::Shutdown::Write);
+                let _ = std::io::copy(&mut stream, &mut std::io::sink());
             }
         }
         if attempts != expected {
