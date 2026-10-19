@@ -110,6 +110,9 @@ fn serve(dir: &std::path::Path, certificate: &str, expected: usize) -> Result<Se
                 Err(error) => return Err(error.to_string()),
             };
             attempts += 1;
+            // Windows 上 accept 出的连接会继承监听端口的非阻塞状态（Linux 不会），
+            // 否则 TLS 握手一开始就读到 WouldBlock，服务端丢弃连接，客户端得到 os error 10053。
+            socket.set_nonblocking(false).map_err(|e| e.to_string())?;
             socket.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
             socket.set_write_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
             let connection = rustls::ServerConnection::new(tls.clone()).map_err(|e| e.to_string())?;
