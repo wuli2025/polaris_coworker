@@ -308,17 +308,14 @@ fn dispatch_chat_and_services(cmd: &str, a: &Args, app: AppHandle) -> Result<Val
                 return Err("更新需要确认 (confirm: true)".to_string());
             }
             let (enabled, service, script) = docker_updater_bits();
-            if !docker_update_auth_configured() {
-                return Err("Docker 一键更新需要先设置 POLARIS_AUTH_TOKEN 或 POLARIS_REQUIRE_LOGIN=1；开放模式不会获得容器替换能力。".to_string());
-            }
             if !script {
                 return Err("/usr/local/bin/update.sh 不存在(镜像未含更新脚本,旧版镜像请先手动装一次新的)。".to_string());
             }
             if !service {
-                return Err("隔离更新服务未配置。请生成 POLARIS_UPDATER_TOKEN，并用 docker-compose.update.yml 重建服务。".to_string());
+                return Err("隔离更新服务未配置。请用 docker-compose.update.yml 重建服务。".to_string());
             }
             if !enabled {
-                return Err("容器一键更新未满足安全条件，请检查应用鉴权、updater token 与更新脚本。".to_string());
+                return Err("容器一键更新未就绪，请检查 updater 内部服务与更新脚本。".to_string());
             }
             let target = docker_registry_target()?;
             if current_build_revision() == target.revision {

@@ -30,7 +30,6 @@ import {
   dockerUpdaterEnabled,
   dockerUpdaterServiceConfigured,
   dockerUpdateScriptPresent,
-  dockerAuthConfigured,
   dockerMessage,
 } from "../composables/useUpdater";
 
@@ -155,26 +154,21 @@ const lastChecked = computed(() => {
         <div v-if="lastChecked" class="last">上次检查 {{ lastChecked }}</div>
       </div>
 
-      <!-- Docker 一键更新权限是显式 opt-in；版本检查本身不需要 updater sidecar。 -->
+      <!-- 旧镜像先迁移一次；新架构由隔离 updater 提供页面更新。 -->
       <div v-if="isDocker && !dockerUpdaterEnabled" class="docker-setup">
         <div class="docker-setup-head">
           <ShieldAlert :size="18" :stroke-width="1.8" />
           <div>
             <div class="docker-setup-title">一键更新尚未启用</div>
             <div class="docker-setup-sub">
-              <template v-if="!dockerAuthConfigured">
-                为避免把宿主机级更新能力暴露给匿名访问，请先设置
-                <code>POLARIS_AUTH_TOKEN</code> 或 <code>POLARIS_REQUIRE_LOGIN=1</code>，然后重建容器。
-              </template>
-              <template v-else-if="!dockerUpdateScriptPresent">
-                当前是旧版或自建镜像，镜像内没有更新脚本；请先在宿主机手动更新一次。
+              <template v-if="!dockerUpdateScriptPresent">
+                当前是旧版或自建镜像，镜像内没有更新脚本；请先执行官网的一次迁移命令。
               </template>
               <template v-else-if="!dockerUpdaterServiceConfigured">
-                隔离更新服务尚未配置。请生成 <code>POLARIS_UPDATER_TOKEN</code>，并叠加
-                <code>docker-compose.update.yml</code> 重建服务。
+                内部更新服务尚未启动；请重新运行官网安装/迁移命令。
               </template>
               <template v-else>
-                一键更新的安全条件未满足，请核对应用鉴权与 updater token。
+                更新服务尚未就绪，请重新运行官网安装/迁移命令。
               </template>
             </div>
           </div>
@@ -182,7 +176,7 @@ const lastChecked = computed(() => {
         <code class="docker-command">docker compose -f docker-compose.yml -f docker-compose.update.yml up -d</code>
         <p class="docker-warning">
           Docker socket 只挂在固定版本的 Watchtower sidecar，绝不进入 Polaris App 容器。
-          同时仍须启用账号鉴权并使用 HTTPS；更新 token 请使用独立随机值。
+          App 与 sidecar 的通信密钥由部署文件在容器内部处理，无需用户配置。
         </p>
       </div>
 

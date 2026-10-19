@@ -180,14 +180,11 @@ mod origin_gate_tests {
 
     #[cfg(not(feature = "desktop"))]
     #[test]
-    fn docker_一键更新要求应用鉴权与窄接口配置() {
-        assert!(!docker_update_auth_configured_with(None, false));
-        assert!(!docker_update_auth_configured_with(Some("  "), false));
-        assert!(docker_update_auth_configured_with(
-            Some("machine-secret"),
-            false
-        ));
-        assert!(docker_update_auth_configured_with(None, true));
+    fn docker_一键更新只依赖隔离服务与更新脚本() {
+        assert!(docker_update_enabled_with(true, true));
+        assert!(!docker_update_enabled_with(false, true));
+        assert!(!docker_update_enabled_with(true, false));
+        assert!(!docker_update_enabled_with(false, false));
 
         assert!(!updater_service_configured_with(None, Some("secret")));
         assert!(!updater_service_configured_with(

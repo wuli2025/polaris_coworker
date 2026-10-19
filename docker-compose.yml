@@ -23,10 +23,13 @@ services:
         INSTALL_CLAUDE: ${POLARIS_INSTALL_CLAUDE:-false}
     container_name: polaris-web
     restart: unless-stopped
+    # 新安装沿用镜像 UID/GID 1000；旧 root 数据布局由迁移脚本临时设为 0:0，
+    # 不递归改写 NAS 文件属主或 ACL。
+    user: "${POLARIS_RUNTIME_USER:-1000:1000}"
     # 安全默认：只给本机 TLS 反代访问，不把带 owner 能力的明文 HTTP 直接暴露公网。
     # 仅在可信内网且明确接受明文风险时，才在 .env 设置 POLARIS_BIND_IP=0.0.0.0。
     ports:
-      - "${POLARIS_BIND_IP:-127.0.0.1}:8080:8080"
+      - "${POLARIS_BIND_IP:-127.0.0.1}:${POLARIS_HTTP_PORT:-8080}:8080"
       # iroh 打洞用的 UDP 口。**必须发布**,而且必须是固定口:iroh 默认随机绑,
       # 容器里随机口等于外面永远打不进来 → 打洞必失败 → 全部流量绕公共中继,
       # 实测往返从 12ms 变 370ms、盘慢 30 倍,而且不报任何错(只是"能用但很慢")。

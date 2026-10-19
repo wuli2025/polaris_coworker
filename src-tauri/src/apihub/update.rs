@@ -189,8 +189,7 @@ fn spawn_docker_update(target: &RegistryTarget) -> Result<Value, String> {
     }))
 }
 
-/// 远程更新会触发宿主机侧容器替换。只有部署者已经显式打开机器口令或团队账号登录时，
-/// 才允许把这项能力暴露给 Web；开放模式即使误配了 updater token 也 fail-closed。
+/// 保留给旧前端显示部署状态；不再作为容器更新能力的开关。
 #[cfg(not(feature = "desktop"))]
 fn docker_update_auth_configured_with(token: Option<&str>, require_login: bool) -> bool {
     token.is_some_and(|v| !v.trim().is_empty()) || require_login
@@ -220,17 +219,19 @@ fn updater_service_configured() -> bool {
     updater_service_configured_with(url.as_deref(), token.as_deref())
 }
 
-/// 「网页上能不能一键更新」= 已启用应用鉴权 + 隔离 updater 已配置 + 更新脚本在镜像里。
+/// 「网页上能不能一键更新」只依赖隔离 updater 与镜像内更新脚本。
+/// 用户访问鉴权将在账号体系接管时统一处理，不在 NAS 安装流程中额外设门槛。
+#[cfg(not(feature = "desktop"))]
+fn docker_update_enabled_with(service: bool, script: bool) -> bool {
+    service && script
+}
+
 /// 返回 `(enabled, updater_service_configured, script_present)`。
 #[cfg(not(feature = "desktop"))]
 pub(crate) fn docker_updater_bits() -> (bool, bool, bool) {
     let service = updater_service_configured();
     let script = std::path::Path::new(UPDATE_SCRIPT).exists();
-    (
-        service && script && docker_update_auth_configured(),
-        service,
-        script,
-    )
+    (docker_update_enabled_with(service, script), service, script)
 }
 
 /// 读取运行 tag 的 OCI index/config，并以 build revision 判断是否真的有可拉取的新镜像。

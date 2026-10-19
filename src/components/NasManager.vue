@@ -23,6 +23,8 @@ import {
   FolderOpen,
 } from "@lucide/vue";
 import OrbitSpinner from "./icons/OrbitSpinner.vue";
+import { nasThemeVars } from "./nasTheme";
+import { useAppStore } from "../stores/app";
 import {
   invoke,
   nas,
@@ -56,6 +58,8 @@ const emit = defineEmits<{
   (e: "open-interconnect"): void;
 }>();
 
+const app = useAppStore();
+const nasStyle = computed(() => nasThemeVars(app.theme));
 const list = ref<NasView[]>([]);
 const remoteSources = ref<ManagedRemote[]>([]);
 const mounts = ref<MountStatus[]>([]);
@@ -301,7 +305,7 @@ onMounted(refresh);
 
 <template>
   <div class="nas-overlay" @click.self="emit('close')">
-    <div class="nas-panel glass">
+    <div class="nas-panel glass" :style="nasStyle">
       <header class="nas-head">
         <div class="nas-title">
           <Server :size="18" :stroke-width="1.8" />
@@ -526,11 +530,11 @@ onMounted(refresh);
   max-height: 88vh;
   display: flex;
   flex-direction: column;
-  color: var(--text);
+  color: var(--nas-text);
   color-scheme: light;
   border-radius: 20px;
-  border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  border: 1px solid var(--nas-border);
+  background: var(--nas-panel);
   backdrop-filter: blur(26px) saturate(1.3);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
@@ -553,6 +557,7 @@ onMounted(refresh);
   font-size: 15.5px;
   font-weight: 650;
   letter-spacing: 0.2px;
+  color: var(--nas-text);
 }
 .nas-head-actions {
   display: flex;
@@ -564,15 +569,15 @@ onMounted(refresh);
   width: 32px;
   height: 32px;
   border-radius: 10px;
-  border: 1px solid var(--border-soft);
-  background: var(--bg-soft);
-  color: var(--text-2);
+  border: 1px solid var(--nas-border);
+  background: var(--nas-form);
+  color: var(--nas-secondary);
   cursor: pointer;
   transition: background 0.16s, border-color 0.16s;
 }
 .ghost-btn:hover {
-  background: var(--selection-bg-hover);
-  color: var(--text);
+  background: var(--nas-card-hover);
+  color: var(--nas-text);
 }
 .nas-sub {
   display: flex;
@@ -582,7 +587,7 @@ onMounted(refresh);
   padding: 9px 11px;
   font-size: 12.3px;
   line-height: 1.55;
-  color: var(--text-2);
+  color: var(--nas-secondary);
   background: var(--primary-soft);
   border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
   border-radius: 11px;
@@ -602,8 +607,8 @@ onMounted(refresh);
   margin: 6px 0 16px;
   padding: 14px;
   border-radius: 14px;
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
+  border: 1px solid var(--nas-border);
+  background: var(--nas-form);
 }
 .glass-in {
   animation: glassIn 0.18s ease;
@@ -628,22 +633,22 @@ onMounted(refresh);
   max-width: 120px;
 }
 .fld > span {
-  color: var(--text-2);
+  color: var(--nas-secondary);
   font-weight: 600;
 }
 .fld input {
   height: 36px;
   padding: 0 11px;
   border-radius: 9px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text);
+  border: 1px solid var(--nas-border);
+  background: var(--nas-control);
+  color: var(--nas-text);
   font-size: 13px;
   outline: none;
   transition: border-color 0.16s, box-shadow 0.16s;
 }
 .fld input::placeholder {
-  color: var(--dim);
+  color: var(--nas-placeholder);
   opacity: 1;
 }
 .fld input:focus {
@@ -656,7 +661,7 @@ onMounted(refresh);
   gap: 8px;
   margin-top: 12px;
   font-size: 12.5px;
-  color: var(--text-2);
+  color: var(--nas-secondary);
   cursor: pointer;
 }
 .chk input {
@@ -685,20 +690,20 @@ onMounted(refresh);
   transition: filter 0.16s, background 0.16s;
 }
 .btn-ghost {
-  background: var(--panel);
-  border-color: var(--border);
-  color: var(--text-2);
+  background: var(--nas-control);
+  border-color: var(--nas-border);
+  color: var(--nas-secondary);
 }
 .btn-ghost:hover {
-  background: var(--selection-bg-hover);
-  color: var(--text);
+  background: var(--nas-card-hover);
+  color: var(--nas-text);
 }
 .btn-primary {
-  background: linear-gradient(135deg, #5b8cff, #6f6aff);
-  color: #fff;
+  background: linear-gradient(135deg, var(--nas-primary-start), var(--nas-primary-end));
+  color: var(--nas-primary-label);
 }
 .btn-primary:hover {
-  filter: brightness(1.08);
+  filter: brightness(0.94);
 }
 
 /* 区块 */
@@ -717,11 +722,11 @@ onMounted(refresh);
   font-size: 12.5px;
   font-weight: 650;
   letter-spacing: 0.3px;
-  color: var(--text-2);
+  color: var(--nas-secondary);
 }
 .sect-note {
   font-size: 11.3px;
-  color: var(--muted);
+  color: var(--nas-muted);
 }
 .add-btn {
   display: inline-flex;
@@ -746,17 +751,17 @@ onMounted(refresh);
   font-size: 12.6px;
   line-height: 1.6;
   text-align: center;
-  color: var(--muted);
-  border: 1px dashed var(--border);
+  color: var(--nas-muted);
+  border: 1px dashed var(--nas-border);
   border-radius: 12px;
 }
 
 .remote-section {
   margin: 6px 0 16px;
   padding: 0 12px 12px;
-  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--nas-border));
   border-radius: 14px;
-  background: color-mix(in srgb, var(--primary-soft) 54%, var(--panel));
+  background: color-mix(in srgb, var(--primary-soft) 44%, var(--nas-panel));
 }
 .remote-section .sect-head > div {
   min-width: 0;
@@ -765,10 +770,10 @@ onMounted(refresh);
   gap: 2px;
 }
 .remote-empty {
-  background: var(--panel);
+  background: var(--nas-card);
 }
 .remote-card {
-  background: color-mix(in srgb, var(--panel) 92%, var(--primary-soft));
+  background: color-mix(in srgb, var(--nas-card) 92%, var(--primary-soft));
 }
 
 /* 卡片 */
@@ -786,16 +791,17 @@ onMounted(refresh);
   gap: 12px;
   padding: 12px 13px;
   border-radius: 13px;
-  border: 1px solid var(--border-soft);
-  background: var(--panel);
+  border: 1px solid var(--nas-border);
+  background: var(--nas-card);
+  color: var(--nas-text);
   transition: border-color 0.16s, background 0.16s, transform 0.16s;
 }
 .nas-card:hover {
-  background: var(--panel-hover);
+  background: var(--nas-card-hover);
 }
 .nas-card.on {
-  border-color: color-mix(in srgb, var(--ok) 42%, var(--border));
-  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--nas-ok) 42%, var(--nas-border));
+  background: var(--nas-ok-soft);
 }
 .nas-card.discovered {
   border-style: dashed;
@@ -811,8 +817,8 @@ onMounted(refresh);
   background: var(--primary-soft);
 }
 .nas-card.on .card-ic {
-  color: var(--ok);
-  background: var(--ok-soft);
+  color: var(--nas-ok);
+  background: var(--nas-ok-soft);
 }
 .card-main {
   flex: 1 1 auto;
@@ -829,6 +835,7 @@ onMounted(refresh);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--nas-text);
 }
 .badge {
   flex: 0 0 auto;
@@ -838,14 +845,14 @@ onMounted(refresh);
   border-radius: 999px;
 }
 .badge.ok {
-  color: var(--ok);
-  background: var(--ok-soft);
+  color: var(--nas-ok);
+  background: var(--nas-ok-soft);
 }
 .card-unc {
   margin-top: 2px;
   font-size: 11.8px;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  color: var(--muted);
+  color: var(--nas-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -855,7 +862,7 @@ onMounted(refresh);
   display: flex;
   gap: 6px;
   font-size: 11.3px;
-  color: var(--muted);
+  color: var(--nas-muted);
 }
 .card-meta.warn {
   color: var(--vermilion);
@@ -879,26 +886,26 @@ onMounted(refresh);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  color: var(--text-2);
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
+  color: var(--nas-secondary);
+  background: var(--nas-form);
+  border: 1px solid var(--nas-border);
   transition: background 0.16s, filter 0.16s;
 }
 .act:hover {
-  color: var(--text);
-  background: var(--selection-bg-hover);
+  color: var(--nas-text);
+  background: var(--nas-card-hover);
 }
 .act:disabled {
   opacity: 0.55;
   cursor: default;
 }
 .act.primary {
-  color: #fff;
-  background: linear-gradient(135deg, #4f86ff, #6f6aff);
+  color: var(--nas-primary-label);
+  background: linear-gradient(135deg, var(--nas-primary-start), var(--nas-primary-end));
   border-color: transparent;
 }
 .act.primary:hover {
-  filter: brightness(1.1);
+  filter: brightness(0.94);
 }
 .act.icon {
   padding: 0 9px;
