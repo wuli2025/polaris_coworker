@@ -17,7 +17,18 @@ const categories: [Code, readonly string[]][] = [
     "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT"]],
 ];
 
+// Registered credential values are additionally removed by the daemon event sink.
+function reason(message: AssistantMessage): string {
+  const raw = message.errorMessage?.trim();
+  if (!raw) return "";
+  return raw.replace(/(?:authorization|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[=:]\s*[^\r\n,;}]+/gi, "[REDACTED]")
+    .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(/sk-[a-zA-Z0-9_-]+/g, "[REDACTED]")
+    .replace(/[\r\n\x00-\x1f]+/g, " ");
+}
 export function modelError(message: AssistantMessage): { code: Code; message: string } {
+  const detail = reason(message);
+  const describe = (code: Code) => ({ code, message: messages[code] + (detail ? ` 提供商原因：${detail}` : "") });
   // Pi 1.0.4 exposes structured failures through diagnostics. Some adapters only
   // supply errorMessage; leave those unclassified instead of parsing provider prose.
   for (const diagnostic of [...(message.diagnostics ?? [])].reverse()) {
@@ -32,9 +43,9 @@ export function modelError(message: AssistantMessage): { code: Code; message: st
     if (status === 401 || status === 403) code = "MODEL_AUTH";
     else if (status === 429) code = "MODEL_RATE_LIMIT";
     else code = categories.find(([, names]) => tags.some((tag) => typeof tag === "string" && names.includes(tag)))?.[0];
-    if (code) return { code, message: messages[code] };
+    if (code) return describe(code);
   }
-  return { code: "MODEL_ERROR", message: messages.MODEL_ERROR };
+  return describe("MODEL_ERROR");
 }
 
 /** SDK auth failures can happen before an assistant message exists. */

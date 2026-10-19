@@ -9,7 +9,12 @@ import { Redactor } from "./credentials.ts";
 /** Shared generation-directory lock contract with Rust credential_lock.rs. */
 export class FileCredentials implements CredentialStore {
   constructor(readonly path: string, private readonly redactor: Redactor,
-    private readonly locks: LockOptions = { timeoutMs: 30000, pollMs: 25 }) {
+    private readonly locks: LockOptions = { timeoutMs: 30000, pollMs: 25 },
+    private readonly bundled?: { id: string; key: string }) {
+    if (bundled) {
+      if (!bundled.id.trim() || !bundled.key.trim()) throw new Error("BundledCredentialInvalid");
+      this.redactor.add(bundled.key);
+    }
     if (!path || !Number.isSafeInteger(locks.timeoutMs) || locks.timeoutMs <= 0
       || !Number.isSafeInteger(locks.maxHoldMs ?? DEFAULT_MAX_HOLD_MS) || (locks.maxHoldMs ?? DEFAULT_MAX_HOLD_MS) <= 0
       || !Number.isSafeInteger(locks.pollMs) || locks.pollMs <= 0) throw new Error("CredentialStoreConfigInvalid");
@@ -55,11 +60,17 @@ export class FileCredentials implements CredentialStore {
   async read(id: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
     options?.signal?.throwIfAborted();
     const entries = (await this.root()).credentials;
-    return entries && Object.hasOwn(entries, id) ? entries[id] : undefined;
+    const saved = entries && Object.hasOwn(entries, id) ? entries[id] : undefined;
+    if (saved) return saved;
+    return this.bundled?.id === id ? { type: "api_key", key: this.bundled.key } : undefined;
   }
   async list(options?: AuthOperationOptions) {
     options?.signal?.throwIfAborted();
-    return Object.entries((await this.root()).credentials ?? {}).map(([providerId, c]) => ({ providerId, type: c.type }));
+    const entries = Object.entries((await this.root()).credentials ?? {}).map(([providerId, c]) => ({ providerId, type: c.type }));
+    if (this.bundled && !entries.some((entry) => entry.providerId === this.bundled!.id)) {
+      entries.push({ providerId: this.bundled.id, type: "api_key" });
+    }
+    return entries;
   }
   async modify(id: string, fn: (current: Credential | undefined) => Promise<Credential | undefined>, options?: AuthOperationOptions) {
     return this.locked(async (assertOwned) => {

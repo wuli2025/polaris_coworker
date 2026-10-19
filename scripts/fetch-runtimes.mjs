@@ -5,7 +5,7 @@
 // 抓什么(对应「不再强制用户装 uv / PowerShell 7」):
 //   · uv        —— Python 脚本的统一托管者(一个二进制管解释器+依赖)
 //   · Python    —— python-build-standalone 便携解释器,`uv run` 免联网即可跑
-//   · Git Bash  —— 仅 Windows。Claude Code 在 Windows 上跑 Bash 工具必须有 bash;
+//   · Git Bash  —— 仅 Windows。Pi agent 在 Windows 上跑 Bash 工具需要 bash;
 //                  内置一份 MinGit 后,用户既不用装 PowerShell 7 也不用装 Git。
 //
 // ★ MinGit 的两个坑(2026-07-23 实测,别想当然):
@@ -191,7 +191,7 @@ function extract(archivePath, destDir, strip) {
 
 /**
  * MinGit 的 sh.exe 就是 bash 本体,但没叫 bash.exe。
- * Claude Code 认的是 CLAUDE_CODE_GIT_BASH_PATH 指向的 bash —— 这里补出来。
+ * Pi 的 shellPath 需要可执行的 bash —— 这里补出来。
  *
  * ★ 只能放在 `usr/bin/`,**不要**再往 `bin/` 放一份(2026-07-23 实测):
  *   msys 的 bash 依赖同目录的 `msys-2.0.dll`,而 `bin/` 下没有这个 dll →

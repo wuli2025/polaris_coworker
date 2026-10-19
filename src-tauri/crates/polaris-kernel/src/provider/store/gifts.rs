@@ -179,51 +179,7 @@ pub(super) fn gift_kimi_key() -> String {
     String::from_utf8(bytes).unwrap_or_default()
 }
 
-/// 首启一次性把「粉丝福利」MiniMax 供应商(含构建期注入的 key)种进 store。
-/// 用 marker(`<data>/.gift_minimax_seeded`)记录, 之后即便用户在坞里删除/改空,
-/// 重启也 **不会** 再种 —— 尊重用户的删除(沿用资料库播种的语义)。
-/// 未注入 key(dev 构建)时直接跳过。返回是否新种了内容。
-pub(super) fn seed_gift_minimax(store: &mut Store, data_dir: &Path) -> bool {
-    let key = gift_minimax_key();
-    if key.is_empty() {
-        return false;
-    }
-    let marker = data_dir.join(".gift_minimax_seeded");
-    if marker.exists() {
-        return false;
-    }
-    // 不管后面有没有真种进去, 都打 marker, 避免每次启动重试 + 尊重删除。
-    let _ = fs::write(&marker, b"seeded\n");
-
-    // 用户已自配同 id 供应商则不覆盖。
-    if store.items.iter().any(|i| i.id == "minimax") {
-        return false;
-    }
-    // 钉 MiniMax-M3(官方 Claude Code 文档推荐):四档全设成 M3, 后台小任务也走 M3,
-    // 不再回落 Claude 默认 haiku 名被网关当未知模型。
-    let cfg = config_with_model(
-        default_config(
-            "https://api.minimaxi.com/anthropic",
-            DEFAULT_TOKEN_FIELD,
-            &key,
-        ),
-        "MiniMax-M3",
-    );
-    store.items.push(StoredProvider {
-        id: "minimax".to_string(),
-        name: "MiniMax".to_string(),
-        note: "粉丝福利 · 预置额度，开箱即用 · MiniMax-M3".to_string(),
-        website_url: "https://www.minimaxi.com".to_string(),
-        token_field: DEFAULT_TOKEN_FIELD.to_string(),
-        protocol: String::new(),
-        settings_config: cfg,
-    });
-    true
-}
-
-/// 首启一次性把「免费额度赠送」Kimi For Coding(含源码内置 token)种进 store。
-/// 语义与 [`seed_gift_minimax`] 一致:marker(`<data>/.gift_kimi_seeded`)记一次,
-/// 用户事后删除/改空也不再回种 —— 尊重删除。dev 构建未注入 key 时直接跳过。
+/// Legacy Kimi gift support; absent build credentials leave the store unchanged.
 pub(super) fn seed_gift_kimi(store: &mut Store, data_dir: &Path) -> bool {
     let key = gift_kimi_key();
     if key.is_empty() {

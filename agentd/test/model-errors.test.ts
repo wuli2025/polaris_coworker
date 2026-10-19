@@ -23,7 +23,7 @@ for (const [name, diagnostic, code] of cases) {
   test(`structured model error: ${name}`, () => {
     const events: ProtocolEvent[] = [];
     const mapper = new EventMapper("session", "turn", (event) => events.push(event));
-    const message = fauxAssistantMessage("", { stopReason: "error", errorMessage: "secret authentication 429 context network" });
+    const message = fauxAssistantMessage("", { stopReason: "error", errorMessage: "model unavailable; Authorization: secret" });
     message.diagnostics = [{ timestamp: Date.now(), type: "provider_failure", ...diagnostic }];
     mapper.accept({ type: "message_end", message });
     const error = events.find((event) => event.event === "error")!;
@@ -31,10 +31,13 @@ for (const [name, diagnostic, code] of cases) {
     assert.match(error.message, /[\u4e00-\u9fff]/);
     assert.equal(mapper.status, "error");
     assert.ok(!JSON.stringify(events).includes("secret"));
-    // Only the category determines the public message.
+    // Classification is stable while the provider reason remains visible.
     message.errorMessage = "different provider text";
     mapper.accept({ type: "message_end", message });
-    assert.equal(events.filter((event) => event.event === "error")[1].message, error.message);
+    const second = events.filter((event) => event.event === "error")[1];
+    assert.equal(second.code, code);
+    assert.match(second.message, /different provider text/);
+    assert.match(error.message, /model unavailable/);
   });
 }
 

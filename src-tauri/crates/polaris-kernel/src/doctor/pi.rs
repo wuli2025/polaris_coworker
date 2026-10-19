@@ -27,9 +27,7 @@ impl AgentRuntimeReport {
     }
 }
 pub fn require_legacy() -> Result<(), String> {
-    let config = Config::load().map_err(|_| "AgentConfigInvalid".to_string())?;
-    if config.agent.backend != "claude-cli" { return Err("LegacyBackendRequired: agent.backend=claude-cli".into()); }
-    Ok(())
+    Err("Pi agent 已随应用内置，无需安装 Claude Code".into())
 }
 pub fn legacy_enabled() -> bool { require_legacy().is_ok() }
 
@@ -44,6 +42,7 @@ pub(crate) fn credentials_ready(root: &Value) -> bool {
     }))
 }
 fn store_ready() -> bool {
+    if crate::provider::store::bundled::available() { return true; }
     crate::provider::credential_file::provider_store_path()
         .and_then(|p| crate::provider::credential_file::read_root(&p).ok())
         .is_some_and(|v| credentials_ready(&v))

@@ -171,11 +171,12 @@ pub(crate) fn build_views(store: &Store) -> Vec<ProviderView> {
         ));
     }
 
+    for view in &mut out { bundled::mark(view, bundled::available()); }
     out
 }
 
 pub(super) fn detect_current(views: &[ProviderView], store: &Store) -> String {
-    if pi_translate::is_pi() { return store.current_id.clone(); }
+    if pi_translate::is_pi() { return if store.current_id.is_empty() { bundled::ID.into() } else { store.current_id.clone() }; }
     // 联动: 真相在全局 settings.json(外部 cc-switch 等改动也能被察觉);
     // 隔离: 全局与我们无关, 真相在本进程 env(apply_process_env 设的)。
     let live_base = if store.link_global {
@@ -192,14 +193,14 @@ pub(super) fn detect_current(views: &[ProviderView], store: &Store) -> String {
 
     if live_base.is_empty() {
         if store.current_id == "claude-official" || store.current_id.is_empty() {
-            return "claude-official".to_string();
+            return bundled::ID.to_string();
         }
         if let Some(v) = views.iter().find(|v| v.id == store.current_id) {
             if normalize_url(&v.base_url).is_empty() {
                 return v.id.clone();
             }
         }
-        return "claude-official".to_string();
+        return bundled::ID.to_string();
     }
 
     if let Some(v) = views

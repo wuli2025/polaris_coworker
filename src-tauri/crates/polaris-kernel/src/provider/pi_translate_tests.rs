@@ -43,3 +43,14 @@ fn pi_error_categories_drive_the_existing_sliding_window() {
         assert_eq!(tracker.record_failure("p"), i == 2);
     }
 }
+
+#[test]
+fn codex_default_is_astra_and_explicit_model_wins() {
+    let defaults = super::super::pi_config::load().unwrap();
+    let mut v = view("chatgpt", json!({}));
+    v.id = "codex".into();
+    let translated = translate(&v, &[], &defaults).unwrap();
+    assert_eq!(translated["models"][0]["id"], store::bundled::CODEX_MODEL);
+    v.settings_config = json!({"models":["user-model"]});
+    assert_eq!(translate(&v, &[], &defaults).unwrap()["models"][0]["id"], "user-model");
+}

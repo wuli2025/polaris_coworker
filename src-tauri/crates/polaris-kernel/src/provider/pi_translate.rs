@@ -62,7 +62,8 @@ fn translate_inner(view: &ProviderView, catalog: &[Value], defaults: &PiSettings
         let env: Vec<Value> = MODEL_VARIABLES.iter().filter_map(|key| {
             view.settings_config.get("env")?.get(*key)?.as_str().filter(|s| !s.trim().is_empty()).map(|s| json!(s))
         }).collect();
-        if env.is_empty() { matching.iter().map(|m| (*m).clone()).collect() } else { env }
+        if env.is_empty() && view.id == "codex" { vec![json!(store::bundled::CODEX_MODEL)] }
+        else if env.is_empty() { matching.iter().map(|m| (*m).clone()).collect() } else { env }
     };
     if complete && sources.is_empty() { return Err("ProviderModelsMissing [paths: /settingsConfig/models]".into()); }
     let mut seen = HashSet::new();

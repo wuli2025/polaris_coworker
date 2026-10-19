@@ -6,6 +6,6 @@ pub(crate) fn changed() { GENERATION.fetch_add(1, Ordering::SeqCst); }
 pub(crate) fn snapshot() -> (u64, String) {
     let _state = PROVIDER_MUTATION.lock();
     let id = current_provider_id();
-    (GENERATION.load(Ordering::SeqCst), if id.is_empty() { "claude-official".into() } else { id })
+    (GENERATION.load(Ordering::SeqCst), if id.is_empty() { store::bundled::ID.into() } else { id })
 }
 pub(crate) fn current(generation: u64) -> bool { GENERATION.load(Ordering::SeqCst) == generation }

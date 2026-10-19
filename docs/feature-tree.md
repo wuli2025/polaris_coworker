@@ -497,3 +497,4 @@ Kernel 全量 189 通过、6 个 TCP 沙箱失败、2 忽略；排除明确列�
 - 入口：agentd `network.ts` 在 SDK 初始化前安装 undici 8.10.2 分发器；宿主 `chat/backend/config_network.rs` 下发设置；doctor `pi_network.rs` 增加模型网络 HEAD 探测。保存使用 `pi_translate::validate_local`，切换执行 `config.validate`；mesh `transport.rs` / `security.rs` 复用统一 CA。
 - 配置：宿主 `agentd.network.proxy` → agentd `network.proxy`，显式值优先于 HTTP_PROXY/HTTPS_PROXY，NO_PROXY 仍生效；默认代理为空、idleTimeoutMs=300000、probeTimeoutMs=5000。Windows 系统代理/PAC 不会自动读取，需填写代理软件的 HTTP 监听地址或启动前设置环境变量。
 - 迁移与验证：无数据迁移，宿主配置修改后重启；锁文件无新增包。配置/切换示例、文件清单、实际命令、失败与未运行项见 [P7b-3 执行报告](tasks/P7b3-execution-report.md)，由 Claude 重跑验收。
+- R-release-v3：3.0.0 / 内置 MiniMax + Pi 发布；[入口、依赖、配置、迁移与验证](tasks/R-release-v3-report.md)。

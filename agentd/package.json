@@ -1,6 +1,6 @@
 {
 	"name": "@polaris/agentd",
-	"version": "0.1.0",
+	"version": "3.0.0",
 	"private": true,
 	"description": "Polaris agent daemon: hosts Pi SDK sessions and speaks JSONL over stdio to the Rust shell",
 	"type": "module",

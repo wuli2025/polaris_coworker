@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.19.0
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -75,7 +75,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.19.0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -124,9 +124,14 @@ jobs:
       - name: Install frontend deps
         run: npm install
 
+      - name: Install agentd dependencies
+        working-directory: agentd
+        run: npm ci
+
       - name: Build, sign & publish release
         uses: tauri-apps/tauri-action@v0
         env:
+          POLARIS_BUNDLED_MINIMAX_KEY: ${{ secrets.MINIMAX_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

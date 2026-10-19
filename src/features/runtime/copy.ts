@@ -1,6 +1,6 @@
 /** Runtime-facing copy stays here so desktop, server and preview agree. */
 export const runtimeCopy = {
-  intro: '默认使用 Pi 运行时。就绪状态以 Node、agentd 握手、shell 与凭据检查为准。',
+  intro: 'Pi agent 已随应用内置。就绪状态以 Node、agentd 握手、shell 与凭据检查为准。',
   preview: '浏览器预览 · 未连接真实运行时，以下不是就绪证明。',
   unknown: '未知',
   configured: '已配置',
@@ -12,7 +12,7 @@ export const runtimeCopy = {
   verifyHint: '检查运行时、shell 与凭据配置',
   providerScope: 'Pi 原生连接提供商；联动系统 CLI 与本地翻译代理不适用。',
   legacyScope: '当前为 Claude CLI 兼容后端。',
-  credentials: 'Pi 凭据保存在 ~/Polaris/data/providers.json；首次迁移需重新登录。',
+  credentials: '用户凭据保存在 ~/Polaris/data/providers.json；内置 MiniMax 凭据由安装包提供，用户填写的 key 优先。',
   login: '在供应商坞完成订阅授权，按返回的授权页、配对码或回贴提示操作。',
   loginSaved: '订阅已授权，可选择此提供商开始对话。',
   protocol: 'Pi 按所选协议直连上游。自定义提供商需填写真实模型 ID 与端点。',

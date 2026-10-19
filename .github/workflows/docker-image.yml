@@ -65,6 +65,8 @@ jobs:
 
       - name: Build and publish multi-platform image
         id: build
+        env:
+          POLARIS_BUNDLED_MINIMAX_KEY: ${{ secrets.MINIMAX_API_KEY }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -73,6 +75,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          secret-envs: |
+            POLARIS_BUNDLED_MINIMAX_KEY=POLARIS_BUNDLED_MINIMAX_KEY
           build-args: |
             POLARIS_BUILD_REVISION=${{ github.sha }}
             POLARIS_BUILD_VERSION=${{ steps.app.outputs.version }}

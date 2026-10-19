@@ -50,7 +50,7 @@ export class EventMapper {
         }
       }
       this.emit({ event: "usage", usage: message.usage });
-      // Provider error strings can include headers. Never forward them.
+      // Model errors preserve the reason after header and credential redaction.
       if (message.stopReason === "error") {
         this.status = "error";
         const failure = modelError(message);

@@ -1,5 +1,7 @@
 //! Provider store facade; public command paths are preserved.
 use super::*;
+#[path = "store/bundled.rs"]
+pub mod bundled;
 #[path = "store/presets.rs"]
 mod presets;
 use presets::*;

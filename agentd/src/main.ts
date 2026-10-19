@@ -8,6 +8,13 @@ import { publicError } from "./protocol/errors.ts";
 import { JsonlReader, JsonlWriter } from "./protocol/jsonl.ts";
 
 const redactor = new Redactor();
+const bundledKey = process.env.POLARIS_BUNDLED_MINIMAX_KEY?.trim();
+const bundledId = process.env.POLARIS_BUNDLED_PROVIDER_ID?.trim();
+const bundled = bundledKey && bundledId ? { id: bundledId, key: bundledKey } : undefined;
+if (bundled) redactor.add(bundled.key);
+// Do not pass the build credential to tools spawned by the daemon.
+delete process.env.POLARIS_BUNDLED_MINIMAX_KEY;
+delete process.env.POLARIS_BUNDLED_PROVIDER_ID;
 const output = new JsonlWriter(process.stdout, redactor);
 const logs = new JsonlWriter(process.stderr, redactor);
 // Use the same ordered writer for structured logs, without parsing user input as logs.
@@ -50,7 +57,7 @@ async function main(): Promise<void> {
     timeoutMs: Number(process.env.POLARIS_CREDENTIAL_LOCK_TIMEOUT_MS ?? 30000),
     maxHoldMs: Number(process.env.POLARIS_CREDENTIAL_LOCK_MAX_HOLD_MS ?? 600000),
     pollMs: Number(process.env.POLARIS_CREDENTIAL_LOCK_POLL_MS ?? 25),
-  }) : undefined;
+  }, bundled) : undefined;
   const daemon = await Daemon.create(config,
     (value) => output.send(value), writeLog, { redactor, credentials });
   logger = daemon.logger;

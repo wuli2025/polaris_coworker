@@ -74,8 +74,8 @@ pub fn init(_app: &AppHandle) -> Result<()> {
         }
     }
 
-    // 首启一次性种「粉丝福利」MiniMax + 「免费额度赠送」Kimi For Coding(含内置 key)。
-    let gifted_minimax = seed_gift_minimax(&mut store, &dir);
+    // MiniMax 只持久化元数据；内置凭据留在运行时。Kimi 保留旧兼容入口。
+    let gifted_minimax = bundled::seed(&mut store, bundled::available());
     let gifted_kimi = seed_gift_kimi(&mut store, &dir);
 
     if store.current_id.is_empty() { store.current_id = "claude-official".into(); }
