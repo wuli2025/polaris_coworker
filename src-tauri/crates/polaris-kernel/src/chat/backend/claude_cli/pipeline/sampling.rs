@@ -130,7 +130,7 @@ pub(crate) fn sample_tree(root: u32) -> Option<TreeSample> {
         }
         days * 86400 + secs as u64
     }
-    let out = Command::new("ps")
+    let out = std::process::Command::new("ps")
         .args(["-axo", "pid=,ppid=,cputime="])
         .output()
         .ok()?;

@@ -32,7 +32,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const packageJson = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
 const version = packageJson.version;
-if (version !== "2.9.2") die(`repository version must remain 2.9.2, got ${version}`);
+if (version !== "3.0.0") die(`repository version must remain 3.0.0, got ${version}`);
 
 async function atomicWrite(target, value, mode) {
   await mkdir(path.dirname(target), { recursive: true });

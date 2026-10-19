@@ -32,7 +32,7 @@ const nasSection = nasHtml.slice(start, end);
 const latest = JSON.parse(latestText);
 
 assert.match(nasSection, /旧版 2\.7 \/ 2\.8/);
-assert.match(nasSection, /已经是 2\.9\.2/);
+assert.match(nasSection, /已经是 3\.0\.0/);
 assert.match(nasSection, /nas-bootstrap\.sh/);
 assert.match(nasSection, /git pull --ff-only origin main/);
 assert.match(nasSection, /HostConfig\.PortBindings/);
@@ -46,7 +46,7 @@ assert.doesNotMatch(nasHtml, /数据在 <code>\/volume1\/docker\/polaris\/<\/cod
 assert.match(nasHtml, /同时支持 x86_64（Intel\/AMD）和 ARM64/);
 assert.match(nasHtml, /polaris-stack/);
 
-assert.equal(latest.version, "2.9.2");
+assert.equal(latest.version, "3.0.0");
 assert.match(latest.buildRevision, /^[0-9a-f]{40}$/);
 assert.match(latest.digest, /^sha256:[0-9a-f]{64}$/);
 assert.equal(latest.image, "ghcr.io/wuli2025/polaris_coworker:latest");

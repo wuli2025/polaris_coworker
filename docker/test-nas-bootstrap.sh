@@ -138,7 +138,7 @@ if [ -n "$out" ]; then
       env_sha=$(sha256sum "$POLARIS_TEST_ASSETS/.env.server.example" | awk '{print $1}')
       printf '%s\n' \
         '{' \
-        '  "version": "2.9.2",' \
+        '  "version": "3.0.0",' \
         '  "compose": {' \
         '    "base": "https://test.invalid/docker/current/docker-compose.yml",' \
         '    "update": "https://test.invalid/docker/current/docker-compose.update.yml",' \
@@ -165,7 +165,7 @@ case "$url" in
     printf '%s\n' '{"ready":true}'
     ;;
   */api/build)
-    printf '%s\n' '{"version":"2.9.2","buildRevision":"1111111111111111111111111111111111111111"}'
+    printf '%s\n' '{"version":"3.0.0","buildRevision":"1111111111111111111111111111111111111111"}'
     ;;
   *) exit 22 ;;
 esac
