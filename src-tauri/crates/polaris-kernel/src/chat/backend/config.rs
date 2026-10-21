@@ -75,7 +75,7 @@ impl Default for Agentd {
             network: Network::default(),
             node: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).0,
             entry: runtime_paths(None, None, crate::doctor::bundled::runtime_root(), development_root().as_deref()).1, node_args: vec![], args: vec![],
-            isolation: if cfg!(feature = "desktop") { "shared" } else { "per-account" }.into(),
+            isolation: "shared".into(),
             max_processes: 8, idle_ms: 600_000, request_timeout_ms: 15_000,
             turn_idle_timeout_ms: 240_000, turn_max_ms: 0, _legacy_turn_timeout: (),
             abort_timeout_ms: 5_000, ping_interval_ms: 30_000,

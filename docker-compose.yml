@@ -41,7 +41,7 @@ services:
       - POLARIS_AGENTD_ENTRY=${POLARIS_AGENTD_ENTRY:-/app/runtime/agentd/dist/src/main.js}
       - POLARIS_AGENTD_ARGS=${POLARIS_AGENTD_ARGS:-[]}
       - POLARIS_AGENTD_NODE_ARGS=${POLARIS_AGENTD_NODE_ARGS:-[]}
-      - POLARIS_AGENTD_ISOLATION=${POLARIS_AGENTD_ISOLATION:-per-account}
+      - POLARIS_AGENTD_ISOLATION=${POLARIS_AGENTD_ISOLATION:-shared}
       # 留空（默认）= 免口令，谁连上谁能用：家用 NAS 在 NAT 后面公网连不上，
       # 而口令忘了没有找回入口。只有真做了公网映射/反代域名才在 .env 里填上它。
       - POLARIS_AUTH_TOKEN=${POLARIS_AUTH_TOKEN:-}

@@ -81,11 +81,36 @@ fn registry_endpoint(repo: &str) -> Result<(String, String, bool), String> {
 
 #[cfg(not(feature = "desktop"))]
 fn registry_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
+    let mut builder = ureq::AgentBuilder::new()
+        // ghcr 的 blob 会 302 到 GitHub CDN；Docker 默认网络没有 IPv6 路由，
+        // AAAA 地址只会报 os error 99，所以先试 IPv4。
+        .resolver(|netloc: &str| {
+            use std::net::ToSocketAddrs;
+            let mut addrs: Vec<_> = netloc.to_socket_addrs()?.collect();
+            addrs.sort_by_key(|a| a.is_ipv6());
+            Ok(addrs)
+        });
+    // 国内 NAS 常靠 HTTPS_PROXY 才能访问 GitHub CDN；与 agentd 一致读取代理环境变量。
+    if let Some(proxy) = registry_proxy_from_env() {
+        builder = builder.proxy(proxy);
+    }
+    builder
         .timeout_connect(std::time::Duration::from_secs(8))
         .timeout_read(std::time::Duration::from_secs(25))
         .timeout_write(std::time::Duration::from_secs(10))
         .build()
+}
+
+/// 只给默认的 ghcr 路径用代理；自定义 registry（含本地测试 registry）保持直连。
+#[cfg(not(feature = "desktop"))]
+fn registry_proxy_from_env() -> Option<ureq::Proxy> {
+    if nonempty_env("POLARIS_REGISTRY_API_URL").is_some() {
+        return None;
+    }
+    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .find_map(|k| nonempty_env(k))
+        .and_then(|url| ureq::Proxy::new(url).ok())
 }
 
 #[cfg(not(feature = "desktop"))]

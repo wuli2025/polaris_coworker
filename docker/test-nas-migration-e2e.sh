@@ -101,7 +101,7 @@ docker run -d \
 )
 
 build_json=$(curl -fsS http://127.0.0.1:18080/api/build)
-printf '%s' "$build_json" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"3\.0\.0"' || fail "new build is not 3.0.0"
+printf '%s' "$build_json" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"3\.0\.1"' || fail "new build is not 3.0.1"
 if [ -n "${GITHUB_SHA:-}" ]; then
   printf '%s' "$build_json" | grep -Eq "\"buildRevision\"[[:space:]]*:[[:space:]]*\"$GITHUB_SHA\"" ||
     fail "new build revision does not match the workflow revision"
@@ -166,8 +166,8 @@ docker run -d \
   sh docker/nas-bootstrap.sh
 )
 
-curl -fsS http://127.0.0.1:18082/api/build | grep -Eq '"version"[[:space:]]*:[[:space:]]*"3\.0\.0"' ||
-  fail "home-layout migration did not start 3.0.0"
+curl -fsS http://127.0.0.1:18082/api/build | grep -Eq '"version"[[:space:]]*:[[:space:]]*"3\.0\.1"' ||
+  fail "home-layout migration did not start 3.0.1"
 [ "$(docker inspect -f '{{.Config.User}}' polaris-web)" = 1000:1000 ] || fail "home-layout runtime user changed"
 docker exec polaris-web test -f /home/polaris/Polaris/sentinel.txt || fail "home bind sentinel was not preserved"
 docker exec polaris-web test -f /home/polaris/.claude/sentinel.txt || fail "home named-volume sentinel was not preserved"

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-EXPECTED_VERSION=3.0.0
+EXPECTED_VERSION=3.0.1
 TARGET=${POLARIS_TARGET:-polaris-web}
 SITE_BASE=${POLARIS_SITE_BASE:-https://llmwiki.cloud}
 PROJECT_NAME=${POLARIS_PROJECT_NAME:-polaris-v292}
@@ -105,7 +105,7 @@ if [ -n "$repo_root" ] &&
    [ -f "$repo_root/docker-compose.yml" ] &&
    [ -f "$repo_root/docker-compose.update.yml" ] &&
    [ -f "$repo_root/.env.server.example" ] &&
-   grep -Eq '"version"[[:space:]]*:[[:space:]]*"3\.0\.0"' "$repo_root/package.json"; then
+   grep -Eq '"version"[[:space:]]*:[[:space:]]*"3\.0\.1"' "$repo_root/package.json"; then
   copy_atomic "$repo_root/docker-compose.yml" "$BASE_FILE"
   copy_atomic "$repo_root/docker-compose.update.yml" "$UPDATE_FILE"
   copy_atomic "$repo_root/.env.server.example" "$ENV_EXAMPLE"
