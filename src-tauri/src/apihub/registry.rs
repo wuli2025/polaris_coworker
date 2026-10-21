@@ -107,9 +107,23 @@ fn registry_proxy_from_env() -> Option<ureq::Proxy> {
     if nonempty_env("POLARIS_REGISTRY_API_URL").is_some() {
         return None;
     }
+    // ureq 不处理 NO_PROXY；显式绕过 ghcr（或 *）时保持直连。
+    let no_proxy = nonempty_env("NO_PROXY").or_else(|| nonempty_env("no_proxy"));
+    if no_proxy.is_some_and(|v| {
+        v.split(',')
+            .map(|h| h.trim().trim_start_matches('.'))
+            .any(|h| h == "*" || h.eq_ignore_ascii_case("ghcr.io"))
+    }) {
+        return None;
+    }
+    // server 构建未启用 ureq socks-proxy，只接受 HTTP(S) 代理，避免把能直连的检查弄坏。
     ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
         .iter()
         .find_map(|k| nonempty_env(k))
+        .filter(|url| {
+            let lower = url.to_ascii_lowercase();
+            lower.starts_with("http://") || lower.starts_with("https://")
+        })
         .and_then(|url| ureq::Proxy::new(url).ok())
 }
 
